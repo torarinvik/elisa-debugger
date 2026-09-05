@@ -10,6 +10,10 @@ module DebuggerEDIR:
         const EDIR_MAX_INSTRUCTIONS: usize = 256
         const EDIR_MAX_LOCALS: usize = 32
         const EDIR_MAX_LOCALS_INDEX: i64 = 32
+        const EDIR_MAX_GLOBALS: usize = 16
+        const EDIR_MAX_GLOBAL_INDEX: i64 = 16
+        const EDIR_MAX_MEMORY: usize = 64
+        const EDIR_MAX_MEMORY_INDEX: i64 = 64
         const EDIR_MAX_CALL_DEPTH: usize = 16
         const EDIR_STEP_INCREMENT: u64 = 1
 
@@ -21,10 +25,16 @@ module DebuggerEDIR:
             Subtract
             LoadLocal
             StoreLocal
+            LoadGlobal
+            StoreGlobal
+            LoadMemory
+            StoreMemory
+            Allocate
             Multiply
             Divide
             Negate
             CompareEqual
+            CompareLess
             Jump
             BranchZero
             Call
@@ -65,6 +75,10 @@ module DebuggerEDIR:
             program_counter: mutable u64
             accumulator: mutable i64
             locals: mutable i64[EDIR_MAX_LOCALS]
+            globals: mutable i64[EDIR_MAX_GLOBALS]
+            memory: mutable i64[EDIR_MAX_MEMORY]
+            memory_initialized: mutable bool[EDIR_MAX_MEMORY]
+            heap_next: mutable usize
             return_stack: mutable u64[EDIR_MAX_CALL_DEPTH]
             return_stack_pointer: mutable usize
             halted: mutable bool
@@ -106,6 +120,12 @@ module DebuggerEDIR:
                 instruction: Instruction = image.instructions[index]
                 if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal:
                     return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= image.program.local_count.i64()
+                if instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal:
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= EDIR_MAX_GLOBAL_INDEX
+                if instruction.opcode == Opcode.LoadMemory or instruction.opcode == Opcode.StoreMemory:
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= EDIR_MAX_MEMORY_INDEX
+                if instruction.opcode == Opcode.Allocate:
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a <= 0 or instruction.a > EDIR_MAX_MEMORY_INDEX
                 if instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero or instruction.opcode == Opcode.Call:
                     return verification_failure(VerificationError.InvalidTarget, index.u64()) if instruction.a < 0 or instruction.a >= image.program.instruction_count.i64()
                 if instruction.opcode == Opcode.Call and instruction.b > EDIR_MAX_CALL_DEPTH.i64():
@@ -157,6 +177,12 @@ module DebuggerEDIR:
                 else:
                     updated.accumulator <- 0
                 updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.CompareLess:
+                if updated.accumulator < instruction.a:
+                    updated.accumulator <- 1
+                else:
+                    updated.accumulator <- 0
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.LoadLocal:
                 if instruction.a < 0 or instruction.a >= EDIR_MAX_LOCALS_INDEX:
                     updated.faulted <- true
@@ -170,6 +196,45 @@ module DebuggerEDIR:
                     updated.halted <- true
                 else:
                     updated.locals[instruction.a.usize()] <- updated.accumulator
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.LoadGlobal:
+                if instruction.a < 0 or instruction.a >= EDIR_MAX_GLOBAL_INDEX:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.globals[instruction.a.usize()]
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.StoreGlobal:
+                if instruction.a < 0 or instruction.a >= EDIR_MAX_GLOBAL_INDEX:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.globals[instruction.a.usize()] <- updated.accumulator
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.LoadMemory:
+                if instruction.a < 0 or instruction.a >= EDIR_MAX_MEMORY_INDEX or not updated.memory_initialized[instruction.a.usize()]:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.memory[instruction.a.usize()]
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.StoreMemory:
+                if instruction.a < 0 or instruction.a >= EDIR_MAX_MEMORY_INDEX:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.memory[instruction.a.usize()] <- updated.accumulator
+                    updated.memory_initialized[instruction.a.usize()] <- true
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Allocate:
+                requested: mutable usize = 0
+                requested <- instruction.a.usize() if instruction.a > 0
+                if instruction.a <= 0 or updated.heap_next + requested > EDIR_MAX_MEMORY:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.heap_next.i64()
+                    updated.heap_next <- updated.heap_next + requested
                     updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.Jump:
                 if instruction.a < 0:

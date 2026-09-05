@@ -14,6 +14,8 @@ module DebuggerReplayEngine:
         const REPLAY_SCHEMA_VERSION: u32 = 1
         const REPLAY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
         const REPLAY_HASH_PRIME: u64 = 1099511628211
+        const REPLAY_GLOBAL_CAPACITY: usize = 16
+        const REPLAY_MEMORY_CAPACITY: usize = 64
 
     public:
         enum EngineError:
@@ -42,74 +44,74 @@ module DebuggerReplayEngine:
             engine.engine_error <- EngineError.None
             return engine
 
-        def replay_engine_position(engine: ReplayEngine) -> DebuggerIdentity::Position:
+        def replay_engine_position(engine: mutable ReplayEngine&) -> DebuggerIdentity::Position:
             position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(engine.recording)
             position.branch <- engine.branch
             position.event <- engine.event_count.u64()
             position.statement <- DebuggerIdentity::debug_id(engine.machine.program_counter)
             return position
 
-        def replay_engine_state_hash(engine: ReplayEngine) -> u64:
+        def replay_engine_state_hash(engine: mutable ReplayEngine&) -> u64:
             hash: mutable u64 = REPLAY_HASH_OFFSET_BASIS + engine.machine.program_counter
             hash <- hash * REPLAY_HASH_PRIME + engine.machine.accumulator.u64()
             hash <- hash * REPLAY_HASH_PRIME + engine.machine.result.u64()
             hash <- hash * REPLAY_HASH_PRIME + engine.machine.return_stack_pointer.u64()
+            hash <- hash * REPLAY_HASH_PRIME + engine.machine.heap_next.u64()
+            for index in 0..<REPLAY_GLOBAL_CAPACITY:
+                hash <- hash * REPLAY_HASH_PRIME + engine.machine.globals[index].u64()
+            for index in 0..<REPLAY_MEMORY_CAPACITY:
+                hash <- hash * REPLAY_HASH_PRIME + engine.machine.memory[index].u64()
+                initialized: mutable u64 = 0
+                initialized <- 1 if engine.machine.memory_initialized[index]
+                hash <- hash * REPLAY_HASH_PRIME + initialized
             hash <- hash * REPLAY_HASH_PRIME + engine.event_count.u64()
             return hash
 
-        def replay_engine_step(engine: ReplayEngine) -> ReplayEngine:
-            updated: mutable ReplayEngine = engine
-            return updated if engine.machine.halted or engine.machine.faulted
+        def replay_engine_step(engine: mutable ReplayEngine&) -> void:
+            return if engine.machine.halted or engine.machine.faulted
             if engine.event_count >= REPLAY_HISTORY_CAPACITY:
-                updated.engine_error <- EngineError.HistoryFull
-                return updated
+                engine.engine_error <- EngineError.HistoryFull
+                return
             snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(engine.machine, DebuggerIdentity::debug_id(engine.event_count.u64()), engine.event_count.u64(), replay_engine_state_hash(engine))
-            updated.history[engine.event_count] <- snapshot
+            engine.history[engine.event_count] <- snapshot
             instruction: DebuggerEDIR::Instruction = engine.image.instructions[engine.machine.program_counter.usize()]
-            updated.machine <- DebuggerEDIR::machine_step(engine.machine, instruction)
+            engine.machine <- DebuggerEDIR::machine_step(engine.machine, instruction)
             position: DebuggerIdentity::Position = replay_engine_position(engine)
-            updated.events[engine.event_count] <- DebuggerEvents::event_envelope(REPLAY_SCHEMA_VERSION, engine.event_count.u64(), position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, replay_engine_state_hash(updated))
-            updated.event_count <- updated.event_count + 1
-            if updated.machine.faulted:
-                updated.engine_error <- EngineError.ExecutionFault
-            return updated
+            engine.events[engine.event_count] <- DebuggerEvents::event_envelope(REPLAY_SCHEMA_VERSION, engine.event_count.u64(), position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, replay_engine_state_hash(engine))
+            engine.event_count <- engine.event_count + 1
+            if engine.machine.faulted:
+                engine.engine_error <- EngineError.ExecutionFault
 
-        def replay_engine_run(engine: ReplayEngine, max_steps: u64) -> ReplayEngine:
-            updated: mutable ReplayEngine = engine
-            start: u64 = updated.event_count.u64()
-            while not updated.machine.halted and not updated.machine.faulted and updated.event_count.u64() - start < max_steps:
-                updated <- replay_engine_step(updated)
-                break if updated.engine_error != EngineError.None
-            if not updated.machine.halted and not updated.machine.faulted and updated.event_count.u64() - start >= max_steps:
-                updated.engine_error <- EngineError.StepLimit
-            return updated
+        def replay_engine_run(engine: mutable ReplayEngine&, max_steps: u64) -> void:
+            start: u64 = engine.event_count.u64()
+            while not engine.machine.halted and not engine.machine.faulted and engine.event_count.u64() - start < max_steps:
+                replay_engine_step(engine)
+                break if engine.engine_error != EngineError.None
+            if not engine.machine.halted and not engine.machine.faulted and engine.event_count.u64() - start >= max_steps:
+                engine.engine_error <- EngineError.StepLimit
 
-        def replay_engine_reverse_one(engine: ReplayEngine) -> ReplayEngine:
-            updated: mutable ReplayEngine = engine
+        def replay_engine_reverse_one(engine: mutable ReplayEngine&) -> void:
             if engine.event_count == 0:
-                updated.engine_error <- EngineError.HistoryUnavailable
-                return updated
+                engine.engine_error <- EngineError.HistoryUnavailable
+                return
             target: usize = engine.event_count - 1
             snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[target]
-            updated.machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
-            updated.event_count <- target
-            updated.engine_error <- EngineError.None
-            return updated
+            engine.machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
+            engine.event_count <- target
+            engine.engine_error <- EngineError.None
 
-        def replay_engine_seek(engine: ReplayEngine, target: usize) -> ReplayEngine:
-            updated: mutable ReplayEngine = engine
+        def replay_engine_seek(engine: mutable ReplayEngine&, target: usize) -> void:
             if target > REPLAY_HISTORY_CAPACITY:
-                updated.engine_error <- EngineError.HistoryUnavailable
-                return updated
+                engine.engine_error <- EngineError.HistoryUnavailable
+                return
             if target < engine.event_count:
                 snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[target]
-                updated.machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
-                updated.event_count <- target
-                updated.engine_error <- EngineError.None
-                return updated
-            while updated.event_count < target and not updated.machine.halted and not updated.machine.faulted:
-                updated <- replay_engine_step(updated)
-            return updated
+                engine.machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
+                engine.event_count <- target
+                engine.engine_error <- EngineError.None
+                return
+            while engine.event_count < target and not engine.machine.halted and not engine.machine.faulted:
+                replay_engine_step(engine)
 
-        def replay_engine_is_exact(engine: ReplayEngine) -> bool:
+        def replay_engine_is_exact(engine: mutable ReplayEngine&) -> bool:
             return engine.engine_error == EngineError.None and not engine.machine.faulted

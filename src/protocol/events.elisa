@@ -1,0 +1,90 @@
+# Bounded asynchronous notifications shared by DAP bridges, headless clients,
+# and embedded integrations. Queue entries are acknowledged in order so a
+# slow client cannot silently lose the event sequence.
+
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+
+module DebuggerProtocolEvents:
+    private:
+        const EVENT_QUEUE_CAPACITY: usize = 64
+        const FIRST_SEQUENCE: u64 = 1
+        const MAX_SEQUENCE: u64 = 18446744073709551615
+        const NO_SEQUENCE: u64 = 0
+        const EVENT_KIND_MAX: u16 = 6
+        const OUTPUT_CHANNEL_MAX: u16 = 3
+        const DETAIL_CAPACITY: u32 = 1
+        const DETAIL_SEQUENCE: u32 = 2
+        const DETAIL_ENUM: u32 = 3
+
+    public:
+        enum EventKind:
+            Stopped
+            Continued
+            Output
+            Progress
+            Trace
+            Exited
+            Invalidated
+
+        enum OutputChannel:
+            Stdout
+            Stderr
+            Console
+            Telemetry
+
+        struct Event:
+            sequence: mutable u64
+            session: mutable DebuggerIdentity::DebugId
+            stop_generation: mutable u64
+            kind: mutable EventKind
+            channel: mutable OutputChannel
+            payload: mutable DebuggerIdentity::DebugId
+            progress_completed: mutable u64
+            progress_total: mutable u64
+
+        struct EventQueue:
+            events: mutable Event[EVENT_QUEUE_CAPACITY]
+            count: mutable usize
+            next_sequence: mutable u64
+            overflowed: mutable bool
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def event_queue_new() -> EventQueue:
+            return EventQueue{events: zeroed, count: 0, next_sequence: FIRST_SEQUENCE, overflowed: false, last_error: DebuggerErrors::no_error()}
+
+        def event_queue_emit(queue: mutable EventQueue&, session: DebuggerIdentity::DebugId, generation: u64, kind: EventKind, channel: OutputChannel, payload: DebuggerIdentity::DebugId, completed: u64, total: u64) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY) if queue.count > EVENT_QUEUE_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_CAPACITY) if queue.count >= EVENT_QUEUE_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SEQUENCE) if queue.next_sequence == NO_SEQUENCE or queue.next_sequence == MAX_SEQUENCE
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM) if kind.u16() > EVENT_KIND_MAX or channel.u16() > OUTPUT_CHANNEL_MAX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE) if completed > total
+            queue.events[queue.count] <- Event{sequence: queue.next_sequence, session: session, stop_generation: generation, kind: kind, channel: channel, payload: payload, progress_completed: completed, progress_total: total}
+            queue.count <- queue.count + 1
+            queue.next_sequence <- queue.next_sequence + FIRST_SEQUENCE
+            return DebuggerErrors::no_error()
+
+        def event_queue_peek(queue: mutable EventQueue&) -> Event:
+            result: mutable Event = zeroed
+            return result if queue.count == 0 or queue.count > EVENT_QUEUE_CAPACITY
+            return queue.events[0]
+
+        def event_queue_ack(queue: mutable EventQueue&, sequence: u64) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY) if queue.count > EVENT_QUEUE_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_SEQUENCE) if queue.count == 0
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE) if sequence == NO_SEQUENCE or sequence != queue.events[0].sequence
+            for index in 1..<queue.count:
+                queue.events[index - 1] <- queue.events[index]
+            queue.count <- queue.count - 1
+            return DebuggerErrors::no_error()
+
+        def event_queue_is_valid(queue: EventQueue) -> bool:
+            return false if queue.count > EVENT_QUEUE_CAPACITY or queue.next_sequence == NO_SEQUENCE or queue.next_sequence > MAX_SEQUENCE or not DebuggerErrors::error_is_ok(queue.last_error)
+            for index in 0..<queue.count:
+                event: Event = queue.events[index]
+                return false if event.sequence == NO_SEQUENCE or event.kind.u16() > EVENT_KIND_MAX or event.channel.u16() > OUTPUT_CHANNEL_MAX or event.progress_completed > event.progress_total
+                return false if index > 0 and event.sequence != queue.events[index - 1].sequence + FIRST_SEQUENCE
+            return true
+
+        def event_queue_count(queue: EventQueue) -> usize:
+            return queue.count

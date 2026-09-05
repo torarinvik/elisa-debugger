@@ -103,6 +103,26 @@ def check_schema_recorder() -> i64:
     return 1 if DebuggerErrors::error_is_ok(failure) or failure.detail != 4
     return 0
 
+def check_opaque_validation() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest_payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: 0, first_event: 0, last_event: 0, payload_length: manifest_payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_payload)}
+    manifest_chunk.payload_length <- manifest_payload.length
+    manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_payload)
+    for index in 0..<manifest_payload.length:
+        manifest_chunk.payload[index] <- manifest_payload.bytes[index]
+    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk))
+    opaque: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    opaque.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA + 1, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 1, first_event: 0, last_event: 0, payload_length: 1, checksum: TEST_CHUNK_CHECKSUM}
+    opaque.payload[0] <- TEST_PAYLOAD_BYTE
+    opaque.payload_length <- 1
+    opaque.checksum <- TEST_CHUNK_CHECKSUM
+    return 2 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, opaque))
+    return 0
+
 def main() -> i64:
     writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     writer <- DebuggerTraceBinary::writer_put_u16(writer, TEST_U16_VALUE)
@@ -204,6 +224,7 @@ def main() -> i64:
     return 24 if DebuggerErrors::error_is_ok(bad_append)
     return 25 if DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(corrupt_recorder))
     return 42 if check_schema_recorder() != 0
+    return 77 if check_opaque_validation() != 0
     exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle)
     return 26 if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count != TEST_EXPORT_CHUNK_COUNT
     exported_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(exported.bytes.bytes[0], exported.bytes.length)

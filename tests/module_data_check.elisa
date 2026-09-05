@@ -9,6 +9,7 @@ include "../src/query/provenance.elisa"
 include "../src/concurrency/analysis.elisa"
 include "../src/replay/branches.elisa"
 include "../src/metadata/types.elisa"
+include "../src/native/symbols.elisa"
 include "../src/breakpoint/watchpoint.elisa"
 include "../src/concurrency/runtime.elisa"
 include "../src/replay/resources.elisa"
@@ -30,8 +31,51 @@ const RESOURCE_PATH_ID: u64 = 400
 const RESOURCE_GENERATION: u64 = 1
 const INVALID_INDEX_COUNT: usize = 513
 const INVALID_GRAPH_COUNT: usize = 257
+const INVALID_TYPE_COUNT: usize = 513
+const INVALID_SCOPE_COUNT: usize = 513
+const INVALID_BINDING_COUNT: usize = 1025
+const INVALID_SYMBOL_COUNT: usize = 513
+const INVALID_RESOURCE_COUNT: usize = 17
+const INVALID_EFFECT_COUNT: usize = 257
+const INVALID_TASK_COUNT: usize = 65
+const RESOURCE_INVALID_INDEX: usize = 16
+
+def check_corrupt_metadata() -> i64:
+    types: mutable DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_new()
+    types.type_count <- INVALID_TYPE_COUNT
+    return 1 if DebuggerTypeMetadata::metadata_find_type(types, DebuggerIdentity::debug_id(1)).id.value != 0
+    types.scope_count <- INVALID_SCOPE_COUNT
+    return 2 if DebuggerTypeMetadata::metadata_find_scope(types, DebuggerIdentity::debug_id(1)).id.value != 0
+    types.binding_count <- INVALID_BINDING_COUNT
+    binding: DebuggerIdentity::BindingIdentity = zeroed
+    return 3 if DebuggerTypeMetadata::metadata_find_binding(types, binding).id.declaration.value != 0
+    return 0
+
+def check_corrupt_tables() -> i64:
+    symbols: mutable DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbols::symbols_new()
+    symbols.count <- INVALID_SYMBOL_COUNT
+    return 1 if DebuggerNativeSymbols::symbols_find(symbols, 0).id.value != 0
+    resources: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording)
+    resources.count <- INVALID_RESOURCE_COUNT
+    return 2 if DebuggerVirtualResources::resources_find(resources, DebuggerIdentity::debug_id(1)) != RESOURCE_INVALID_INDEX
+    effects: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Replaying)
+    effects.count <- INVALID_EFFECT_COUNT
+    effects.cursor <- 0
+    replayed: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_replay(effects, DebuggerEffects::EffectKind.Clock, 1)
+    return 3 if replayed.last_error.code != DebuggerErrors::ErrorCode.Corrupt
+    return 4 if DebuggerEffects::effect_oracle_replay_complete(effects)
+    return 0
+
+def check_corrupt_runtime() -> i64:
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    runtime.task_count <- INVALID_TASK_COUNT
+    return 1 if DebuggerConcurrencyRuntime::runtime_has_deadlock(runtime)
+    return 0
 
 def main() -> i64:
+    return 74 if check_corrupt_metadata() != 0
+    return 75 if check_corrupt_tables() != 0
+    return 76 if check_corrupt_runtime() != 0
     expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
     evaluated: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, 8)
     return 1 if evaluated.value != 9 or not DebuggerErrors::error_is_ok(evaluated.failure)

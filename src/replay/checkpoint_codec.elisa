@@ -22,6 +22,14 @@ module DebuggerCheckpointCodec:
         const CHECKPOINT_SCHEMA_BYTE_1: u8 = 0
         const CHECKPOINT_SCHEMA_BYTE_2: u8 = 0
         const CHECKPOINT_SCHEMA_BYTE_3: u8 = 0
+        const CHECKPOINT_MAX_PROGRAM_COUNTER: u64 = 256
+        const CHECKPOINT_MAX_HEAP: usize = 64
+        const CHECKPOINT_MAX_STACK_POINTER: usize = 16
+        const CHECKPOINT_SCALARS_BEFORE_MEMORY: usize = 5
+        const CHECKPOINT_PROGRAM_COUNTER_OFFSET: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * 3
+        const CHECKPOINT_HEAP_OFFSET: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALARS_BEFORE_MEMORY + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY + CHECKPOINT_MEMORY_CAPACITY) + CHECKPOINT_MEMORY_CAPACITY
+        const CHECKPOINT_STACK_POINTER_OFFSET: usize = CHECKPOINT_HEAP_OFFSET + CHECKPOINT_INTEGER_BYTES * (1 + CHECKPOINT_STACK_CAPACITY)
+        const CHECKPOINT_FLAGS_OFFSET: usize = CHECKPOINT_STACK_POINTER_OFFSET + CHECKPOINT_INTEGER_BYTES
 
     public:
         def checkpoint_encode(snapshot: DebuggerCheckpoint::MachineSnapshot) -> DebuggerTraceBinary::ByteWriter:
@@ -84,4 +92,15 @@ module DebuggerCheckpointCodec:
         def checkpoint_bytes_are_valid(reader: DebuggerTraceBinary::ByteReader) -> bool:
             return false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.length != CHECKPOINT_ENCODED_BYTES
             return false if reader.bytes[0] != CHECKPOINT_SCHEMA_BYTE_0 or reader.bytes[1] != CHECKPOINT_SCHEMA_BYTE_1 or reader.bytes[2] != CHECKPOINT_SCHEMA_BYTE_2 or reader.bytes[3] != CHECKPOINT_SCHEMA_BYTE_3
+            return false if reader.bytes[CHECKPOINT_FLAGS_OFFSET] > BOOLEAN_TRUE or reader.bytes[CHECKPOINT_FLAGS_OFFSET + 1] > BOOLEAN_TRUE
+            for index in 0..<CHECKPOINT_MEMORY_CAPACITY:
+                flag_offset: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALARS_BEFORE_MEMORY + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY) + index * (CHECKPOINT_INTEGER_BYTES + 1) + CHECKPOINT_INTEGER_BYTES
+                return false if reader.bytes[flag_offset] > BOOLEAN_TRUE
+            heap_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_HEAP_OFFSET], CHECKPOINT_INTEGER_BYTES)
+            heap_next: u64 = DebuggerTraceBinary::reader_take_u64(heap_reader)
+            pc_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_PROGRAM_COUNTER_OFFSET], CHECKPOINT_INTEGER_BYTES)
+            program_counter: u64 = DebuggerTraceBinary::reader_take_u64(pc_reader)
+            stack_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_STACK_POINTER_OFFSET], CHECKPOINT_INTEGER_BYTES)
+            stack_pointer: u64 = DebuggerTraceBinary::reader_take_u64(stack_reader)
+            return false if program_counter > CHECKPOINT_MAX_PROGRAM_COUNTER or heap_next > CHECKPOINT_MAX_HEAP.u64() or stack_pointer > CHECKPOINT_MAX_STACK_POINTER.u64()
             return true

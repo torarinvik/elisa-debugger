@@ -11,6 +11,7 @@ include "../core/errors.elisa"
 module DebuggerTraceReader:
     private:
         const READER_EVENT_CAPACITY: usize = 256
+        const READER_CHUNK_CAPACITY: usize = 8
         const READER_FIRST_SEQUENCE: u64 = 0
         const EVENT_SCHEMA_BYTES: usize = 4
         const EVENT_ORDINAL_BYTES: usize = 8
@@ -46,6 +47,7 @@ module DebuggerTraceReader:
             next_sequence: mutable u64
             next_event: mutable u64
             manifest_seen: mutable bool
+            chunk_count: mutable usize
             state: mutable ReaderState
             last_error: mutable DebuggerErrors::DebuggerError
 
@@ -54,6 +56,7 @@ module DebuggerTraceReader:
             reader.next_sequence <- READER_FIRST_SEQUENCE
             reader.next_event <- 0
             reader.manifest_seen <- false
+            reader.chunk_count <- 0
             reader.state <- ReaderState.Empty
             reader.last_error <- DebuggerErrors::no_error()
             return reader
@@ -182,6 +185,7 @@ module DebuggerTraceReader:
         def reader_ingest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
             return reader.last_error if reader.state == ReaderState.Corrupt
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENUM) if chunk.header.kind.u16() > READER_CHUNK_KIND_MAX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if reader.chunk_count >= READER_CHUNK_CAPACITY
             result: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if chunk.header.kind == DebuggerTrace::ChunkKind.Manifest:
                 result <- reader_ingest_manifest(reader, chunk)
@@ -193,10 +197,11 @@ module DebuggerTraceReader:
                 reader.state <- ReaderState.Corrupt
                 reader.last_error <- result
                 return result
+            reader.chunk_count <- reader.chunk_count + 1
             return result
 
         def reader_is_exact(reader: TraceReader) -> bool:
-            return false if reader.event_count > READER_EVENT_CAPACITY or reader.state != ReaderState.Ready or not DebuggerErrors::error_is_ok(reader.last_error) or not DebuggerTraceManifest::manifest_is_replayable(reader.manifest)
+            return false if reader.event_count > READER_EVENT_CAPACITY or reader.chunk_count > READER_CHUNK_CAPACITY or reader.state != ReaderState.Ready or not DebuggerErrors::error_is_ok(reader.last_error) or not DebuggerTraceManifest::manifest_is_replayable(reader.manifest)
             for index in 0..<reader.event_count:
                 event: DebuggerEvents::EventEnvelope = reader.events[index]
                 return false if index.u64() > READER_MAX_EVENT - reader.manifest.first_event

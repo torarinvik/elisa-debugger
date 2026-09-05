@@ -1,0 +1,72 @@
+# Machine-readable provider discovery for editor plugins and embedded clients.
+# Discovery is a value contract: transports serialize it without importing an
+# engine implementation or parsing human-facing command output.
+
+include "./messages.elisa"
+include "./request.elisa"
+include "../core/session.elisa"
+include "../core/errors.elisa"
+
+module DebuggerDiscovery:
+    private:
+        const DISCOVERY_PROTOCOL_MAJOR: u32 = 1
+        const DISCOVERY_PROTOCOL_MINOR: u32 = 0
+        const DISCOVERY_MAX_PAGE_SIZE: u64 = 256
+        const DISCOVERY_MAX_MEMORY_READ: u64 = 64
+        const DISCOVERY_MAX_BOOKMARKS: u64 = 128
+        const DISCOVERY_MAX_TRACE_EVENTS: u64 = 1024
+        const ENGINE_KIND_MAX: u16 = 3
+        const HISTORY_KIND_MAX: u16 = 3
+        const DETAIL_PROTOCOL: u32 = 1
+        const DETAIL_LIMITS: u32 = 2
+
+    public:
+        struct DiscoveryLimits:
+            max_page_size: mutable u64
+            max_memory_read: mutable u64
+            max_bookmarks: mutable u64
+            max_trace_events: mutable u64
+
+        struct Discovery:
+            protocol: mutable DebuggerProtocol::ProtocolVersion
+            engine: mutable DebuggerCapabilities::EngineKind
+            history: mutable DebuggerCapabilities::HistoryKind
+            capabilities: mutable DebuggerCapabilities::CapabilitySet
+            limits: mutable DiscoveryLimits
+
+        def discovery_for(session: DebuggerSession::Session) -> Discovery:
+            return Discovery{
+                protocol: DebuggerProtocol::ProtocolVersion{major: DISCOVERY_PROTOCOL_MAJOR, minor: DISCOVERY_PROTOCOL_MINOR},
+                engine: session.capabilities.engine,
+                history: session.capabilities.history,
+                capabilities: session.capabilities,
+                limits: DiscoveryLimits{max_page_size: DISCOVERY_MAX_PAGE_SIZE, max_memory_read: DISCOVERY_MAX_MEMORY_READ, max_bookmarks: DISCOVERY_MAX_BOOKMARKS, max_trace_events: DISCOVERY_MAX_TRACE_EVENTS}
+            }
+
+        def discovery_is_valid(discovery: Discovery) -> bool:
+            return false if discovery.protocol.major != DISCOVERY_PROTOCOL_MAJOR or discovery.protocol.minor > DISCOVERY_PROTOCOL_MINOR
+            return false if discovery.engine.u16() > ENGINE_KIND_MAX or discovery.history.u16() > HISTORY_KIND_MAX
+            return false if discovery.limits.max_page_size == 0 or discovery.limits.max_memory_read == 0 or discovery.limits.max_bookmarks == 0 or discovery.limits.max_trace_events == 0
+            return true
+
+        def discovery_supports(discovery: Discovery, method: DebuggerProtocol::Method) -> bool:
+            return false if not discovery_is_valid(discovery)
+            return true if method == DebuggerProtocol::Method.Discover or method == DebuggerProtocol::Method.Initialize
+            return discovery.capabilities.engine != DebuggerCapabilities::EngineKind.Managed if method == DebuggerProtocol::Method.Attach
+            return discovery.history != DebuggerCapabilities::HistoryKind.None if method == DebuggerProtocol::Method.OpenTrace
+            return discovery.history == DebuggerCapabilities::HistoryKind.Exact if method == DebuggerProtocol::Method.Replay or method == DebuggerProtocol::Method.ReverseStep or method == DebuggerProtocol::Method.Seek
+            return discovery.capabilities.source_breakpoints if method == DebuggerProtocol::Method.SetBreakpoints
+            return discovery.capabilities.data_breakpoints if method == DebuggerProtocol::Method.SetDataBreakpoints
+            return discovery.capabilities.checkpoints if method == DebuggerProtocol::Method.Checkpoint
+            return discovery.capabilities.branches if method == DebuggerProtocol::Method.Branch
+            return discovery.capabilities.provenance if method == DebuggerProtocol::Method.Compare
+            return discovery.capabilities.typed_values if method == DebuggerProtocol::Method.Threads or method == DebuggerProtocol::Method.Stack or method == DebuggerProtocol::Method.Scopes or method == DebuggerProtocol::Method.Variables
+            return discovery.capabilities.expression_evaluation if method == DebuggerProtocol::Method.Evaluate
+            return discovery.capabilities.engine == DebuggerCapabilities::EngineKind.Managed if method == DebuggerProtocol::Method.Memory
+            return true if method == DebuggerProtocol::Method.Launch or method == DebuggerProtocol::Method.Pause or method == DebuggerProtocol::Method.Continue or method == DebuggerProtocol::Method.Step or method == DebuggerProtocol::Method.Detach or method == DebuggerProtocol::Method.Terminate or method == DebuggerProtocol::Method.Close
+            return false
+
+        def discovery_error(discovery: Discovery) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PROTOCOL) if discovery.protocol.major != DISCOVERY_PROTOCOL_MAJOR or discovery.protocol.minor > DISCOVERY_PROTOCOL_MINOR
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_LIMITS) if discovery.limits.max_page_size == 0 or discovery.limits.max_memory_read == 0 or discovery.limits.max_bookmarks == 0 or discovery.limits.max_trace_events == 0
+            return DebuggerErrors::no_error()

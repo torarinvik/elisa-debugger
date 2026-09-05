@@ -40,7 +40,13 @@ module DebuggerTraceStream:
 
         def trace_stream_begin(stream: TraceStream, header: DebuggerTrace::ChunkHeader) -> TraceStream:
             updated: mutable TraceStream = stream
-            return updated if stream.chunk_count >= TRACE_CHUNK_CAPACITY or header.payload_length > TRACE_MAX_PAYLOAD.u64()
+            return updated if stream.status == TraceReadStatus.Corrupt or stream.status == TraceReadStatus.ResourceLimit
+            if stream.chunk_count >= TRACE_CHUNK_CAPACITY or header.payload_length > TRACE_MAX_PAYLOAD.u64():
+                updated.status <- TraceReadStatus.ResourceLimit
+                return updated
+            if stream.status == TraceReadStatus.Truncated or not DebuggerTrace::trace_chunk_range_valid(header):
+                updated.status <- TraceReadStatus.Corrupt
+                return updated
             updated.chunks[stream.chunk_count].header <- header
             updated.chunks[stream.chunk_count].payload_received <- 0
             updated.chunks[stream.chunk_count].checksum <- TRACE_HASH_OFFSET_BASIS
@@ -50,6 +56,7 @@ module DebuggerTraceStream:
 
         def trace_stream_append(stream: TraceStream, byte: u8) -> TraceStream:
             updated: mutable TraceStream = stream
+            return updated if stream.status != TraceReadStatus.Truncated
             return updated if stream.chunk_count >= TRACE_CHUNK_CAPACITY
             index: usize = stream.chunk_count
             chunk: mutable TraceChunk = stream.chunks[index]
@@ -62,11 +69,12 @@ module DebuggerTraceStream:
                 chunk.complete <- true
                 updated.chunks[index] <- chunk
                 updated.chunk_count <- updated.chunk_count + 1
-                updated.verified_event <- chunk.header.last_event
+                updated.verified_event <- chunk.header.last_event if chunk.checksum == chunk.header.checksum
                 updated.status <- TraceReadStatus.Complete if chunk.checksum == chunk.header.checksum else TraceReadStatus.Corrupt
             return updated
 
         def trace_stream_verify(stream: TraceStream) -> TraceReadStatus:
+            return stream.status if stream.status == TraceReadStatus.Truncated or stream.status == TraceReadStatus.Corrupt or stream.status == TraceReadStatus.ResourceLimit
             return TraceReadStatus.Empty if stream.chunk_count == 0
             for index in 0..<stream.chunk_count:
                 chunk: TraceChunk = stream.chunks[index]

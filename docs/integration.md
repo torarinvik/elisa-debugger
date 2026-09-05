@@ -9,8 +9,9 @@ For in-process Elisa integrations, `DebuggerManagedService` is the shared
 managed provider facade. Construct it with a verified `ProgramImage`, dispatch
 typed requests through `service_dispatch`, and read bounded frames or locals
 with `service_frame` and `service_locals`. This path executes the same replay
-engine used by the protocol adapters, including reverse-step and validated
-`targetEvent` seek, so a host bridge does not need a second execution policy.
+engine directly, including reverse-step and validated `targetEvent` seek.
+The standalone protocol executables currently dispatch session transitions;
+they are not wired to this managed execution facade.
 
 ## VS Code
 

@@ -26,7 +26,7 @@ def main() -> i64:
     stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, step_request)
     return 3 if not stepped.accepted
     frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
-    return 4 if frame.accumulator != EXPECTED_RESULT or frame.event != TARGET_EVENT
+    return 4 if frame.accumulator != EXPECTED_RESULT or frame.event != TARGET_EVENT or frame.instruction.value != TARGET_EVENT
     continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return 5 if not continued.accepted or not DebuggerManagedService::service_is_exact(service)
@@ -42,4 +42,16 @@ def main() -> i64:
     stale_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: STEP_REQUEST_ID, has_id: true, expected_generation: 99, target_event: 0, valid: true}
     stale: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, stale_request)
     return 9 if stale.accepted or stale.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
+    unreachable_request: mutable DebuggerProtocolRequest::Request = seek_request
+    unreachable_request.target_event <- INSTRUCTION_COUNT + TARGET_EVENT
+    unreachable: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, unreachable_request)
+    unchanged: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
+    return 10 if unreachable.accepted or unchanged.event != TARGET_EVENT or unchanged.instruction.value != TARGET_EVENT
+    service.controller.session <- DebuggerSession::session_resume(service.controller.session)
+    running_seek: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, seek_request)
+    reverse_request: mutable DebuggerProtocolRequest::Request = step_request
+    reverse_request.method <- DebuggerProtocolRequest::RequestMethod.ReverseStep
+    running_reverse: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, reverse_request)
+    running_frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
+    return 11 if running_seek.accepted or running_reverse.accepted or running_frame.event != TARGET_EVENT
     return 0

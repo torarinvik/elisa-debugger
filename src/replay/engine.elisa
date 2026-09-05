@@ -19,6 +19,8 @@ module DebuggerReplayEngine:
         const REPLAY_LOCAL_CAPACITY: usize = 32
         const REPLAY_CALL_DEPTH_CAPACITY: usize = 16
         const REPLAY_FIRST_BRANCH_ID: u64 = 1
+        const HASH_FALSE: u64 = 0
+        const HASH_TRUE: u64 = 1
 
     public:
         enum EngineError:
@@ -72,10 +74,16 @@ module DebuggerReplayEngine:
                 initialized <- 1 if engine.machine.memory_initialized[index]
                 hash <- hash * REPLAY_HASH_PRIME + initialized
             hash <- hash * REPLAY_HASH_PRIME + engine.event_count.u64()
+            halted: u64 = HASH_TRUE if engine.machine.halted else HASH_FALSE
+            faulted: u64 = HASH_TRUE if engine.machine.faulted else HASH_FALSE
+            hash <- hash * REPLAY_HASH_PRIME + halted
+            hash <- hash * REPLAY_HASH_PRIME + faulted
+            hash <- hash * REPLAY_HASH_PRIME + engine.machine.steps
             return hash
 
         def replay_engine_step(engine: mutable ReplayEngine&) -> void:
             return if engine.machine.halted or engine.machine.faulted
+            engine.engine_error <- EngineError.None
             if engine.event_count >= REPLAY_HISTORY_CAPACITY:
                 engine.engine_error <- EngineError.HistoryFull
                 return
@@ -95,6 +103,7 @@ module DebuggerReplayEngine:
                 engine.engine_error <- EngineError.ExecutionFault
 
         def replay_engine_run(engine: mutable ReplayEngine&, max_steps: u64) -> void:
+            engine.engine_error <- EngineError.None if not engine.machine.faulted
             start: u64 = engine.event_count.u64()
             while not engine.machine.halted and not engine.machine.faulted and engine.event_count.u64() - start < max_steps:
                 replay_engine_step(engine)
@@ -113,6 +122,8 @@ module DebuggerReplayEngine:
             engine.engine_error <- EngineError.None
 
         def replay_engine_seek(engine: mutable ReplayEngine&, target: usize) -> void:
+            original_machine: DebuggerEDIR::Machine = engine.machine
+            original_count: usize = engine.event_count
             if target > REPLAY_HISTORY_CAPACITY:
                 engine.engine_error <- EngineError.HistoryUnavailable
                 return
@@ -123,7 +134,13 @@ module DebuggerReplayEngine:
                 engine.engine_error <- EngineError.None
                 return
             while engine.event_count < target and not engine.machine.halted and not engine.machine.faulted:
+                previous: usize = engine.event_count
                 replay_engine_step(engine)
+                break if engine.event_count == previous
+            if engine.event_count != target:
+                engine.machine <- original_machine
+                engine.event_count <- original_count
+                engine.engine_error <- EngineError.HistoryUnavailable
 
         def replay_engine_is_exact(engine: mutable ReplayEngine&) -> bool:
             return engine.engine_error == EngineError.None and not engine.machine.faulted

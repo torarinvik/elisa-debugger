@@ -1,0 +1,110 @@
+# Virtual resource adapters used by managed recording, replay, and branches.
+# Reads are served from captured bytes; writes update only the virtual copy.
+
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+
+module DebuggerVirtualResources:
+    private:
+        const RESOURCE_FILE_CAPACITY: usize = 16
+        const RESOURCE_DATA_CAPACITY: usize = 256
+        const RESOURCE_FIRST_HANDLE: u64 = 1
+        const RESOURCE_NO_HANDLE: u64 = 0
+        const DETAIL_CAPACITY: u32 = 1
+        const DETAIL_HANDLE: u32 = 2
+        const DETAIL_DIVERGENCE: u32 = 3
+
+    public:
+        enum ResourceMode:
+            Recording
+            Replaying
+            Branch
+
+        struct VirtualFile:
+            handle: mutable DebuggerIdentity::DebugId
+            path: mutable DebuggerIdentity::DebugId
+            bytes: mutable u8[RESOURCE_DATA_CAPACITY]
+            length: mutable usize
+            cursor: mutable usize
+            writable: mutable bool
+            generation: mutable u64
+
+        struct ResourceStore:
+            files: mutable VirtualFile[RESOURCE_FILE_CAPACITY]
+            count: mutable usize
+            next_handle: mutable u64
+            mode: mutable ResourceMode
+
+        struct IoResult:
+            transferred: mutable usize
+            eof: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def resources_new(mode: ResourceMode) -> ResourceStore:
+            store: mutable ResourceStore = zeroed
+            store.next_handle <- RESOURCE_FIRST_HANDLE
+            store.mode <- mode
+            return store
+
+        def resources_open(store: mutable ResourceStore&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64) -> DebuggerIdentity::DebugId:
+            return DebuggerIdentity::debug_id(RESOURCE_NO_HANDLE) if store.count >= RESOURCE_FILE_CAPACITY
+            index: usize = store.count
+            store.files[index].handle <- DebuggerIdentity::debug_id(store.next_handle)
+            store.files[index].path <- path
+            store.files[index].writable <- writable
+            store.files[index].generation <- generation
+            store.count <- store.count + 1
+            store.next_handle <- store.next_handle + RESOURCE_FIRST_HANDLE
+            return store.files[index].handle
+
+        def resources_find(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId) -> usize:
+            for index in 0..<store.count:
+                return index if store.files[index].handle.value == handle.value
+            return RESOURCE_FILE_CAPACITY
+
+        def resources_seed(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            index: usize = resources_find(store, handle)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_HANDLE) if index >= RESOURCE_FILE_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if length > RESOURCE_DATA_CAPACITY
+            for byte_index in 0..<length:
+                store.files[index].bytes[byte_index] <- bytes[byte_index]
+            store.files[index].length <- length
+            store.files[index].cursor <- 0
+            return DebuggerErrors::no_error()
+
+        def resources_read(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, output: mutable u8&, length: usize) -> IoResult:
+            result: mutable IoResult = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            index: usize = resources_find(store, handle)
+            if index >= RESOURCE_FILE_CAPACITY:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_HANDLE)
+                return result
+            available: usize = store.files[index].length - store.files[index].cursor
+            result.transferred <- available
+            result.transferred <- length if length < available
+            for byte_index in 0..<result.transferred:
+                output[byte_index] <- store.files[index].bytes[store.files[index].cursor + byte_index]
+            store.files[index].cursor <- store.files[index].cursor + result.transferred
+            result.eof <- result.transferred < length
+            return result
+
+        def resources_write(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, input: u8&, length: usize) -> IoResult:
+            result: mutable IoResult = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            index: usize = resources_find(store, handle)
+            if index >= RESOURCE_FILE_CAPACITY:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_HANDLE)
+                return result
+            if store.mode == ResourceMode.Replaying and not store.files[index].writable:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_DIVERGENCE)
+                return result
+            if not store.files[index].writable:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, DETAIL_HANDLE)
+                return result
+            return result if store.files[index].cursor + length > RESOURCE_DATA_CAPACITY
+            for byte_index in 0..<length:
+                store.files[index].bytes[store.files[index].cursor + byte_index] <- input[byte_index]
+            store.files[index].cursor <- store.files[index].cursor + length
+            store.files[index].length <- store.files[index].cursor if store.files[index].length < store.files[index].cursor
+            result.transferred <- length
+            return result

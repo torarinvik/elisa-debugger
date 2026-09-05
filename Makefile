@@ -6,7 +6,7 @@ BUILD ?= build
 # strict product-freshness gate.
 ELISA_ALLOW_STALE_STAGE1 ?= 1
 
-.PHONY: check build server dap-server cli module-check smoke clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -23,6 +23,9 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 	"$(BUILD)/elisa-debugger-module-trace-check"
 	"$(BUILD)/elisa-debugger-edir-call-check"
 	"$(BUILD)/elisa-debugger-session-check"
+
+ffi-check: $(BUILD)/elisa-debugger-ffi-probe
+	test "$$(printf 'ELI' | "$(BUILD)/elisa-debugger-ffi-probe")" = 'ELI'
 
 $(BUILD)/elisa-debugger: $(shell find src -type f -name '*.elisa')
 	mkdir -p $(BUILD)
@@ -64,10 +67,14 @@ $(BUILD)/elisa-debugger-session-check: tests/session_check.elisa
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
+$(BUILD)/elisa-debugger-ffi-probe: tests/ffi_probe.elisa
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
 check: $(BUILD)/elisa-debugger
 	"$(BUILD)/elisa-debugger"
 
-smoke: check server dap-server cli
+smoke: check server dap-server cli ffi-check
 	printf '21 {"method":"discover"}\n' | "$(BUILD)/elisa-debugger-server" | grep -F '"protocolMajor":1'
 	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"supportsStepBack":true'
 	printf 'launch\npause\ncontinue\nclose\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=2'

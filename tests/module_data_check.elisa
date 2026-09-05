@@ -11,6 +11,8 @@ include "../src/metadata/types.elisa"
 include "../src/inspect/store.elisa"
 include "../src/breakpoint/watchpoint.elisa"
 include "../src/concurrency/runtime.elisa"
+include "../src/replay/resources.elisa"
+include "../src/concurrency/checkpoint.elisa"
 
 const VALUE_STORE_GENERATION: u64 = 7
 const VALUE_NAME_ID: u64 = 100
@@ -24,11 +26,19 @@ const WATCH_VALUE_SECOND: u64 = 11
 const TASK_PARENT_ID: u64 = 0
 const TASK_RESOURCE_ONE: u64 = 300
 const TASK_RESOURCE_TWO: u64 = 301
+const RESOURCE_PATH_ID: u64 = 400
+const RESOURCE_GENERATION: u64 = 1
 
 def main() -> i64:
     expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
     evaluated: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, 8)
     return 1 if evaluated.value != 9 or not DebuggerErrors::error_is_ok(evaluated.failure)
+    multiplied: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Multiply, left: 6, right: 7, binding: zeroed}, 8)
+    return 16 if multiplied.value != 42
+    divided: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Divide, left: 42, right: 7, binding: zeroed}, 8)
+    return 17 if divided.value != 6
+    divide_by_zero: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Divide, left: 1, right: 0, binding: zeroed}, 8)
+    return 18 if divide_by_zero.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
     oracle: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
     oracle <- DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11, 22, 3)
     return 2 if oracle.count != 1 or not oracle.records[0].suppress_external_write
@@ -55,9 +65,20 @@ def main() -> i64:
     branch_id: DebuggerIdentity::DebugId = branches.branches[0].id
     branches <- DebuggerBranches::branches_add_intervention(branches, branch_id, DebuggerBranches::Intervention{event: 4, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(8), value_hash: 99})
     return 8 if branches.branches[0].intervention_count != 1
+    parent_branch: DebuggerBranches::BranchRecord = branches.branches[0]
+    child_branch: mutable DebuggerBranches::BranchRecord = parent_branch
+    child_branch.interventions[0].value_hash <- 100
+    return 25 if DebuggerBranches::branches_first_divergence(parent_branch, child_branch) != 4 or parent_branch.interventions[0].value_hash != 99
     metadata: mutable DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_type(DebuggerTypeMetadata::metadata_new(), DebuggerTypeMetadata::TypeInfo{id: DebuggerIdentity::debug_id(10), kind: DebuggerTypeMetadata::TypeKind.Struct, name: DebuggerIdentity::debug_id(11), size: 16, alignment: 8, child_count: 2, pointee: DebuggerIdentity::debug_id(0), flags: 0})
     found_type: DebuggerTypeMetadata::TypeInfo = DebuggerTypeMetadata::metadata_find_type(metadata, DebuggerIdentity::debug_id(10))
     return 9 if found_type.child_count != 2
+    scope_id: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(12)
+    metadata <- DebuggerTypeMetadata::metadata_add_scope(metadata, DebuggerTypeMetadata::ScopeInfo{id: scope_id, parent: DebuggerIdentity::debug_id(0), function: DebuggerIdentity::debug_id(13), start_event: 2, end_event: 8})
+    binding_identity: DebuggerIdentity::BindingIdentity = DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(14), incarnation: 1}
+    metadata <- DebuggerTypeMetadata::metadata_add_binding(metadata, DebuggerTypeMetadata::BindingInfo{id: binding_identity, name: DebuggerIdentity::debug_id(15), type_id: DebuggerIdentity::debug_id(10), scope: scope_id, lifetime_start: 2, lifetime_end: 8})
+    return 22 if DebuggerTypeMetadata::metadata_find_scope(metadata, scope_id).function.value != 13 or not DebuggerTypeMetadata::metadata_scope_is_active(DebuggerTypeMetadata::metadata_find_scope(metadata, scope_id), 4)
+    found_binding: DebuggerTypeMetadata::BindingInfo = DebuggerTypeMetadata::metadata_find_binding(metadata, binding_identity)
+    return 23 if found_binding.name.value != 15
     values: mutable DebuggerValueStore::ValueStore = DebuggerValueStore::value_store_new(VALUE_STORE_GENERATION)
     root: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_aggregate(values, DebuggerIdentity::debug_id(VALUE_NAME_ID), DebuggerIdentity::debug_id(VALUE_TYPE_ID))
     child: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_scalar(values, DebuggerIdentity::debug_id(VALUE_NAME_ID + 1), DebuggerIdentity::debug_id(VALUE_TYPE_ID), VALUE_CHILD_VALUE)
@@ -81,6 +102,20 @@ def main() -> i64:
     return 16 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, task_one, task_two, DebuggerIdentity::debug_id(TASK_RESOURCE_ONE), DebuggerConcurrency::SynchronizationKind.Mutex)
     return 17 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, task_two, task_one, DebuggerIdentity::debug_id(TASK_RESOURCE_TWO), DebuggerConcurrency::SynchronizationKind.Mutex)
     return 18 if not DebuggerConcurrencyRuntime::runtime_has_deadlock(runtime)
+    resource_bytes: mutable u8[3] = [7, 8, 9]
+    resources: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Replaying)
+    resource_handle: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(resources, DebuggerIdentity::debug_id(RESOURCE_PATH_ID), true, RESOURCE_GENERATION)
+    return 19 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seed(resources, resource_handle, resource_bytes[0], 3))
+    read_bytes: mutable u8[3] = zeroed
+    read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, read_bytes[0], 3)
+    return 20 if read_result.transferred != 3 or read_bytes[2] != 9
+    write_byte: mutable u8[1] = [10]
+    write_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(resources, resource_handle, write_byte[0], 1)
+    return 21 if write_result.transferred != 1
+    task_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
+    DebuggerConcurrencyRuntime::runtime_transition(runtime, task_one, DebuggerConcurrency::TaskState.Completed)
+    DebuggerConcurrencyCheckpoint::task_snapshot_restore(runtime, task_snapshot)
+    return 24 if not DebuggerConcurrencyCheckpoint::task_snapshot_matches(runtime, task_snapshot) or runtime.tasks[0].state != DebuggerConcurrency::TaskState.Blocked
     return 0
     return 0
     return 0

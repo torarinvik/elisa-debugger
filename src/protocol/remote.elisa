@@ -15,6 +15,7 @@ module DebuggerRemote:
         const DETAIL_PROTOCOL: u32 = 1
         const DETAIL_AUTHENTICATION: u32 = 2
         const DETAIL_QUOTA: u32 = 3
+        const DETAIL_STATE: u32 = 4
 
     public:
         enum RemoteState:
@@ -45,11 +46,17 @@ module DebuggerRemote:
 
         def remote_begin(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Disconnected and channel.state != RemoteState.Failed
             updated.state <- RemoteState.Authenticating
+            updated.last_error <- DebuggerErrors::no_error()
             return updated
 
         def remote_accept_handshake(channel: RemoteChannel, handshake: RemoteHandshake) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
+            if channel.state != RemoteState.Authenticating:
+                updated.state <- RemoteState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE)
+                return updated
             if handshake.protocol_major != REMOTE_PROTOCOL_MAJOR or handshake.protocol_minor > REMOTE_PROTOCOL_MINOR or handshake.engine != REMOTE_ENGINE_MANAGED or handshake.trace_schema != REMOTE_TRACE_SCHEMA:
                 updated.state <- RemoteState.Failed
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_PROTOCOL)
@@ -61,6 +68,7 @@ module DebuggerRemote:
             updated.handshake <- handshake
             updated.state <- RemoteState.Connected
             updated.missed_heartbeats <- 0
+            updated.bytes_received <- 0
             updated.quota_exceeded <- false
             updated.last_error <- DebuggerErrors::no_error()
             return updated
@@ -70,6 +78,7 @@ module DebuggerRemote:
             return updated if channel.state != RemoteState.Connected
             if bytes > channel.policy.quotas.remote_payload_bytes or channel.bytes_received > channel.policy.quotas.remote_payload_bytes - bytes:
                 updated.quota_exceeded <- true
+                updated.state <- RemoteState.Draining
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA)
                 return updated
             updated.bytes_received <- channel.bytes_received + bytes
@@ -89,17 +98,23 @@ module DebuggerRemote:
             updated.state <- RemoteState.Disconnected
             updated.handshake.authenticated <- false
             updated.missed_heartbeats <- 0
+            updated.bytes_received <- 0
             updated.quota_exceeded <- false
+            updated.last_error <- DebuggerErrors::no_error()
             return updated
 
         def remote_reconnect(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Disconnected and channel.state != RemoteState.Draining and channel.state != RemoteState.Failed
             updated.state <- RemoteState.Authenticating
             updated.missed_heartbeats <- 0
+            updated.bytes_received <- 0
+            updated.quota_exceeded <- false
+            updated.last_error <- DebuggerErrors::no_error()
             return updated
 
         def remote_can_control(channel: RemoteChannel) -> bool:
-            return channel.state == RemoteState.Connected and channel.handshake.authenticated and DebuggerSecurity::policy_allows(channel.policy, DebuggerSecurity::Permission.Execute)
+            return channel.state == RemoteState.Connected and channel.handshake.authenticated and not channel.quota_exceeded and DebuggerSecurity::policy_allows(channel.policy, DebuggerSecurity::Permission.Execute)
 
         def remote_quota_remaining(channel: RemoteChannel) -> u64:
             return channel.policy.quotas.remote_payload_bytes - channel.bytes_received if channel.bytes_received < channel.policy.quotas.remote_payload_bytes

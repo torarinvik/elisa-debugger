@@ -1,0 +1,73 @@
+# Resumable, quota-bounded artifact transfer for remote clients.  The receiver
+# hashes bytes in arrival order and never exposes an artifact before a complete
+# checksum match.
+
+include "../core/errors.elisa"
+
+module DebuggerRemoteArtifact:
+    private:
+        const TRANSFER_CAPACITY: usize = 4096
+        const TRANSFER_CHUNK_CAPACITY: usize = 256
+        const HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const HASH_PRIME: u64 = 1099511628211
+        const DETAIL_OFFSET: u32 = 1
+        const DETAIL_SIZE: u32 = 2
+        const DETAIL_CHECKSUM: u32 = 3
+
+    public:
+        enum TransferState:
+            Receiving
+            Complete
+            Corrupt
+            QuotaExceeded
+
+        struct ArtifactTransfer:
+            expected_size: mutable usize
+            expected_checksum: mutable u64
+            received: mutable usize
+            checksum: mutable u64
+            bytes: mutable u8[TRANSFER_CAPACITY]
+            state: mutable TransferState
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def transfer_new(expected_size: usize, expected_checksum: u64) -> ArtifactTransfer:
+            transfer: mutable ArtifactTransfer = zeroed
+            transfer.expected_size <- expected_size
+            transfer.expected_checksum <- expected_checksum
+            transfer.checksum <- HASH_OFFSET_BASIS
+            transfer.state <- TransferState.Receiving
+            transfer.last_error <- DebuggerErrors::no_error()
+            transfer.state <- TransferState.QuotaExceeded if expected_size > TRANSFER_CAPACITY
+            transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if expected_size > TRANSFER_CAPACITY
+            return transfer
+
+        def transfer_accept(transfer: mutable ArtifactTransfer&, offset: usize, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            return transfer.last_error if transfer.state != TransferState.Receiving
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OFFSET) if offset != transfer.received
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if length > TRANSFER_CHUNK_CAPACITY or transfer.received + length > transfer.expected_size or transfer.received + length > TRANSFER_CAPACITY
+            for index in 0..<length:
+                value: u8 = bytes[index]
+                transfer.bytes[transfer.received + index] <- value
+                transfer.checksum <- (transfer.checksum ^ value.u64()) * HASH_PRIME
+            transfer.received <- transfer.received + length
+            return DebuggerErrors::no_error()
+
+        def transfer_finish(transfer: mutable ArtifactTransfer&) -> DebuggerErrors::DebuggerError:
+            return transfer.last_error if transfer.state == TransferState.Corrupt or transfer.state == TransferState.QuotaExceeded
+            if transfer.received != transfer.expected_size:
+                transfer.state <- TransferState.Corrupt
+                transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SIZE)
+                return transfer.last_error
+            if transfer.checksum != transfer.expected_checksum:
+                transfer.state <- TransferState.Corrupt
+                transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM)
+                return transfer.last_error
+            transfer.state <- TransferState.Complete
+            transfer.last_error <- DebuggerErrors::no_error()
+            return DebuggerErrors::no_error()
+
+        def transfer_is_complete(transfer: ArtifactTransfer) -> bool:
+            return transfer.state == TransferState.Complete
+
+        def transfer_bytes_received(transfer: ArtifactTransfer) -> usize:
+            return transfer.received

@@ -16,6 +16,8 @@ module DebuggerTraceRecorder:
         const RECORDER_CHUNK_CAPACITY: usize = 8
         const RECORDER_PAYLOAD_CAPACITY: usize = 4096
         const RECORDER_SCHEMA_VERSION: u32 = 1
+        const RECORDER_MANIFEST_SEQUENCE: u64 = 0
+        const RECORDER_EVENT_SEQUENCE_OFFSET: u64 = 1
         const RECORDER_DETAIL_NON_MONOTONIC: u32 = 1
         const RECORDER_DETAIL_RESOURCE_LIMIT: u32 = 2
         const RECORDER_DETAIL_ENCODING: u32 = 3
@@ -76,7 +78,7 @@ module DebuggerTraceRecorder:
                 for byte_index in 0..<event_bytes.length:
                     encoded <- DebuggerTraceBinary::writer_put_byte(encoded, event_bytes.bytes[byte_index])
             chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
-            chunk.header <- DebuggerTrace::ChunkHeader{schema: RECORDER_SCHEMA_VERSION, kind: DebuggerTrace::ChunkKind.Events, sequence: recorder.chunk_count.u64(), first_event: recorder.pending[0].ordinal, last_event: recorder.pending[recorder.pending_count - 1].ordinal, payload_length: encoded.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(encoded)}
+            chunk.header <- DebuggerTrace::ChunkHeader{schema: RECORDER_SCHEMA_VERSION, kind: DebuggerTrace::ChunkKind.Events, sequence: recorder.chunk_count.u64() + RECORDER_EVENT_SEQUENCE_OFFSET, first_event: recorder.pending[0].ordinal, last_event: recorder.pending[recorder.pending_count - 1].ordinal, payload_length: encoded.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(encoded)}
             chunk.payload_length <- encoded.length
             chunk.checksum <- DebuggerTraceBinary::writer_checksum(encoded)
             for index in 0..<encoded.length:
@@ -130,11 +132,21 @@ module DebuggerTraceRecorder:
             return DebuggerTraceStorage::StorageStatus.Invalid if recorder.status == RecorderStatus.Corrupt
             final_error: DebuggerErrors::DebuggerError = recorder_finalize(recorder)
             return DebuggerTraceStorage::StorageStatus.Oversized if not DebuggerErrors::error_is_ok(final_error)
+            manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(recorder.manifest)
+            return DebuggerTraceStorage::StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(manifest_bytes)
+            manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+            manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: RECORDER_SCHEMA_VERSION, kind: DebuggerTrace::ChunkKind.Manifest, sequence: RECORDER_MANIFEST_SEQUENCE, first_event: recorder.manifest.first_event, last_event: recorder.manifest.last_event, payload_length: manifest_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_bytes)}
+            manifest_chunk.payload_length <- manifest_bytes.length
+            manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_bytes)
+            for index in 0..<manifest_bytes.length:
+                manifest_chunk.payload[index] <- manifest_bytes.bytes[index]
+            manifest_result: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_chunk(fd, manifest_chunk) can Blocking.IO
+            return manifest_result if manifest_result != DebuggerTraceStorage::StorageStatus.Ready
             for index in 0..<recorder.chunk_count:
                 result: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_chunk(fd, recorder.chunks[index]) can Blocking.IO
                 return result if result != DebuggerTraceStorage::StorageStatus.Ready
             manifest: DebuggerTraceManifest::BundleManifest = recorder.manifest
-            return DebuggerTraceStorage::storage_write_footer(fd, recorder.chunk_count.u64(), manifest.last_event) can Blocking.IO
+            return DebuggerTraceStorage::storage_write_footer(fd, recorder.chunk_count.u64() + RECORDER_EVENT_SEQUENCE_OFFSET, manifest.last_event) can Blocking.IO
 
         def recorder_is_exact(recorder: TraceRecorder) -> bool:
             return recorder.status == RecorderStatus.Recording or recorder.status == RecorderStatus.Complete

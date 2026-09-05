@@ -11,6 +11,12 @@ include "../src/protocol/session_service.elisa"
 include "../src/protocol/dispatcher.elisa"
 include "../src/protocol/remote.elisa"
 include "../src/native/controller.elisa"
+include "../src/protocol/remote_artifact.elisa"
+include "../src/breakpoint/resolver.elisa"
+include "../src/platform/process.elisa"
+
+const ARTIFACT_SIZE: usize = 3
+const ARTIFACT_CHECKSUM: u64 = 11570874782335668893
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -56,4 +62,20 @@ def main() -> i64:
     service_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.Replay, request_id: 10, session_id: stopped.session.id.value, expected_stop_generation: stopped.session.stop_generation, page_size: 0}
     service_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle(service, service_request)
     return 10 if not service_response.ok or service.session.state != DebuggerSession::SessionState.Replaying
+    artifact_bytes: mutable u8[ARTIFACT_SIZE] = [1, 2, 3]
+    transfer: mutable DebuggerRemoteArtifact::ArtifactTransfer = DebuggerRemoteArtifact::transfer_new(ARTIFACT_SIZE, ARTIFACT_CHECKSUM)
+    transfer_error: DebuggerErrors::DebuggerError = DebuggerRemoteArtifact::transfer_accept(transfer, 0, artifact_bytes[0], ARTIFACT_SIZE)
+    return 11 if not DebuggerErrors::error_is_ok(transfer_error)
+    return 12 if not DebuggerErrors::error_is_ok(DebuggerRemoteArtifact::transfer_finish(transfer)) or not DebuggerRemoteArtifact::transfer_is_complete(transfer)
+    resolver: mutable DebuggerBreakpointResolver::Resolver = DebuggerBreakpointResolver::resolver_new()
+    source_span: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(500), start_byte: 0, end_byte: 10, start_line: 4, start_column: 0, end_line: 4, end_column: 8, discriminator: 0}
+    return 13 if not DebuggerBreakpointResolver::resolver_add(resolver, DebuggerBreakpointResolver::Candidate{id: DebuggerIdentity::debug_id(1), function: DebuggerIdentity::debug_id(2), source: source_span, instruction: 9})
+    location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(500), line: 4, column: 2, discriminator: 0}
+    resolved: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_source(resolver, location)
+    return 14 if resolved.status != DebuggerMetadata::BreakpointResolution.Resolved or resolved.instruction != 9
+    process: DebuggerProcess::ProcessHandle = DebuggerProcess::process_attach(22, 33)
+    return 15 if not DebuggerProcess::process_is_valid(process) or process.state != DebuggerProcess::ProcessState.Stopped
+    memory_bytes: mutable u8[2] = [8, 9]
+    memory: DebuggerProcess::MemoryRead = DebuggerProcess::memory_read_from_buffer(4096, memory_bytes[0], 2)
+    return 16 if not memory.complete or memory.bytes[1] != 9
     return 0

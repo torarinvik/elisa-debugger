@@ -1,0 +1,59 @@
+# Build-aware source and function breakpoint resolution.  Pending requests are
+# retained until metadata for the selected build is installed.
+
+include "./breakpoint.elisa"
+include "../core/identity.elisa"
+include "../metadata/source.elisa"
+
+module DebuggerBreakpointResolver:
+    private:
+        const RESOLUTION_CAPACITY: usize = 512
+        const NO_INSTRUCTION: u64 = 0
+
+    public:
+        struct Candidate:
+            id: mutable DebuggerIdentity::DebugId
+            function: mutable DebuggerIdentity::DebugId
+            source: mutable DebuggerIdentity::SourceSpan
+            instruction: mutable u64
+
+        struct Resolver:
+            candidates: mutable Candidate[RESOLUTION_CAPACITY]
+            count: mutable usize
+
+        struct Resolution:
+            status: mutable DebuggerMetadata::BreakpointResolution
+            instruction: mutable u64
+            matched: mutable usize
+
+        def resolver_new() -> Resolver:
+            return zeroed
+
+        def resolver_add(resolver: mutable Resolver&, candidate: Candidate) -> bool:
+            return false if resolver.count >= RESOLUTION_CAPACITY
+            resolver.candidates[resolver.count] <- candidate
+            resolver.count <- resolver.count + 1
+            return true
+
+        def resolver_source(resolver: mutable Resolver&, location: DebuggerMetadata::SourceLocation) -> Resolution:
+            result: mutable Resolution = zeroed
+            result.status <- DebuggerMetadata::BreakpointResolution.Unresolved
+            result.instruction <- NO_INSTRUCTION
+            for index in 0..<resolver.count:
+                if DebuggerMetadata::source_span_contains(resolver.candidates[index].source, location):
+                    result.instruction <- resolver.candidates[index].instruction
+                    result.matched <- result.matched + 1
+            result.status <- DebuggerMetadata::BreakpointResolution.Resolved if result.matched == 1
+            result.status <- DebuggerMetadata::BreakpointResolution.PartiallyResolved if result.matched > 1
+            return result
+
+        def resolver_function(resolver: mutable Resolver&, function: DebuggerIdentity::DebugId) -> Resolution:
+            result: mutable Resolution = zeroed
+            result.status <- DebuggerMetadata::BreakpointResolution.Unresolved
+            for index in 0..<resolver.count:
+                if resolver.candidates[index].function.value == function.value:
+                    result.instruction <- resolver.candidates[index].instruction
+                    result.matched <- result.matched + 1
+            result.status <- DebuggerMetadata::BreakpointResolution.Resolved if result.matched == 1
+            result.status <- DebuggerMetadata::BreakpointResolution.PartiallyResolved if result.matched > 1
+            return result

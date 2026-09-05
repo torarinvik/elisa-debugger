@@ -1,0 +1,76 @@
+# Canonical checkpoint bytes.  This codec serializes logical managed state in
+# field order, so a checkpoint can be restored after the debugger process exits.
+
+include "./checkpoint.elisa"
+include "../trace/binary.elisa"
+
+module DebuggerCheckpointCodec:
+    private:
+        const CHECKPOINT_SCHEMA: u32 = 1
+        const CHECKPOINT_LOCAL_CAPACITY: usize = 32
+        const CHECKPOINT_GLOBAL_CAPACITY: usize = 16
+        const CHECKPOINT_MEMORY_CAPACITY: usize = 64
+        const CHECKPOINT_STACK_CAPACITY: usize = 16
+        const BOOLEAN_FALSE: u8 = 0
+        const BOOLEAN_TRUE: u8 = 1
+
+    public:
+        def checkpoint_encode(snapshot: DebuggerCheckpoint::MachineSnapshot) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, CHECKPOINT_SCHEMA)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.id.value)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.event)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.state_hash)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.program_counter)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.accumulator.u64())
+            for index in 0..<CHECKPOINT_LOCAL_CAPACITY:
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.locals[index].u64())
+            for index in 0..<CHECKPOINT_GLOBAL_CAPACITY:
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.globals[index].u64())
+            for index in 0..<CHECKPOINT_MEMORY_CAPACITY:
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.memory[index].u64())
+                initialized: mutable u8 = BOOLEAN_FALSE
+                initialized <- BOOLEAN_TRUE if snapshot.memory_initialized[index]
+                writer <- DebuggerTraceBinary::writer_put_byte(writer, initialized)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.heap_next.u64())
+            for index in 0..<CHECKPOINT_STACK_CAPACITY:
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.return_stack[index])
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.return_stack_pointer.u64())
+            halted: mutable u8 = BOOLEAN_FALSE
+            halted <- BOOLEAN_TRUE if snapshot.halted
+            faulted: mutable u8 = BOOLEAN_FALSE
+            faulted <- BOOLEAN_TRUE if snapshot.faulted
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, halted)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, faulted)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.steps)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.result.u64())
+            return writer
+
+        def checkpoint_decode(reader: mutable DebuggerTraceBinary::ByteReader&) -> DebuggerCheckpoint::MachineSnapshot:
+            snapshot: mutable DebuggerCheckpoint::MachineSnapshot = zeroed
+            schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
+            snapshot.id <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
+            snapshot.event <- DebuggerTraceBinary::reader_take_u64(reader)
+            snapshot.state_hash <- DebuggerTraceBinary::reader_take_u64(reader)
+            snapshot.program_counter <- DebuggerTraceBinary::reader_take_u64(reader)
+            snapshot.accumulator <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+            for index in 0..<CHECKPOINT_LOCAL_CAPACITY:
+                snapshot.locals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+            for index in 0..<CHECKPOINT_GLOBAL_CAPACITY:
+                snapshot.globals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+            for index in 0..<CHECKPOINT_MEMORY_CAPACITY:
+                snapshot.memory[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+                snapshot.memory_initialized[index] <- DebuggerTraceBinary::reader_take_byte(reader) == BOOLEAN_TRUE
+            snapshot.heap_next <- DebuggerTraceBinary::reader_take_u64(reader).usize()
+            for index in 0..<CHECKPOINT_STACK_CAPACITY:
+                snapshot.return_stack[index] <- DebuggerTraceBinary::reader_take_u64(reader)
+            snapshot.return_stack_pointer <- DebuggerTraceBinary::reader_take_u64(reader).usize()
+            snapshot.halted <- DebuggerTraceBinary::reader_take_byte(reader) == BOOLEAN_TRUE
+            snapshot.faulted <- DebuggerTraceBinary::reader_take_byte(reader) == BOOLEAN_TRUE
+            snapshot.steps <- DebuggerTraceBinary::reader_take_u64(reader)
+            snapshot.result <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+            snapshot.id <- DebuggerIdentity::debug_id(0) if schema != CHECKPOINT_SCHEMA
+            return snapshot
+
+        def checkpoint_bytes_are_valid(reader: DebuggerTraceBinary::ByteReader) -> bool:
+            return DebuggerTraceBinary::reader_is_valid(reader)

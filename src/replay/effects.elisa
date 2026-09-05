@@ -48,6 +48,7 @@ module DebuggerEffects:
             cursor: mutable usize
             mode: mutable EffectMode
             exactness: mutable Exactness
+            overflowed: mutable bool
             last_error: mutable DebuggerErrors::DebuggerError
 
         def effect_oracle_new(mode: EffectMode) -> EffectOracle:
@@ -56,6 +57,7 @@ module DebuggerEffects:
             oracle.cursor <- 0
             oracle.mode <- mode
             oracle.exactness <- Exactness.Exact
+            oracle.overflowed <- false
             oracle.last_error <- DebuggerErrors::no_error()
             return oracle
 
@@ -64,7 +66,12 @@ module DebuggerEffects:
 
         def effect_oracle_record(oracle: EffectOracle, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> EffectOracle:
             updated: mutable EffectOracle = oracle
-            return updated if oracle.mode == EffectMode.Replaying or oracle.count >= EFFECT_ORACLE_CAPACITY
+            return updated if oracle.mode == EffectMode.Replaying
+            if oracle.count >= EFFECT_ORACLE_CAPACITY:
+                updated.overflowed <- true
+                updated.exactness <- Exactness.Incomplete
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, EFFECT_ORACLE_CAPACITY.u32())
+                return updated
             updated.records[oracle.count] <- EffectRecord{sequence: oracle.count.u64(), kind: kind, request_hash: request_hash, result_hash: result_hash, result_value: value, suppress_external_write: effect_is_external_write(kind)}
             updated.count <- oracle.count + 1
             updated.exactness <- Exactness.Exact
@@ -86,7 +93,11 @@ module DebuggerEffects:
             return updated
 
         def effect_oracle_is_exact(oracle: EffectOracle) -> bool:
-            return oracle.exactness == Exactness.Exact
+            return oracle.exactness == Exactness.Exact and not oracle.overflowed
+
+        def effect_oracle_last_value(oracle: EffectOracle) -> i64:
+            return 0 if oracle.cursor == 0 or oracle.cursor > oracle.count
+            return oracle.records[oracle.cursor - 1].result_value
 
         def effect_record_suppresses_write(record: EffectRecord) -> bool:
             return record.suppress_external_write

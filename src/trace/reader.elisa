@@ -23,7 +23,10 @@ module DebuggerTraceReader:
         const DETAIL_CHECKSUM: u32 = 2
         const DETAIL_ENCODING: u32 = 3
         const DETAIL_CAPACITY: u32 = 4
-        const READER_PAYLOAD_CAPACITY: usize = 4096
+        const DETAIL_ENUM: u32 = 5
+        const READER_PAYLOAD_CAPACITY: usize = 4048
+        const EVENT_KIND_MAX: u16 = 20
+        const EVENT_QUALITY_MAX: u16 = 3
 
     public:
         enum ReaderState:
@@ -82,6 +85,7 @@ module DebuggerTraceReader:
             return DebuggerEvents::EventQuality.Corrupt
 
         def reader_ingest_manifest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if reader.manifest_seen
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.sequence != reader.next_sequence
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if chunk.payload_length > READER_PAYLOAD_CAPACITY
@@ -92,6 +96,7 @@ module DebuggerTraceReader:
             payload_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(chunk.payload[0], chunk.payload_length)
             reader.manifest <- DebuggerTraceManifest::manifest_decode(payload_reader)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if not DebuggerTraceBinary::reader_is_valid(payload_reader) or reader.manifest.schema == 0
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32() or chunk.header.first_event != reader.manifest.first_event or chunk.header.last_event != reader.manifest.last_event
             reader.next_event <- reader.manifest.first_event
             reader.manifest_seen <- true
             reader.next_sequence <- reader.next_sequence + 1
@@ -104,6 +109,7 @@ module DebuggerTraceReader:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if chunk.payload_length > READER_PAYLOAD_CAPACITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if chunk.payload_length % EVENT_ENCODED_BYTES != 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.sequence != reader.next_sequence
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.last_event < chunk.header.first_event
             payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
             for index in 0..<chunk.payload_length:
@@ -127,6 +133,7 @@ module DebuggerTraceReader:
                 kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
                 quality: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
                 payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENUM) if kind > EVENT_KIND_MAX or quality > EVENT_QUALITY_MAX
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if ordinal != reader.next_event
                 event.schema <- schema
                 event.ordinal <- ordinal

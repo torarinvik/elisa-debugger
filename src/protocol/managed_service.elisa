@@ -4,6 +4,7 @@
 
 include "../engine/managed.elisa"
 include "../inspect/managed.elisa"
+include "../inspect/memory.elisa"
 include "../protocol/request.elisa"
 include "../core/errors.elisa"
 
@@ -67,6 +68,8 @@ module DebuggerManagedService:
                 failure <- DebuggerManagedEngine::managed_reverse_step(service.controller)
             if request.method == DebuggerProtocolRequest::RequestMethod.Seek:
                 failure <- DebuggerManagedEngine::managed_seek(service.controller, request.target_event.usize())
+            if request.method == DebuggerProtocolRequest::RequestMethod.Memory:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if not DebuggerSession::session_can_inspect(service.controller.session)
             if request.method == DebuggerProtocolRequest::RequestMethod.Detach:
                 service.controller.session <- DebuggerSession::session_detach(service.controller.session)
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
@@ -76,7 +79,7 @@ module DebuggerManagedService:
             if request.method == DebuggerProtocolRequest::RequestMethod.Close:
                 service.controller.session <- DebuggerSession::session_close(service.controller.session)
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
-            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.Seek:
+            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Memory:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method != DebuggerProtocolRequest::RequestMethod.Discover and request.method != DebuggerProtocolRequest::RequestMethod.Initialize and request.method != DebuggerProtocolRequest::RequestMethod.CreateSession and request.method != DebuggerProtocolRequest::RequestMethod.OpenTrace and request.method != DebuggerProtocolRequest::RequestMethod.Replay and request.method != DebuggerProtocolRequest::RequestMethod.Detach and request.method != DebuggerProtocolRequest::RequestMethod.Terminate and request.method != DebuggerProtocolRequest::RequestMethod.Close
             service.last_error <- failure
             return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
@@ -90,3 +93,7 @@ module DebuggerManagedService:
 
         def service_is_exact(service: mutable Service&) -> bool:
             return DebuggerManagedEngine::managed_is_exact(service.controller)
+
+        def service_memory(service: mutable Service&, address: u64, length: usize) -> DebuggerMemory::MemoryRead:
+            return DebuggerMemory::memory_read_managed(service.controller.engine.machine, address, length) if DebuggerSession::session_can_inspect(service.controller.session)
+            return DebuggerMemory::memory_read_invalid(address, DebuggerMemory::MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED))

@@ -90,11 +90,21 @@ module DebuggerTraceStream:
             return TraceReadStatus.ResourceLimit if stream.chunk_count > TRACE_CHUNK_CAPACITY
             return stream.status if stream.status == TraceReadStatus.Truncated or stream.status == TraceReadStatus.Corrupt or stream.status == TraceReadStatus.ResourceLimit
             return TraceReadStatus.Empty if stream.chunk_count == 0
+            return TraceReadStatus.Corrupt if stream.status == TraceReadStatus.Empty
             for index in 0..<stream.chunk_count:
                 chunk: TraceChunk = stream.chunks[index]
+                return TraceReadStatus.ResourceLimit if chunk.header.payload_length > TRACE_MAX_PAYLOAD.u64() or chunk.payload_received > TRACE_MAX_PAYLOAD
+                return TraceReadStatus.Corrupt if chunk.header.sequence != TRACE_FIRST_SEQUENCE + index.u64()
+                return TraceReadStatus.Corrupt if chunk.payload_received > chunk.header.payload_length.usize()
                 return TraceReadStatus.Truncated if not chunk.complete
+                return TraceReadStatus.Corrupt if chunk.payload_received != chunk.header.payload_length.usize()
                 return TraceReadStatus.Corrupt if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
+                computed: mutable u64 = TRACE_HASH_OFFSET_BASIS
+                for payload_index in 0..<chunk.payload_received:
+                    computed <- (computed ^ chunk.payload[payload_index].u64()) * TRACE_HASH_PRIME
+                return TraceReadStatus.Corrupt if chunk.checksum != computed
                 return TraceReadStatus.Corrupt if chunk.checksum != chunk.header.checksum
+            return TraceReadStatus.Corrupt if stream.next_sequence != TRACE_FIRST_SEQUENCE + stream.chunk_count.u64()
             return TraceReadStatus.Complete
 
         def trace_stream_verified_event(stream: TraceStream) -> u64:

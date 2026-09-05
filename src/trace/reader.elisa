@@ -1,0 +1,144 @@
+# Lossless event reader for recorder chunks.  It verifies every chunk before
+# decoding event envelopes and exposes only the verified prefix after damage.
+
+include "./binary.elisa"
+include "./storage.elisa"
+include "./manifest.elisa"
+include "../core/events.elisa"
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+
+module DebuggerTraceReader:
+    private:
+        const READER_EVENT_CAPACITY: usize = 256
+        const READER_FIRST_SEQUENCE: u64 = 0
+        const EVENT_SCHEMA_BYTES: usize = 4
+        const EVENT_ORDINAL_BYTES: usize = 8
+        const EVENT_ID_BYTES: usize = 8
+        const EVENT_MICROSTEP_BYTES: usize = 4
+        const EVENT_ENUM_BYTES: usize = 2
+        const EVENT_PAYLOAD_BYTES: usize = 8
+        const EVENT_ENCODED_BYTES: usize = EVENT_SCHEMA_BYTES + EVENT_ORDINAL_BYTES + EVENT_ID_BYTES * 7 + EVENT_MICROSTEP_BYTES + EVENT_ENUM_BYTES * 2 + EVENT_PAYLOAD_BYTES
+        const DETAIL_SEQUENCE: u32 = 1
+        const DETAIL_CHECKSUM: u32 = 2
+        const DETAIL_ENCODING: u32 = 3
+        const DETAIL_CAPACITY: u32 = 4
+
+    public:
+        enum ReaderState:
+            Empty
+            Ready
+            Partial
+            Corrupt
+
+        struct TraceReader:
+            manifest: mutable DebuggerTraceManifest::BundleManifest
+            events: mutable DebuggerEvents::EventEnvelope[READER_EVENT_CAPACITY]
+            event_count: mutable usize
+            next_sequence: mutable u64
+            state: mutable ReaderState
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def reader_new() -> TraceReader:
+            reader: mutable TraceReader = zeroed
+            reader.next_sequence <- READER_FIRST_SEQUENCE
+            reader.state <- ReaderState.Empty
+            reader.last_error <- DebuggerErrors::no_error()
+            return reader
+
+        def event_kind_from_code(code: u16) -> DebuggerEvents::EventKind:
+            return DebuggerEvents::EventKind.ExecutionBoundary if code == 0
+            return DebuggerEvents::EventKind.CallEntry if code == 1
+            return DebuggerEvents::EventKind.CallExit if code == 2
+            return DebuggerEvents::EventKind.Unwind if code == 3
+            return DebuggerEvents::EventKind.ScopeEnter if code == 4
+            return DebuggerEvents::EventKind.ScopeExit if code == 5
+            return DebuggerEvents::EventKind.Allocation if code == 6
+            return DebuggerEvents::EventKind.Release if code == 7
+            return DebuggerEvents::EventKind.RegionReset if code == 8
+            return DebuggerEvents::EventKind.MutationAttempt if code == 9
+            return DebuggerEvents::EventKind.MutationCommit if code == 10
+            return DebuggerEvents::EventKind.Input if code == 11
+            return DebuggerEvents::EventKind.Output if code == 12
+            return DebuggerEvents::EventKind.Scheduler if code == 13
+            return DebuggerEvents::EventKind.Synchronization if code == 14
+            return DebuggerEvents::EventKind.Atomic if code == 15
+            return DebuggerEvents::EventKind.Fault if code == 16
+            return DebuggerEvents::EventKind.Checkpoint if code == 17
+            return DebuggerEvents::EventKind.Module if code == 18
+            return DebuggerEvents::EventKind.DebuggerMutation if code == 19
+            return DebuggerEvents::EventKind.TraceHealth
+
+        def event_quality_from_code(code: u16) -> DebuggerEvents::EventQuality:
+            return DebuggerEvents::EventQuality.Exact if code == 0
+            return DebuggerEvents::EventQuality.Partial if code == 1
+            return DebuggerEvents::EventQuality.Observational if code == 2
+            return DebuggerEvents::EventQuality.Diverged if code == 3
+            return DebuggerEvents::EventQuality.Corrupt
+
+        def reader_ingest_manifest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.sequence != reader.next_sequence
+            payload_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(chunk.payload[0], chunk.payload_length)
+            reader.manifest <- DebuggerTraceManifest::manifest_decode(payload_reader)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if not DebuggerTraceBinary::reader_is_valid(payload_reader) or reader.manifest.schema == 0
+            reader.next_sequence <- reader.next_sequence + 1
+            reader.state <- ReaderState.Ready
+            return DebuggerErrors::no_error()
+
+        def reader_ingest_events(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.sequence != reader.next_sequence
+            payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            for index in 0..<chunk.payload_length:
+                payload <- DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM) if DebuggerTraceBinary::writer_checksum(payload) != chunk.checksum
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if reader.event_count >= READER_EVENT_CAPACITY
+            event_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(chunk.payload[0], chunk.payload_length)
+            while event_reader.offset + EVENT_ENCODED_BYTES <= event_reader.length:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if reader.event_count >= READER_EVENT_CAPACITY
+                event: mutable DebuggerEvents::EventEnvelope = zeroed
+                schema: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
+                ordinal: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
+                task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
+                recording: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
+                branch: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
+                event_id: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
+                position_task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
+                invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
+                statement: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
+                microstep: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
+                kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
+                quality: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
+                payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
+                event.schema <- schema
+                event.ordinal <- ordinal
+                event.task <- task
+                event.position <- DebuggerIdentity::Position{recording: recording, branch: branch, event: event_id, task: position_task, invocation: invocation, statement: statement, microstep: microstep}
+                event.kind <- event_kind_from_code(kind)
+                event.quality <- event_quality_from_code(quality)
+                event.payload_hash <- payload_hash
+                reader.events[reader.event_count] <- event
+                reader.event_count <- reader.event_count + 1
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING + 10) if not DebuggerTraceBinary::reader_is_valid(event_reader)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING + 20) if event_reader.offset != event_reader.length
+            reader.next_sequence <- reader.next_sequence + 1
+            reader.state <- ReaderState.Ready
+            return DebuggerErrors::no_error()
+
+        def reader_ingest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+            return reader.last_error if reader.state == ReaderState.Corrupt
+            result: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if chunk.header.kind == DebuggerTrace::ChunkKind.Manifest:
+                result <- reader_ingest_manifest(reader, chunk)
+            if chunk.header.kind == DebuggerTrace::ChunkKind.Events:
+                result <- reader_ingest_events(reader, chunk)
+            if not DebuggerErrors::error_is_ok(result):
+                reader.state <- ReaderState.Corrupt
+                reader.last_error <- result
+                return result
+            return result
+
+        def reader_is_exact(reader: TraceReader) -> bool:
+            return reader.state == ReaderState.Ready and DebuggerErrors::error_is_ok(reader.last_error) and DebuggerTraceManifest::manifest_is_replayable(reader.manifest)
+
+        def reader_event_count(reader: TraceReader) -> usize:
+            return reader.event_count

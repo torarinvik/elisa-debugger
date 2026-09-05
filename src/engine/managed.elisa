@@ -1,0 +1,79 @@
+# Managed execution facade.  It owns the EDIR replay engine and keeps the
+# provider-neutral session position synchronized for every editor adapter.
+
+include "./provider.elisa"
+include "../core/session.elisa"
+include "../core/errors.elisa"
+include "../replay/engine.elisa"
+include "../replay/checkpoint_codec.elisa"
+
+module DebuggerManagedEngine:
+    private:
+        const DETAIL_ENGINE_FAULT: u32 = 1
+        const DETAIL_HISTORY: u32 = 2
+
+    public:
+        struct ManagedController:
+            session: mutable DebuggerSession::Session
+            engine: mutable DebuggerReplayEngine::ReplayEngine
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def managed_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> ManagedController:
+            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), last_error: DebuggerErrors::no_error()}
+
+        def managed_sync_position(controller: mutable ManagedController&) -> void:
+            controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
+
+        def managed_launch(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            controller.session <- DebuggerSession::session_launch(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
+            managed_sync_position(controller)
+            return DebuggerErrors::no_error()
+
+        def managed_pause(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            controller.session <- DebuggerSession::session_pause(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
+            managed_sync_position(controller)
+            return DebuggerErrors::no_error()
+
+        def managed_continue(controller: mutable ManagedController&, max_steps: u64) -> DebuggerErrors::DebuggerError:
+            controller.session <- DebuggerSession::session_resume(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
+            DebuggerReplayEngine::replay_engine_run(controller.engine, max_steps)
+            managed_sync_position(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull or controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
+            controller.session <- DebuggerSession::session_stop(controller.session)
+            return DebuggerErrors::no_error()
+
+        def managed_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            DebuggerReplayEngine::replay_engine_step(controller.engine)
+            controller.session <- DebuggerSession::session_step(controller.session)
+            managed_sync_position(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
+            return DebuggerErrors::no_error()
+
+        def managed_reverse_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count == 0
+            DebuggerReplayEngine::replay_engine_reverse_one(controller.engine)
+            controller.session <- DebuggerSession::session_reverse_step(controller.session)
+            managed_sync_position(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
+            return DebuggerErrors::no_error()
+
+        def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
+            DebuggerReplayEngine::replay_engine_seek(controller.engine, event)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
+            managed_sync_position(controller)
+            controller.session <- DebuggerSession::session_seek(controller.session, event.u64())
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
+            return DebuggerErrors::no_error()
+
+        def managed_checkpoint(controller: mutable ManagedController&) -> DebuggerTraceBinary::ByteWriter:
+            snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(controller.engine.machine, DebuggerIdentity::debug_id(controller.engine.event_count.u64()), controller.engine.event_count.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+            return DebuggerCheckpointCodec::checkpoint_encode(snapshot)
+
+        def managed_is_exact(controller: mutable ManagedController&) -> bool:
+            return DebuggerReplayEngine::replay_engine_is_exact(controller.engine)

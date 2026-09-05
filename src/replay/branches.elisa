@@ -9,6 +9,9 @@ module DebuggerBranches:
         const BRANCH_CAPACITY: usize = 32
         const INTERVENTION_CAPACITY: usize = 16
         const INTERVENTION_NO_TARGET: u64 = 0
+        const INTERVENTION_KIND_MAX: u16 = 3
+        const BRANCH_FIRST_ID: u64 = 1
+        const BRANCH_MAX_ID: u64 = 18446744073709551615
 
     public:
         enum InterventionKind:
@@ -38,7 +41,7 @@ module DebuggerBranches:
 
         def branches_new() -> BranchStore:
             store: mutable BranchStore = zeroed
-            store.next_id <- 1
+            store.next_id <- BRANCH_FIRST_ID
             return store
 
         def branches_parent_exists(store: BranchStore, parent: DebuggerIdentity::DebugId) -> bool:
@@ -50,7 +53,7 @@ module DebuggerBranches:
 
         def branches_fork(store: BranchStore, parent: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> BranchStore:
             updated: mutable BranchStore = store
-            return updated if store.count >= BRANCH_CAPACITY or not branches_parent_exists(store, parent)
+            return updated if store.count >= BRANCH_CAPACITY or store.next_id == 0 or store.next_id == BRANCH_MAX_ID or not branches_parent_exists(store, parent)
             updated.branches[store.count].id <- DebuggerIdentity::debug_id(store.next_id)
             updated.branches[store.count].parent <- parent
             updated.branches[store.count].fork_event <- event
@@ -76,7 +79,7 @@ module DebuggerBranches:
             return updated
 
         def branches_intervention_is_valid(branch: BranchRecord, intervention: Intervention) -> bool:
-            return intervention.event >= branch.fork_event and intervention.target.value != INTERVENTION_NO_TARGET and branch.intervention_count < INTERVENTION_CAPACITY
+            return intervention.event >= branch.fork_event and intervention.kind.u16() <= INTERVENTION_KIND_MAX and intervention.target.value != INTERVENTION_NO_TARGET and branch.intervention_count < INTERVENTION_CAPACITY
 
         def branches_first_divergence(left: BranchRecord, right: BranchRecord) -> u64:
             return left.fork_event if left.parent.value != right.parent.value or left.fork_event != right.fork_event
@@ -85,4 +88,5 @@ module DebuggerBranches:
             limit: usize = left.intervention_count if left.intervention_count < right.intervention_count else right.intervention_count
             for index in 0..<limit:
                 return left.interventions[index].event if left.interventions[index].event != right.interventions[index].event or left.interventions[index].kind != right.interventions[index].kind or left.interventions[index].target.value != right.interventions[index].target.value or left.interventions[index].value_hash != right.interventions[index].value_hash
+            return BRANCH_MAX_ID if limit.u64() > BRANCH_MAX_ID - left.fork_event
             return left.fork_event + limit.u64()

@@ -34,6 +34,75 @@ const TEST_BAD_EVENT_ORDINAL: u64 = 1
 const TEST_EXPORT_CHUNK_COUNT: usize = 1
 const CHECKPOINT_FLAGS_OFFSET: usize = 1148
 
+def check_empty_event_chunk() -> i64:
+    empty_events: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    empty_events.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: 0, checksum: 1469598103934665603}
+    empty_events.checksum <- 1469598103934665603
+    empty_events_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(empty_events)
+    empty_events_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(empty_events_bytes.bytes[0], empty_events_bytes.length)
+    return 1 if empty_events_scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    return 0
+
+def check_invalid_manifest() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest.runtime <- DebuggerIdentity::debug_id(0)
+    return 1 if DebuggerTraceManifest::manifest_is_replayable(manifest)
+    return 0
+
+def check_corrupt_bundle() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: TEST_CHUNK_CHECKSUM}
+    chunk.payload[0] <- TEST_PAYLOAD_BYTE
+    chunk.payload_length <- 1
+    chunk.checksum <- TEST_CHUNK_CHECKSUM
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
+    _ = DebuggerTraceBundle::bundle_append(bundle, chunk)
+    _ = DebuggerTraceBundle::bundle_seal(bundle, false)
+    bundle.chunks[0].checksum <- bundle.chunks[0].checksum + 1
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
+    return 1 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.verified_chunks != 0
+    return 0
+
+def check_pre_manifest() -> i64:
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: TEST_CHUNK_CHECKSUM}
+    chunk.payload[0] <- TEST_PAYLOAD_BYTE
+    chunk.payload_length <- 1
+    chunk.checksum <- TEST_CHUNK_CHECKSUM
+    reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 1 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
+    return 0
+
+def check_trailing_manifest() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest_payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: 0, first_event: 0, last_event: 0, payload_length: manifest_payload.length.u64() + 1, checksum: 0}
+    chunk.payload_length <- manifest_payload.length + 1
+    for index in 0..<manifest_payload.length:
+        chunk.payload[index] <- manifest_payload.bytes[index]
+    chunk.payload[manifest_payload.length] <- TEST_PAYLOAD_BYTE
+    payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for index in 0..<chunk.payload_length:
+        payload <- DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    chunk.header.checksum <- chunk.checksum
+    reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 1 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
+    return 0
+
+def check_schema_recorder() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build, DebuggerIdentity::debug_id(TEST_RECORDING_ID + 2))
+    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING_ID))
+    event: mutable DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_EVENT_SCHEMA + 1, TEST_EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_EVENT_PAYLOAD)
+    failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, event)
+    return 1 if DebuggerErrors::error_is_ok(failure) or failure.detail != 4
+    return 0
+
 def main() -> i64:
     writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     writer <- DebuggerTraceBinary::writer_put_u16(writer, TEST_U16_VALUE)
@@ -59,12 +128,7 @@ def main() -> i64:
     return 29 if footerless_report.state != DebuggerTraceVerify::VerificationState.Partial or footerless_report.replayable
     truncated: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(encoded.bytes[0], TEST_TRUNCATED_CHUNK_BYTES)
     return 9 if truncated.status != DebuggerTraceStorage::StorageStatus.Truncated
-    empty_events: mutable DebuggerTraceStorage::StoredChunk = zeroed
-    empty_events.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: 0, checksum: 1469598103934665603}
-    empty_events.checksum <- 1469598103934665603
-    empty_events_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(empty_events)
-    empty_events_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(empty_events_bytes.bytes[0], empty_events_bytes.length)
-    return 39 if empty_events_scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    return 39 if check_empty_event_chunk() != 0
     footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(1, 0)
     combined: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     for encoded_index in 0..<encoded.length:
@@ -80,9 +144,7 @@ def main() -> i64:
     manifest_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(manifest_bytes.bytes[0], manifest_bytes.length)
     decoded: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_decode(manifest_reader)
     return 11 if not DebuggerTraceManifest::manifest_is_replayable(decoded) or decoded.compiler.value != TEST_BUILD_COMPILER or decoded.last_event != TEST_EXPECTED_LAST_EVENT
-    invalid_manifest: DebuggerTraceManifest::BundleManifest = decoded
-    invalid_manifest.runtime <- DebuggerIdentity::debug_id(0)
-    return 43 if DebuggerTraceManifest::manifest_is_replayable(invalid_manifest)
+    return 43 if check_invalid_manifest() != 0
     recorder_build: DebuggerIdentity::BuildIdentity = build
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(recorder_build, DebuggerIdentity::debug_id(TEST_RECORDING_ID))
     position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING_ID))
@@ -99,10 +161,7 @@ def main() -> i64:
     return 16 if not DebuggerErrors::error_is_ok(seal_error) or not DebuggerTraceBundle::bundle_is_replayable(bundle)
     verification: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
     return 17 if verification.state != DebuggerTraceVerify::VerificationState.Exact or not verification.replayable
-    corrupted_bundle: mutable DebuggerTraceBundle::TraceBundle = bundle
-    corrupted_bundle.chunks[0].checksum <- corrupted_bundle.chunks[0].checksum + 1
-    corrupted_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(corrupted_bundle)
-    return 40 if corrupted_report.state != DebuggerTraceVerify::VerificationState.Corrupt or corrupted_report.verified_chunks != 0
+    return 40 if check_corrupt_bundle() != 0
     partial_verification: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(encoded.bytes[0], TEST_TRUNCATED_CHUNK_BYTES)
     return 18 if partial_verification.state != DebuggerTraceVerify::VerificationState.Partial
     checkpoint_machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -122,22 +181,9 @@ def main() -> i64:
     for manifest_index in 0..<manifest_payload.length:
         manifest_chunk.payload[manifest_index] <- manifest_payload.bytes[manifest_index]
     trace_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
-    pre_manifest: mutable DebuggerTraceStorage::StoredChunk = chunk
-    pre_manifest.header.kind <- DebuggerTrace::ChunkKind.Metadata
-    pre_manifest_reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
-    return 41 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(pre_manifest_reader, pre_manifest))
+    return 41 if check_pre_manifest() != 0
     return 20 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(trace_reader, manifest_chunk))
-    trailing_manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
-    trailing_manifest_chunk.payload[manifest_payload.length] <- TEST_PAYLOAD_BYTE
-    trailing_manifest_payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
-    for trailing_index in 0..<manifest_payload.length + 1:
-        trailing_manifest_payload <- DebuggerTraceBinary::writer_put_byte(trailing_manifest_payload, trailing_manifest_chunk.payload[trailing_index])
-    trailing_manifest_chunk.payload_length <- manifest_payload.length + 1
-    trailing_manifest_chunk.header.payload_length <- trailing_manifest_chunk.payload_length.u64()
-    trailing_manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(trailing_manifest_payload)
-    trailing_manifest_chunk.header.checksum <- trailing_manifest_chunk.checksum
-    trailing_manifest_reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
-    return 35 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(trailing_manifest_reader, trailing_manifest_chunk))
+    return 35 if check_trailing_manifest() != 0
     event_read_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(trace_reader, recorder.chunks[0])
     return 21 if not DebuggerErrors::error_is_ok(event_read_error)
     return 22 if DebuggerTraceReader::reader_event_count(trace_reader) != 1
@@ -157,11 +203,7 @@ def main() -> i64:
     bad_append: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(corrupt_recorder, bad_event)
     return 24 if DebuggerErrors::error_is_ok(bad_append)
     return 25 if DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(corrupt_recorder))
-    schema_recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build, DebuggerIdentity::debug_id(TEST_RECORDING_ID + 2))
-    schema_event: mutable DebuggerEvents::EventEnvelope = event
-    schema_event.schema <- TEST_EVENT_SCHEMA + 1
-    schema_error: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(schema_recorder, schema_event)
-    return 42 if DebuggerErrors::error_is_ok(schema_error) or schema_error.detail != 4
+    return 42 if check_schema_recorder() != 0
     exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle)
     return 26 if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count != TEST_EXPORT_CHUNK_COUNT
     exported_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(exported.bytes.bytes[0], exported.bytes.length)

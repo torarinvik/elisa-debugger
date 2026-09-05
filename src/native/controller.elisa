@@ -26,23 +26,49 @@ module DebuggerNative:
             agent: mutable AgentIdentity
             status: mutable NativeStopStatus
             provider: mutable DebuggerEngine::Provider
+            last_error: mutable DebuggerErrors::DebuggerError
 
         def native_controller_new(provider: DebuggerEngine::Provider) -> NativeController:
-            return NativeController{agent: AgentIdentity{protocol_major: 0, build: 0, target: 0}, status: NativeStopStatus.Detached, provider: provider}
+            return NativeController{agent: AgentIdentity{protocol_major: 0, build: 0, target: 0}, status: NativeStopStatus.Detached, provider: provider, last_error: DebuggerErrors::no_error()}
 
         def native_attach(controller: NativeController, agent: AgentIdentity) -> NativeController:
             updated: mutable NativeController = controller
-            return updated if agent.protocol_major != AGENT_PROTOCOL_MAJOR
+            if agent.protocol_major != AGENT_PROTOCOL_MAJOR:
+                updated.status <- NativeStopStatus.Unsupported
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, AGENT_PROTOCOL_MAJOR)
+                return updated
             updated.agent <- agent
             updated.status <- NativeStopStatus.Attached
+            updated.last_error <- DebuggerErrors::no_error()
             return updated
 
         def native_pause(controller: NativeController) -> NativeController:
             updated: mutable NativeController = controller
-            return updated if controller.status != NativeStopStatus.Attached
+            if controller.status != NativeStopStatus.Attached:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, AGENT_PROTOCOL_MAJOR)
+                return updated
             updated.status <- NativeStopStatus.Pausing
             updated.status <- NativeStopStatus.Stopped
+            updated.last_error <- DebuggerErrors::no_error()
             return updated
+
+        def native_resume(controller: NativeController) -> NativeController:
+            updated: mutable NativeController = controller
+            if controller.status != NativeStopStatus.Stopped:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, AGENT_PROTOCOL_MAJOR)
+                return updated
+            updated.status <- NativeStopStatus.Attached
+            updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        def native_detach(controller: NativeController) -> NativeController:
+            updated: mutable NativeController = controller
+            updated.status <- NativeStopStatus.Detached
+            updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        def native_can_inspect(controller: NativeController) -> bool:
+            return controller.status == NativeStopStatus.Stopped or controller.status == NativeStopStatus.Crashed
 
         def native_exact_replay_error() -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, AGENT_PROTOCOL_MAJOR)

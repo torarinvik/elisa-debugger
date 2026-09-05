@@ -45,6 +45,7 @@ module DebuggerTraceRecorder:
             next_ordinal: mutable u64
             status: mutable RecorderStatus
             last_error: mutable DebuggerErrors::DebuggerError
+            exact: mutable bool
 
         def recorder_new(build: DebuggerIdentity::BuildIdentity, recording: DebuggerIdentity::DebugId) -> TraceRecorder:
             recorder: mutable TraceRecorder = zeroed
@@ -53,6 +54,7 @@ module DebuggerTraceRecorder:
             recorder.status <- RecorderStatus.Recording
             recorder.last_error <- DebuggerErrors::no_error()
             recorder.next_ordinal <- RECORDER_NO_EVENT
+            recorder.exact <- true
             return recorder
 
         def encode_event(event: DebuggerEvents::EventEnvelope) -> DebuggerTraceBinary::ByteWriter:
@@ -114,6 +116,10 @@ module DebuggerTraceRecorder:
                 recorder.manifest <- manifest
                 recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_NON_MONOTONIC)
                 return recorder.last_error
+            recorder.exact <- false if event.quality != DebuggerEvents::EventQuality.Exact
+            partial_manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+            partial_manifest.status <- DebuggerTraceManifest::ManifestStatus.Partial if event.quality != DebuggerEvents::EventQuality.Exact
+            recorder.manifest <- partial_manifest
             if recorder.pending_count >= RECORDER_EVENT_CAPACITY:
                 flushed: DebuggerErrors::DebuggerError = recorder_flush(recorder)
                 if not DebuggerErrors::error_is_ok(flushed):
@@ -165,6 +171,7 @@ module DebuggerTraceRecorder:
 
         def recorder_is_exact(recorder: TraceRecorder) -> bool:
             return false if recorder.pending_count > RECORDER_EVENT_CAPACITY or recorder.chunk_count > RECORDER_CHUNK_CAPACITY
+            return false if not recorder.exact
             return false if not DebuggerErrors::error_is_ok(recorder.last_error)
             return false if not DebuggerTraceManifest::manifest_is_replayable(recorder.manifest)
             for index in 0..<recorder.chunk_count:

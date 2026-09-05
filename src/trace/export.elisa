@@ -1,0 +1,52 @@
+# Canonical bounded export for a verified trace bundle.  The returned bytes are
+# ready for a file or transport; oversized exports fail explicitly.
+
+include "./bundle.elisa"
+include "./storage.elisa"
+include "./binary.elisa"
+include "./manifest.elisa"
+include "../core/errors.elisa"
+
+module DebuggerTraceExport:
+    private:
+        const EXPORT_MANIFEST_SEQUENCE: u64 = 0
+        const EXPORT_EVENT_SEQUENCE_OFFSET: u64 = 1
+        const EXPORT_SCHEMA_VERSION: u32 = 1
+        const DETAIL_INVALID_BUNDLE: u32 = 1
+        const DETAIL_SIZE: u32 = 2
+
+    public:
+        struct ExportResult:
+            bytes: mutable DebuggerTraceBinary::ByteWriter
+            chunk_count: mutable usize
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def append_bytes(writer: mutable DebuggerTraceBinary::ByteWriter&, source: DebuggerTraceBinary::ByteWriter) -> void:
+            for index in 0..<source.length:
+                writer <- DebuggerTraceBinary::writer_put_byte(writer, source.bytes[index])
+
+        def export_bundle(bundle: mutable DebuggerTraceBundle::TraceBundle&) -> ExportResult:
+            result: mutable ExportResult = zeroed
+            result.bytes <- DebuggerTraceBinary::writer_new()
+            result.failure <- DebuggerErrors::no_error()
+            verification: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_scan(bundle)
+            if not DebuggerErrors::error_is_ok(verification):
+                result.failure <- verification
+                return result
+            manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(bundle.manifest)
+            manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+            manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: EXPORT_SCHEMA_VERSION, kind: DebuggerTrace::ChunkKind.Manifest, sequence: EXPORT_MANIFEST_SEQUENCE, first_event: bundle.manifest.first_event, last_event: bundle.manifest.last_event, payload_length: manifest_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_bytes)}
+            manifest_chunk.payload_length <- manifest_bytes.length
+            manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_bytes)
+            for index in 0..<manifest_bytes.length:
+                manifest_chunk.payload[index] <- manifest_bytes.bytes[index]
+            append_bytes(result.bytes, DebuggerTraceStorage::storage_encode_chunk(manifest_chunk))
+            for index in 0..<bundle.chunk_count:
+                chunk: mutable DebuggerTraceStorage::StoredChunk = bundle.chunks[index]
+                chunk.header.sequence <- index.u64() + EXPORT_EVENT_SEQUENCE_OFFSET
+                append_bytes(result.bytes, DebuggerTraceStorage::storage_encode_chunk(chunk))
+                result.chunk_count <- result.chunk_count + 1
+            append_bytes(result.bytes, DebuggerTraceStorage::storage_encode_footer(result.chunk_count.u64() + EXPORT_EVENT_SEQUENCE_OFFSET, bundle.manifest.last_event))
+            result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if not DebuggerTraceBinary::writer_is_valid(result.bytes)
+            result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_INVALID_BUNDLE) if bundle.state == DebuggerTraceBundle::BundleState.Corrupt
+            return result

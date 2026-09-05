@@ -22,6 +22,9 @@ into qualified modules:
 - `DebuggerManagedEngine` binds that replay engine to a session and exposes
   launch, pause, continue, step, reverse-step, seek, and durable checkpoint
   operations through one provider-neutral controller.
+- `DebuggerManagedService` is the public managed provider facade for editor and
+  test-runner bridges; it dispatches typed requests into that controller and
+  exposes bounded frame/local snapshots.
 - `DebuggerEngine`, `DebuggerNative`, and `DebuggerAgent` define the provider
   contract and the explicit native-agent capability boundary.
 - `DebuggerEffects`, `DebuggerScheduler`, `DebuggerTraceStream`, and

@@ -18,6 +18,8 @@ module DebuggerReplayEngine:
         const REPLAY_MEMORY_CAPACITY: usize = 64
         const REPLAY_LOCAL_CAPACITY: usize = 32
         const REPLAY_CALL_DEPTH_CAPACITY: usize = 16
+        const REPLAY_MAX_PROGRAM_COUNTER: u64 = 256
+        const REPLAY_MAX_HEAP: usize = 64
         const REPLAY_FIRST_BRANCH_ID: u64 = 1
         const HASH_FALSE: u64 = 0
         const HASH_TRUE: u64 = 1
@@ -163,7 +165,14 @@ module DebuggerReplayEngine:
                 engine.engine_error <- EngineError.HistoryUnavailable
 
         def replay_engine_is_exact(engine: mutable ReplayEngine&) -> bool:
-            return engine.event_count <= REPLAY_HISTORY_CAPACITY and engine.engine_error == EngineError.None and not engine.machine.faulted
+            return false if engine.event_count > REPLAY_HISTORY_CAPACITY or engine.engine_error != EngineError.None or engine.machine.faulted
+            return false if engine.machine.program_counter >= REPLAY_MAX_PROGRAM_COUNTER or engine.machine.heap_next > REPLAY_MAX_HEAP or engine.machine.return_stack_pointer > REPLAY_CALL_DEPTH_CAPACITY
+            return false if not DebuggerEDIR::verify_image(engine.image).valid
+            for index in 0..<engine.event_count:
+                event: DebuggerEvents::EventEnvelope = engine.events[index]
+                return false if event.ordinal != index.u64() or event.schema != REPLAY_SCHEMA_VERSION or event.kind != DebuggerEvents::EventKind.ExecutionBoundary or event.quality != DebuggerEvents::EventQuality.Exact or event.task.value != event.position.task.value or event.position.recording.value != engine.recording.value
+                return false if engine.history[index].id.value != index.u64() or engine.history[index].event != index.u64()
+            return true
 
         def replay_engine_fork(engine: mutable ReplayEngine&, branch: DebuggerIdentity::DebugId) -> ReplayEngine:
             forked: mutable ReplayEngine = engine

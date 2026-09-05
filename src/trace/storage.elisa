@@ -42,8 +42,19 @@ module DebuggerTraceStorage:
             next_sequence: mutable u64
             footer_verified: mutable bool
 
+        def storage_write_all(fd: int, bytes: u8&, length: usize) -> StorageStatus can[Blocking.IO]:
+            offset: mutable usize = 0
+            while offset < length:
+                written: isize = write(fd, (&bytes[offset]).cast[void&], length - offset) can Blocking.IO
+                return StorageStatus.IoFailure if written <= 0
+                offset <- offset + written.usize()
+            return StorageStatus.Ready
+
         def storage_encode_chunk(chunk: StoredChunk) -> DebuggerTraceBinary::ByteWriter:
             writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum:
+                writer.failed <- true
+                return writer
             if chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY - TRACE_HEADER_BYTES:
                 writer.failed <- true
                 return writer
@@ -65,9 +76,7 @@ module DebuggerTraceStorage:
         def storage_write_chunk(fd: int, chunk: StoredChunk) -> StorageStatus can[Blocking.IO]:
             writer: DebuggerTraceBinary::ByteWriter = storage_encode_chunk(chunk)
             return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
-            written: isize = write(fd, (&writer.bytes[0]).cast[void&], writer.length) can Blocking.IO
-            return StorageStatus.IoFailure if written != writer.length.isize()
-            return StorageStatus.Ready
+            return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
 
         def storage_encode_footer(next_sequence: u64, verified_event: u64) -> DebuggerTraceBinary::ByteWriter:
             writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
@@ -79,9 +88,7 @@ module DebuggerTraceStorage:
         def storage_write_footer(fd: int, next_sequence: u64, verified_event: u64) -> StorageStatus can[Blocking.IO]:
             writer: DebuggerTraceBinary::ByteWriter = storage_encode_footer(next_sequence, verified_event)
             return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
-            written: isize = write(fd, (&writer.bytes[0]).cast[void&], writer.length) can Blocking.IO
-            return StorageStatus.IoFailure if written != writer.length.isize()
-            return StorageStatus.Ready
+            return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
 
         def storage_scan_bytes(bytes: u8&, length: usize) -> StorageScan:
             scan: mutable StorageScan = zeroed

@@ -42,6 +42,8 @@ const SHORT_CHECKPOINT_LENGTH: usize = 4
 const EMPTY_CHECKPOINT_ID: u64 = 0
 const INVALID_STORAGE_RANGE_RESULT: i64 = 80
 const EMPTY_EVENT_ENCODING_RESULT: i64 = 81
+const INVALID_MANIFEST_RANGE_RESULT: i64 = 82
+const INVALID_MANIFEST_DECODE_RESULT: i64 = 83
 
 def check_checkpoint_validation() -> i64:
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -266,6 +268,9 @@ def main() -> i64:
     invalid_checkpoint_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(checkpoint_bytes.bytes[0], checkpoint_bytes.length)
     return 28 if DebuggerCheckpointCodec::checkpoint_bytes_are_valid(invalid_checkpoint_reader)
     manifest_payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(recorder.manifest)
+    short_manifest_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(manifest_payload.bytes[0], SHORT_CHECKPOINT_LENGTH)
+    short_manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_decode(short_manifest_reader)
+    return INVALID_MANIFEST_DECODE_RESULT if short_manifest.schema != 0
     manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
     manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: 0, first_event: 0, last_event: TEST_EVENT_ORDINAL, payload_length: manifest_payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_payload)}
     manifest_chunk.payload_length <- manifest_payload.length
@@ -275,6 +280,11 @@ def main() -> i64:
     trace_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
     return 41 if check_pre_manifest() != 0
     return 20 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(trace_reader, manifest_chunk))
+    invalid_manifest_range_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    invalid_manifest_range: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
+    invalid_manifest_range.header.first_event <- 1
+    invalid_manifest_range_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(invalid_manifest_range_reader, invalid_manifest_range)
+    return INVALID_MANIFEST_RANGE_RESULT if DebuggerErrors::error_is_ok(invalid_manifest_range_error)
     return 35 if check_trailing_manifest() != 0
     event_read_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(trace_reader, recorder.chunks[0])
     return 21 if not DebuggerErrors::error_is_ok(event_read_error)

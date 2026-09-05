@@ -5,6 +5,10 @@ include "../core/errors.elisa"
 include "../core/identity.elisa"
 
 module DebuggerPostmortem:
+    private:
+        const DETAIL_KIND: u32 = 1
+        const DETAIL_BUILD: u32 = 2
+
     public:
         enum ArtifactKind:
             Unknown
@@ -33,6 +37,11 @@ module DebuggerPostmortem:
         def postmortem_mark_ready(artifact: PostmortemArtifact, pointer_bits: u32, thread_count: u64) -> PostmortemArtifact:
             updated: mutable PostmortemArtifact = artifact
             return updated if artifact.state == ArtifactState.Corrupt
+            identity: DebuggerErrors::DebuggerError = postmortem_validate_identity(artifact)
+            if not DebuggerErrors::error_is_ok(identity):
+                updated.state <- ArtifactState.Corrupt
+                updated.failure <- identity
+                return updated
             shape: DebuggerErrors::DebuggerError = postmortem_validate_shape(pointer_bits, thread_count)
             if not DebuggerErrors::error_is_ok(shape):
                 updated.state <- ArtifactState.Corrupt
@@ -51,7 +60,12 @@ module DebuggerPostmortem:
             return updated
 
         def postmortem_can_inspect(artifact: PostmortemArtifact) -> bool:
-            return artifact.state == ArtifactState.Ready and DebuggerErrors::error_is_ok(postmortem_validate_shape(artifact.pointer_bits, artifact.thread_count))
+            return artifact.state == ArtifactState.Ready and DebuggerErrors::error_is_ok(postmortem_validate_identity(artifact)) and DebuggerErrors::error_is_ok(postmortem_validate_shape(artifact.pointer_bits, artifact.thread_count))
+
+        def postmortem_validate_identity(artifact: PostmortemArtifact) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_KIND) if artifact.kind == ArtifactKind.Unknown
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_BUILD) if DebuggerIdentity::debug_id_is_zero(artifact.build)
+            return DebuggerErrors::no_error()
 
         def postmortem_validate_shape(pointer_bits: u32, thread_count: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, pointer_bits) if pointer_bits != 32 and pointer_bits != 64
@@ -61,6 +75,11 @@ module DebuggerPostmortem:
         def postmortem_mark_crashed(artifact: PostmortemArtifact, pointer_bits: u32, thread_count: u64) -> PostmortemArtifact:
             updated: mutable PostmortemArtifact = artifact
             return updated if artifact.state == ArtifactState.Corrupt
+            identity: DebuggerErrors::DebuggerError = postmortem_validate_identity(artifact)
+            if not DebuggerErrors::error_is_ok(identity):
+                updated.state <- ArtifactState.Corrupt
+                updated.failure <- identity
+                return updated
             shape: DebuggerErrors::DebuggerError = postmortem_validate_shape(pointer_bits, thread_count)
             if not DebuggerErrors::error_is_ok(shape):
                 updated.state <- ArtifactState.Corrupt

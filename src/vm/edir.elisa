@@ -16,6 +16,7 @@ module DebuggerEDIR:
         const EDIR_MAX_MEMORY_INDEX: i64 = 64
         const EDIR_MAX_CALL_DEPTH: usize = 16
         const EDIR_STEP_INCREMENT: u64 = 1
+        const EDIR_LOCAL_BIT_BASE: u64 = 1
 
     public:
         enum Opcode:
@@ -123,16 +124,79 @@ module DebuggerEDIR:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
             if instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
+            if instruction.opcode == Opcode.Call:
+                return verification_failure(VerificationError.InvalidOperand, index) if instruction.b < 0
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
         def verify_local_initialization(image: mutable ProgramImage&) -> Verification:
-            initialized: mutable bool[EDIR_MAX_LOCALS] = zeroed
-            for index in 0..<image.program.instruction_count.usize():
+            count: usize = image.program.instruction_count.usize()
+            entry_masks: mutable u64[EDIR_MAX_INSTRUCTIONS] = zeroed
+            seen: mutable bool[EDIR_MAX_INSTRUCTIONS] = zeroed
+            seen[0] <- true
+            changed: mutable bool = true
+            while changed:
+                changed <- false
+                for index in 0..<count:
+                    continue if not seen[index]
+                    instruction: Instruction = image.instructions[index]
+                    outgoing: mutable u64 = entry_masks[index]
+                    outgoing <- outgoing | (EDIR_LOCAL_BIT_BASE << instruction.a.u64()) if instruction.opcode == Opcode.StoreLocal
+                    if instruction.opcode == Opcode.Return:
+                        continue
+                    if instruction.opcode == Opcode.Jump:
+                        successor: usize = instruction.a.usize()
+                        if not seen[successor]:
+                            seen[successor] <- true
+                            entry_masks[successor] <- outgoing
+                            changed <- true
+                        else:
+                            merged: u64 = entry_masks[successor] & outgoing
+                            if merged != entry_masks[successor]:
+                                entry_masks[successor] <- merged
+                                changed <- true
+                        continue
+                    fallthrough: usize = index + 1
+                    return verification_failure(VerificationError.InvalidTarget, index.u64()) if fallthrough >= count
+                    if instruction.opcode == Opcode.BranchZero:
+                        target: usize = instruction.a.usize()
+                        if not seen[target]:
+                            seen[target] <- true
+                            entry_masks[target] <- outgoing
+                            changed <- true
+                        else:
+                            merged_target: u64 = entry_masks[target] & outgoing
+                            if merged_target != entry_masks[target]:
+                                entry_masks[target] <- merged_target
+                                changed <- true
+                        if fallthrough < count:
+                            if not seen[fallthrough]:
+                                seen[fallthrough] <- true
+                                entry_masks[fallthrough] <- outgoing
+                                changed <- true
+                            else:
+                                merged_fallthrough: u64 = entry_masks[fallthrough] & outgoing
+                                if merged_fallthrough != entry_masks[fallthrough]:
+                                    entry_masks[fallthrough] <- merged_fallthrough
+                                    changed <- true
+                        continue
+                    if not seen[fallthrough]:
+                        seen[fallthrough] <- true
+                        entry_masks[fallthrough] <- outgoing
+                        changed <- true
+                    else:
+                        merged_next: u64 = entry_masks[fallthrough] & outgoing
+                        if merged_next != entry_masks[fallthrough]:
+                            entry_masks[fallthrough] <- merged_next
+                            changed <- true
+            reachable_return: mutable bool = false
+            for index in 0..<count:
+                continue if not seen[index]
                 instruction: Instruction = image.instructions[index]
-                if instruction.opcode == Opcode.LoadLocal and not initialized[instruction.a.usize()]:
-                    return verification_failure(VerificationError.UninitializedLocal, index.u64())
-                if instruction.opcode == Opcode.StoreLocal:
-                    initialized[instruction.a.usize()] <- true
+                reachable_return <- true if instruction.opcode == Opcode.Return
+                if instruction.opcode == Opcode.LoadLocal:
+                    bit: u64 = EDIR_LOCAL_BIT_BASE << instruction.a.u64()
+                    return verification_failure(VerificationError.UninitializedLocal, index.u64()) if (entry_masks[index] & bit) == 0
+            return verification_failure(VerificationError.MissingReturn, image.program.instruction_count) if not reachable_return
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
         def verify_image(image: mutable ProgramImage&) -> Verification:
@@ -256,7 +320,7 @@ module DebuggerEDIR:
             if instruction.opcode == Opcode.Allocate:
                 requested: mutable usize = 0
                 requested <- instruction.a.usize() if instruction.a > 0
-                if instruction.a <= 0 or updated.heap_next + requested > EDIR_MAX_MEMORY:
+                if instruction.a <= 0 or updated.heap_next > EDIR_MAX_MEMORY - requested:
                     updated.faulted <- true
                     updated.halted <- true
                 else:

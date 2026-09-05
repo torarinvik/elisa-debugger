@@ -1,0 +1,114 @@
+# Compact, bounded source metadata tables for adapters and breakpoint rebinding.
+# IDs are content identities; client/server path mappings affect lookup only.
+
+include "./source.elisa"
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+
+module DebuggerSourceStore:
+    private:
+        const SOURCE_FILE_CAPACITY: usize = 16
+        const FUNCTION_CAPACITY: usize = 32
+        const PATH_MAPPING_CAPACITY: usize = 8
+        const NO_SOURCE_INDEX: usize = SOURCE_FILE_CAPACITY
+        const NO_FUNCTION_INDEX: usize = FUNCTION_CAPACITY
+        const NO_ID: u64 = 0
+        const DETAIL_CAPACITY: u32 = 1
+        const DETAIL_SOURCE: u32 = 2
+        const DETAIL_FUNCTION: u32 = 3
+        const DETAIL_MAPPING: u32 = 4
+
+    public:
+        struct PathMapping:
+            client_root: mutable DebuggerIdentity::DebugId
+            server_root: mutable DebuggerIdentity::DebugId
+
+        struct SourceStore:
+            files: mutable DebuggerMetadata::SourceFile[SOURCE_FILE_CAPACITY]
+            file_count: mutable usize
+            functions: mutable DebuggerMetadata::FunctionInfo[FUNCTION_CAPACITY]
+            function_sources: mutable DebuggerIdentity::DebugId[FUNCTION_CAPACITY]
+            function_count: mutable usize
+            mappings: mutable PathMapping[PATH_MAPPING_CAPACITY]
+            mapping_count: mutable usize
+
+        def source_store_new() -> SourceStore:
+            return zeroed
+
+        def source_store_find_index(store: mutable SourceStore&, file_id: DebuggerIdentity::DebugId) -> usize:
+            return NO_SOURCE_INDEX if store.file_count > SOURCE_FILE_CAPACITY
+            for index in 0..<store.file_count:
+                return index if store.files[index].id.value == file_id.value
+            return NO_SOURCE_INDEX
+
+        def source_store_add_file(store: mutable SourceStore&, file: DebuggerMetadata::SourceFile) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY) if store.file_count > SOURCE_FILE_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if store.file_count >= SOURCE_FILE_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SOURCE) if not DebuggerMetadata::source_file_is_valid(file)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SOURCE) if source_store_find_index(store, file.id) != NO_SOURCE_INDEX
+            store.files[store.file_count] <- file
+            store.file_count <- store.file_count + 1
+            return DebuggerErrors::no_error()
+
+        def source_store_find_function_index(store: mutable SourceStore&, function_id: DebuggerIdentity::DebugId) -> usize:
+            return NO_FUNCTION_INDEX if store.function_count > FUNCTION_CAPACITY
+            for index in 0..<store.function_count:
+                return index if store.functions[index].id.value == function_id.value
+            return NO_FUNCTION_INDEX
+
+        def source_store_add_function(store: mutable SourceStore&, file_id: DebuggerIdentity::DebugId, function: DebuggerMetadata::FunctionInfo) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY) if store.function_count > FUNCTION_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_FUNCTION) if store.function_count >= FUNCTION_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SOURCE) if source_store_find_index(store, file_id) == NO_SOURCE_INDEX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_FUNCTION) if not DebuggerMetadata::function_info_is_valid(function)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_FUNCTION) if function.source.file.value != file_id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_FUNCTION) if source_store_find_function_index(store, function.id) != NO_FUNCTION_INDEX
+            store.functions[store.function_count] <- function
+            store.function_sources[store.function_count] <- file_id
+            store.function_count <- store.function_count + 1
+            return DebuggerErrors::no_error()
+
+        def source_store_add_mapping(store: mutable SourceStore&, mapping: PathMapping) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY) if store.mapping_count > PATH_MAPPING_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_MAPPING) if store.mapping_count >= PATH_MAPPING_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if mapping.client_root.value == NO_ID or mapping.server_root.value == NO_ID
+            store.mappings[store.mapping_count] <- mapping
+            store.mapping_count <- store.mapping_count + 1
+            return DebuggerErrors::no_error()
+
+        def source_store_find_file(store: mutable SourceStore&, file_id: DebuggerIdentity::DebugId) -> DebuggerMetadata::SourceFile:
+            result: mutable DebuggerMetadata::SourceFile = zeroed
+            index: usize = source_store_find_index(store, file_id)
+            return result if index == NO_SOURCE_INDEX
+            return store.files[index]
+
+        def source_store_find_function(store: mutable SourceStore&, function_id: DebuggerIdentity::DebugId) -> DebuggerMetadata::FunctionInfo:
+            result: mutable DebuggerMetadata::FunctionInfo = zeroed
+            index: usize = source_store_find_function_index(store, function_id)
+            return result if index == NO_FUNCTION_INDEX
+            return store.functions[index]
+
+        def source_store_resolve_client_file(store: mutable SourceStore&, client_file: DebuggerIdentity::DebugId) -> DebuggerIdentity::DebugId:
+            return client_file if source_store_find_index(store, client_file) != NO_SOURCE_INDEX
+            return DebuggerIdentity::debug_id(NO_ID) if store.mapping_count > PATH_MAPPING_CAPACITY
+            for index in 0..<store.mapping_count:
+                mapping: PathMapping = store.mappings[index]
+                return mapping.server_root if mapping.client_root.value == client_file.value and source_store_find_index(store, mapping.server_root) != NO_SOURCE_INDEX
+            return DebuggerIdentity::debug_id(NO_ID)
+
+        def source_store_is_valid(store: mutable SourceStore&) -> bool:
+            return false if store.file_count > SOURCE_FILE_CAPACITY or store.function_count > FUNCTION_CAPACITY or store.mapping_count > PATH_MAPPING_CAPACITY
+            for index in 0..<store.file_count:
+                return false if not DebuggerMetadata::source_file_is_valid(store.files[index])
+                for previous in 0..<index:
+                    return false if store.files[previous].id.value == store.files[index].id.value
+            for index in 0..<store.function_count:
+                return false if not DebuggerMetadata::function_info_is_valid(store.functions[index])
+                return false if store.function_sources[index].value == NO_ID
+                return false if source_store_find_index(store, store.function_sources[index]) == NO_SOURCE_INDEX
+                return false if store.functions[index].source.file.value != store.function_sources[index].value
+                for previous in 0..<index:
+                    return false if store.functions[previous].id.value == store.functions[index].id.value
+            for index in 0..<store.mapping_count:
+                return false if store.mappings[index].client_root.value == NO_ID or store.mappings[index].server_root.value == NO_ID
+            return true

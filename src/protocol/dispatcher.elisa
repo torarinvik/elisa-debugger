@@ -79,3 +79,12 @@ module DebuggerProtocolDispatcher:
             token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
             result: DebuggerCoordinator::Result = DebuggerCoordinator::coordinator_execute(coordinator, request.id, operation_for_method(request.method), requested_generation, token)
             return DispatchResult{session: result.coordinator.session, method: request.method, accepted: result.accepted, stop_generation: result.stop_generation, failure: result.failure}
+
+        def dispatch_seek(session: DebuggerSession::Session, request: DebuggerProtocolRequest::Request, expected_generation: u64) -> DispatchResult:
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_REQUEST)) if not request.valid
+            requested_generation: u64 = request.expected_generation if expected_generation == NO_EXPECTED_GENERATION else expected_generation
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)) if requested_generation != NO_EXPECTED_GENERATION and requested_generation != session.stop_generation
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY_UNAVAILABLE)) if not DebuggerSession::session_can_inspect(session) or session.capabilities.history == DebuggerCapabilities::HistoryKind.None
+            updated: DebuggerSession::Session = DebuggerSession::session_seek(session, request.target_event)
+            return dispatch_error(updated, request.method, map_session_error(updated.last_error)) if updated.last_error != DebuggerSession::SessionError.None
+            return dispatch_ok(updated, request.method)

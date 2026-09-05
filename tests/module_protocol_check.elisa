@@ -28,21 +28,24 @@ def main() -> i64:
         metadata_version: 1
     }
     session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(9), build, DebuggerCapabilities::managed_capabilities())
-    create: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.CreateSession, id: 1, has_id: true, expected_generation: 0, valid: true}
+    create: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.CreateSession, id: 1, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     created: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(session, create, 0)
     return 1 if not created.accepted or created.session.state != DebuggerSession::SessionState.Configuring
-    launch: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: 2, has_id: true, expected_generation: 0, valid: true}
+    launch: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: 2, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     launched: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(created.session, launch, 0)
     return 2 if not launched.accepted or launched.session.state != DebuggerSession::SessionState.Running
-    pause: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Pause, id: 3, has_id: true, expected_generation: 0, valid: true}
+    pause: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Pause, id: 3, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     stopped: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(launched.session, pause, 0)
     return 3 if not stopped.accepted or stopped.session.state != DebuggerSession::SessionState.Stopped
-    replay: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Replay, id: 4, has_id: true, expected_generation: stopped.session.stop_generation, valid: true}
+    replay: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Replay, id: 4, has_id: true, expected_generation: stopped.session.stop_generation, target_event: 0, valid: true}
     replayed: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(stopped.session, replay, 0)
     return 7 if not replayed.accepted or replayed.session.state != DebuggerSession::SessionState.Replaying
     parsed_payload: mutable u8[19] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 114, 101, 112, 108, 97, 121, 34, 125]
     parsed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(parsed_payload[0], 19)
     return 8 if not parsed.valid or parsed.method != DebuggerProtocolRequest::RequestMethod.Replay
+    seek_payload: mutable u8[39] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 115, 101, 101, 107, 34, 44, 34, 116, 97, 114, 103, 101, 116, 69, 118, 101, 110, 116, 34, 58, 55, 125]
+    parsed_seek: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(seek_payload[0], 33)
+    return 31 if not parsed_seek.valid or parsed_seek.method != DebuggerProtocolRequest::RequestMethod.Seek or parsed_seek.target_event != 7
     stale: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(stopped.session, launch, 99)
     return 4 if stale.accepted or stale.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
     channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
@@ -60,9 +63,12 @@ def main() -> i64:
     quota_channel <- DebuggerRemote::remote_receive(quota_channel, 2)
     return 9 if quota_channel.bytes_received != 3
     service: mutable DebuggerSessionService::Service = DebuggerSessionService::service_new(stopped.session)
-    service_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.Replay, request_id: 10, session_id: stopped.session.id.value, expected_stop_generation: stopped.session.stop_generation, page_size: 0}
+    service_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.Replay, request_id: 10, session_id: stopped.session.id.value, expected_stop_generation: stopped.session.stop_generation, page_size: 0, target_event: 0}
     service_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle(service, service_request)
     return 10 if not service_response.ok or service.session.state != DebuggerSession::SessionState.Replaying
+    seek_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.Seek, request_id: 14, session_id: service.session.id.value, expected_stop_generation: service.session.stop_generation, page_size: 0, target_event: 0}
+    seek_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle(service, seek_request)
+    return 30 if not seek_response.ok or service.session.state != DebuggerSession::SessionState.Stopped
     artifact_bytes: mutable u8[ARTIFACT_SIZE] = [1, 2, 3]
     transfer: mutable DebuggerRemoteArtifact::ArtifactTransfer = DebuggerRemoteArtifact::transfer_new(ARTIFACT_SIZE, ARTIFACT_CHECKSUM)
     transfer_error: DebuggerErrors::DebuggerError = DebuggerRemoteArtifact::transfer_accept(transfer, 0, artifact_bytes[0], ARTIFACT_SIZE)
@@ -100,11 +106,11 @@ def main() -> i64:
     channel <- DebuggerRemote::remote_accept_handshake(channel, handshake)
     return 22 if not DebuggerRemote::remote_is_connected(channel)
     trace_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(20), build, DebuggerCapabilities::managed_capabilities())
-    opened_trace: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(trace_session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.OpenTrace, id: 11, has_id: true, expected_generation: 0, valid: true}, 0)
+    opened_trace: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(trace_session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.OpenTrace, id: 11, has_id: true, expected_generation: 0, target_event: 0, valid: true}, 0)
     return 25 if not opened_trace.accepted or opened_trace.session.state != DebuggerSession::SessionState.Stopped
-    verified_trace: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(opened_trace.session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.TraceVerify, id: 12, has_id: true, expected_generation: opened_trace.session.stop_generation, valid: true}, 0)
+    verified_trace: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(opened_trace.session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.TraceVerify, id: 12, has_id: true, expected_generation: opened_trace.session.stop_generation, target_event: 0, valid: true}, 0)
     return 26 if not verified_trace.accepted
     native_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(21), build, DebuggerCapabilities::native_live_capabilities())
-    attached: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(native_session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Attach, id: 13, has_id: true, expected_generation: 0, valid: true}, 0)
+    attached: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(native_session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Attach, id: 13, has_id: true, expected_generation: 0, target_event: 0, valid: true}, 0)
     return 27 if not attached.accepted or attached.session.state != DebuggerSession::SessionState.Stopped
     return 0

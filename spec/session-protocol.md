@@ -58,6 +58,11 @@ not observable as a ready stop until state validation succeeds.
 `terminate`, and `close` are reserved method names. Unsupported operations
 return `UNSUPPORTED` with a capability explanation.
 
+`seek` carries a bounded `targetEvent` ordinal and the current
+`expectedStopGeneration`. The server validates both before changing the
+selected position; a successful seek returns a new stop generation. The
+request is safe to retry only with the same request ID and target ordinal.
+
 Large results are paginated with an opaque `next` token. Requests that may run
 longer than a client timeout emit `progress` events and honor `cancel` by
 request ID. Mutation requests declare whether retrying the same ID is safe.

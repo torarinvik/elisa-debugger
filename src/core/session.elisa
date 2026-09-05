@@ -5,6 +5,8 @@ module DebuggerSession:
     private:
         const STOP_GENERATION_INCREMENT: u64 = 1
         const NO_EXPECTED_GENERATION: u64 = 0
+        const EVENT_INCREMENT: u64 = 1
+        const INITIAL_EVENT: u64 = 0
 
     public:
         enum SessionState:
@@ -100,6 +102,45 @@ module DebuggerSession:
                 updated.last_error <- SessionError.None
                 return updated
             updated.last_error <- SessionError.Unsupported
+            return updated
+
+        def session_step(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Stopped or session.state == SessionState.Replaying:
+                updated.position.event <- session.position.event + EVENT_INCREMENT
+                updated.state <- SessionState.Stopped
+                updated.stop_generation <- session.stop_generation + STOP_GENERATION_INCREMENT
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_reverse_step(session: Session) -> Session:
+            updated: mutable Session = session
+            if not session_can_reverse(session):
+                updated.last_error <- SessionError.Unsupported
+                return updated
+            if session.position.event == INITIAL_EVENT:
+                updated.last_error <- SessionError.ReplayDiverged
+                return updated
+            updated.position.event <- session.position.event - EVENT_INCREMENT
+            updated.state <- SessionState.Stopped
+            updated.stop_generation <- session.stop_generation + STOP_GENERATION_INCREMENT
+            updated.last_error <- SessionError.None
+            return updated
+
+        def session_seek(session: Session, event: u64) -> Session:
+            updated: mutable Session = session
+            if not session_can_inspect(session):
+                updated.last_error <- SessionError.InvalidTransition
+                return updated
+            if event > session.position.event and session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact:
+                updated.last_error <- SessionError.Unsupported
+                return updated
+            updated.position.event <- event
+            updated.state <- SessionState.Stopped
+            updated.stop_generation <- session.stop_generation + STOP_GENERATION_INCREMENT
+            updated.last_error <- SessionError.None
             return updated
 
         def session_close(session: Session) -> Session:

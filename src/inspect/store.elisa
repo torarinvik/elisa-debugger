@@ -1,0 +1,101 @@
+# Generation-scoped value storage shared by CLI, DAP, and editor bridges.
+# Handles are opaque and become invalid as soon as the stop generation changes.
+
+include "./values.elisa"
+include "../core/identity.elisa"
+
+module DebuggerValueStore:
+    private:
+        const VALUE_STORE_CAPACITY: usize = 64
+        const VALUE_CHILD_CAPACITY: usize = 16
+        const VALUE_FIRST_ID: u64 = 1
+        const VALUE_NO_ID: u64 = 0
+
+    public:
+        struct ValueNode:
+            handle: mutable DebuggerValues::ValueHandle
+            name: mutable DebuggerIdentity::DebugId
+            type_id: mutable DebuggerIdentity::DebugId
+            kind: mutable DebuggerValues::ValueKind
+            state: mutable DebuggerValues::ValueState
+            signed_value: mutable i64
+            unsigned_value: mutable u64
+            child_count: mutable usize
+            children: mutable DebuggerIdentity::DebugId[VALUE_CHILD_CAPACITY]
+
+        struct ValueStore:
+            generation: mutable u64
+            nodes: mutable ValueNode[VALUE_STORE_CAPACITY]
+            count: mutable usize
+            next_id: mutable u64
+
+        struct ValuePage:
+            first: mutable usize
+            count: mutable usize
+            next: mutable usize
+            truncated: mutable bool
+            invalid_handle: mutable bool
+
+        def value_store_new(generation: u64) -> ValueStore:
+            store: mutable ValueStore = zeroed
+            store.generation <- generation
+            store.next_id <- VALUE_FIRST_ID
+            return store
+
+        def value_handle_is_valid(store: mutable ValueStore&, handle: DebuggerValues::ValueHandle) -> bool:
+            return false if handle.stop_generation != store.generation
+            return false if handle.id.value < VALUE_FIRST_ID
+            index: usize = (handle.id.value - VALUE_FIRST_ID).usize()
+            return index < store.count and store.nodes[index].handle.id.value == handle.id.value
+
+        def value_store_add(store: mutable ValueStore&, node: ValueNode) -> DebuggerValues::ValueHandle:
+            invalid: DebuggerValues::ValueHandle = DebuggerValues::ValueHandle{stop_generation: store.generation, id: DebuggerIdentity::debug_id(VALUE_NO_ID)}
+            return invalid if store.count >= VALUE_STORE_CAPACITY
+            index: usize = store.count
+            assigned: mutable ValueNode = node
+            assigned.handle <- DebuggerValues::ValueHandle{stop_generation: store.generation, id: DebuggerIdentity::debug_id(store.next_id)}
+            store.nodes[index] <- assigned
+            store.count <- store.count + 1
+            store.next_id <- store.next_id + VALUE_FIRST_ID
+            return assigned.handle
+
+        def value_store_add_scalar(store: mutable ValueStore&, name: DebuggerIdentity::DebugId, type_id: DebuggerIdentity::DebugId, value: i64) -> DebuggerValues::ValueHandle:
+            node: mutable ValueNode = zeroed
+            node.name <- name
+            node.type_id <- type_id
+            node.kind <- DebuggerValues::ValueKind.Signed
+            node.state <- DebuggerValues::ValueState.Available
+            node.signed_value <- value
+            return value_store_add(store, node)
+
+        def value_store_add_aggregate(store: mutable ValueStore&, name: DebuggerIdentity::DebugId, type_id: DebuggerIdentity::DebugId) -> DebuggerValues::ValueHandle:
+            node: mutable ValueNode = zeroed
+            node.name <- name
+            node.type_id <- type_id
+            node.kind <- DebuggerValues::ValueKind.Aggregate
+            node.state <- DebuggerValues::ValueState.Available
+            return value_store_add(store, node)
+
+        def value_store_add_child(store: mutable ValueStore&, parent: DebuggerValues::ValueHandle, child: DebuggerValues::ValueHandle) -> bool:
+            return false if not value_handle_is_valid(store, parent) or not value_handle_is_valid(store, child)
+            parent_index: usize = (parent.id.value - VALUE_FIRST_ID).usize()
+            return false if store.nodes[parent_index].child_count >= VALUE_CHILD_CAPACITY
+            child_index: usize = (child.id.value - VALUE_FIRST_ID).usize()
+            store.nodes[parent_index].children[store.nodes[parent_index].child_count] <- store.nodes[child_index].handle.id
+            store.nodes[parent_index].child_count <- store.nodes[parent_index].child_count + 1
+            return true
+
+        def value_store_read(store: mutable ValueStore&, handle: DebuggerValues::ValueHandle) -> ValueNode:
+            result: mutable ValueNode = zeroed
+            return result if not value_handle_is_valid(store, handle)
+            index: usize = (handle.id.value - VALUE_FIRST_ID).usize()
+            return store.nodes[index]
+
+        def value_store_page(store: mutable ValueStore&, parent: DebuggerValues::ValueHandle, requested: usize) -> ValuePage:
+            invalid: ValuePage = ValuePage{first: 0, count: 0, next: 0, truncated: false, invalid_handle: true}
+            return invalid if not value_handle_is_valid(store, parent)
+            parent_index: usize = (parent.id.value - VALUE_FIRST_ID).usize()
+            first: usize = requested if requested < store.nodes[parent_index].child_count else store.nodes[parent_index].child_count
+            remaining: usize = store.nodes[parent_index].child_count - first
+            count: usize = remaining
+            return ValuePage{first: first, count: count, next: first + count, truncated: false, invalid_handle: false}

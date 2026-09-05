@@ -1,0 +1,115 @@
+# Managed task runtime state used by deterministic replay and concurrency
+# diagnostics.  Task identities survive OS-thread reuse and every transition
+# can be emitted as a scheduler decision by the shared event recorder.
+
+include "./model.elisa"
+include "./scheduler.elisa"
+include "./analysis.elisa"
+include "../core/identity.elisa"
+
+module DebuggerConcurrencyRuntime:
+    private:
+        const TASK_RUNTIME_CAPACITY: usize = 64
+        const WAIT_EDGE_CAPACITY: usize = 128
+        const FIRST_TASK_ID: u64 = 1
+        const ROOT_TASK_ID: u64 = 0
+        const NO_TASK_INDEX: usize = TASK_RUNTIME_CAPACITY
+
+    public:
+        enum RuntimeStatus:
+            Ready
+            Running
+            Blocked
+            Completed
+            Diverged
+
+        struct TaskRuntime:
+            tasks: mutable DebuggerConcurrency::TaskInfo[TASK_RUNTIME_CAPACITY]
+            task_count: mutable usize
+            next_id: mutable u64
+            current: mutable DebuggerIdentity::DebugId
+            waits: mutable DebuggerConcurrency::WaitEdge[WAIT_EDGE_CAPACITY]
+            wait_count: mutable usize
+            scheduler: mutable DebuggerScheduler::DeterministicScheduler
+            status: mutable RuntimeStatus
+
+        def runtime_new(replaying: bool) -> TaskRuntime:
+            runtime: mutable TaskRuntime = zeroed
+            runtime.next_id <- FIRST_TASK_ID
+            runtime.scheduler <- DebuggerScheduler::scheduler_new(replaying)
+            runtime.status <- RuntimeStatus.Ready
+            return runtime
+
+        def runtime_spawn(runtime: mutable TaskRuntime&, parent: DebuggerIdentity::DebugId) -> DebuggerIdentity::DebugId:
+            return DebuggerIdentity::debug_id(ROOT_TASK_ID) if runtime.task_count >= TASK_RUNTIME_CAPACITY
+            index: usize = runtime.task_count
+            id: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(runtime.next_id)
+            runtime.tasks[index] <- DebuggerConcurrency::TaskInfo{id: id, parent: parent, state: DebuggerConcurrency::TaskState.Runnable, logical_time: 0, os_thread: 0}
+            runtime.task_count <- runtime.task_count + 1
+            runtime.next_id <- runtime.next_id + FIRST_TASK_ID
+            if runtime.current.value == ROOT_TASK_ID:
+                runtime.current <- id
+            return id
+
+        def runtime_find_index(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId) -> usize:
+            for index in 0..<runtime.task_count:
+                return index if runtime.tasks[index].id.value == id.value
+            return NO_TASK_INDEX
+
+        def runtime_transition(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, state: DebuggerConcurrency::TaskState) -> bool:
+            index: usize = runtime_find_index(runtime, id)
+            return false if index == NO_TASK_INDEX
+            runtime.tasks[index].state <- state
+            runtime.tasks[index].logical_time <- runtime.tasks[index].logical_time + FIRST_TASK_ID
+            runtime.status <- RuntimeStatus.Running if state == DebuggerConcurrency::TaskState.Running
+            runtime.status <- RuntimeStatus.Blocked if state == DebuggerConcurrency::TaskState.Blocked
+            runtime.status <- RuntimeStatus.Completed if state == DebuggerConcurrency::TaskState.Completed
+            return true
+
+        def runtime_schedule(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, kind: DebuggerScheduler::ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> bool:
+            index: usize = runtime_find_index(runtime, id)
+            return false if index == NO_TASK_INDEX
+            runtime.scheduler <- DebuggerScheduler::scheduler_next(runtime.scheduler, runtime.tasks[index], kind)
+            return false if runtime.scheduler.diverged
+            runtime.current <- id
+            runtime.tasks[index].logical_time <- runtime.tasks[index].logical_time + FIRST_TASK_ID
+            return true
+
+        def runtime_wait(runtime: mutable TaskRuntime&, waiter: DebuggerIdentity::DebugId, owner: DebuggerIdentity::DebugId, resource: DebuggerIdentity::DebugId, kind: DebuggerConcurrency::SynchronizationKind) -> bool:
+            return false if runtime.wait_count >= WAIT_EDGE_CAPACITY
+            return false if runtime_find_index(runtime, waiter) == NO_TASK_INDEX or runtime_find_index(runtime, owner) == NO_TASK_INDEX
+            runtime.waits[runtime.wait_count] <- DebuggerConcurrency::WaitEdge{waiter: waiter, owner: owner, resource: resource, kind: kind}
+            runtime.wait_count <- runtime.wait_count + 1
+            runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Blocked)
+            return true
+
+        def runtime_wake(runtime: mutable TaskRuntime&, waiter: DebuggerIdentity::DebugId) -> bool:
+            index: usize = runtime_find_index(runtime, waiter)
+            return false if index == NO_TASK_INDEX
+            runtime.tasks[index].state <- DebuggerConcurrency::TaskState.Runnable
+            for edge_index in 0..<runtime.wait_count:
+                if runtime.waits[edge_index].waiter.value == waiter.value:
+                    runtime.waits[edge_index] <- runtime.waits[runtime.wait_count - 1]
+                    runtime.wait_count <- runtime.wait_count - 1
+                    break
+            return true
+
+        def runtime_has_deadlock(runtime: mutable TaskRuntime&) -> bool:
+            for first_index in 0..<runtime.wait_count:
+                start: u64 = runtime.waits[first_index].waiter.value
+                current: mutable u64 = runtime.waits[first_index].owner.value
+                for hop in 0..<WAIT_EDGE_CAPACITY:
+                    return true if current == start
+                    found: mutable bool = false
+                    next: mutable u64 = 0
+                    for edge_index in 0..<runtime.wait_count:
+                        if runtime.waits[edge_index].waiter.value == current:
+                            next <- runtime.waits[edge_index].owner.value
+                            found <- true
+                            break
+                    break if not found
+                    current <- next
+            return false
+
+        def runtime_task_count(runtime: TaskRuntime) -> usize:
+            return runtime.task_count

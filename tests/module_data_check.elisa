@@ -8,6 +8,22 @@ include "../src/query/evaluator.elisa"
 include "../src/concurrency/analysis.elisa"
 include "../src/replay/branches.elisa"
 include "../src/metadata/types.elisa"
+include "../src/inspect/store.elisa"
+include "../src/breakpoint/watchpoint.elisa"
+include "../src/concurrency/runtime.elisa"
+
+const VALUE_STORE_GENERATION: u64 = 7
+const VALUE_NAME_ID: u64 = 100
+const VALUE_TYPE_ID: u64 = 101
+const VALUE_ROOT_VALUE: i64 = 42
+const VALUE_CHILD_VALUE: i64 = 9
+const WATCH_ALLOCATION_ID: u64 = 200
+const WATCH_ALLOCATION_GENERATION: u64 = 1
+const WATCH_VALUE_FIRST: u64 = 10
+const WATCH_VALUE_SECOND: u64 = 11
+const TASK_PARENT_ID: u64 = 0
+const TASK_RESOURCE_ONE: u64 = 300
+const TASK_RESOURCE_TWO: u64 = 301
 
 def main() -> i64:
     expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
@@ -42,4 +58,29 @@ def main() -> i64:
     metadata: mutable DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_type(DebuggerTypeMetadata::metadata_new(), DebuggerTypeMetadata::TypeInfo{id: DebuggerIdentity::debug_id(10), kind: DebuggerTypeMetadata::TypeKind.Struct, name: DebuggerIdentity::debug_id(11), size: 16, alignment: 8, child_count: 2, pointee: DebuggerIdentity::debug_id(0), flags: 0})
     found_type: DebuggerTypeMetadata::TypeInfo = DebuggerTypeMetadata::metadata_find_type(metadata, DebuggerIdentity::debug_id(10))
     return 9 if found_type.child_count != 2
+    values: mutable DebuggerValueStore::ValueStore = DebuggerValueStore::value_store_new(VALUE_STORE_GENERATION)
+    root: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_aggregate(values, DebuggerIdentity::debug_id(VALUE_NAME_ID), DebuggerIdentity::debug_id(VALUE_TYPE_ID))
+    child: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_scalar(values, DebuggerIdentity::debug_id(VALUE_NAME_ID + 1), DebuggerIdentity::debug_id(VALUE_TYPE_ID), VALUE_CHILD_VALUE)
+    return 10 if not DebuggerValueStore::value_store_add_child(values, root, child)
+    page: DebuggerValueStore::ValuePage = DebuggerValueStore::value_store_page(values, root, 0)
+    return 11 if page.invalid_handle or page.count != 1
+    read: DebuggerValueStore::ValueNode = DebuggerValueStore::value_store_read(values, child)
+    return 12 if read.signed_value != VALUE_CHILD_VALUE
+    stale: DebuggerValues::ValueHandle = DebuggerValues::ValueHandle{stop_generation: VALUE_STORE_GENERATION + 1, id: child.id}
+    return 13 if DebuggerValueStore::value_store_add_child(values, root, stale)
+    allocation: DebuggerIdentity::AllocationIdentity = DebuggerIdentity::AllocationIdentity{allocation: DebuggerIdentity::debug_id(WATCH_ALLOCATION_ID), generation: WATCH_ALLOCATION_GENERATION, offset: 0}
+    watchpoints: mutable DebuggerWatchpoints::WatchpointTable = DebuggerWatchpoints::watchpoints_new()
+    watch_id: DebuggerIdentity::DebugId = DebuggerWatchpoints::watchpoints_add(watchpoints, allocation, DebuggerWatchpoints::AccessKind.Write, VALUE_STORE_GENERATION)
+    first_observation: DebuggerWatchpoints::Observation = DebuggerWatchpoints::watchpoint_observe(watchpoints, watch_id, allocation, WATCH_VALUE_FIRST, VALUE_STORE_GENERATION)
+    return 14 if first_observation.stop
+    second_observation: DebuggerWatchpoints::Observation = DebuggerWatchpoints::watchpoint_observe(watchpoints, watch_id, allocation, WATCH_VALUE_SECOND, VALUE_STORE_GENERATION)
+    return 15 if not second_observation.stop or second_observation.point.hit_count != 2
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    task_one: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(TASK_PARENT_ID))
+    task_two: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, task_one)
+    return 16 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, task_one, task_two, DebuggerIdentity::debug_id(TASK_RESOURCE_ONE), DebuggerConcurrency::SynchronizationKind.Mutex)
+    return 17 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, task_two, task_one, DebuggerIdentity::debug_id(TASK_RESOURCE_TWO), DebuggerConcurrency::SynchronizationKind.Mutex)
+    return 18 if not DebuggerConcurrencyRuntime::runtime_has_deadlock(runtime)
+    return 0
+    return 0
     return 0

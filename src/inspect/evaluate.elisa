@@ -14,7 +14,32 @@ module DebuggerEvaluate:
         const EVALUATION_FALSE: i64 = 0
         const EVALUATION_TRUE: i64 = 1
         const EVALUATION_I64_MIN: i64 = -9223372036854775807 - 1
+        const EVALUATION_I64_MAX: i64 = 9223372036854775807
         const EVALUATION_NEGATIVE_ONE: i64 = -1
+        const EVALUATION_KIND_MAX: u16 = 12
+        const DETAIL_BUDGET: u32 = 1
+        const DETAIL_OVERFLOW: u32 = 2
+        const DETAIL_KIND: u32 = 3
+
+        def add_overflows(left: i64, right: i64) -> bool:
+            return left > EVALUATION_I64_MAX - right if right > 0
+            return left < EVALUATION_I64_MIN - right if right < 0
+            return false
+
+        def subtract_overflows(left: i64, right: i64) -> bool:
+            return left < EVALUATION_I64_MIN + right if right > 0
+            return left > EVALUATION_I64_MAX + right if right < 0
+            return false
+
+        def multiply_overflows(left: i64, right: i64) -> bool:
+            return false if left == 0 or right == 0
+            return true if left == EVALUATION_I64_MIN and right == EVALUATION_NEGATIVE_ONE
+            return true if right == EVALUATION_I64_MIN and left == EVALUATION_NEGATIVE_ONE
+            return left > EVALUATION_I64_MAX / right if left > 0 and right > 0
+            return right < EVALUATION_I64_MIN / left if left > 0 and right < 0
+            return left < EVALUATION_I64_MIN / right if left < 0 and right > 0
+            return left < EVALUATION_I64_MAX / right if left < 0 and right < 0
+            return false
 
     public:
         enum EvaluationKind:
@@ -48,15 +73,19 @@ module DebuggerEvaluate:
 
 
         def evaluate_expression(expression: Expression, budget: usize) -> Evaluation:
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, 0), consumed: budget} if budget == 0
+            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_BUDGET), consumed: budget} if budget == 0
+            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_KIND), consumed: 0} if expression.kind.u16() > EVALUATION_KIND_MAX
             if expression.kind == EvaluationKind.Literal:
                 return evaluate_literal(expression.left)
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, 0), consumed: 0} if budget < EVALUATION_COST_BINARY
+            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_BUDGET), consumed: 0} if budget < EVALUATION_COST_BINARY
             if expression.kind == EvaluationKind.Add:
+                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OVERFLOW), consumed: EVALUATION_COST_BINARY} if add_overflows(expression.left, expression.right)
                 return Evaluation{value: expression.left + expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
             if expression.kind == EvaluationKind.Subtract:
+                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OVERFLOW), consumed: EVALUATION_COST_BINARY} if subtract_overflows(expression.left, expression.right)
                 return Evaluation{value: expression.left - expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
             if expression.kind == EvaluationKind.Multiply:
+                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OVERFLOW), consumed: EVALUATION_COST_BINARY} if multiply_overflows(expression.left, expression.right)
                 return Evaluation{value: expression.left * expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
             if expression.kind == EvaluationKind.Divide:
                 return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EVALUATION_COST_BINARY.u32()), consumed: EVALUATION_COST_BINARY} if expression.right == 0
@@ -81,4 +110,4 @@ module DebuggerEvaluate:
                 result: mutable i64 = EVALUATION_FALSE
                 result <- EVALUATION_TRUE if expression.left != EVALUATION_FALSE or expression.right != EVALUATION_FALSE
                 return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, 0), consumed: 0}
+            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_KIND), consumed: 0}

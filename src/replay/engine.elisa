@@ -16,6 +16,7 @@ module DebuggerReplayEngine:
         const REPLAY_HASH_PRIME: u64 = 1099511628211
         const REPLAY_GLOBAL_CAPACITY: usize = 16
         const REPLAY_MEMORY_CAPACITY: usize = 64
+        const REPLAY_FIRST_BRANCH_ID: u64 = 1
 
     public:
         enum EngineError:
@@ -72,6 +73,11 @@ module DebuggerReplayEngine:
             if engine.event_count >= REPLAY_HISTORY_CAPACITY:
                 engine.engine_error <- EngineError.HistoryFull
                 return
+            if engine.machine.program_counter >= engine.image.program.instruction_count:
+                engine.machine.faulted <- true
+                engine.machine.halted <- true
+                engine.engine_error <- EngineError.ExecutionFault
+                return
             snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(engine.machine, DebuggerIdentity::debug_id(engine.event_count.u64()), engine.event_count.u64(), replay_engine_state_hash(engine))
             engine.history[engine.event_count] <- snapshot
             instruction: DebuggerEDIR::Instruction = engine.image.instructions[engine.machine.program_counter.usize()]
@@ -115,3 +121,18 @@ module DebuggerReplayEngine:
 
         def replay_engine_is_exact(engine: mutable ReplayEngine&) -> bool:
             return engine.engine_error == EngineError.None and not engine.machine.faulted
+
+        def replay_engine_fork(engine: ReplayEngine, branch: DebuggerIdentity::DebugId) -> ReplayEngine:
+            forked: mutable ReplayEngine = engine
+            forked.branch <- branch
+            forked.engine_error <- EngineError.None
+            return forked
+
+        def replay_engine_next_branch(engine: ReplayEngine) -> DebuggerIdentity::DebugId:
+            return DebuggerIdentity::debug_id(REPLAY_FIRST_BRANCH_ID + engine.event_count.u64())
+
+        def replay_engine_set_accumulator(engine: mutable ReplayEngine&, value: i64) -> bool:
+            return false if engine.machine.halted or engine.machine.faulted
+            engine.machine.accumulator <- value
+            engine.engine_error <- EngineError.None
+            return true

@@ -44,8 +44,10 @@ module DebuggerEDIR:
             None
             UnknownVersion
             InvalidOpcode
+            InvalidOperand
             InvalidRegister
             InvalidTarget
+            UninitializedLocal
             MissingReturn
             InvalidSourceRange
             InvalidCallDepth
@@ -112,12 +114,35 @@ module DebuggerEDIR:
         def verification_failure(reason: VerificationError, instruction: u64) -> Verification:
             return Verification{valid: false, verification_error: reason, instruction: instruction}
 
+        def verify_instruction_operands(instruction: Instruction, index: u64) -> Verification:
+            if instruction.opcode == Opcode.Nop or instruction.opcode == Opcode.Return:
+                return verification_failure(VerificationError.InvalidOperand, index) if instruction.a != 0 or instruction.b != 0
+            if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal or instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal or instruction.opcode == Opcode.LoadMemory or instruction.opcode == Opcode.StoreMemory or instruction.opcode == Opcode.Allocate:
+                return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
+            if instruction.opcode == Opcode.Add or instruction.opcode == Opcode.Subtract or instruction.opcode == Opcode.Multiply or instruction.opcode == Opcode.Divide or instruction.opcode == Opcode.CompareEqual or instruction.opcode == Opcode.CompareLess or instruction.opcode == Opcode.Constant or instruction.opcode == Opcode.Negate:
+                return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
+            if instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero:
+                return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
+            return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
+
+        def verify_local_initialization(image: mutable ProgramImage&) -> Verification:
+            initialized: mutable bool[EDIR_MAX_LOCALS] = zeroed
+            for index in 0..<image.program.instruction_count.usize():
+                instruction: Instruction = image.instructions[index]
+                if instruction.opcode == Opcode.LoadLocal and not initialized[instruction.a.usize()]:
+                    return verification_failure(VerificationError.UninitializedLocal, index.u64())
+                if instruction.opcode == Opcode.StoreLocal:
+                    initialized[instruction.a.usize()] <- true
+            return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
+
         def verify_image(image: mutable ProgramImage&) -> Verification:
             program_verification: Verification = verify_program(image.program)
             return program_verification if not program_verification.valid
             saw_return: mutable bool = false
             for index in 0..<image.program.instruction_count.usize():
                 instruction: Instruction = image.instructions[index]
+                operand_verification: Verification = verify_instruction_operands(instruction, index.u64())
+                return operand_verification if not operand_verification.valid
                 if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal:
                     return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= image.program.local_count.i64()
                 if instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal:
@@ -133,6 +158,8 @@ module DebuggerEDIR:
                 return verification_failure(VerificationError.InvalidSourceRange, index.u64()) if instruction.source.end_byte < instruction.source.start_byte
                 saw_return <- true if instruction.opcode == Opcode.Return
             return verification_failure(VerificationError.MissingReturn, image.program.instruction_count) if not saw_return
+            initialization_verification: Verification = verify_local_initialization(image)
+            return initialization_verification if not initialization_verification.valid
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
         def machine_new() -> Machine:

@@ -61,6 +61,12 @@ def main() -> i64:
     seek_payload: mutable u8[39] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 115, 101, 101, 107, 34, 44, 34, 116, 97, 114, 103, 101, 116, 69, 118, 101, 110, 116, 34, 58, 55, 125]
     parsed_seek: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(seek_payload[0], 33)
     return 31 if not parsed_seek.valid or parsed_seek.method != DebuggerProtocolRequest::RequestMethod.Seek or parsed_seek.target_event != 7
+    trace_verify_payload: mutable u8[25] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 116, 114, 97, 99, 101, 46, 118, 101, 114, 105, 102, 121, 34, 125]
+    parsed_trace_verify: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(trace_verify_payload[0], 25)
+    return 89 if not parsed_trace_verify.valid or parsed_trace_verify.method != DebuggerProtocolRequest::RequestMethod.TraceVerify
+    trace_export_payload: mutable u8[25] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 116, 114, 97, 99, 101, 46, 101, 120, 112, 111, 114, 116, 34, 125]
+    parsed_trace_export: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(trace_export_payload[0], 25)
+    return 90 if not parsed_trace_export.valid or parsed_trace_export.method != DebuggerProtocolRequest::RequestMethod.TraceExport
     stale: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(stopped.session, launch, 99)
     return 4 if stale.accepted or stale.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
     channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
@@ -105,12 +111,16 @@ def main() -> i64:
     transfer_error: DebuggerErrors::DebuggerError = DebuggerRemoteArtifact::transfer_accept(transfer, 0, artifact_bytes[0], ARTIFACT_SIZE)
     return 11 if not DebuggerErrors::error_is_ok(transfer_error)
     return 12 if not DebuggerErrors::error_is_ok(DebuggerRemoteArtifact::transfer_finish(transfer)) or not DebuggerRemoteArtifact::transfer_is_complete(transfer)
+    post_complete_bytes: mutable u8[1] = [4]
+    post_complete_error: DebuggerErrors::DebuggerError = DebuggerRemoteArtifact::transfer_accept(transfer, ARTIFACT_SIZE, post_complete_bytes[0], 1)
+    return 87 if post_complete_error.code != DebuggerErrors::ErrorCode.InvalidState
     corrupt_transfer: mutable DebuggerRemoteArtifact::ArtifactTransfer = transfer
     corrupt_transfer.received <- INVALID_TRANSFER_RECEIVED
     return 69 if DebuggerRemoteArtifact::transfer_is_complete(corrupt_transfer)
     resolver: mutable DebuggerBreakpointResolver::Resolver = DebuggerBreakpointResolver::resolver_new()
     source_span: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(500), start_byte: 0, end_byte: 10, start_line: 4, start_column: 0, end_line: 4, end_column: 8, discriminator: 0}
     return 13 if not DebuggerBreakpointResolver::resolver_add(resolver, DebuggerBreakpointResolver::Candidate{id: DebuggerIdentity::debug_id(1), function: DebuggerIdentity::debug_id(2), source: source_span, instruction: 9})
+    return 106 if DebuggerBreakpointResolver::resolver_add(resolver, DebuggerBreakpointResolver::Candidate{id: DebuggerIdentity::debug_id(4), function: DebuggerIdentity::debug_id(2), source: source_span, instruction: 0})
     location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(500), line: 4, column: 2, discriminator: 0}
     resolved: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_source(resolver, location)
     return 14 if resolved.status != DebuggerMetadata::BreakpointResolution.Resolved or resolved.instruction != 9
@@ -193,6 +203,12 @@ def main() -> i64:
     inconsistent_response: mutable DebuggerProtocol::ResponseEnvelope = DebuggerProtocol::response_ok(envelope_request.request_id, service.session.stop_generation)
     inconsistent_response.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, false, TEST_ERROR_DETAIL)
     return 72 if DebuggerProtocolClient::client_accept(envelope_client, inconsistent_response).code != DebuggerErrors::ErrorCode.Corrupt
+    monotonic_client: mutable DebuggerProtocolClient::ReferenceClient = DebuggerProtocolClient::client_new(DebuggerProtocol::protocol_version())
+    _ = DebuggerProtocolClient::client_start(monotonic_client, service.session.id.value)
+    monotonic_client.stop_generation <- 1
+    monotonic_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocolClient::client_make_request(monotonic_client, DebuggerProtocol::Method.Threads, 0)
+    monotonic_failure: DebuggerErrors::DebuggerError = DebuggerProtocolClient::client_accept(monotonic_client, DebuggerProtocol::response_ok(monotonic_request.request_id, 0))
+    return 88 if monotonic_failure.code != DebuggerErrors::ErrorCode.Corrupt or monotonic_client.state != DebuggerProtocolClient::ClientState.Failed
     unknown_response: DebuggerProtocol::ResponseEnvelope = DebuggerProtocol::response_ok(999, service.session.stop_generation)
     unknown_response_failure: DebuggerErrors::DebuggerError = DebuggerProtocolClient::client_accept(envelope_client, unknown_response)
     return 84 if unknown_response_failure.code != DebuggerErrors::ErrorCode.InvalidArgument or envelope_client.state != DebuggerProtocolClient::ClientState.Failed

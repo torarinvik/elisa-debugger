@@ -19,6 +19,35 @@ module DebuggerEDIR:
         const EDIR_STEP_INCREMENT: u64 = 1
         const EDIR_MAX_STEP_COUNT: u64 = 18446744073709551615
         const EDIR_LOCAL_BIT_BASE: u64 = 1
+        const EDIR_I64_MAX: i64 = 9223372036854775807
+        const EDIR_I64_MIN: i64 = -9223372036854775807 - 1
+
+        def add_overflows(left: i64, right: i64) -> bool:
+            return left > EDIR_I64_MAX - right if right > 0
+            return left < EDIR_I64_MIN - right if right < 0
+            return false
+
+        def subtract_overflows(left: i64, right: i64) -> bool:
+            return left < EDIR_I64_MIN + right if right > 0
+            return left > EDIR_I64_MAX + right if right < 0
+            return false
+
+        def multiply_overflows(left: i64, right: i64) -> bool:
+            return false if left == 0 or right == 0
+            return true if left == EDIR_I64_MIN and right == -1
+            return true if right == EDIR_I64_MIN and left == -1
+            if left > 0:
+                return left > EDIR_I64_MAX / right if right > 0
+                return right < EDIR_I64_MIN / left
+            if right > 0:
+                return left < EDIR_I64_MIN / right
+            return right < EDIR_I64_MAX / left
+
+        def negate_overflows(value: i64) -> bool:
+            return value == EDIR_I64_MIN
+
+        def divide_overflows(left: i64, right: i64) -> bool:
+            return left == EDIR_I64_MIN and right == -1
 
     public:
         enum Opcode:
@@ -273,24 +302,40 @@ module DebuggerEDIR:
                 updated.accumulator <- instruction.a
                 updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.Add:
-                updated.accumulator <- updated.accumulator + instruction.a
-                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+                if add_overflows(updated.accumulator, instruction.a):
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.accumulator + instruction.a
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.Subtract:
-                updated.accumulator <- updated.accumulator - instruction.a
-                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+                if subtract_overflows(updated.accumulator, instruction.a):
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.accumulator - instruction.a
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.Multiply:
-                updated.accumulator <- updated.accumulator * instruction.a
-                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+                if multiply_overflows(updated.accumulator, instruction.a):
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.accumulator * instruction.a
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.Divide:
-                if instruction.a == 0:
+                if instruction.a == 0 or divide_overflows(updated.accumulator, instruction.a):
                     updated.faulted <- true
                     updated.halted <- true
                 else:
                     updated.accumulator <- updated.accumulator / instruction.a
                     updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.Negate:
-                updated.accumulator <- 0 - updated.accumulator
-                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+                if negate_overflows(updated.accumulator):
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- 0 - updated.accumulator
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
             if instruction.opcode == Opcode.CompareEqual:
                 if updated.accumulator == instruction.a:
                     updated.accumulator <- 1

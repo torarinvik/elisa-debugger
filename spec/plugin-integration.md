@@ -31,6 +31,10 @@ must not parse human CLI output or reimplement replay policy.
 The host integration should check `discover`/`initialize` version negotiation,
 surface `UNSUPPORTED` as a capability limitation, and preserve source/build
 content identities when mapping paths between the project and debug host.
+Use the discovery capability and limit fields to enable timeline, checkpoint,
+memory, and trace panels only when the active provider advertises them. Event
+notifications are ordered by sequence and acknowledged explicitly, which lets
+the bridge reconnect without replaying stale UI state.
 
 ## Other clients
 
@@ -43,3 +47,9 @@ All clients must handle cancellation, progress, stale stop generations,
 truncated history, missing source artifacts, and capability changes. A client
 that only supports ordinary debugging can ignore timeline extensions while
 using the same launch/stack/variables operations.
+
+The optional `timeline`, `memory`, and `events` surfaces are public protocol
+contracts backed by `DebuggerTimeline`, `DebuggerMemory`, and
+`DebuggerProtocolEvents`. They return typed unavailable, stale, corrupt, and
+resource-limit states so clients can degrade gracefully without inspecting
+private module data.

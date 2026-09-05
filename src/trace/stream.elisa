@@ -10,6 +10,7 @@ module DebuggerTraceStream:
         const TRACE_MAX_PAYLOAD: usize = 512
         const TRACE_FIRST_SEQUENCE: u64 = 0
         const TRACE_SEQUENCE_INCREMENT: u64 = 1
+        const TRACE_MAX_SEQUENCE: u64 = 18446744073709551615
         const TRACE_HASH_OFFSET_BASIS: u64 = 1469598103934665603
         const TRACE_HASH_PRIME: u64 = 1099511628211
 
@@ -47,8 +48,14 @@ module DebuggerTraceStream:
             if stream.chunk_count >= TRACE_CHUNK_CAPACITY or header.payload_length > TRACE_MAX_PAYLOAD.u64():
                 updated.status <- TraceReadStatus.ResourceLimit
                 return updated
+            if header.kind == DebuggerTrace::ChunkKind.Events and header.payload_length == 0:
+                updated.status <- TraceReadStatus.Corrupt
+                return updated
             if header.sequence != stream.next_sequence:
                 updated.status <- TraceReadStatus.Corrupt
+                return updated
+            if header.sequence == TRACE_MAX_SEQUENCE:
+                updated.status <- TraceReadStatus.ResourceLimit
                 return updated
             if stream.status == TraceReadStatus.Truncated or not DebuggerTrace::trace_chunk_range_valid(header):
                 updated.status <- TraceReadStatus.Corrupt
@@ -81,6 +88,9 @@ module DebuggerTraceStream:
                 chunk.complete <- true
                 updated.chunks[index] <- chunk
                 updated.chunk_count <- updated.chunk_count + 1
+                if stream.next_sequence == TRACE_MAX_SEQUENCE:
+                    updated.status <- TraceReadStatus.ResourceLimit
+                    return updated
                 updated.next_sequence <- stream.next_sequence + TRACE_SEQUENCE_INCREMENT
                 updated.verified_event <- chunk.header.last_event if chunk.checksum == chunk.header.checksum
                 updated.status <- TraceReadStatus.Complete if chunk.checksum == chunk.header.checksum else TraceReadStatus.Corrupt

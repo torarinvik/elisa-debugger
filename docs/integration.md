@@ -16,6 +16,14 @@ the provider-neutral lifecycle dispatcher for now; in-process clients that
 need managed execution can call `DebuggerSessionService::managed_new` and
 `service_handle_managed` with the same envelope model.
 
+Call `DebuggerDiscovery::discovery_for` before selecting optional UI actions.
+The returned protocol version, provider kind, history mode, capabilities, and
+resource limits are stable machine-readable data. Timeline positions and
+bookmarks use `DebuggerTimeline`; managed heap and stack reads use
+`DebuggerMemory`; ordered asynchronous notifications use
+`DebuggerProtocolEvents`. These public modules keep editor adapters independent
+of private replay and storage representations.
+
 ## VS Code
 
 Register `build/elisa-debugger-dap-server` as a debug adapter that is launched
@@ -49,6 +57,11 @@ The service method names are versioned and editor-neutral: `discover`,
 `terminate`, and `close`. Include `expectedStopGeneration` on requests that
 operate on a stopped session. A stale value produces `STALE_GENERATION` and
 does not mutate the session.
+
+Use the discovery response to hide unsupported commands and to size client
+buffers from the advertised limits. Subscribe to protocol events by sequence
+number and acknowledge them monotonically; do not infer stop state from log
+text.
 
 ## Other clients
 

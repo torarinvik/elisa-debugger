@@ -44,11 +44,16 @@ const INVALID_STORAGE_RANGE_RESULT: i64 = 80
 const EMPTY_EVENT_ENCODING_RESULT: i64 = 81
 const INVALID_MANIFEST_RANGE_RESULT: i64 = 82
 const INVALID_MANIFEST_DECODE_RESULT: i64 = 83
+const EMPTY_MANIFEST_ENCODING_RESULT: i64 = 84
 
 def check_checkpoint_validation() -> i64:
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
     snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(TEST_CHECKPOINT_ID), 0, TEST_EVENT_PAYLOAD)
     encoded: DebuggerTraceBinary::ByteWriter = DebuggerCheckpointCodec::checkpoint_encode(snapshot)
+    invalid_snapshot: mutable DebuggerCheckpoint::MachineSnapshot = snapshot
+    invalid_snapshot.id <- DebuggerIdentity::debug_id(EMPTY_CHECKPOINT_ID)
+    invalid_encoded: DebuggerTraceBinary::ByteWriter = DebuggerCheckpointCodec::checkpoint_encode(invalid_snapshot)
+    return 4 if DebuggerTraceBinary::writer_is_valid(invalid_encoded)
     offset_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
     offset_reader.offset <- 1
     return 1 if DebuggerCheckpointCodec::checkpoint_bytes_are_valid(offset_reader)
@@ -78,6 +83,15 @@ def check_empty_event_chunk() -> i64:
     return EMPTY_EVENT_ENCODING_RESULT if DebuggerTraceBinary::writer_is_valid(empty_events_bytes)
     empty_events_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(empty_events_bytes.bytes[0], empty_events_bytes.length)
     return 1 if empty_events_scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    return 0
+
+def check_empty_manifest_chunk() -> i64:
+    empty_manifest: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    empty_manifest.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: 0, first_event: 0, last_event: 0, payload_length: 0, checksum: 1469598103934665603}
+    empty_manifest.checksum <- 1469598103934665603
+    reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    failure: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(reader, empty_manifest)
+    return EMPTY_MANIFEST_ENCODING_RESULT if DebuggerErrors::error_is_ok(failure)
     return 0
 
 def check_invalid_manifest() -> i64:
@@ -212,6 +226,7 @@ def main() -> i64:
     truncated: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(encoded.bytes[0], TEST_TRUNCATED_CHUNK_BYTES)
     return 9 if truncated.status != DebuggerTraceStorage::StorageStatus.Truncated
     return 39 if check_empty_event_chunk() != 0
+    return 84 if check_empty_manifest_chunk() != 0
     footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(1, 0)
     combined: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     for encoded_index in 0..<encoded.length:

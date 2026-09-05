@@ -14,9 +14,12 @@ into qualified modules:
 - `DebuggerTrace` owns versioned trace metadata and chunk validation.
 - `DebuggerValues` owns typed inspection states and stale value handles.
 - `DebuggerMetadata` owns content-addressed source spans and function metadata.
+- `DebuggerSourceStore` owns bounded source-file, function, and client-path
+  metadata registration with explicit validation and lookup APIs.
 - `DebuggerBreakpoints` owns build-aware breakpoint status and hit policy.
 - `DebuggerConcurrency` owns logical task and wait-edge identities.
 - `DebuggerHistory` owns bounded historical query descriptors.
+- `DebuggerTimeline` owns bounded retained-history coordinates and bookmarks.
 - `DebuggerReplayEngine` executes verified EDIR images, records pre-step state,
   and performs bounded reverse-step/seek on logical machine state.
 - `DebuggerManagedEngine` binds that replay engine to a session and exposes
@@ -43,6 +46,9 @@ into qualified modules:
   `DebuggerBuild` are public integration contracts for DAP, JetBrains, CLI,
   remote, and headless clients; private limits are named constants in each
   module.
+- `DebuggerDiscovery`, `DebuggerProtocolEvents`, and `DebuggerMemory` expose
+  machine-readable capability discovery, ordered event delivery, and bounded
+  managed-memory inspection for editor-neutral clients.
 - `DebuggerCLIEntrypoint` provides a line-oriented interactive/machine command
   mode without duplicating session policy.
 - `DebuggerProtocolFraming` owns bounded length-prefixed transport framing.
@@ -63,6 +69,8 @@ make check server
 make smoke
 # Compile the additional provider, trace, query, and protocol modules.
 make module-check
+# The source metadata and protocol event modules also have focused checks.
+make source-store-check protocol-events-check
 ```
 
 The Makefile allows a stale sibling compiler product by default because that
@@ -109,3 +117,10 @@ or duplicate replay policy. The DAP adapter and advanced session service share
 the same `DebuggerSession` state and stop-generation semantics. See the
 protocol specification for framing, IDs, coordinates, version negotiation,
 pagination, cancellation, and error behavior.
+
+Clients can call `DebuggerDiscovery::discovery_for` (or the `discover` service
+method) before creating a session to select only advertised operations. The
+same session service exposes `DebuggerTimeline` coordinates, `DebuggerMemory`
+reads, and `DebuggerProtocolEvents` notifications, so a VS Code extension,
+JetBrains plugin, CLI, or another host can add time-travel panels without
+coupling itself to the replay engine's private state.

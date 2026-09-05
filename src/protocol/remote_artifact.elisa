@@ -13,6 +13,7 @@ module DebuggerRemoteArtifact:
         const DETAIL_OFFSET: u32 = 1
         const DETAIL_SIZE: u32 = 2
         const DETAIL_CHECKSUM: u32 = 3
+        const DETAIL_STATE: u32 = 4
 
     public:
         enum TransferState:
@@ -41,15 +42,21 @@ module DebuggerRemoteArtifact:
             transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if expected_size > TRANSFER_CAPACITY
             return transfer
 
+        def transfer_fail(transfer: mutable ArtifactTransfer&, state: TransferState, failure: DebuggerErrors::DebuggerError) -> DebuggerErrors::DebuggerError:
+            transfer.state <- state
+            transfer.last_error <- failure
+            return failure
+
         def transfer_accept(transfer: mutable ArtifactTransfer&, offset: usize, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE) if transfer.state == TransferState.Complete
             return transfer.last_error if transfer.state != TransferState.Receiving
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OFFSET) if offset != transfer.received
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if length > TRANSFER_CHUNK_CAPACITY
+            return transfer_fail(transfer, TransferState.Corrupt, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OFFSET)) if offset != transfer.received
+            return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)) if length > TRANSFER_CHUNK_CAPACITY
             if transfer.received > transfer.expected_size or transfer.received > TRANSFER_CAPACITY:
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SIZE)
+                return transfer_fail(transfer, TransferState.Corrupt, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SIZE))
             if length > transfer.expected_size - transfer.received:
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if length > TRANSFER_CAPACITY - transfer.received
+                return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE))
+            return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)) if length > TRANSFER_CAPACITY - transfer.received
             for index in 0..<length:
                 value: u8 = bytes[index]
                 transfer.bytes[transfer.received + index] <- value

@@ -26,6 +26,7 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
 	"$(BUILD)/elisa-debugger-managed-service-check"
 	"$(BUILD)/elisa-debugger-protocol-events-check"
+	"$(BUILD)/elisa-debugger-source-store-check"
 
 managed-inspection-check: $(BUILD)/elisa-debugger-managed-inspection-check
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
@@ -111,8 +112,9 @@ smoke: check server dap-server cli ffi-check
 	printf 'Content-Length: 655360\r\n\r\n' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 49\r\n\r\n{' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf '21 {"method":"discover"}\n' | "$(BUILD)/elisa-debugger-server" | grep -F '"protocolMajor":1'
-	server_timeline=$$(printf '30 {"method":"initialize","id":1}\n26 {"method":"launch","id":2}\n25 {"method":"pause","id":3}\n24 {"method":"step","id":4}\n31 {"method":"reverseStep","id":5}\n25 {"method":"close","id":6}\n' | "$(BUILD)/elisa-debugger-server"); echo "$$server_timeline" | grep -F '"id":"4","ok":true'; echo "$$server_timeline" | grep -F '"id":"5","ok":true'
+	server_timeline=$$(printf '30 {"method":"initialize","id":1}\n26 {"method":"launch","id":2}\n25 {"method":"pause","id":3}\n24 {"method":"step","id":4}\n31 {"method":"reverseStep","id":5}\n25 {"method":"close","id":6}\n' | "$(BUILD)/elisa-debugger-server"); echo "$$server_timeline" | grep -F '"id":"4","ok":true'; echo "$$server_timeline" | grep -F '"id":"5","ok":true'; printf '%s\n' "$$server_timeline" | while IFS=' ' read -r declared payload; do test "$$declared" -eq "$$(printf %s "$$payload" | wc -c | tr -d ' ')"; done
 	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"supportsStepBack":true'
+	dap_initialize=$$(printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server"); dap_declared=$$(printf %s "$$dap_initialize" | sed -n 's/^Content-Length: //p'); dap_body=$$(printf %s "$$dap_initialize" | sed -n '3p'); test "$$dap_declared" -eq "$$(printf %s "$$dap_body" | wc -c | tr -d ' ' )"
 	printf 'Content-Length: 41\r\n\r\n{"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}Content-Length: 45\r\n\r\n{"seq":2,"type":"request","command":"launch"}Content-Length: 44\r\n\r\n{"seq":3,"type":"request","command":"pause"}Content-Length: 49\r\n\r\n{"seq":4,"type":"request","command":"stackTrace"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"stackFrames":[{"id":1,"name":"main","line":1'
 	dap_timeline=$$(printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}Content-Length: 45\r\n\r\n{"seq":2,"type":"request","command":"launch"}Content-Length: 44\r\n\r\n{"seq":3,"type":"request","command":"pause"}Content-Length: 43\r\n\r\n{"seq":4,"type":"request","command":"next"}Content-Length: 49\r\n\r\n{"seq":5,"type":"request","command":"stackTrace"}Content-Length: 47\r\n\r\n{"seq":6,"type":"request","command":"stepBack"}Content-Length: 49\r\n\r\n{"seq":7,"type":"request","command":"stackTrace"}' | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_timeline" | grep -F '"line":2'; echo "$$dap_timeline" | grep -F '"line":1'

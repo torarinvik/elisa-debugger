@@ -95,6 +95,11 @@ module DebuggerEffects:
         def effect_oracle_replay(oracle: EffectOracle, kind: EffectKind, request_hash: u64) -> EffectOracle:
             updated: mutable EffectOracle = oracle
             return updated if oracle.mode != EffectMode.Replaying
+            return updated if oracle.exactness == Exactness.Diverged or not DebuggerErrors::error_is_ok(oracle.last_error)
+            if kind.u16() > EFFECT_KIND_MAX:
+                updated.exactness <- Exactness.Diverged
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)
+                return updated
             if oracle.count > EFFECT_ORACLE_CAPACITY or oracle.cursor > oracle.count:
                 updated.exactness <- Exactness.Diverged
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, EFFECT_ORACLE_CAPACITY.u32())
@@ -131,7 +136,7 @@ module DebuggerEffects:
             return oracle.records[oracle.cursor - 1]
 
         def effect_oracle_replay_complete(oracle: EffectOracle) -> bool:
-            return false if oracle.count > EFFECT_ORACLE_CAPACITY or oracle.cursor > oracle.count
+            return false if oracle.count > EFFECT_ORACLE_CAPACITY or oracle.cursor > oracle.count or oracle.mode.u16() > EFFECT_MODE_MAX or oracle.exactness == Exactness.Diverged or not DebuggerErrors::error_is_ok(oracle.last_error)
             return oracle.mode != EffectMode.Replaying or oracle.cursor == oracle.count
 
         def effect_record_suppresses_write(record: EffectRecord) -> bool:

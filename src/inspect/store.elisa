@@ -11,6 +11,7 @@ module DebuggerValueStore:
         const VALUE_FIRST_ID: u64 = 1
         const VALUE_MAX_ID: u64 = 18446744073709551615
         const VALUE_NO_ID: u64 = 0
+        const VALUE_NO_INDEX: usize = VALUE_STORE_CAPACITY
 
     public:
         struct ValueNode:
@@ -102,7 +103,33 @@ module DebuggerValueStore:
             return false if parent.id.value == child.id.value
             return false if store.nodes[parent_index].kind != DebuggerValues::ValueKind.Aggregate or store.nodes[parent_index].state != DebuggerValues::ValueState.Available
             return false if store.nodes[parent_index].child_count >= VALUE_CHILD_CAPACITY
+            for child_position in 0..<store.nodes[parent_index].child_count:
+                return false if store.nodes[parent_index].children[child_position].value == child.id.value
             child_index: usize = (child.id.value - VALUE_FIRST_ID).usize()
+            queue: mutable usize[VALUE_STORE_CAPACITY] = zeroed
+            visited: mutable bool[VALUE_STORE_CAPACITY] = zeroed
+            queue_count: mutable usize = 1
+            cursor: mutable usize = 0
+            queue[0] <- child_index
+            visited[child_index] <- true
+            while cursor < queue_count:
+                index: usize = queue[cursor]
+                cursor <- cursor + 1
+                return false if store.nodes[index].child_count > VALUE_CHILD_CAPACITY
+                for child_position in 0..<store.nodes[index].child_count:
+                    child_id: DebuggerIdentity::DebugId = store.nodes[index].children[child_position]
+                    return false if child_id.value == parent.id.value
+                    descendant_index: mutable usize = VALUE_NO_INDEX
+                    for candidate in 0..<store.count:
+                        if store.nodes[candidate].handle.id.value == child_id.value:
+                            descendant_index <- candidate
+                            break
+                    return false if descendant_index == VALUE_NO_INDEX
+                    if not visited[descendant_index]:
+                        return false if queue_count >= VALUE_STORE_CAPACITY
+                        visited[descendant_index] <- true
+                        queue[queue_count] <- descendant_index
+                        queue_count <- queue_count + 1
             store.nodes[parent_index].children[store.nodes[parent_index].child_count] <- store.nodes[child_index].handle.id
             store.nodes[parent_index].child_count <- store.nodes[parent_index].child_count + 1
             return true

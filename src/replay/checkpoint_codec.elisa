@@ -66,6 +66,7 @@ module DebuggerCheckpointCodec:
 
         def checkpoint_decode(reader: mutable DebuggerTraceBinary::ByteReader&) -> DebuggerCheckpoint::MachineSnapshot:
             snapshot: mutable DebuggerCheckpoint::MachineSnapshot = zeroed
+            decode_valid: mutable bool = true
             schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
             snapshot.id <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
             snapshot.event <- DebuggerTraceBinary::reader_take_u64(reader)
@@ -78,16 +79,23 @@ module DebuggerCheckpointCodec:
                 snapshot.globals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
             for index in 0..<CHECKPOINT_MEMORY_CAPACITY:
                 snapshot.memory[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-                snapshot.memory_initialized[index] <- DebuggerTraceBinary::reader_take_byte(reader) == BOOLEAN_TRUE
+                initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                decode_valid <- false if initialized > BOOLEAN_TRUE
+                snapshot.memory_initialized[index] <- initialized == BOOLEAN_TRUE
             snapshot.heap_next <- DebuggerTraceBinary::reader_take_u64(reader).usize()
             for index in 0..<CHECKPOINT_STACK_CAPACITY:
                 snapshot.return_stack[index] <- DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.return_stack_pointer <- DebuggerTraceBinary::reader_take_u64(reader).usize()
-            snapshot.halted <- DebuggerTraceBinary::reader_take_byte(reader) == BOOLEAN_TRUE
-            snapshot.faulted <- DebuggerTraceBinary::reader_take_byte(reader) == BOOLEAN_TRUE
+            halted: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            faulted: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            decode_valid <- false if halted > BOOLEAN_TRUE or faulted > BOOLEAN_TRUE
+            snapshot.halted <- halted == BOOLEAN_TRUE
+            snapshot.faulted <- faulted == BOOLEAN_TRUE
             snapshot.steps <- DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.result <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-            snapshot.id <- DebuggerIdentity::debug_id(CHECKPOINT_INVALID_ID) if schema != CHECKPOINT_SCHEMA or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+            decode_valid <- false if schema != CHECKPOINT_SCHEMA or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+            decode_valid <- false if snapshot.program_counter >= CHECKPOINT_MAX_PROGRAM_COUNTER or snapshot.heap_next > CHECKPOINT_MAX_HEAP or snapshot.return_stack_pointer > CHECKPOINT_MAX_STACK_POINTER
+            snapshot.id <- DebuggerIdentity::debug_id(CHECKPOINT_INVALID_ID) if not decode_valid
             return snapshot
 
         def checkpoint_bytes_are_valid(reader: DebuggerTraceBinary::ByteReader) -> bool:

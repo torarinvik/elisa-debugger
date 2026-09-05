@@ -1,0 +1,150 @@
+# Serialized session coordinator.  Protocol adapters hand this module typed
+# operations; they never mutate session state directly or observe a half-applied
+# restore.  The coordinator is deliberately provider-neutral so the same
+# operation contract can drive managed, native, and postmortem providers.
+
+include "../core/session.elisa"
+include "../core/errors.elisa"
+include "../core/cancellation.elisa"
+
+module DebuggerCoordinator:
+    private:
+        const NO_EXPECTED_GENERATION: u64 = 0
+        const NO_REQUEST: u64 = 0
+        const DETAIL_INVALID_OPERATION: u32 = 1
+        const DETAIL_STALE_GENERATION: u32 = 2
+        const DETAIL_BUSY: u32 = 3
+        const DETAIL_UNSUPPORTED: u32 = 4
+        const DETAIL_CAPABILITY: u32 = 5
+
+    public:
+        enum Operation:
+            Discover
+            Initialize
+            CreateSession
+            OpenTrace
+            Launch
+            Attach
+            Replay
+            Pause
+            Continue
+            Step
+            ReverseStep
+            Seek
+            Threads
+            Stack
+            Scopes
+            Variables
+            Evaluate
+            SetBreakpoints
+            SetDataBreakpoints
+            Checkpoint
+            Branch
+            Compare
+            TraceVerify
+            TraceExport
+            Detach
+            Terminate
+            Close
+            Cancel
+
+        struct Coordinator:
+            session: mutable DebuggerSession::Session
+            busy: mutable bool
+            active_request: mutable u64
+            last_request: mutable u64
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct Result:
+            coordinator: mutable Coordinator
+            operation: mutable Operation
+            request_id: mutable u64
+            accepted: mutable bool
+            stop_generation: mutable u64
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def coordinator_new(session: DebuggerSession::Session) -> Coordinator:
+            return Coordinator{session: session, busy: false, active_request: NO_REQUEST, last_request: NO_REQUEST, last_error: DebuggerErrors::no_error()}
+
+        def result_error(coordinator: Coordinator, operation: Operation, request_id: u64, failure: DebuggerErrors::DebuggerError) -> Result:
+            return Result{coordinator: coordinator, operation: operation, request_id: request_id, accepted: false, stop_generation: coordinator.session.stop_generation, failure: failure}
+
+        def result_ok(coordinator: Coordinator, operation: Operation, request_id: u64) -> Result:
+            return Result{coordinator: coordinator, operation: operation, request_id: request_id, accepted: true, stop_generation: coordinator.session.stop_generation, failure: DebuggerErrors::no_error()}
+
+        def map_session_error(failure: DebuggerSession::SessionError) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_INVALID_OPERATION) if failure == DebuggerSession::SessionError.InvalidTransition
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION) if failure == DebuggerSession::SessionError.StaleGeneration
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.ReplayDiverged
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.TraceCorrupt
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.ArtifactMismatch
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.Cancelled
+            return DebuggerErrors::no_error()
+
+        def coordinator_execute(coordinator: Coordinator, request_id: u64, operation: Operation, expected_generation: u64, token: DebuggerCancellation::CancellationToken) -> Result:
+            updated: mutable Coordinator = coordinator
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, true, DETAIL_BUSY)) if coordinator.busy
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_INVALID_OPERATION)) if DebuggerCancellation::cancellation_is_requested(token, 0)
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)) if expected_generation != NO_EXPECTED_GENERATION and expected_generation != coordinator.session.stop_generation
+            updated.busy <- true
+            updated.active_request <- request_id
+            updated.last_request <- request_id
+            updated.last_error <- DebuggerErrors::no_error()
+            if operation == Operation.Discover or operation == Operation.Initialize:
+                updated.busy <- false
+                return result_ok(updated, operation, request_id)
+            if operation == Operation.CreateSession:
+                updated.session <- DebuggerSession::session_configure(coordinator.session)
+            if operation == Operation.Launch:
+                updated.session <- DebuggerSession::session_launch(coordinator.session)
+            if operation == Operation.Replay:
+                updated.session <- DebuggerSession::session_begin_replay(coordinator.session)
+            if operation == Operation.Pause:
+                updated.session <- DebuggerSession::session_pause(coordinator.session)
+            if operation == Operation.Continue:
+                updated.session <- DebuggerSession::session_resume(coordinator.session)
+            if operation == Operation.Detach:
+                updated.session <- DebuggerSession::session_detach(coordinator.session)
+            if operation == Operation.Terminate:
+                updated.session <- DebuggerSession::session_terminate(coordinator.session)
+            if operation == Operation.Close:
+                updated.session <- DebuggerSession::session_close(coordinator.session)
+            if operation == Operation.Threads or operation == Operation.Stack or operation == Operation.Scopes or operation == Operation.Variables or operation == Operation.Evaluate:
+                if not DebuggerSession::session_can_inspect(coordinator.session):
+                    updated.busy <- false
+                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                    return result_error(updated, operation, request_id, updated.last_error)
+            if operation == Operation.SetBreakpoints and not coordinator.session.capabilities.source_breakpoints:
+                updated.busy <- false
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                return result_error(updated, operation, request_id, updated.last_error)
+            if operation == Operation.SetDataBreakpoints and not coordinator.session.capabilities.data_breakpoints:
+                updated.busy <- false
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                return result_error(updated, operation, request_id, updated.last_error)
+            if operation == Operation.Checkpoint and (not coordinator.session.capabilities.checkpoints or not DebuggerSession::session_can_inspect(coordinator.session)):
+                updated.busy <- false
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                return result_error(updated, operation, request_id, updated.last_error)
+            if operation == Operation.Branch and (not coordinator.session.capabilities.branches or not DebuggerSession::session_can_inspect(coordinator.session)):
+                updated.busy <- false
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                return result_error(updated, operation, request_id, updated.last_error)
+            if operation == Operation.Compare and (not coordinator.session.capabilities.provenance or not DebuggerSession::session_can_inspect(coordinator.session)):
+                updated.busy <- false
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                return result_error(updated, operation, request_id, updated.last_error)
+            if operation == Operation.Step or operation == Operation.ReverseStep or operation == Operation.Seek or operation == Operation.Attach or operation == Operation.OpenTrace or operation == Operation.TraceVerify or operation == Operation.TraceExport or operation == Operation.Cancel:
+                updated.busy <- false
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                return result_error(updated, operation, request_id, updated.last_error)
+            if updated.session.last_error != DebuggerSession::SessionError.None:
+                updated.busy <- false
+                updated.last_error <- map_session_error(updated.session.last_error)
+                return result_error(updated, operation, request_id, updated.last_error)
+            updated.busy <- false
+            return result_ok(updated, operation, request_id)
+
+        def coordinator_is_idle(coordinator: Coordinator) -> bool:
+            return not coordinator.busy

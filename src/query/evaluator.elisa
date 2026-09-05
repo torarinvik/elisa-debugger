@@ -1,0 +1,60 @@
+# Historical query execution over rebuildable sparse indexes.  Predicates are
+# evaluated at captured boundaries and return explicit cancellation/limits.
+
+include "./index.elisa"
+include "../core/cancellation.elisa"
+
+module DebuggerQueryEvaluator:
+    private:
+        const QUERY_DEFAULT_BUDGET: u64 = 1000000
+
+    public:
+        enum PredicateKind:
+            StateHashEquals
+            StatementEquals
+            TaskEquals
+            EventRange
+
+        struct Predicate:
+            kind: mutable PredicateKind
+            value: mutable u64
+            second: mutable u64
+
+        enum QueryStatus:
+            Match
+            NoMatch
+            Cancelled
+            ResourceLimit
+
+        struct QueryResult:
+            status: mutable QueryStatus
+            event: mutable u64
+            scanned: mutable u64
+
+        def predicate_matches(entry: DebuggerQueryIndex::EventIndexEntry, predicate: Predicate) -> bool:
+            return entry.state_hash == predicate.value if predicate.kind == PredicateKind.StateHashEquals
+            return entry.statement.value == predicate.value if predicate.kind == PredicateKind.StatementEquals
+            return entry.task.value == predicate.value if predicate.kind == PredicateKind.TaskEquals
+            return entry.event >= predicate.value and entry.event <= predicate.second
+
+        def query_first(index: DebuggerQueryIndex::EventIndex, predicate: Predicate, first_event: u64, last_event: u64, token: DebuggerCancellation::CancellationToken, budget: u64) -> QueryResult:
+            limit: u64 = QUERY_DEFAULT_BUDGET if budget == 0 else budget
+            scanned: mutable u64 = 0
+            for position in 0..<index.count:
+                entry: DebuggerQueryIndex::EventIndexEntry = index.entries[position]
+                if entry.event < first_event or entry.event > last_event:
+                    continue
+                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: scanned} if DebuggerCancellation::cancellation_is_requested(token, scanned)
+                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: scanned} if scanned >= limit
+                scanned <- scanned + 1
+                return QueryResult{status: QueryStatus.Match, event: entry.event, scanned: scanned} if predicate_matches(entry, predicate)
+            return QueryResult{status: QueryStatus.NoMatch, event: 0, scanned: scanned}
+
+        def query_compare(left: DebuggerQueryIndex::EventIndex, right: DebuggerQueryIndex::EventIndex, budget: u64) -> QueryResult:
+            limit: u64 = QUERY_DEFAULT_BUDGET if budget == 0 else budget
+            count: usize = left.count if left.count < right.count else right.count
+            for position in 0..<count:
+                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: position.u64()} if position.u64() >= limit
+                if left.entries[position].state_hash != right.entries[position].state_hash or left.entries[position].statement.value != right.entries[position].statement.value:
+                    return QueryResult{status: QueryStatus.Match, event: left.entries[position].event, scanned: position.u64() + 1}
+            return QueryResult{status: QueryStatus.NoMatch, event: 0, scanned: count.u64()}

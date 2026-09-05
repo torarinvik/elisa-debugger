@@ -1,0 +1,63 @@
+# Deterministic scheduler decisions are part of an exact recording.  The VM
+# consumes these decisions during replay instead of asking the host scheduler.
+
+include "./model.elisa"
+
+module DebuggerScheduler:
+    private:
+        const SCHEDULE_CAPACITY: usize = 512
+
+    public:
+        enum ScheduleKind:
+            Run
+            Yield
+            LockAcquire
+            LockRelease
+            Wait
+            Wake
+            Join
+
+        struct ScheduleDecision:
+            ordinal: mutable u64
+            task: mutable DebuggerConcurrency::TaskInfo
+            kind: mutable ScheduleKind
+            synchronization: mutable u64
+
+        struct DeterministicScheduler:
+            decisions: mutable ScheduleDecision[SCHEDULE_CAPACITY]
+            count: mutable usize
+            cursor: mutable usize
+            replaying: mutable bool
+            diverged: mutable bool
+
+        def scheduler_new(replaying: bool) -> DeterministicScheduler:
+            scheduler: mutable DeterministicScheduler = zeroed
+            scheduler.count <- 0
+            scheduler.cursor <- 0
+            scheduler.replaying <- replaying
+            scheduler.diverged <- false
+            return scheduler
+
+        def scheduler_append(scheduler: DeterministicScheduler, decision: ScheduleDecision) -> DeterministicScheduler:
+            updated: mutable DeterministicScheduler = scheduler
+            return updated if scheduler.replaying or scheduler.count >= SCHEDULE_CAPACITY
+            updated.decisions[scheduler.count] <- decision
+            updated.count <- scheduler.count + 1
+            return updated
+
+        def scheduler_next(scheduler: DeterministicScheduler, task: DebuggerConcurrency::TaskInfo, kind: ScheduleKind) -> DeterministicScheduler:
+            updated: mutable DeterministicScheduler = scheduler
+            if not scheduler.replaying:
+                return scheduler_append(scheduler, ScheduleDecision{ordinal: scheduler.count.u64(), task: task, kind: kind, synchronization: 0})
+            if scheduler.cursor >= scheduler.count:
+                updated.diverged <- true
+                return updated
+            expected: ScheduleDecision = scheduler.decisions[scheduler.cursor]
+            if expected.task.id.value != task.id.value or expected.kind != kind:
+                updated.diverged <- true
+                return updated
+            updated.cursor <- scheduler.cursor + 1
+            return updated
+
+        def scheduler_is_exact(scheduler: DeterministicScheduler) -> bool:
+            return not scheduler.diverged

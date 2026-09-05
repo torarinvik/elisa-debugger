@@ -1,0 +1,41 @@
+# Build-aware breakpoint storage and resolution.  Resolution is explicit so a
+# client can show pending breakpoints rather than silently dropping them.
+
+include "./breakpoint.elisa"
+include "../core/identity.elisa"
+
+module DebuggerBreakpointManager:
+    private:
+        const BREAKPOINT_CAPACITY: usize = 256
+
+    public:
+        struct BreakpointTable:
+            points: mutable DebuggerBreakpoints::Breakpoint[BREAKPOINT_CAPACITY]
+            count: mutable usize
+            next_id: mutable u64
+
+        def breakpoint_table_new() -> BreakpointTable:
+            table: mutable BreakpointTable = zeroed
+            table.count <- 0
+            table.next_id <- 1
+            return table
+
+        def breakpoint_table_add(table: BreakpointTable, point: DebuggerBreakpoints::Breakpoint) -> BreakpointTable:
+            updated: mutable BreakpointTable = table
+            return updated if table.count >= BREAKPOINT_CAPACITY
+            updated.points[table.count] <- point
+            updated.points[table.count].id <- DebuggerIdentity::debug_id(table.next_id)
+            updated.points[table.count].status <- DebuggerBreakpoints::BreakpointStatus.Pending
+            updated.count <- table.count + 1
+            updated.next_id <- table.next_id + 1
+            return updated
+
+        def breakpoint_table_resolve(table: BreakpointTable, source: DebuggerIdentity::DebugId, line: u64) -> BreakpointTable:
+            updated: mutable BreakpointTable = table
+            for index in 0..<table.count:
+                if table.points[index].source.file.value == source.value and table.points[index].source.line == line:
+                    updated.points[index].status <- DebuggerBreakpoints::BreakpointStatus.Verified
+            return updated
+
+        def breakpoint_table_count(table: BreakpointTable) -> usize:
+            return table.count

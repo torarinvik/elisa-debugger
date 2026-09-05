@@ -1,0 +1,70 @@
+# Immutable branch lineage and safe interventions.  Parent history is never
+# mutated; branches reference a verified fork and carry only deltas.
+
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+
+module DebuggerBranches:
+    private:
+        const BRANCH_CAPACITY: usize = 32
+        const INTERVENTION_CAPACITY: usize = 16
+
+    public:
+        enum InterventionKind:
+            Value
+            Input
+            Schedule
+            Error
+
+        struct Intervention:
+            event: mutable u64
+            kind: mutable InterventionKind
+            target: mutable DebuggerIdentity::DebugId
+            value_hash: mutable u64
+
+        struct BranchRecord:
+            id: mutable DebuggerIdentity::DebugId
+            parent: mutable DebuggerIdentity::DebugId
+            fork_event: mutable u64
+            state_hash: mutable u64
+            intervention_count: mutable usize
+            interventions: mutable Intervention[INTERVENTION_CAPACITY]
+
+        struct BranchStore:
+            branches: mutable BranchRecord[BRANCH_CAPACITY]
+            count: mutable usize
+            next_id: mutable u64
+
+        def branches_new() -> BranchStore:
+            store: mutable BranchStore = zeroed
+            store.next_id <- 1
+            return store
+
+        def branches_fork(store: BranchStore, parent: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> BranchStore:
+            updated: mutable BranchStore = store
+            return updated if store.count >= BRANCH_CAPACITY
+            updated.branches[store.count].id <- DebuggerIdentity::debug_id(store.next_id)
+            updated.branches[store.count].parent <- parent
+            updated.branches[store.count].fork_event <- event
+            updated.branches[store.count].state_hash <- state_hash
+            updated.branches[store.count].intervention_count <- 0
+            updated.count <- store.count + 1
+            updated.next_id <- store.next_id + 1
+            return updated
+
+        def branches_add_intervention(store: BranchStore, branch: DebuggerIdentity::DebugId, intervention: Intervention) -> BranchStore:
+            updated: mutable BranchStore = store
+            for index in 0..<store.count:
+                if store.branches[index].id.value == branch.value:
+                    return updated if store.branches[index].intervention_count >= INTERVENTION_CAPACITY
+                    updated.branches[index].interventions[store.branches[index].intervention_count] <- intervention
+                    updated.branches[index].intervention_count <- store.branches[index].intervention_count + 1
+                    return updated
+            return updated
+
+        def branches_first_divergence(left: BranchRecord, right: BranchRecord) -> u64:
+            return left.fork_event if left.state_hash != right.state_hash
+            limit: usize = left.intervention_count if left.intervention_count < right.intervention_count else right.intervention_count
+            for index in 0..<limit:
+                return left.interventions[index].event if left.interventions[index].value_hash != right.interventions[index].value_hash
+            return left.fork_event + limit.u64()

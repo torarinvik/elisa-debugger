@@ -1,0 +1,55 @@
+# Compile-time coverage for breakpoint, scheduling, query, agent, and public
+# protocol/provider modules.
+
+include "../src/breakpoint/manager.elisa"
+include "../src/concurrency/scheduler.elisa"
+include "../src/query/index.elisa"
+include "../src/query/provenance.elisa"
+include "../src/agent/hooks.elisa"
+include "../src/protocol/messages.elisa"
+include "../src/protocol/session_service.elisa"
+include "../src/protocol/dispatcher.elisa"
+include "../src/protocol/remote.elisa"
+include "../src/native/controller.elisa"
+
+def main() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(1),
+        runtime: DebuggerIdentity::debug_id(2),
+        source: DebuggerIdentity::debug_id(3),
+        target: DebuggerIdentity::debug_id(4),
+        metadata_version: 1
+    }
+    session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(9), build, DebuggerCapabilities::managed_capabilities())
+    create: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.CreateSession, id: 1, has_id: true, expected_generation: 0, valid: true}
+    created: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(session, create, 0)
+    return 1 if not created.accepted or created.session.state != DebuggerSession::SessionState.Configuring
+    launch: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: 2, has_id: true, expected_generation: 0, valid: true}
+    launched: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(created.session, launch, 0)
+    return 2 if not launched.accepted or launched.session.state != DebuggerSession::SessionState.Running
+    pause: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Pause, id: 3, has_id: true, expected_generation: 0, valid: true}
+    stopped: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(launched.session, pause, 0)
+    return 3 if not stopped.accepted or stopped.session.state != DebuggerSession::SessionState.Stopped
+    replay: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Replay, id: 4, has_id: true, expected_generation: stopped.session.stop_generation, valid: true}
+    replayed: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(stopped.session, replay, 0)
+    return 7 if not replayed.accepted or replayed.session.state != DebuggerSession::SessionState.Replaying
+    parsed_payload: mutable u8[19] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 114, 101, 112, 108, 97, 121, 34, 125]
+    parsed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(parsed_payload[0], 19)
+    return 8 if not parsed.valid or parsed.method != DebuggerProtocolRequest::RequestMethod.Replay
+    stale: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(stopped.session, launch, 99)
+    return 4 if stale.accepted or stale.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
+    channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
+    handshake: DebuggerRemote::RemoteHandshake = DebuggerRemote::RemoteHandshake{protocol_major: 1, protocol_minor: 0, engine: 1, trace_schema: 1, authenticated: true}
+    channel <- DebuggerRemote::remote_accept_handshake(channel, handshake)
+    return 5 if not DebuggerRemote::remote_is_connected(channel)
+    channel <- DebuggerRemote::remote_heartbeat_missed(channel)
+    channel <- DebuggerRemote::remote_heartbeat_missed(channel)
+    channel <- DebuggerRemote::remote_heartbeat_missed(channel)
+    return 6 if channel.state != DebuggerRemote::RemoteState.Draining
+    quota_channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
+    quota_channel.policy.quotas.remote_payload_bytes <- 4
+    quota_channel <- DebuggerRemote::remote_accept_handshake(quota_channel, handshake)
+    quota_channel <- DebuggerRemote::remote_receive(quota_channel, 3)
+    quota_channel <- DebuggerRemote::remote_receive(quota_channel, 2)
+    return 9 if quota_channel.bytes_received != 3
+    return 0

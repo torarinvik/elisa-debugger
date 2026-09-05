@@ -1,0 +1,53 @@
+# Bounded, side-effect-free expression evaluation over a selected value set.
+# Parsing and language-specific lowering can add operators without changing the
+# protocol's explicit unavailable/error states.
+
+include "./values.elisa"
+include "../core/errors.elisa"
+
+module DebuggerEvaluate:
+    private:
+        const MAX_EXPRESSION_BYTES: usize = 256
+        const MAX_OPERAND_COUNT: usize = 8
+        const EVALUATION_COST_LITERAL: usize = 1
+        const EVALUATION_COST_BINARY: usize = 2
+        const EVALUATION_FALSE: i64 = 0
+        const EVALUATION_TRUE: i64 = 1
+
+    public:
+        enum EvaluationKind:
+            Empty
+            Literal
+            Binding
+            Add
+            Subtract
+            CompareEqual
+            Unsupported
+
+        struct Expression:
+            kind: mutable EvaluationKind
+            left: mutable i64
+            right: mutable i64
+            binding: mutable DebuggerValues::ValueHandle
+
+        struct Evaluation:
+            value: mutable i64
+            failure: mutable DebuggerErrors::DebuggerError
+            consumed: mutable usize
+
+        def evaluate_literal(value: i64) -> Evaluation:
+            return Evaluation{value: value, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_LITERAL}
+
+        def evaluate_expression(expression: Expression, budget: usize) -> Evaluation:
+            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, 0), consumed: budget} if budget == 0
+            if expression.kind == EvaluationKind.Literal:
+                return evaluate_literal(expression.left)
+            if expression.kind == EvaluationKind.Add:
+                return Evaluation{value: expression.left + expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+            if expression.kind == EvaluationKind.Subtract:
+                return Evaluation{value: expression.left - expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+            if expression.kind == EvaluationKind.CompareEqual:
+                result: mutable i64 = EVALUATION_FALSE
+                result <- EVALUATION_TRUE if expression.left == expression.right
+                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, 0), consumed: 0}

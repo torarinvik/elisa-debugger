@@ -1,0 +1,56 @@
+# Process-control model for native attach/launch providers.  Platform FFI
+# bindings populate these handles; core logic remains independent of PIDs.
+
+include "../core/errors.elisa"
+
+module DebuggerProcess:
+    private:
+        const INVALID_HANDLE: u64 = 0
+        const MEMORY_READ_LIMIT: usize = 4096
+
+    public:
+        enum ProcessState:
+            Unknown
+            Launching
+            Running
+            Stopped
+            Exited
+            Detached
+            Crashed
+
+        struct ProcessHandle:
+            pid: mutable u64
+            start_identity: mutable u64
+            state: mutable ProcessState
+            owned: mutable bool
+
+        struct MemoryRead:
+            address: mutable u64
+            bytes: mutable u8[MEMORY_READ_LIMIT]
+            length: mutable usize
+            complete: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def invalid_process() -> ProcessHandle:
+            return ProcessHandle{pid: INVALID_HANDLE, start_identity: INVALID_HANDLE, state: ProcessState.Unknown, owned: false}
+
+        def process_is_valid(process: ProcessHandle) -> bool:
+            return process.pid != INVALID_HANDLE and process.start_identity != INVALID_HANDLE and process.state != ProcessState.Detached
+
+        def process_mark_stopped(process: ProcessHandle) -> ProcessHandle:
+            updated: mutable ProcessHandle = process
+            updated.state <- ProcessState.Stopped if process_is_valid(process)
+            return updated
+
+        def process_mark_exited(process: ProcessHandle, crashed: bool) -> ProcessHandle:
+            updated: mutable ProcessHandle = process
+            updated.state <- ProcessState.Crashed if crashed else ProcessState.Exited
+            return updated
+
+        def memory_read_invalid(address: u64, detail: u32) -> MemoryRead:
+            read: mutable MemoryRead = zeroed
+            read.address <- address
+            read.length <- 0
+            read.complete <- false
+            read.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, detail)
+            return read

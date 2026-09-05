@@ -1,0 +1,81 @@
+# Shared request dispatcher for the headless service, CLI, and DAP adapter.
+# It owns lifecycle/generation decisions; transports only serialize outcomes.
+
+include "../core/session.elisa"
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+include "../core/capabilities.elisa"
+include "../core/cancellation.elisa"
+include "../engine/coordinator.elisa"
+include "./request.elisa"
+
+module DebuggerProtocolDispatcher:
+    private:
+        const NO_EXPECTED_GENERATION: u64 = 0
+        const DETAIL_INVALID_REQUEST: u32 = 1
+        const DETAIL_STALE_GENERATION: u32 = 2
+        const DETAIL_UNSUPPORTED_OPERATION: u32 = 3
+        const DETAIL_CAPABILITY_UNAVAILABLE: u32 = 4
+
+    public:
+        struct DispatchResult:
+            session: mutable DebuggerSession::Session
+            method: mutable DebuggerProtocolRequest::RequestMethod
+            accepted: mutable bool
+            stop_generation: mutable u64
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def dispatch_error(session: DebuggerSession::Session, method: DebuggerProtocolRequest::RequestMethod, failure: DebuggerErrors::DebuggerError) -> DispatchResult:
+            return DispatchResult{session: session, method: method, accepted: false, stop_generation: session.stop_generation, failure: failure}
+
+        def dispatch_ok(session: DebuggerSession::Session, method: DebuggerProtocolRequest::RequestMethod) -> DispatchResult:
+            return DispatchResult{session: session, method: method, accepted: true, stop_generation: session.stop_generation, failure: DebuggerErrors::no_error()}
+
+        def map_session_error(failure: DebuggerSession::SessionError) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_INVALID_REQUEST) if failure == DebuggerSession::SessionError.InvalidTransition
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION) if failure == DebuggerSession::SessionError.StaleGeneration
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.ReplayDiverged
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.TraceCorrupt
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.ArtifactMismatch
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.Cancelled
+            return DebuggerErrors::no_error()
+
+        def operation_for_method(method: DebuggerProtocolRequest::RequestMethod) -> DebuggerCoordinator::Operation:
+            return DebuggerCoordinator::Operation.Discover if method == DebuggerProtocolRequest::RequestMethod.Discover
+            return DebuggerCoordinator::Operation.Initialize if method == DebuggerProtocolRequest::RequestMethod.Initialize
+            return DebuggerCoordinator::Operation.CreateSession if method == DebuggerProtocolRequest::RequestMethod.CreateSession
+            return DebuggerCoordinator::Operation.OpenTrace if method == DebuggerProtocolRequest::RequestMethod.OpenTrace
+            return DebuggerCoordinator::Operation.Launch if method == DebuggerProtocolRequest::RequestMethod.Launch
+            return DebuggerCoordinator::Operation.Attach if method == DebuggerProtocolRequest::RequestMethod.Attach
+            return DebuggerCoordinator::Operation.Replay if method == DebuggerProtocolRequest::RequestMethod.Replay
+            return DebuggerCoordinator::Operation.Pause if method == DebuggerProtocolRequest::RequestMethod.Pause
+            return DebuggerCoordinator::Operation.Continue if method == DebuggerProtocolRequest::RequestMethod.Continue
+            return DebuggerCoordinator::Operation.Step if method == DebuggerProtocolRequest::RequestMethod.Step
+            return DebuggerCoordinator::Operation.ReverseStep if method == DebuggerProtocolRequest::RequestMethod.ReverseStep
+            return DebuggerCoordinator::Operation.Seek if method == DebuggerProtocolRequest::RequestMethod.Seek
+            return DebuggerCoordinator::Operation.Threads if method == DebuggerProtocolRequest::RequestMethod.Threads
+            return DebuggerCoordinator::Operation.Stack if method == DebuggerProtocolRequest::RequestMethod.Stack
+            return DebuggerCoordinator::Operation.Scopes if method == DebuggerProtocolRequest::RequestMethod.Scopes
+            return DebuggerCoordinator::Operation.Variables if method == DebuggerProtocolRequest::RequestMethod.Variables
+            return DebuggerCoordinator::Operation.Evaluate if method == DebuggerProtocolRequest::RequestMethod.Evaluate
+            return DebuggerCoordinator::Operation.SetBreakpoints if method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints
+            return DebuggerCoordinator::Operation.SetDataBreakpoints if method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints
+            return DebuggerCoordinator::Operation.Checkpoint if method == DebuggerProtocolRequest::RequestMethod.Checkpoint
+            return DebuggerCoordinator::Operation.Branch if method == DebuggerProtocolRequest::RequestMethod.Branch
+            return DebuggerCoordinator::Operation.Compare if method == DebuggerProtocolRequest::RequestMethod.Compare
+            return DebuggerCoordinator::Operation.TraceVerify if method == DebuggerProtocolRequest::RequestMethod.TraceVerify
+            return DebuggerCoordinator::Operation.TraceExport if method == DebuggerProtocolRequest::RequestMethod.TraceExport
+            return DebuggerCoordinator::Operation.Detach if method == DebuggerProtocolRequest::RequestMethod.Detach
+            return DebuggerCoordinator::Operation.Terminate if method == DebuggerProtocolRequest::RequestMethod.Terminate
+            return DebuggerCoordinator::Operation.Close if method == DebuggerProtocolRequest::RequestMethod.Close
+            return DebuggerCoordinator::Operation.Cancel
+
+        def dispatch_request(session: DebuggerSession::Session, request: DebuggerProtocolRequest::Request, expected_generation: u64) -> DispatchResult:
+            requested_generation: mutable u64 = expected_generation
+            requested_generation <- request.expected_generation if expected_generation == NO_EXPECTED_GENERATION
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_REQUEST)) if not request.valid
+            coordinator: DebuggerCoordinator::Coordinator = DebuggerCoordinator::coordinator_new(session)
+            token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
+            result: DebuggerCoordinator::Result = DebuggerCoordinator::coordinator_execute(coordinator, request.id, operation_for_method(request.method), requested_generation, token)
+            return DispatchResult{session: result.coordinator.session, method: request.method, accepted: result.accepted, stop_generation: result.stop_generation, failure: result.failure}

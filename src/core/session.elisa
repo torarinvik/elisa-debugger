@@ -1,0 +1,176 @@
+include "./identity.elisa"
+include "./capabilities.elisa"
+
+module DebuggerSession:
+    private:
+        const STOP_GENERATION_INCREMENT: u64 = 1
+        const NO_EXPECTED_GENERATION: u64 = 0
+
+    public:
+        enum SessionState:
+            Created
+            Configuring
+            Launching
+            Running
+            Pausing
+            Stopped
+            Recording
+            Restoring
+            Replaying
+            Exited
+            Detached
+            Failed
+            Closed
+
+        enum SessionError:
+            None
+            InvalidTransition
+            StaleGeneration
+            Unsupported
+            Cancelled
+            ArtifactMismatch
+            TraceCorrupt
+            ReplayDiverged
+
+        struct Session:
+            id: mutable DebuggerIdentity::DebugId
+            build: mutable DebuggerIdentity::BuildIdentity
+            capabilities: mutable DebuggerCapabilities::CapabilitySet
+            state: mutable SessionState
+            stop_generation: mutable u64
+            position: mutable DebuggerIdentity::Position
+            last_error: mutable SessionError
+
+        def new_session(id: DebuggerIdentity::DebugId, build: DebuggerIdentity::BuildIdentity, capabilities: DebuggerCapabilities::CapabilitySet) -> Session:
+            return Session{
+                id: id,
+                build: build,
+                capabilities: capabilities,
+                state: SessionState.Created,
+                stop_generation: 0,
+                position: DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(0)),
+                last_error: SessionError.None
+            }
+
+        def session_can_inspect(session: Session) -> bool:
+            return session.state == SessionState.Stopped or session.state == SessionState.Replaying
+
+        def session_can_resume(session: Session) -> bool:
+            return session.state == SessionState.Stopped or session.state == SessionState.Replaying
+
+        def session_can_reverse(session: Session) -> bool:
+            return session_can_inspect(session) and session.capabilities.reverse_execution
+
+        def session_stop(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Running or session.state == SessionState.Pausing or session.state == SessionState.Recording:
+                updated.state <- SessionState.Stopped
+                updated.stop_generation <- updated.stop_generation + STOP_GENERATION_INCREMENT
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_launch(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Created or session.state == SessionState.Configuring or session.state == SessionState.Launching:
+                updated.state <- SessionState.Running
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_pause(session: Session) -> Session:
+            return session_stop(session)
+
+        def session_resume(session: Session) -> Session:
+            updated: mutable Session = session
+            if session_can_resume(session):
+                updated.state <- SessionState.Running
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_begin_replay(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Stopped and session.capabilities.history == DebuggerCapabilities::HistoryKind.Exact:
+                updated.state <- SessionState.Replaying
+                updated.stop_generation <- updated.stop_generation + STOP_GENERATION_INCREMENT
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.Unsupported
+            return updated
+
+        def session_close(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Closed:
+                updated.last_error <- SessionError.InvalidTransition
+                return updated
+            updated.state <- SessionState.Closed
+            updated.stop_generation <- updated.stop_generation + STOP_GENERATION_INCREMENT
+            updated.last_error <- SessionError.None
+            return updated
+
+        def session_configure(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Created:
+                updated.state <- SessionState.Configuring
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_begin_recording(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Running or session.state == SessionState.Stopped:
+                updated.state <- SessionState.Recording
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_begin_restore(session: Session, expected_generation: u64) -> Session:
+            updated: mutable Session = session
+            if expected_generation != NO_EXPECTED_GENERATION and expected_generation != session.stop_generation:
+                updated.last_error <- SessionError.StaleGeneration
+                return updated
+            if session.state == SessionState.Stopped or session.state == SessionState.Replaying:
+                updated.state <- SessionState.Restoring
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_finish_restore(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Restoring:
+                updated.state <- SessionState.Stopped
+                updated.stop_generation <- updated.stop_generation + STOP_GENERATION_INCREMENT
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_detach(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Running or session.state == SessionState.Stopped or session.state == SessionState.Pausing:
+                updated.state <- SessionState.Detached
+                updated.stop_generation <- updated.stop_generation + STOP_GENERATION_INCREMENT
+                updated.last_error <- SessionError.None
+                return updated
+            updated.last_error <- SessionError.InvalidTransition
+            return updated
+
+        def session_terminate(session: Session) -> Session:
+            updated: mutable Session = session
+            if session.state == SessionState.Closed or session.state == SessionState.Exited:
+                updated.last_error <- SessionError.InvalidTransition
+                return updated
+            updated.state <- SessionState.Exited
+            updated.stop_generation <- updated.stop_generation + STOP_GENERATION_INCREMENT
+            updated.last_error <- SessionError.None
+            return updated
+
+        def session_accept_generation(session: Session, expected_generation: u64) -> bool:
+            return expected_generation == NO_EXPECTED_GENERATION or expected_generation == session.stop_generation

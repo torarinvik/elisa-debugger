@@ -1,0 +1,407 @@
+# Standard DAP transport entrypoint.  It owns Content-Length framing and a
+# bounded command dispatcher for initialize, launch, stepping, pause, threads,
+# and lifecycle requests; session semantics remain in the shared modules.
+
+extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
+extern printf(format: cstr, ...) -> int can[Console]
+extern puts(text: cstr) -> int can[Console]
+
+include "../core/session.elisa"
+include "../core/capabilities.elisa"
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+include "./request.elisa"
+include "./dispatcher.elisa"
+
+module DebuggerDAPServer:
+    private:
+        const STDIN_FD: int = 0
+        const MAX_DAP_PAYLOAD: usize = 65536
+        const MAX_DAP_HEADER_DIGITS: usize = 10
+        const DAP_READ_CHUNK_SIZE: usize = 4096
+        const DAP_SERVER_SUCCESS_EXIT_CODE: i64 = 0
+        const DAP_SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
+        const DAP_NO_EXPECTED_GENERATION: u64 = 0
+        const DECODER_HEADER_STATE: u8 = 0
+        const DECODER_PAYLOAD_STATE: u8 = 2
+        const DECODER_FAILED_STATE: u8 = 3
+        const HEADER_TAIL_NONE: u8 = 0
+        const HEADER_TAIL_CR: u8 = 1
+        const HEADER_TAIL_CRLF: u8 = 2
+        const HEADER_TAIL_CRLFCR: u8 = 3
+        const ASCII_ZERO: u8 = 48
+        const ASCII_NINE: u8 = 57
+        const ASCII_CR: u8 = 13
+        const ASCII_LF: u8 = 10
+        const ASCII_SPACE: u8 = 32
+        const ASCII_QUOTE: u8 = 34
+        const ASCII_COLON: u8 = 58
+        const ASCII_C: u8 = 99
+        const ASCII_O: u8 = 111
+        const ASCII_M: u8 = 109
+        const ASCII_A: u8 = 97
+        const ASCII_N: u8 = 110
+        const ASCII_D: u8 = 100
+        const ASCII_S: u8 = 115
+        const ASCII_Q: u8 = 113
+        const ASCII_E: u8 = 101
+        const ASCII_T: u8 = 116
+        const ASCII_L: u8 = 108
+        const ASCII_G: u8 = 103
+        const ASCII_H: u8 = 104
+        const ASCII_HYPHEN: u8 = 45
+        const ASCII_UPPER_C: u8 = 67
+        const ASCII_UPPER_L: u8 = 76
+        const HEADER_PREFIX_LENGTH: u8 = 15
+        const COMMAND_PREFIX_LENGTH: u8 = 11
+        const COMMAND_PREFIX_FINAL_POSITION: u8 = 10
+        const SEQUENCE_PREFIX_LENGTH: u8 = 6
+        const SEQUENCE_PREFIX_FINAL_POSITION: u8 = 5
+        const COMMAND_HASH_INITIALIZE: u64 = 2872973214862224
+        const COMMAND_HASH_LAUNCH: u64 = 3185124275
+        const COMMAND_HASH_CONFIGURATION_DONE: u64 = 7082032881039876504
+        const COMMAND_HASH_CONTINUE: u64 = 2825521278119
+        const COMMAND_HASH_NEXT: u64 = 3377907
+        const COMMAND_HASH_STEP_BACK: u64 = 3269898090963
+        const COMMAND_HASH_PAUSE: u64 = 106440182
+        const COMMAND_HASH_THREADS: u64 = 106036245417
+        const COMMAND_HASH_DISCONNECT: u64 = 2736770871285916
+        const COMMAND_HASH_TERMINATE: u64 = 101818530709089
+        const DAP_BODY_PREFIX: cstr = "{\"seq\":"
+        const DAP_BODY_MIDDLE: cstr = ",\"type\":\"response\",\"request_seq\":"
+        const DAP_COMMAND_PREFIX: cstr = ",\"command\":\""
+        const DAP_BODY_PREFIX_LENGTH: usize = 7
+        const DAP_BODY_MIDDLE_LENGTH: usize = 33
+        const DAP_COMMAND_PREFIX_LENGTH: usize = 12
+        const DAP_JSON_TERMINATOR_LENGTH: usize = 1
+        const DAP_HASH_MULTIPLIER: u64 = 31
+        const DAP_DECIMAL_BASE: u64 = 10
+        const DAP_INIT_COMMAND: cstr = "initialize"
+        const DAP_INIT_COMMAND_LENGTH: usize = 10
+        const DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsStepBack\":false,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":false}}"
+        const DAP_INIT_SUFFIX_LENGTH: usize = 157
+        const DAP_LAUNCH_COMMAND: cstr = "launch"
+        const DAP_LAUNCH_COMMAND_LENGTH: usize = 6
+        const DAP_SIMPLE_SUCCESS_SUFFIX: cstr = "\",\"success\":true}"
+        const DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH: usize = 17
+        const DAP_CONFIGURATION_DONE_COMMAND: cstr = "configurationDone"
+        const DAP_CONFIGURATION_DONE_COMMAND_LENGTH: usize = 17
+        const DAP_CONTINUE_COMMAND: cstr = "continue"
+        const DAP_CONTINUE_COMMAND_LENGTH: usize = 8
+        const DAP_CONTINUE_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"allThreadsContinued\":true}}"
+        const DAP_CONTINUE_SUFFIX_LENGTH: usize = 53
+        const DAP_NEXT_COMMAND: cstr = "next"
+        const DAP_NEXT_COMMAND_LENGTH: usize = 4
+        const DAP_STEP_BACK_COMMAND: cstr = "stepBack"
+        const DAP_STEP_BACK_COMMAND_LENGTH: usize = 8
+        const DAP_PAUSE_COMMAND: cstr = "pause"
+        const DAP_PAUSE_COMMAND_LENGTH: usize = 5
+        const DAP_THREADS_COMMAND: cstr = "threads"
+        const DAP_THREADS_COMMAND_LENGTH: usize = 7
+        const DAP_THREADS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"threads\":[]}}"
+        const DAP_THREADS_SUFFIX_LENGTH: usize = 39
+        const DAP_DISCONNECT_COMMAND: cstr = "disconnect"
+        const DAP_DISCONNECT_COMMAND_LENGTH: usize = 10
+        const DAP_TERMINATE_COMMAND: cstr = "terminate"
+        const DAP_TERMINATE_COMMAND_LENGTH: usize = 9
+        const DAP_UNSUPPORTED_COMMAND: cstr = "unknown"
+        const DAP_UNSUPPORTED_COMMAND_LENGTH: usize = 7
+        const DAP_UNSUPPORTED_SUFFIX: cstr = "\",\"success\":false,\"message\":\"unsupported command\"}"
+        const DAP_UNSUPPORTED_SUFFIX_LENGTH: usize = 50
+        const DAP_UNAVAILABLE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"operation is unavailable\"}"
+        const DAP_UNAVAILABLE_SUFFIX_LENGTH: usize = 55
+
+        struct Decoder:
+            state: mutable u8
+            header_tail: mutable u8
+            content_length: mutable usize
+            header_digits: mutable usize
+            payload_received: mutable usize
+            command_prefix_position: mutable u8
+            in_command: mutable bool
+            command_hash: mutable u64
+            sequence_prefix_position: mutable u8
+            in_sequence: mutable bool
+            request_sequence: mutable u64
+            header_prefix_position: mutable u8
+
+        def decoder_new() -> Decoder:
+            decoder: Decoder = zeroed
+            return decoder
+
+        def command_prefix_matches(position: u8, byte: u8) -> bool:
+            return byte == ASCII_QUOTE if position == 0
+            return byte == ASCII_C if position == 1
+            return byte == ASCII_O if position == 2
+            return byte == ASCII_M if position == 3
+            return byte == ASCII_M if position == 4
+            return byte == ASCII_A if position == 5
+            return byte == ASCII_N if position == 6
+            return byte == ASCII_D if position == 7
+            return byte == ASCII_QUOTE if position == 8
+            return byte == ASCII_COLON if position == 9
+            return byte == ASCII_QUOTE if position == COMMAND_PREFIX_FINAL_POSITION
+            return false
+
+        def sequence_prefix_matches(position: u8, byte: u8) -> bool:
+            return byte == ASCII_QUOTE if position == 0
+            return byte == ASCII_S if position == 1
+            return byte == ASCII_E if position == 2
+            return byte == ASCII_Q if position == 3
+            return byte == ASCII_QUOTE if position == 4
+            return byte == ASCII_COLON if position == SEQUENCE_PREFIX_FINAL_POSITION
+            return false
+
+        def header_prefix_matches(position: u8, byte: u8) -> bool:
+            return byte == ASCII_UPPER_C if position == 0
+            return byte == ASCII_O if position == 1
+            return byte == ASCII_N if position == 2
+            return byte == ASCII_T if position == 3
+            return byte == ASCII_E if position == 4
+            return byte == ASCII_N if position == 5
+            return byte == ASCII_T if position == 6
+            return byte == ASCII_HYPHEN if position == 7
+            return byte == ASCII_UPPER_L if position == 8
+            return byte == ASCII_E if position == 9
+            return byte == ASCII_N if position == 10
+            return byte == ASCII_G if position == 11
+            return byte == ASCII_T if position == 12
+            return byte == ASCII_H if position == 13
+            return byte == ASCII_COLON if position == 14
+            return false
+
+        def decoder_accept_payload_byte(decoder: mutable Decoder&, byte: u8) -> void:
+            if not decoder.in_command:
+                if command_prefix_matches(decoder.command_prefix_position, byte):
+                    decoder.command_prefix_position <- decoder.command_prefix_position + 1
+                    if decoder.command_prefix_position == COMMAND_PREFIX_LENGTH:
+                        decoder.in_command <- true
+                        decoder.command_hash <- 0
+                else:
+                    decoder.command_prefix_position <- 1 if byte == ASCII_QUOTE else 0
+            else:
+                if byte == ASCII_QUOTE:
+                    decoder.in_command <- false
+                else:
+                    decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
+            if not decoder.in_sequence:
+                if sequence_prefix_matches(decoder.sequence_prefix_position, byte):
+                    decoder.sequence_prefix_position <- decoder.sequence_prefix_position + 1
+                    if decoder.sequence_prefix_position == SEQUENCE_PREFIX_LENGTH:
+                        decoder.in_sequence <- true
+                        decoder.request_sequence <- 0
+                else:
+                    decoder.sequence_prefix_position <- 1 if byte == ASCII_QUOTE else 0
+            else:
+                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    decoder.request_sequence <- decoder.request_sequence * DAP_DECIMAL_BASE + (byte - ASCII_ZERO).u64()
+                else:
+                    decoder.in_sequence <- false
+
+        def decoder_fail(decoder: mutable Decoder&) -> void:
+            decoder.state <- DECODER_FAILED_STATE
+
+        def decoder_accept(decoder: mutable Decoder&, byte: u8) -> bool:
+            return false if decoder.state == DECODER_FAILED_STATE
+            if decoder.state == DECODER_HEADER_STATE:
+                if decoder.header_prefix_position < HEADER_PREFIX_LENGTH:
+                    if not header_prefix_matches(decoder.header_prefix_position, byte):
+                        decoder_fail(decoder)
+                        return false
+                    decoder.header_prefix_position <- decoder.header_prefix_position + 1
+                    return false
+                if decoder.header_tail == HEADER_TAIL_NONE:
+                    if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                        return false if decoder.header_digits >= MAX_DAP_HEADER_DIGITS
+                        digit: usize = (byte - ASCII_ZERO).usize()
+                        return false if decoder.content_length > (MAX_DAP_PAYLOAD - digit) / DAP_DECIMAL_BASE.usize()
+                        decoder.content_length <- decoder.content_length * DAP_DECIMAL_BASE.usize() + digit
+                        decoder.header_digits <- decoder.header_digits + 1
+                        return false
+                    if byte == ASCII_SPACE:
+                        return false
+                    if byte == ASCII_CR:
+                        return false if decoder.header_digits == 0
+                        decoder.header_tail <- HEADER_TAIL_CR
+                        return false
+                    decoder_fail(decoder)
+                    return false
+                if decoder.header_tail == HEADER_TAIL_CR:
+                    if byte == ASCII_LF:
+                        decoder.header_tail <- HEADER_TAIL_CRLF
+                        return false
+                    decoder_fail(decoder)
+                    return false
+                if decoder.header_tail == HEADER_TAIL_CRLF:
+                    if byte == ASCII_CR:
+                        decoder.header_tail <- HEADER_TAIL_CRLFCR
+                        return false
+                    decoder_fail(decoder)
+                    return false
+                if byte == ASCII_LF and decoder.header_digits > 0 and decoder.content_length > 0:
+                    decoder.state <- DECODER_PAYLOAD_STATE
+                    decoder.payload_received <- 0
+                    decoder.header_tail <- HEADER_TAIL_NONE
+                    return false
+                decoder_fail(decoder)
+                return false
+            if decoder.state == DECODER_PAYLOAD_STATE:
+                decoder_accept_payload_byte(decoder, byte)
+                decoder.payload_received <- decoder.payload_received + 1
+                if decoder.payload_received == decoder.content_length:
+                    decoder.state <- DECODER_HEADER_STATE
+                    decoder.header_tail <- HEADER_TAIL_NONE
+                    decoder.content_length <- 0
+                    decoder.header_digits <- 0
+                    decoder.header_prefix_position <- 0
+                    decoder.payload_received <- 0
+                    decoder.command_prefix_position <- 0
+                    decoder.in_command <- false
+                    return true
+                return false
+            decoder_fail(decoder)
+            return false
+
+        def decimal_digits(value: u64) -> usize:
+            count: mutable usize = 1
+            remaining: mutable u64 = value
+            while remaining >= DAP_DECIMAL_BASE:
+                remaining <- remaining / DAP_DECIMAL_BASE
+                count <- count + 1
+            return count
+
+        def write_dynamic_response(response_sequence: u64, request_sequence: u64, command: cstr, command_length: usize, suffix: cstr, suffix_length: usize) -> void can[Console, Unsafe.PointerCast]:
+            body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + command_length + suffix_length + DAP_JSON_TERMINATOR_LENGTH).u64()
+            _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
+            _ = printf(DAP_BODY_PREFIX) can Console
+            _ = printf("%llu", response_sequence) can Console
+            _ = printf(DAP_BODY_MIDDLE) can Console
+            _ = printf("%llu", request_sequence) can Console
+            _ = printf(DAP_COMMAND_PREFIX) can Console
+            _ = printf(command) can Console
+            _ = printf(suffix) can Console
+            _ = printf("\n") can Console
+
+        def request_for(method: DebuggerProtocolRequest::RequestMethod) -> DebuggerProtocolRequest::Request:
+            request: mutable DebuggerProtocolRequest::Request = zeroed
+            request.method <- method
+            request.valid <- true
+            return request
+
+        def dispatch_command(session: DebuggerSession::Session, command_hash: u64) -> DebuggerProtocolDispatcher::DispatchResult:
+            if command_hash == COMMAND_HASH_INITIALIZE:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Initialize), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_LAUNCH:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Launch), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_CONTINUE:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Continue), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_PAUSE:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Pause), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_NEXT:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Step), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_STEP_BACK:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.ReverseStep), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_DISCONNECT:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Detach), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_TERMINATE:
+                return DebuggerProtocolDispatcher::dispatch_request(session, request_for(DebuggerProtocolRequest::RequestMethod.Terminate), DAP_NO_EXPECTED_GENERATION)
+            if command_hash == COMMAND_HASH_CONFIGURATION_DONE or command_hash == COMMAND_HASH_THREADS:
+                return DebuggerProtocolDispatcher::dispatch_ok(session, DebuggerProtocolRequest::RequestMethod.Initialize)
+            invalid: mutable DebuggerProtocolRequest::Request = zeroed
+            invalid.valid <- false
+            return DebuggerProtocolDispatcher::dispatch_request(session, invalid, DAP_NO_EXPECTED_GENERATION)
+
+        def write_failure_response(command_hash: u64, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            if command_hash == COMMAND_HASH_INITIALIZE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_INIT_COMMAND, DAP_INIT_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_LAUNCH:
+                write_dynamic_response(response_sequence, request_sequence, DAP_LAUNCH_COMMAND, DAP_LAUNCH_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_CONFIGURATION_DONE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_CONFIGURATION_DONE_COMMAND, DAP_CONFIGURATION_DONE_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_CONTINUE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_CONTINUE_COMMAND, DAP_CONTINUE_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_NEXT:
+                write_dynamic_response(response_sequence, request_sequence, DAP_NEXT_COMMAND, DAP_NEXT_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_STEP_BACK:
+                write_dynamic_response(response_sequence, request_sequence, DAP_STEP_BACK_COMMAND, DAP_STEP_BACK_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_PAUSE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_PAUSE_COMMAND, DAP_PAUSE_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_THREADS:
+                write_dynamic_response(response_sequence, request_sequence, DAP_THREADS_COMMAND, DAP_THREADS_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_DISCONNECT:
+                write_dynamic_response(response_sequence, request_sequence, DAP_DISCONNECT_COMMAND, DAP_DISCONNECT_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_TERMINATE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_TERMINATE_COMMAND, DAP_TERMINATE_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            write_dynamic_response(response_sequence, request_sequence, DAP_UNSUPPORTED_COMMAND, DAP_UNSUPPORTED_COMMAND_LENGTH, DAP_UNSUPPORTED_SUFFIX, DAP_UNSUPPORTED_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+
+        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            if not result.accepted:
+                write_failure_response(command_hash, request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_INITIALIZE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_INIT_COMMAND, DAP_INIT_COMMAND_LENGTH, DAP_INIT_SUFFIX, DAP_INIT_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_LAUNCH:
+                write_dynamic_response(response_sequence, request_sequence, DAP_LAUNCH_COMMAND, DAP_LAUNCH_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_CONFIGURATION_DONE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_CONFIGURATION_DONE_COMMAND, DAP_CONFIGURATION_DONE_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_CONTINUE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_CONTINUE_COMMAND, DAP_CONTINUE_COMMAND_LENGTH, DAP_CONTINUE_SUFFIX, DAP_CONTINUE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_NEXT:
+                write_dynamic_response(response_sequence, request_sequence, DAP_NEXT_COMMAND, DAP_NEXT_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_STEP_BACK:
+                write_dynamic_response(response_sequence, request_sequence, DAP_STEP_BACK_COMMAND, DAP_STEP_BACK_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_PAUSE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_PAUSE_COMMAND, DAP_PAUSE_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_THREADS:
+                write_dynamic_response(response_sequence, request_sequence, DAP_THREADS_COMMAND, DAP_THREADS_COMMAND_LENGTH, DAP_THREADS_SUFFIX, DAP_THREADS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_DISCONNECT:
+                write_dynamic_response(response_sequence, request_sequence, DAP_DISCONNECT_COMMAND, DAP_DISCONNECT_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_TERMINATE:
+                write_dynamic_response(response_sequence, request_sequence, DAP_TERMINATE_COMMAND, DAP_TERMINATE_COMMAND_LENGTH, DAP_SIMPLE_SUCCESS_SUFFIX, DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            write_dynamic_response(response_sequence, request_sequence, DAP_UNSUPPORTED_COMMAND, DAP_UNSUPPORTED_COMMAND_LENGTH, DAP_UNSUPPORTED_SUFFIX, DAP_UNSUPPORTED_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+
+    public:
+        def initial_session() -> DebuggerSession::Session:
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
+            return DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
+
+        def run() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            decoder: mutable Decoder = decoder_new()
+            chunk: mutable u8[DAP_READ_CHUNK_SIZE] = zeroed
+            response_sequence: mutable u64 = 1
+            session: mutable DebuggerSession::Session = initial_session()
+            while true:
+                count: isize = read(STDIN_FD, (&chunk[0]).cast[void&], DAP_READ_CHUNK_SIZE) can Console
+                break if count <= 0
+                for index in 0..<count.usize():
+                    completed: bool = decoder_accept(decoder, chunk[index])
+                    if completed:
+                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(session, decoder.command_hash)
+                        session <- result.session
+                        write_response(result, decoder.command_hash, decoder.request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                        response_sequence <- response_sequence + 1
+                    return DAP_SERVER_INVALID_FRAME_EXIT_CODE if decoder.state == DECODER_FAILED_STATE
+            return DAP_SERVER_SUCCESS_EXIT_CODE
+
+def main() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    return DebuggerDAPServer::run()

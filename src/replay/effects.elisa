@@ -1,0 +1,92 @@
+# Effect virtualization and exactness barriers.  Replay consumes recorded
+# replies and never repeats an external write.
+
+include "../core/errors.elisa"
+
+module DebuggerEffects:
+    private:
+        const EFFECT_ORACLE_CAPACITY: usize = 256
+        const EFFECT_SEQUENCE_START: u64 = 0
+
+    public:
+        enum EffectKind:
+            Clock
+            Random
+            ConsoleInput
+            ConsoleOutput
+            FileRead
+            FileWrite
+            NetworkRead
+            NetworkWrite
+            Process
+            Foreign
+
+        enum EffectMode:
+            Live
+            Recording
+            Replaying
+            Virtualized
+            Barrier
+
+        enum Exactness:
+            Exact
+            Observational
+            Incomplete
+            Diverged
+
+        struct EffectRecord:
+            sequence: mutable u64
+            kind: mutable EffectKind
+            request_hash: mutable u64
+            result_hash: mutable u64
+            result_value: mutable i64
+            suppress_external_write: mutable bool
+
+        struct EffectOracle:
+            records: mutable EffectRecord[EFFECT_ORACLE_CAPACITY]
+            count: mutable usize
+            cursor: mutable usize
+            mode: mutable EffectMode
+            exactness: mutable Exactness
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def effect_oracle_new(mode: EffectMode) -> EffectOracle:
+            oracle: mutable EffectOracle = zeroed
+            oracle.count <- 0
+            oracle.cursor <- 0
+            oracle.mode <- mode
+            oracle.exactness <- Exactness.Exact
+            oracle.last_error <- DebuggerErrors::no_error()
+            return oracle
+
+        def effect_is_external_write(kind: EffectKind) -> bool:
+            return kind == EffectKind.FileWrite or kind == EffectKind.NetworkWrite or kind == EffectKind.Process or kind == EffectKind.Foreign
+
+        def effect_oracle_record(oracle: EffectOracle, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> EffectOracle:
+            updated: mutable EffectOracle = oracle
+            return updated if oracle.mode == EffectMode.Replaying or oracle.count >= EFFECT_ORACLE_CAPACITY
+            updated.records[oracle.count] <- EffectRecord{sequence: oracle.count.u64(), kind: kind, request_hash: request_hash, result_hash: result_hash, result_value: value, suppress_external_write: effect_is_external_write(kind)}
+            updated.count <- oracle.count + 1
+            updated.exactness <- Exactness.Exact
+            return updated
+
+        def effect_oracle_replay(oracle: EffectOracle, kind: EffectKind, request_hash: u64) -> EffectOracle:
+            updated: mutable EffectOracle = oracle
+            return updated if oracle.mode != EffectMode.Replaying
+            if oracle.cursor >= oracle.count:
+                updated.exactness <- Exactness.Diverged
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
+                return updated
+            record: EffectRecord = oracle.records[oracle.cursor]
+            if record.kind != kind or record.request_hash != request_hash:
+                updated.exactness <- Exactness.Diverged
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
+                return updated
+            updated.cursor <- oracle.cursor + 1
+            return updated
+
+        def effect_oracle_is_exact(oracle: EffectOracle) -> bool:
+            return oracle.exactness == Exactness.Exact
+
+        def effect_record_suppresses_write(record: EffectRecord) -> bool:
+            return record.suppress_external_write

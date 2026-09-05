@@ -1,0 +1,178 @@
+include "./core/identity.elisa"
+include "./core/capabilities.elisa"
+include "./core/session.elisa"
+include "./core/events.elisa"
+include "./trace/format.elisa"
+include "./trace/tape.elisa"
+include "./vm/edir.elisa"
+include "./replay/replay.elisa"
+include "./replay/checkpoint.elisa"
+include "./replay/engine.elisa"
+include "./protocol/dap.elisa"
+include "./protocol/request.elisa"
+include "./inspect/values.elisa"
+include "./metadata/source.elisa"
+include "./breakpoint/breakpoint.elisa"
+include "./concurrency/model.elisa"
+include "./query/history.elisa"
+
+module DebuggerSelfTest:
+    private:
+        def check_identity() -> i64:
+            id: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(17)
+            return 1 if DebuggerIdentity::debug_id_is_zero(id)
+            position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(id)
+            return 2 if position.event != 0
+            return 0
+
+        def check_capabilities() -> i64:
+            capabilities: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::managed_capabilities()
+            return 3 if capabilities.history != DebuggerCapabilities::HistoryKind.Exact
+            return 4 if not capabilities.reverse_execution
+            return 0
+
+        def check_session() -> i64:
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+                compiler: DebuggerIdentity::debug_id(1),
+                runtime: DebuggerIdentity::debug_id(2),
+                source: DebuggerIdentity::debug_id(3),
+                target: DebuggerIdentity::debug_id(4),
+                metadata_version: 1
+            }
+            session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(9), build, DebuggerCapabilities::managed_capabilities())
+            return 5 if DebuggerSession::session_can_inspect(session)
+            session.state <- DebuggerSession::SessionState.Running
+            session <- DebuggerSession::session_stop(session)
+            return 6 if session.last_error != DebuggerSession::SessionError.None
+            return 7 if not DebuggerSession::session_can_reverse(session)
+            session <- DebuggerSession::session_begin_replay(session)
+            return 8 if session.last_error != DebuggerSession::SessionError.None
+            return 9 if not DebuggerSession::session_can_inspect(session)
+            return 0
+
+        def check_event() -> i64:
+            position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(11))
+            event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(1, 4, position, DebuggerEvents::EventKind.MutationCommit, DebuggerEvents::EventQuality.Exact, 99)
+            return 10 if not DebuggerEvents::event_is_committed(event)
+            tape: mutable DebuggerTraceTape::TraceTape = DebuggerTraceTape::trace_tape_new()
+            return 11 if not DebuggerTraceTape::trace_tape_append(tape, event)
+            return 12 if DebuggerTraceTape::trace_tape_count(tape) != 1
+            return 13 if not DebuggerTraceTape::trace_tape_is_exact(tape)
+            return 0
+
+        def check_managed_execution() -> i64:
+            program: DebuggerEDIR::Program = DebuggerEDIR::Program{version: 1, instruction_count: 1, local_count: 0, has_return: true}
+            verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_program(program)
+            return 14 if not verification.valid
+            machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+            span: DebuggerIdentity::SourceSpan = zeroed
+            constant: DebuggerEDIR::Instruction = DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: 41, b: 0, source: span}
+            machine <- DebuggerEDIR::machine_step(machine, constant)
+            result: DebuggerEDIR::Instruction = DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Add, a: 1, b: 0, source: span}
+            machine <- DebuggerEDIR::machine_step(machine, result)
+            halt: DebuggerEDIR::Instruction = DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: span}
+            machine <- DebuggerEDIR::machine_step(machine, halt)
+            return 15 if not DebuggerEDIR::machine_is_halted(machine)
+            return 16 if machine.result != 42
+            image: mutable DebuggerEDIR::ProgramImage = zeroed
+            image.program <- program
+            image.program.instruction_count <- 3
+            image.instructions[0] <- constant
+            image.instructions[1] <- result
+            image.instructions[2] <- halt
+            image_machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_run(image, DebuggerEDIR::machine_new(), 8)
+            return 17 if DebuggerEDIR::machine_is_faulted(image_machine)
+            return 18 if image_machine.result != 42
+            snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(image_machine, DebuggerIdentity::debug_id(12), 3, 77)
+            restored: DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(snapshot)
+            return 19 if not DebuggerCheckpoint::snapshot_matches_machine(snapshot, restored)
+            replay: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_new(image, DebuggerIdentity::debug_id(90))
+            replay <- DebuggerReplayEngine::replay_engine_run(replay, 8)
+            return 20 if not DebuggerReplayEngine::replay_engine_is_exact(replay)
+            return 21 if replay.machine.result != 42 or replay.event_count != 3
+            replay <- DebuggerReplayEngine::replay_engine_reverse_one(replay)
+            return 22 if replay.event_count != 2 or replay.machine.accumulator != 42
+            replay <- DebuggerReplayEngine::replay_engine_seek(replay, 3)
+            return 23 if replay.machine.result != 42
+            return 0
+
+        def check_replay_and_adapter() -> i64:
+            cursor: mutable DebuggerReplay::ReplayCursor = DebuggerReplay::replay_cursor(DebuggerIdentity::debug_id(5))
+            cursor.verified_event <- 3
+            cursor.current_event <- 3
+            return 26 if not DebuggerReplay::replay_can_reverse(cursor)
+            cursor <- DebuggerReplay::replay_reverse_one(cursor)
+            return 27 if cursor.current_event != 2
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+                compiler: DebuggerIdentity::debug_id(1),
+                runtime: DebuggerIdentity::debug_id(2),
+                source: DebuggerIdentity::debug_id(3),
+                target: DebuggerIdentity::debug_id(4),
+                metadata_version: 1
+            }
+            session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(9), build, DebuggerCapabilities::managed_capabilities())
+            adapter: DebuggerDAP::AdapterCapabilities = DebuggerDAP::capabilities_for(session)
+            return 28 if not adapter.supports_step_back
+            return 0
+
+        def check_inspection_and_history() -> i64:
+            value: mutable DebuggerValues::ValueDescriptor = zeroed
+            value.state <- DebuggerValues::ValueState.Available
+            value.value_kind <- DebuggerValues::ValueKind.Aggregate
+            value.child_count <- 2
+            value.handle.stop_generation <- 4
+            return 29 if not DebuggerValues::value_can_expand(value)
+            return 30 if DebuggerValues::value_handle_is_stale(value, 4)
+            window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: 1, last_event: 10, max_results: 10, max_steps: 100}
+            return 31 if not DebuggerHistory::query_window_is_valid(window)
+            return 0
+
+        def check_source_and_concurrency() -> i64:
+            file: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(30)
+            span: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{
+                file: file,
+                start_byte: 0,
+                end_byte: 10,
+                start_line: 2,
+                start_column: 0,
+                end_line: 2,
+                end_column: 10,
+                discriminator: 0
+            }
+            location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: file, line: 2, column: 3, discriminator: 0}
+            return 32 if not DebuggerMetadata::source_span_contains(span, location)
+            task: DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(1), parent: DebuggerIdentity::debug_id(0), state: DebuggerConcurrency::TaskState.Running, logical_time: 1, os_thread: 7}
+            return 33 if not DebuggerConcurrency::task_is_active(task)
+            return 0
+
+        def check_request_classifier() -> i64:
+            request_text: mutable u8[64] = [123, 34, 109, 101, 116, 104, 111, 100, 34, 58, 34, 100, 105, 115, 99, 111, 118, 101, 114, 34, 125]
+            request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(request_text[0], 21)
+            return 34 if not request.valid
+            return 35 if request.method != DebuggerProtocolRequest::RequestMethod.Discover
+            return 0
+
+    public:
+        def run() -> i64:
+            result: mutable i64 = check_identity()
+            return result if result != 0
+            result <- check_capabilities()
+            return result if result != 0
+            result <- check_session()
+            return result if result != 0
+            result <- check_event()
+            return result if result != 0
+            result <- check_managed_execution()
+            return result if result != 0
+            result <- check_replay_and_adapter()
+            return result if result != 0
+            result <- check_inspection_and_history()
+            return result if result != 0
+            result <- check_source_and_concurrency()
+            return result if result != 0
+            result <- check_request_classifier()
+            return result if result != 0
+            return 0
+
+def main() -> i64:
+    return DebuggerSelfTest::run()

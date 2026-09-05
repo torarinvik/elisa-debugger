@@ -1,0 +1,82 @@
+# Durable bundle manifest.  It records the compatibility inputs needed before
+# opening event chunks or claiming exact replay.
+
+include "./binary.elisa"
+include "./format.elisa"
+include "../core/identity.elisa"
+
+module DebuggerTraceManifest:
+    private:
+        const MANIFEST_MAGIC: u32 = 1296649556
+        const MANIFEST_SCHEMA: u16 = 1
+
+    public:
+        enum ManifestStatus:
+            Exact
+            Partial
+            Observational
+            Corrupt
+
+        struct BundleManifest:
+            schema: mutable u16
+            compiler: mutable DebuggerIdentity::DebugId
+            runtime: mutable DebuggerIdentity::DebugId
+            source: mutable DebuggerIdentity::DebugId
+            target: mutable DebuggerIdentity::DebugId
+            metadata_version: mutable u32
+            pointer_bits: mutable u16
+            status: mutable ManifestStatus
+            first_event: mutable u64
+            last_event: mutable u64
+            checkpoint_count: mutable u64
+
+        def manifest_new(build: DebuggerIdentity::BuildIdentity, status: ManifestStatus) -> BundleManifest:
+            return BundleManifest{schema: MANIFEST_SCHEMA, compiler: build.compiler, runtime: build.runtime, source: build.source, target: build.target, metadata_version: build.metadata_version, pointer_bits: 64, status: status, first_event: 0, last_event: 0, checkpoint_count: 0}
+
+        def manifest_status_code(status: ManifestStatus) -> u16:
+            return 0 if status == ManifestStatus.Exact
+            return 1 if status == ManifestStatus.Partial
+            return 2 if status == ManifestStatus.Observational
+            return 3
+
+        def manifest_status_from_code(code: u16) -> ManifestStatus:
+            return ManifestStatus.Exact if code == 0
+            return ManifestStatus.Partial if code == 1
+            return ManifestStatus.Observational if code == 2
+            return ManifestStatus.Corrupt
+
+        def manifest_encode(manifest: BundleManifest) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, MANIFEST_MAGIC)
+            writer <- DebuggerTraceBinary::writer_put_u16(writer, manifest.schema)
+            writer <- DebuggerTraceBinary::writer_put_u16(writer, manifest_status_code(manifest.status))
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.compiler.value)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.runtime.value)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.source.value)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.target.value)
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, manifest.metadata_version)
+            writer <- DebuggerTraceBinary::writer_put_u16(writer, manifest.pointer_bits)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.first_event)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.last_event)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, manifest.checkpoint_count)
+            return writer
+
+        def manifest_decode(reader: mutable DebuggerTraceBinary::ByteReader&) -> BundleManifest:
+            decoded: mutable BundleManifest = zeroed
+            magic: u32 = DebuggerTraceBinary::reader_take_u32(reader)
+            decoded.schema <- DebuggerTraceBinary::reader_take_u16(reader)
+            decoded.status <- manifest_status_from_code(DebuggerTraceBinary::reader_take_u16(reader))
+            decoded.compiler <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
+            decoded.runtime <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
+            decoded.source <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
+            decoded.target <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
+            decoded.metadata_version <- DebuggerTraceBinary::reader_take_u32(reader)
+            decoded.pointer_bits <- DebuggerTraceBinary::reader_take_u16(reader)
+            decoded.first_event <- DebuggerTraceBinary::reader_take_u64(reader)
+            decoded.last_event <- DebuggerTraceBinary::reader_take_u64(reader)
+            decoded.checkpoint_count <- DebuggerTraceBinary::reader_take_u64(reader)
+            decoded.schema <- 0 if magic != MANIFEST_MAGIC
+            return decoded
+
+        def manifest_is_replayable(manifest: BundleManifest) -> bool:
+            return manifest.schema == MANIFEST_SCHEMA and manifest.status == ManifestStatus.Exact and manifest.pointer_bits == 64 and manifest.last_event >= manifest.first_event

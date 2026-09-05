@@ -1,0 +1,79 @@
+# Provider-neutral execution contract.  CLI, DAP, and remote adapters consume
+# these values instead of importing a native or managed implementation.
+
+include "../core/identity.elisa"
+include "../core/capabilities.elisa"
+include "../core/errors.elisa"
+
+module DebuggerEngine:
+    private:
+        const INITIAL_STOP_GENERATION: u64 = 0
+        const NO_REQUEST: u64 = 0
+        const STOP_GENERATION_INCREMENT: u64 = 1
+
+    public:
+        enum StopReason:
+            Entry
+            Breakpoint
+            Step
+            ReverseStep
+            Exception
+            Fault
+            Pause
+            DataBreakpoint
+            Deadlock
+            Exited
+
+        enum ProviderState:
+            Created
+            Configuring
+            Launching
+            Running
+            Pausing
+            Stopped
+            Recording
+            Restoring
+            Replaying
+            Exited
+            Failed
+            Closed
+
+        struct ExecutionPosition:
+            position: mutable DebuggerIdentity::Position
+            stop_generation: mutable u64
+            reason: mutable StopReason
+            state: mutable ProviderState
+
+        struct Provider:
+            kind: mutable DebuggerCapabilities::EngineKind
+            state: mutable ProviderState
+            capabilities: mutable DebuggerCapabilities::CapabilitySet
+            stop_generation: mutable u64
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def provider_new(kind: DebuggerCapabilities::EngineKind, capabilities: DebuggerCapabilities::CapabilitySet) -> Provider:
+            return Provider{kind: kind, state: ProviderState.Created, capabilities: capabilities, stop_generation: INITIAL_STOP_GENERATION, last_error: DebuggerErrors::no_error()}
+
+        def provider_can_inspect(provider: Provider) -> bool:
+            return provider.state == ProviderState.Stopped or provider.state == ProviderState.Replaying or provider.state == ProviderState.Exited
+
+        def provider_can_resume(provider: Provider) -> bool:
+            return provider.state == ProviderState.Stopped or provider.state == ProviderState.Pausing or provider.state == ProviderState.Replaying
+
+        def provider_accept_generation(provider: Provider, expected: u64) -> bool:
+            return expected == NO_REQUEST or expected == provider.stop_generation
+
+        def provider_mark_stopped(provider: Provider, position: DebuggerIdentity::Position, reason: StopReason) -> Provider:
+            updated: mutable Provider = provider
+            updated.state <- ProviderState.Stopped
+            updated.stop_generation <- provider.stop_generation + STOP_GENERATION_INCREMENT
+            return updated
+
+        def provider_mark_failed(provider: Provider, failure: DebuggerErrors::DebuggerError) -> Provider:
+            updated: mutable Provider = provider
+            updated.state <- ProviderState.Failed
+            updated.last_error <- failure
+            return updated
+
+        def execution_position(provider: Provider, position: DebuggerIdentity::Position, reason: StopReason) -> ExecutionPosition:
+            return ExecutionPosition{position: position, stop_generation: provider.stop_generation, reason: reason, state: provider.state}

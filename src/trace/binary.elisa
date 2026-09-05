@@ -1,0 +1,105 @@
+# Canonical little-endian byte reader/writer.  Durable trace fields never use
+# host struct layout, pointer values, or implicit integer endianness.
+
+module DebuggerTraceBinary:
+    private:
+        const BINARY_BUFFER_CAPACITY: usize = 4096
+        const BYTE_BITS: u64 = 8
+        const BYTE_MASK: u64 = 255
+
+    public:
+        struct ByteWriter:
+            bytes: mutable u8[BINARY_BUFFER_CAPACITY]
+            length: mutable usize
+            failed: mutable bool
+
+        struct ByteReader:
+            bytes: mutable u8[BINARY_BUFFER_CAPACITY]
+            length: mutable usize
+            offset: mutable usize
+            failed: mutable bool
+
+        def writer_new() -> ByteWriter:
+            writer: mutable ByteWriter = zeroed
+            writer.length <- 0
+            writer.failed <- false
+            return writer
+
+        def writer_put_byte(writer: ByteWriter, value: u8) -> ByteWriter:
+            updated: mutable ByteWriter = writer
+            if writer.length >= BINARY_BUFFER_CAPACITY:
+                updated.failed <- true
+                return updated
+            updated.bytes[writer.length] <- value
+            updated.length <- writer.length + 1
+            return updated
+
+        def writer_put_u16(writer: ByteWriter, value: u16) -> ByteWriter:
+            updated: mutable ByteWriter = writer_put_byte(writer, (value.u64() & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value.u64() >> BYTE_BITS) & BYTE_MASK).u8())
+            return updated
+
+        def writer_put_u32(writer: ByteWriter, value: u32) -> ByteWriter:
+            updated: mutable ByteWriter = writer
+            updated <- writer_put_byte(updated, (value.u64() & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value.u64() >> BYTE_BITS) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value.u64() >> (BYTE_BITS * 2)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value.u64() >> (BYTE_BITS * 3)) & BYTE_MASK).u8())
+            return updated
+
+        def writer_put_u64(writer: ByteWriter, value: u64) -> ByteWriter:
+            updated: mutable ByteWriter = writer
+            updated <- writer_put_byte(updated, (value & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 1)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 2)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 3)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 4)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 5)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 6)) & BYTE_MASK).u8())
+            updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 7)) & BYTE_MASK).u8())
+            return updated
+
+        def writer_checksum(writer: ByteWriter) -> u64:
+            checksum: mutable u64 = 1469598103934665603
+            for index in 0..<writer.length:
+                checksum <- (checksum ^ writer.bytes[index].u64()) * 1099511628211
+            return checksum
+
+        def writer_is_valid(writer: ByteWriter) -> bool:
+            return not writer.failed
+
+        def reader_new(bytes: u8&, length: usize) -> ByteReader:
+            reader: mutable ByteReader = zeroed
+            return reader if length > BINARY_BUFFER_CAPACITY
+            for index in 0..<length:
+                reader.bytes[index] <- bytes[index]
+            reader.length <- length
+            reader.offset <- 0
+            reader.failed <- false
+            return reader
+
+        def reader_take_byte(reader: mutable ByteReader&) -> u8:
+            return 0 if reader.failed or reader.offset >= reader.length
+            value: u8 = reader.bytes[reader.offset]
+            reader.offset <- reader.offset + 1
+            return value
+
+        def reader_take_u16(reader: mutable ByteReader&) -> u16:
+            low: u64 = reader_take_byte(reader).u64()
+            high: u64 = reader_take_byte(reader).u64()
+            return (low | (high << BYTE_BITS)).u16()
+
+        def reader_take_u32(reader: mutable ByteReader&) -> u32:
+            value: mutable u64 = 0
+            for shift in 0..<4:
+                value <- value | (reader_take_byte(reader).u64() << (BYTE_BITS * shift.u64()))
+            return value.u32()
+
+        def reader_take_u64(reader: mutable ByteReader&) -> u64:
+            value: mutable u64 = 0
+            for shift in 0..<8:
+                value <- value | (reader_take_byte(reader).u64() << (BYTE_BITS * shift.u64()))
+            return value
+
+        def reader_is_valid(reader: ByteReader) -> bool:
+            return not reader.failed and reader.offset <= reader.length

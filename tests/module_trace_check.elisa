@@ -1,0 +1,45 @@
+# Compile-time coverage for canonical trace encoding and durable storage.
+
+include "../src/trace/binary.elisa"
+include "../src/trace/storage.elisa"
+include "../src/trace/manifest.elisa"
+
+def main() -> i64:
+    writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    writer <- DebuggerTraceBinary::writer_put_u16(writer, 4660)
+    writer <- DebuggerTraceBinary::writer_put_u32(writer, 2309737967)
+    writer <- DebuggerTraceBinary::writer_put_u64(writer, 1234605616436508552)
+    return 1 if not DebuggerTraceBinary::writer_is_valid(writer)
+    reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(writer.bytes[0], writer.length)
+    return 2 if DebuggerTraceBinary::reader_take_u16(reader) != 4660
+    return 3 if DebuggerTraceBinary::reader_take_u32(reader) != 2309737967
+    return 4 if DebuggerTraceBinary::reader_take_u64(reader) != 1234605616436508552
+    return 5 if not DebuggerTraceBinary::reader_is_valid(reader)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: 1, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: 4953205138095159339}
+    chunk.payload[0] <- 42
+    chunk.payload_length <- 1
+    chunk.checksum <- 4953205138095159339
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    return 6 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    return 7 if encoded.length != 49
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(encoded.bytes[0], encoded.length)
+    return 8 if scan.status != DebuggerTraceStorage::StorageStatus.Ready or scan.verified_chunks != 1
+    truncated: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(encoded.bytes[0], 48)
+    return 9 if truncated.status != DebuggerTraceStorage::StorageStatus.Truncated
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(1, 0)
+    combined: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for encoded_index in 0..<encoded.length:
+        combined <- DebuggerTraceBinary::writer_put_byte(combined, encoded.bytes[encoded_index])
+    for footer_index in 0..<footer.length:
+        combined <- DebuggerTraceBinary::writer_put_byte(combined, footer.bytes[footer_index])
+    scan_with_footer: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(combined.bytes[0], combined.length)
+    return 10 if scan_with_footer.status != DebuggerTraceStorage::StorageStatus.Ready
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
+    manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest.last_event <- 4
+    manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    manifest_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(manifest_bytes.bytes[0], manifest_bytes.length)
+    decoded: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_decode(manifest_reader)
+    return 11 if not DebuggerTraceManifest::manifest_is_replayable(decoded) or decoded.compiler.value != 1 or decoded.last_event != 4
+    return 0

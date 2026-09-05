@@ -1,0 +1,66 @@
+# Typed inspection results distinguish unavailable, optimized-away, invalid,
+# and redacted values.  A client must never turn those states into zeroes.
+
+include "../core/identity.elisa"
+
+module DebuggerValues:
+    private:
+        const VALUE_MAX_PAGE_SIZE: u64 = 256
+        const VALUE_MAX_DEPTH: u32 = 64
+    public:
+        enum ValueKind:
+            Void
+            Signed
+            Unsigned
+            Floating
+            Boolean
+            Text
+            Aggregate
+            Reference
+            Error
+
+        enum ValueState:
+            Available
+            Unavailable
+            OptimizedAway
+            Invalid
+            Uninitialized
+            Redacted
+
+        struct ValueHandle:
+            stop_generation: mutable u64
+            id: mutable DebuggerIdentity::DebugId
+
+        struct ValueDescriptor:
+            handle: mutable ValueHandle
+            name: mutable DebuggerIdentity::DebugId
+            value_kind: mutable ValueKind
+            state: mutable ValueState
+            type_id: mutable DebuggerIdentity::DebugId
+            byte_size: mutable u64
+            child_count: mutable u64
+
+        struct ValuePage:
+            first: mutable u64
+            count: mutable u64
+            next: mutable u64
+            depth: mutable u32
+            cycle: mutable bool
+            truncated: mutable bool
+
+        def value_can_expand(value: ValueDescriptor) -> bool:
+            return value.state == ValueState.Available and value.child_count > 0 and value.value_kind == ValueKind.Aggregate
+
+        def value_handle_is_stale(value: ValueDescriptor, stop_generation: u64) -> bool:
+            return value.handle.stop_generation != stop_generation
+
+        def value_window_start(value: ValueDescriptor, requested: u64) -> u64:
+            return requested if requested < value.child_count else value.child_count
+
+        def value_expand(value: ValueDescriptor, requested: u64, depth: u32, already_seen: bool) -> ValuePage:
+            first: u64 = value_window_start(value, requested)
+            remaining: u64 = value.child_count - first
+            count: u64 = VALUE_MAX_PAGE_SIZE if remaining > VALUE_MAX_PAGE_SIZE else remaining
+            return ValuePage{first: first, count: 0, next: first, depth: depth, cycle: true, truncated: false} if already_seen
+            return ValuePage{first: first, count: 0, next: first, depth: depth, cycle: false, truncated: true} if depth >= VALUE_MAX_DEPTH
+            return ValuePage{first: first, count: count, next: first + count, depth: depth, cycle: false, truncated: count < remaining}

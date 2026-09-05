@@ -1,0 +1,73 @@
+# Length-prefixed protocol framing shared by DAP and the advanced session API.
+
+module DebuggerProtocolFraming:
+    private:
+        const FRAME_MAX_PAYLOAD: usize = 65536
+        const FRAME_MAX_HEADER_DIGITS: usize = 10
+        const ASCII_ZERO: u8 = 48
+        const ASCII_NINE: u8 = 57
+        const ASCII_SPACE: u8 = 32
+        const ASCII_NEWLINE: u8 = 10
+
+    public:
+        enum FrameDecoderState:
+            Header
+            Payload
+            Trailer
+            Failed
+
+        struct FrameDecoder:
+            state: mutable FrameDecoderState
+            payload: mutable u8[FRAME_MAX_PAYLOAD]
+            payload_length: mutable usize
+            payload_received: mutable usize
+            header_value: mutable usize
+            header_digits: mutable usize
+
+        def frame_decoder_new() -> FrameDecoder:
+            decoder: FrameDecoder = zeroed
+            decoder.state <- FrameDecoderState.Header
+            return decoder
+
+        def frame_decoder_reset(decoder: mutable FrameDecoder&) -> void:
+            decoder.state <- FrameDecoderState.Header
+            decoder.payload_length <- 0
+            decoder.payload_received <- 0
+            decoder.header_value <- 0
+            decoder.header_digits <- 0
+
+        def frame_decoder_accept(decoder: mutable FrameDecoder&, byte: u8) -> bool:
+            return false if decoder.state == FrameDecoderState.Failed
+            if decoder.state == FrameDecoderState.Header:
+                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    return false if decoder.header_digits >= FRAME_MAX_HEADER_DIGITS
+                    digit: usize = (byte - ASCII_ZERO).usize()
+                    return false if decoder.header_value > (FRAME_MAX_PAYLOAD - digit) / 10
+                    decoder.header_value <- decoder.header_value * 10 + digit
+                    decoder.header_digits <- decoder.header_digits + 1
+                    return false
+                if byte == ASCII_SPACE and decoder.header_digits > 0:
+                    decoder.payload_length <- decoder.header_value
+                    decoder.payload_received <- 0
+                    decoder.state <- FrameDecoderState.Payload if decoder.payload_length > 0 else FrameDecoderState.Trailer
+                    return false
+                decoder.state <- FrameDecoderState.Failed
+                return false
+            if decoder.state == FrameDecoderState.Payload:
+                return false if decoder.payload_received >= decoder.payload_length
+                decoder.payload[decoder.payload_received] <- byte
+                decoder.payload_received <- decoder.payload_received + 1
+                decoder.state <- FrameDecoderState.Trailer if decoder.payload_received == decoder.payload_length
+                return false
+            if decoder.state == FrameDecoderState.Trailer:
+                if byte == ASCII_NEWLINE:
+                    return true
+                decoder.state <- FrameDecoderState.Failed
+                return false
+            return false
+
+        def frame_decoder_is_failed(decoder: mutable FrameDecoder&) -> bool:
+            return decoder.state == FrameDecoderState.Failed
+
+        def frame_decoder_length(decoder: mutable FrameDecoder&) -> usize:
+            return decoder.payload_length

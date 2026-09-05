@@ -1,0 +1,134 @@
+# Chunked durable trace storage.  The in-memory encoder is also used by the
+# file writer, making round-trip and malformed-input tests independent of libc.
+
+include "./binary.elisa"
+include "./format.elisa"
+
+extern write(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
+
+module DebuggerTraceStorage:
+    private:
+        const TRACE_MAGIC_0: u8 = 69
+        const TRACE_MAGIC_1: u8 = 76
+        const TRACE_MAGIC_2: u8 = 84
+        const TRACE_MAGIC_3: u8 = 82
+        const TRACE_FORMAT_VERSION: u16 = 1
+        const TRACE_FOOTER_MAGIC: u32 = 1380270920
+        const TRACE_HEADER_BYTES: usize = 48
+        const TRACE_FOOTER_BYTES: usize = 20
+        const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = 4096
+        const TRACE_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const TRACE_HASH_PRIME: u64 = 1099511628211
+        const TRACE_KIND_MAX: u16 = 5
+
+    public:
+        enum StorageStatus:
+            Ready
+            Oversized
+            Invalid
+            Truncated
+            IoFailure
+
+        struct StoredChunk:
+            header: mutable DebuggerTrace::ChunkHeader
+            payload: mutable u8[TRACE_STORAGE_PAYLOAD_CAPACITY]
+            payload_length: mutable usize
+            checksum: mutable u64
+
+        struct StorageScan:
+            status: mutable StorageStatus
+            verified_chunks: mutable u64
+            verified_event: mutable u64
+            next_sequence: mutable u64
+
+        def storage_encode_chunk(chunk: StoredChunk) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_0)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_1)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_2)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_3)
+            writer <- DebuggerTraceBinary::writer_put_u16(writer, TRACE_FORMAT_VERSION)
+            writer <- DebuggerTraceBinary::writer_put_u16(writer, chunk.header.kind.u16())
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.header.sequence)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.header.first_event)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.header.last_event)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.payload_length.u64())
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.checksum)
+            for index in 0..<chunk.payload_length:
+                writer <- DebuggerTraceBinary::writer_put_byte(writer, chunk.payload[index])
+            return writer
+
+        def storage_write_chunk(fd: int, chunk: StoredChunk) -> StorageStatus can[Blocking.IO]:
+            writer: DebuggerTraceBinary::ByteWriter = storage_encode_chunk(chunk)
+            return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
+            written: isize = write(fd, (&writer.bytes[0]).cast[void&], writer.length) can Blocking.IO
+            return StorageStatus.IoFailure if written != writer.length.isize()
+            return StorageStatus.Ready
+
+        def storage_encode_footer(next_sequence: u64, verified_event: u64) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, TRACE_FOOTER_MAGIC)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, next_sequence)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, verified_event)
+            return writer
+
+        def storage_write_footer(fd: int, next_sequence: u64, verified_event: u64) -> StorageStatus can[Blocking.IO]:
+            writer: DebuggerTraceBinary::ByteWriter = storage_encode_footer(next_sequence, verified_event)
+            return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
+            written: isize = write(fd, (&writer.bytes[0]).cast[void&], writer.length) can Blocking.IO
+            return StorageStatus.IoFailure if written != writer.length.isize()
+            return StorageStatus.Ready
+
+        def storage_scan_bytes(bytes: u8&, length: usize) -> StorageScan:
+            scan: mutable StorageScan = zeroed
+            scan.status <- StorageStatus.Ready
+            scan.next_sequence <- 0
+            offset: mutable usize = 0
+            while offset < length:
+                if length - offset == TRACE_FOOTER_BYTES:
+                    footer: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_FOOTER_BYTES)
+                    footer_magic: u32 = DebuggerTraceBinary::reader_take_u32(footer)
+                    footer_sequence: u64 = DebuggerTraceBinary::reader_take_u64(footer)
+                    footer_event: u64 = DebuggerTraceBinary::reader_take_u64(footer)
+                    if footer_magic != TRACE_FOOTER_MAGIC or footer_sequence != scan.next_sequence or footer_event != scan.verified_event:
+                        scan.status <- StorageStatus.Invalid
+                    return scan
+                if length - offset < TRACE_HEADER_BYTES:
+                    scan.status <- StorageStatus.Truncated
+                    return scan
+                reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], length - offset)
+                return StorageScan{status: StorageStatus.Truncated, verified_chunks: 0, verified_event: 0, next_sequence: 0} if not DebuggerTraceBinary::reader_is_valid(reader)
+                magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                magic3: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                version: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+                kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+                sequence: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                first_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                last_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                payload_length: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                checksum: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                if magic0 != TRACE_MAGIC_0 or magic1 != TRACE_MAGIC_1 or magic2 != TRACE_MAGIC_2 or magic3 != TRACE_MAGIC_3 or version != TRACE_FORMAT_VERSION or kind > TRACE_KIND_MAX or sequence != scan.next_sequence or last_event < first_event:
+                    scan.status <- StorageStatus.Invalid
+                    return scan
+                if payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY.u64():
+                    scan.status <- StorageStatus.Oversized
+                    return scan
+                if payload_length > (length - offset - TRACE_HEADER_BYTES).u64():
+                    scan.status <- StorageStatus.Truncated
+                    return scan
+                computed: mutable u64 = TRACE_HASH_OFFSET_BASIS
+                for payload_index in 0..<payload_length.usize():
+                    computed <- (computed ^ bytes[offset + TRACE_HEADER_BYTES + payload_index].u64()) * TRACE_HASH_PRIME
+                if checksum != computed:
+                    scan.status <- StorageStatus.Invalid
+                    return scan
+                scan.verified_chunks <- scan.verified_chunks + 1
+                scan.verified_event <- last_event
+                scan.next_sequence <- scan.next_sequence + 1
+                offset <- offset + TRACE_HEADER_BYTES + payload_length.usize()
+            return scan
+
+        def storage_footer_magic() -> u32:
+            return TRACE_FOOTER_MAGIC

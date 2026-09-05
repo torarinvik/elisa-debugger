@@ -1,0 +1,115 @@
+# Bounded managed replay engine.  Every step snapshots logical machine state
+# before execution, which makes reverse-step and seek exact within the retained
+# window without pretending a native heap copy is a resumable checkpoint.
+
+include "../core/identity.elisa"
+include "../core/events.elisa"
+include "../vm/edir.elisa"
+include "./checkpoint.elisa"
+
+module DebuggerReplayEngine:
+    private:
+        const REPLAY_HISTORY_CAPACITY: usize = 64
+        const REPLAY_ROOT_BRANCH: u64 = 0
+        const REPLAY_SCHEMA_VERSION: u32 = 1
+        const REPLAY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const REPLAY_HASH_PRIME: u64 = 1099511628211
+
+    public:
+        enum EngineError:
+            None
+            HistoryFull
+            HistoryUnavailable
+            ExecutionFault
+            StepLimit
+
+        struct ReplayEngine:
+            image: mutable DebuggerEDIR::ProgramImage
+            machine: mutable DebuggerEDIR::Machine
+            history: mutable DebuggerCheckpoint::MachineSnapshot[REPLAY_HISTORY_CAPACITY]
+            events: mutable DebuggerEvents::EventEnvelope[REPLAY_HISTORY_CAPACITY]
+            event_count: mutable usize
+            recording: mutable DebuggerIdentity::DebugId
+            branch: mutable DebuggerIdentity::DebugId
+            engine_error: mutable EngineError
+
+        def replay_engine_new(image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> ReplayEngine:
+            engine: ReplayEngine = zeroed
+            engine.image <- image
+            engine.machine <- DebuggerEDIR::machine_new()
+            engine.recording <- recording
+            engine.branch <- DebuggerIdentity::debug_id(REPLAY_ROOT_BRANCH)
+            engine.engine_error <- EngineError.None
+            return engine
+
+        def replay_engine_position(engine: ReplayEngine) -> DebuggerIdentity::Position:
+            position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(engine.recording)
+            position.branch <- engine.branch
+            position.event <- engine.event_count.u64()
+            position.statement <- DebuggerIdentity::debug_id(engine.machine.program_counter)
+            return position
+
+        def replay_engine_state_hash(engine: ReplayEngine) -> u64:
+            hash: mutable u64 = REPLAY_HASH_OFFSET_BASIS + engine.machine.program_counter
+            hash <- hash * REPLAY_HASH_PRIME + engine.machine.accumulator.u64()
+            hash <- hash * REPLAY_HASH_PRIME + engine.machine.result.u64()
+            hash <- hash * REPLAY_HASH_PRIME + engine.machine.return_stack_pointer.u64()
+            hash <- hash * REPLAY_HASH_PRIME + engine.event_count.u64()
+            return hash
+
+        def replay_engine_step(engine: ReplayEngine) -> ReplayEngine:
+            updated: mutable ReplayEngine = engine
+            return updated if engine.machine.halted or engine.machine.faulted
+            if engine.event_count >= REPLAY_HISTORY_CAPACITY:
+                updated.engine_error <- EngineError.HistoryFull
+                return updated
+            snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(engine.machine, DebuggerIdentity::debug_id(engine.event_count.u64()), engine.event_count.u64(), replay_engine_state_hash(engine))
+            updated.history[engine.event_count] <- snapshot
+            instruction: DebuggerEDIR::Instruction = engine.image.instructions[engine.machine.program_counter.usize()]
+            updated.machine <- DebuggerEDIR::machine_step(engine.machine, instruction)
+            position: DebuggerIdentity::Position = replay_engine_position(engine)
+            updated.events[engine.event_count] <- DebuggerEvents::event_envelope(REPLAY_SCHEMA_VERSION, engine.event_count.u64(), position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, replay_engine_state_hash(updated))
+            updated.event_count <- updated.event_count + 1
+            if updated.machine.faulted:
+                updated.engine_error <- EngineError.ExecutionFault
+            return updated
+
+        def replay_engine_run(engine: ReplayEngine, max_steps: u64) -> ReplayEngine:
+            updated: mutable ReplayEngine = engine
+            start: u64 = updated.event_count.u64()
+            while not updated.machine.halted and not updated.machine.faulted and updated.event_count.u64() - start < max_steps:
+                updated <- replay_engine_step(updated)
+                break if updated.engine_error != EngineError.None
+            if not updated.machine.halted and not updated.machine.faulted and updated.event_count.u64() - start >= max_steps:
+                updated.engine_error <- EngineError.StepLimit
+            return updated
+
+        def replay_engine_reverse_one(engine: ReplayEngine) -> ReplayEngine:
+            updated: mutable ReplayEngine = engine
+            if engine.event_count == 0:
+                updated.engine_error <- EngineError.HistoryUnavailable
+                return updated
+            target: usize = engine.event_count - 1
+            snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[target]
+            updated.machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
+            updated.event_count <- target
+            updated.engine_error <- EngineError.None
+            return updated
+
+        def replay_engine_seek(engine: ReplayEngine, target: usize) -> ReplayEngine:
+            updated: mutable ReplayEngine = engine
+            if target > REPLAY_HISTORY_CAPACITY:
+                updated.engine_error <- EngineError.HistoryUnavailable
+                return updated
+            if target < engine.event_count:
+                snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[target]
+                updated.machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
+                updated.event_count <- target
+                updated.engine_error <- EngineError.None
+                return updated
+            while updated.event_count < target and not updated.machine.halted and not updated.machine.faulted:
+                updated <- replay_engine_step(updated)
+            return updated
+
+        def replay_engine_is_exact(engine: ReplayEngine) -> bool:
+            return engine.engine_error == EngineError.None and not engine.machine.faulted

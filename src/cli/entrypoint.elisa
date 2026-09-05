@@ -1,0 +1,72 @@
+# Small interactive/machine CLI.  It shares the protocol dispatcher, so a
+# terminal command cannot bypass generation or lifecycle rules.
+
+include "../core/session.elisa"
+include "../core/capabilities.elisa"
+include "../core/identity.elisa"
+include "../protocol/request.elisa"
+include "../protocol/dispatcher.elisa"
+
+extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
+extern printf(format: cstr, ...) -> int can[Console]
+extern puts(text: cstr) -> int can[Console]
+
+module DebuggerCLIEntrypoint:
+    private:
+        const STDIN_FD: int = 0
+        const LINE_CAPACITY: usize = 256
+        const ASCII_NEWLINE: u8 = 10
+        const ASCII_SPACE: u8 = 32
+        const HASH_MULTIPLIER: u64 = 31
+        const EXIT_OK: i64 = 0
+        const EXIT_INPUT_ERROR: i64 = 2
+        const HASH_LAUNCH: u64 = 3185124275
+        const HASH_PAUSE: u64 = 106440182
+        const HASH_CONTINUE: u64 = 2825521278119
+        const HASH_STEP: u64 = 3540684
+        const HASH_REVERSE_STEP: u64 = 96211551034117326
+        const HASH_CLOSE: u64 = 94756344
+
+        def method_from_hash(hash: u64) -> DebuggerProtocolRequest::RequestMethod:
+            return DebuggerProtocolRequest::RequestMethod.Launch if hash == HASH_LAUNCH
+            return DebuggerProtocolRequest::RequestMethod.Pause if hash == HASH_PAUSE
+            return DebuggerProtocolRequest::RequestMethod.Continue if hash == HASH_CONTINUE
+            return DebuggerProtocolRequest::RequestMethod.Step if hash == HASH_STEP
+            return DebuggerProtocolRequest::RequestMethod.ReverseStep if hash == HASH_REVERSE_STEP
+            return DebuggerProtocolRequest::RequestMethod.Close if hash == HASH_CLOSE
+            return DebuggerProtocolRequest::RequestMethod.Unknown
+
+        def initial_session() -> DebuggerSession::Session:
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
+            return DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
+
+    public:
+        def run_cli() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            session: mutable DebuggerSession::Session = initial_session()
+            line: mutable u8[LINE_CAPACITY] = zeroed
+            length: mutable usize = 0
+            hash: mutable u64 = 0
+            while true:
+                count: isize = read(STDIN_FD, (&line[length]).cast[void&], 1) can Console
+                break if count <= 0
+                byte: u8 = line[length]
+                if byte == ASCII_NEWLINE:
+                    method: DebuggerProtocolRequest::RequestMethod = method_from_hash(hash)
+                    request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: 0, has_id: false, expected_generation: 0, valid: method != DebuggerProtocolRequest::RequestMethod.Unknown}
+                    result: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(session, request, 0)
+                    session <- result.session
+                    if result.accepted:
+                        _ = printf("ok generation=%llu\n", session.stop_generation) can Console
+                    else:
+                        _ = printf("error code=%d detail=%u\n", result.failure.code, result.failure.detail) can Console
+                    length <- 0
+                    hash <- 0
+                else:
+                    return EXIT_INPUT_ERROR if length + 1 >= LINE_CAPACITY
+                    if byte != ASCII_SPACE:
+                        hash <- hash * HASH_MULTIPLIER + byte.u64()
+                    length <- length + 1
+            return EXIT_OK
+
+def main() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    return DebuggerCLIEntrypoint::run_cli()

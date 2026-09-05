@@ -1,0 +1,79 @@
+# Lossless trace stream primitives.  The durable writer stores complete
+# chunks, validates checksums, and reports the last verified prefix after a
+# torn write or corruption.
+
+include "./format.elisa"
+
+module DebuggerTraceStream:
+    private:
+        const TRACE_CHUNK_CAPACITY: usize = 8
+        const TRACE_MAX_PAYLOAD: usize = 512
+        const TRACE_CHECKSUM_SEED: u64 = 0
+        const TRACE_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const TRACE_HASH_PRIME: u64 = 1099511628211
+
+    public:
+        enum TraceReadStatus:
+            Empty
+            Complete
+            Truncated
+            Corrupt
+            ResourceLimit
+
+        struct TraceChunk:
+            header: mutable DebuggerTrace::ChunkHeader
+            payload: mutable u8[TRACE_MAX_PAYLOAD]
+            payload_received: mutable usize
+            checksum: mutable u64
+            complete: mutable bool
+
+        struct TraceStream:
+            chunks: mutable TraceChunk[TRACE_CHUNK_CAPACITY]
+            chunk_count: mutable usize
+            verified_event: mutable u64
+            status: mutable TraceReadStatus
+
+        def trace_stream_new() -> TraceStream:
+            stream: TraceStream = zeroed
+            stream.status <- TraceReadStatus.Empty
+            return stream
+
+        def trace_stream_begin(stream: TraceStream, header: DebuggerTrace::ChunkHeader) -> TraceStream:
+            updated: mutable TraceStream = stream
+            return updated if stream.chunk_count >= TRACE_CHUNK_CAPACITY or header.payload_length > TRACE_MAX_PAYLOAD.u64()
+            updated.chunks[stream.chunk_count].header <- header
+            updated.chunks[stream.chunk_count].payload_received <- 0
+            updated.chunks[stream.chunk_count].checksum <- TRACE_HASH_OFFSET_BASIS
+            updated.chunks[stream.chunk_count].complete <- false
+            updated.status <- TraceReadStatus.Truncated
+            return updated
+
+        def trace_stream_append(stream: TraceStream, byte: u8) -> TraceStream:
+            updated: mutable TraceStream = stream
+            return updated if stream.chunk_count >= TRACE_CHUNK_CAPACITY
+            index: usize = stream.chunk_count
+            chunk: mutable TraceChunk = stream.chunks[index]
+            return updated if chunk.payload_received >= TRACE_MAX_PAYLOAD
+            chunk.payload[chunk.payload_received] <- byte
+            chunk.checksum <- (chunk.checksum ^ byte.u64()) * TRACE_HASH_PRIME
+            chunk.payload_received <- chunk.payload_received + 1
+            updated.chunks[index] <- chunk
+            if chunk.payload_received == chunk.header.payload_length.usize():
+                chunk.complete <- true
+                updated.chunks[index] <- chunk
+                updated.chunk_count <- updated.chunk_count + 1
+                updated.verified_event <- chunk.header.last_event
+                updated.status <- TraceReadStatus.Complete if chunk.checksum == chunk.header.checksum else TraceReadStatus.Corrupt
+            return updated
+
+        def trace_stream_verify(stream: TraceStream) -> TraceReadStatus:
+            return TraceReadStatus.Empty if stream.chunk_count == 0
+            for index in 0..<stream.chunk_count:
+                chunk: TraceChunk = stream.chunks[index]
+                return TraceReadStatus.Truncated if not chunk.complete
+                return TraceReadStatus.Corrupt if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
+                return TraceReadStatus.Corrupt if chunk.checksum != chunk.header.checksum
+            return TraceReadStatus.Complete
+
+        def trace_stream_verified_event(stream: TraceStream) -> u64:
+            return stream.verified_event

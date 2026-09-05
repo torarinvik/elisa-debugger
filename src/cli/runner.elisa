@@ -1,0 +1,56 @@
+# Machine and interactive command execution share this runner.  Rendering is
+# intentionally outside it so JSON clients and terminals observe identical
+# lifecycle, generation, and capability decisions.
+
+include "./commands.elisa"
+include "../protocol/dispatcher.elisa"
+include "../protocol/request.elisa"
+
+module DebuggerCLIRunner:
+    private:
+        const COMMAND_NONE: u64 = 0
+        const COMMAND_HASH_CONTINUE: u64 = 2825521278119
+        const COMMAND_HASH_NEXT: u64 = 3377907
+        const COMMAND_HASH_STEP: u64 = 3540684
+        const COMMAND_HASH_REVERSE_STEP: u64 = 96211551034117326
+        const COMMAND_HASH_PAUSE: u64 = 106440182
+        const COMMAND_HASH_CLOSE: u64 = 94756344
+
+    public:
+        enum OutputMode:
+            Human
+            Json
+            Quiet
+
+        struct Runner:
+            session: mutable DebuggerSession::Session
+            mode: mutable OutputMode
+            last_status: mutable DebuggerErrors::DebuggerError
+
+        def runner_new(session: DebuggerSession::Session, mode: OutputMode) -> Runner:
+            return Runner{session: session, mode: mode, last_status: DebuggerErrors::no_error()}
+
+        def command_hash_byte(hash: u64, byte: u8) -> u64:
+            return hash * 31 + byte.u64()
+
+        def command_from_hash(hash: u64) -> DebuggerCLI::Command:
+            return DebuggerCLI::Command.Continue if hash == COMMAND_HASH_CONTINUE
+            return DebuggerCLI::Command.Step if hash == COMMAND_HASH_NEXT
+            return DebuggerCLI::Command.Step if hash == COMMAND_HASH_STEP
+            return DebuggerCLI::Command.ReverseStep if hash == COMMAND_HASH_REVERSE_STEP
+            return DebuggerCLI::Command.Pause if hash == COMMAND_HASH_PAUSE
+            return DebuggerCLI::Command.Quit if hash == COMMAND_HASH_CLOSE
+            return DebuggerCLI::Command.Run
+
+        def runner_dispatch(runner: Runner, request: DebuggerProtocolRequest::Request, expected_generation: u64) -> Runner:
+            updated: mutable Runner = runner
+            result: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(runner.session, request, expected_generation)
+            updated.session <- result.session
+            updated.last_status <- result.failure
+            return updated
+
+        def runner_can_inspect(runner: Runner) -> bool:
+            return DebuggerSession::session_can_inspect(runner.session)
+
+        def runner_is_closed(runner: Runner) -> bool:
+            return runner.session.state == DebuggerSession::SessionState.Closed

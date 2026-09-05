@@ -1,0 +1,231 @@
+# EDIR is the managed execution representation.  This first instruction slice
+# is intentionally small and typed; the verifier is the security boundary for
+# future trace loading and remote execution.
+
+include "../core/identity.elisa"
+
+module DebuggerEDIR:
+    private:
+        const EDIR_PROGRAM_VERSION: u32 = 1
+        const EDIR_MAX_INSTRUCTIONS: usize = 256
+        const EDIR_MAX_LOCALS: usize = 32
+        const EDIR_MAX_LOCALS_INDEX: i64 = 32
+        const EDIR_MAX_CALL_DEPTH: usize = 16
+        const EDIR_STEP_INCREMENT: u64 = 1
+
+    public:
+        enum Opcode:
+            Nop
+            Constant
+            Add
+            Subtract
+            LoadLocal
+            StoreLocal
+            Multiply
+            Divide
+            Negate
+            CompareEqual
+            Jump
+            BranchZero
+            Call
+            Return
+
+        enum VerificationError:
+            None
+            UnknownVersion
+            InvalidOpcode
+            InvalidRegister
+            InvalidTarget
+            MissingReturn
+            InvalidSourceRange
+            InvalidCallDepth
+
+        struct Instruction:
+            opcode: mutable Opcode
+            a: mutable i64
+            b: mutable i64
+            source: mutable DebuggerIdentity::SourceSpan
+
+        struct Program:
+            version: mutable u32
+            instruction_count: mutable u64
+            local_count: mutable u64
+            has_return: mutable bool
+
+        struct ProgramImage:
+            program: mutable Program
+            instructions: mutable Instruction[EDIR_MAX_INSTRUCTIONS]
+
+        struct Verification:
+            valid: mutable bool
+            verification_error: mutable VerificationError
+            instruction: mutable u64
+
+        struct Machine:
+            program_counter: mutable u64
+            accumulator: mutable i64
+            locals: mutable i64[EDIR_MAX_LOCALS]
+            return_stack: mutable u64[EDIR_MAX_CALL_DEPTH]
+            return_stack_pointer: mutable usize
+            halted: mutable bool
+            faulted: mutable bool
+            steps: mutable u64
+            result: mutable i64
+
+        def verify_program(program: Program) -> Verification:
+            verification: Verification = zeroed
+            verification.valid <- true
+            verification.verification_error <- VerificationError.None
+            verification.instruction <- 0
+            if program.version != EDIR_PROGRAM_VERSION:
+                verification.valid <- false
+                verification.verification_error <- VerificationError.UnknownVersion
+                return verification
+            if program.instruction_count == 0 or not program.has_return:
+                verification.valid <- false
+                verification.verification_error <- VerificationError.MissingReturn
+                return verification
+            if program.instruction_count > EDIR_MAX_INSTRUCTIONS.u64():
+                verification.valid <- false
+                verification.verification_error <- VerificationError.InvalidTarget
+                return verification
+            if program.local_count > EDIR_MAX_LOCALS_INDEX.u64():
+                verification.valid <- false
+                verification.verification_error <- VerificationError.InvalidRegister
+                return verification
+            return verification
+
+        def verification_failure(reason: VerificationError, instruction: u64) -> Verification:
+            return Verification{valid: false, verification_error: reason, instruction: instruction}
+
+        def verify_image(image: mutable ProgramImage&) -> Verification:
+            program_verification: Verification = verify_program(image.program)
+            return program_verification if not program_verification.valid
+            saw_return: mutable bool = false
+            for index in 0..<image.program.instruction_count.usize():
+                instruction: Instruction = image.instructions[index]
+                if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal:
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= image.program.local_count.i64()
+                if instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero or instruction.opcode == Opcode.Call:
+                    return verification_failure(VerificationError.InvalidTarget, index.u64()) if instruction.a < 0 or instruction.a >= image.program.instruction_count.i64()
+                if instruction.opcode == Opcode.Call and instruction.b > EDIR_MAX_CALL_DEPTH.i64():
+                    return verification_failure(VerificationError.InvalidCallDepth, index.u64())
+                return verification_failure(VerificationError.InvalidSourceRange, index.u64()) if instruction.source.end_byte < instruction.source.start_byte
+                saw_return <- true if instruction.opcode == Opcode.Return
+            return verification_failure(VerificationError.MissingReturn, image.program.instruction_count) if not saw_return
+            return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
+
+        def machine_new() -> Machine:
+            machine: Machine = zeroed
+            machine.halted <- false
+            machine.faulted <- false
+            machine.steps <- 0
+            machine.return_stack_pointer <- 0
+            return machine
+
+        def machine_step(machine: Machine, instruction: Instruction) -> Machine:
+            updated: mutable Machine = machine
+            if machine.halted:
+                return updated
+            if instruction.opcode == Opcode.Nop:
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Constant:
+                updated.accumulator <- instruction.a
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Add:
+                updated.accumulator <- updated.accumulator + instruction.a
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Subtract:
+                updated.accumulator <- updated.accumulator - instruction.a
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Multiply:
+                updated.accumulator <- updated.accumulator * instruction.a
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Divide:
+                if instruction.a == 0:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.accumulator / instruction.a
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Negate:
+                updated.accumulator <- 0 - updated.accumulator
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.CompareEqual:
+                if updated.accumulator == instruction.a:
+                    updated.accumulator <- 1
+                else:
+                    updated.accumulator <- 0
+                updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.LoadLocal:
+                if instruction.a < 0 or instruction.a >= EDIR_MAX_LOCALS_INDEX:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.accumulator <- updated.locals[instruction.a.usize()]
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.StoreLocal:
+                if instruction.a < 0 or instruction.a >= EDIR_MAX_LOCALS_INDEX:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.locals[instruction.a.usize()] <- updated.accumulator
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Jump:
+                if instruction.a < 0:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    updated.program_counter <- instruction.a.u64()
+            if instruction.opcode == Opcode.BranchZero:
+                if updated.accumulator == 0:
+                    if instruction.a < 0:
+                        updated.faulted <- true
+                        updated.halted <- true
+                    else:
+                        updated.program_counter <- instruction.a.u64()
+                else:
+                    updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
+            if instruction.opcode == Opcode.Call:
+                if instruction.a < 0:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    if updated.return_stack_pointer >= EDIR_MAX_CALL_DEPTH:
+                        updated.faulted <- true
+                        updated.halted <- true
+                    else:
+                        updated.return_stack[updated.return_stack_pointer] <- updated.program_counter + EDIR_STEP_INCREMENT
+                        updated.return_stack_pointer <- updated.return_stack_pointer + 1
+                        updated.program_counter <- instruction.a.u64()
+            if instruction.opcode == Opcode.Return:
+                updated.result <- updated.accumulator
+                if updated.return_stack_pointer == 0:
+                    updated.halted <- true
+                else:
+                    updated.return_stack_pointer <- updated.return_stack_pointer - 1
+                    updated.program_counter <- updated.return_stack[updated.return_stack_pointer]
+            updated.steps <- updated.steps + EDIR_STEP_INCREMENT
+            return updated
+
+        def machine_run(image: mutable ProgramImage&, machine: Machine, max_steps: u64) -> Machine:
+            updated: mutable Machine = machine
+            verification: Verification = verify_image(image)
+            if not verification.valid:
+                updated.faulted <- true
+                updated.halted <- true
+                return updated
+            while not updated.halted and not updated.faulted and updated.steps < max_steps:
+                if updated.program_counter >= image.program.instruction_count:
+                    updated.faulted <- true
+                    updated.halted <- true
+                else:
+                    instruction: Instruction = image.instructions[updated.program_counter.usize()]
+                    updated <- machine_step(updated, instruction)
+            return updated
+
+        def machine_is_halted(machine: Machine) -> bool:
+            return machine.halted
+
+        def machine_is_faulted(machine: Machine) -> bool:
+            return machine.faulted

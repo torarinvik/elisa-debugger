@@ -1,0 +1,70 @@
+# Replay cursor, checkpoint, and immutable branch lineage.
+
+include "../core/identity.elisa"
+
+module DebuggerReplay:
+    public:
+        enum ReplayError:
+            None
+            NoHistory
+            CheckpointUnavailable
+            Diverged
+            InvalidBranch
+
+        struct Checkpoint:
+            id: mutable DebuggerIdentity::DebugId
+            recording: mutable DebuggerIdentity::DebugId
+            event: mutable u64
+            state_hash: mutable u64
+            parent: mutable DebuggerIdentity::DebugId
+
+        struct ReplayCursor:
+            recording: mutable DebuggerIdentity::DebugId
+            branch: mutable DebuggerIdentity::DebugId
+            current_event: mutable u64
+            verified_event: mutable u64
+            replay_error: mutable ReplayError
+
+        struct Branch:
+            id: mutable DebuggerIdentity::DebugId
+            parent: mutable DebuggerIdentity::DebugId
+            fork_event: mutable u64
+            state_hash: mutable u64
+            intervention_count: mutable u64
+
+        def replay_cursor(recording: DebuggerIdentity::DebugId) -> ReplayCursor:
+            return ReplayCursor{
+                recording: recording,
+                branch: DebuggerIdentity::debug_id(0),
+                current_event: 0,
+                verified_event: 0,
+                replay_error: ReplayError.None
+            }
+
+        def replay_can_reverse(cursor: ReplayCursor) -> bool:
+            return cursor.replay_error == ReplayError.None and cursor.current_event > 0 and cursor.current_event <= cursor.verified_event
+
+        def replay_seek(cursor: ReplayCursor, event: u64) -> ReplayCursor:
+            updated: mutable ReplayCursor = cursor
+            if cursor.replay_error != ReplayError.None or event > cursor.verified_event:
+                updated.replay_error <- ReplayError.NoHistory
+                return updated
+            updated.current_event <- event
+            return updated
+
+        def replay_reverse_one(cursor: ReplayCursor) -> ReplayCursor:
+            updated: mutable ReplayCursor = cursor
+            if not replay_can_reverse(cursor):
+                updated.replay_error <- ReplayError.NoHistory
+                return updated
+            updated.current_event <- updated.current_event - 1
+            return updated
+
+        def branch_from(cursor: ReplayCursor, id: DebuggerIdentity::DebugId, state_hash: u64) -> Branch:
+            return Branch{
+                id: id,
+                parent: cursor.branch,
+                fork_event: cursor.current_event,
+                state_hash: state_hash,
+                intervention_count: 0
+            }

@@ -1,0 +1,45 @@
+# Compile-time coverage for trace, replay, and inspection modules.
+
+include "../src/trace/stream.elisa"
+include "../src/replay/effects.elisa"
+include "../src/inspect/locations.elisa"
+include "../src/inspect/evaluate.elisa"
+include "../src/query/evaluator.elisa"
+include "../src/concurrency/analysis.elisa"
+include "../src/replay/branches.elisa"
+include "../src/metadata/types.elisa"
+
+def main() -> i64:
+    expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
+    evaluated: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, 8)
+    return 1 if evaluated.value != 9 or not DebuggerErrors::error_is_ok(evaluated.failure)
+    oracle: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
+    oracle <- DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11, 22, 3)
+    return 2 if oracle.count != 1 or not oracle.records[0].suppress_external_write
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    oracle <- DebuggerEffects::effect_oracle_replay(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11)
+    return 3 if not DebuggerEffects::effect_oracle_is_exact(oracle) or oracle.cursor != 1
+    header: DebuggerTrace::ChunkHeader = DebuggerTrace::ChunkHeader{schema: 1, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: 4953205138095159339}
+    stream: mutable DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(DebuggerTraceStream::trace_stream_new(), header)
+    stream <- DebuggerTraceStream::trace_stream_append(stream, 42)
+    return 4 if DebuggerTraceStream::trace_stream_verify(stream) != DebuggerTraceStream::TraceReadStatus.Complete
+    index: mutable DebuggerQueryIndex::EventIndex = DebuggerQueryIndex::event_index_new()
+    index <- DebuggerQueryIndex::event_index_append(index, DebuggerQueryIndex::EventIndexEntry{event: 4, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 99})
+    token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(100)
+    query: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_first(index, DebuggerQueryEvaluator::Predicate{kind: DebuggerQueryEvaluator::PredicateKind.StateHashEquals, value: 99, second: 0}, 0, 8, token, 8)
+    return 5 if query.status != DebuggerQueryEvaluator::QueryStatus.Match or query.event != 4
+    task: DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(1), parent: DebuggerIdentity::debug_id(0), state: DebuggerConcurrency::TaskState.Blocked, logical_time: 1, os_thread: 1}
+    edge: DebuggerConcurrency::WaitEdge = DebuggerConcurrency::WaitEdge{waiter: task.id, owner: task.id, resource: DebuggerIdentity::debug_id(2), kind: DebuggerConcurrency::SynchronizationKind.Mutex}
+    graph: mutable DebuggerConcurrencyAnalysis::WaitGraph = DebuggerConcurrencyAnalysis::wait_graph_add(DebuggerConcurrencyAnalysis::wait_graph_new(), edge)
+    return 6 if not DebuggerConcurrencyAnalysis::wait_graph_has_cycle(graph, task)
+    clock: DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_tick(DebuggerConcurrencyAnalysis::vector_clock_new(), 0)
+    later: DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_tick(clock, 0)
+    return 7 if not DebuggerConcurrencyAnalysis::vector_clock_happens_before(clock, later)
+    branches: mutable DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(DebuggerBranches::branches_new(), DebuggerIdentity::debug_id(0), 3, 7)
+    branch_id: DebuggerIdentity::DebugId = branches.branches[0].id
+    branches <- DebuggerBranches::branches_add_intervention(branches, branch_id, DebuggerBranches::Intervention{event: 4, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(8), value_hash: 99})
+    return 8 if branches.branches[0].intervention_count != 1
+    metadata: mutable DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_type(DebuggerTypeMetadata::metadata_new(), DebuggerTypeMetadata::TypeInfo{id: DebuggerIdentity::debug_id(10), kind: DebuggerTypeMetadata::TypeKind.Struct, name: DebuggerIdentity::debug_id(11), size: 16, alignment: 8, child_count: 2, pointee: DebuggerIdentity::debug_id(0), flags: 0})
+    found_type: DebuggerTypeMetadata::TypeInfo = DebuggerTypeMetadata::metadata_find_type(metadata, DebuggerIdentity::debug_id(10))
+    return 9 if found_type.child_count != 2
+    return 0

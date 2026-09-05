@@ -1,0 +1,70 @@
+# Remote session transport state.  Authentication is deliberately delegated to
+# an externally provisioned tunnel or platform security binding; this module
+# never invents cryptography or accepts unauthenticated process control.
+
+include "../core/errors.elisa"
+include "../security/policy.elisa"
+
+module DebuggerRemote:
+    private:
+        const REMOTE_PROTOCOL_MAJOR: u32 = 1
+        const REMOTE_HEARTBEAT_LIMIT: u64 = 3
+
+    public:
+        enum RemoteState:
+            Disconnected
+            Authenticating
+            Connected
+            Draining
+            Failed
+
+        struct RemoteHandshake:
+            protocol_major: mutable u32
+            protocol_minor: mutable u32
+            engine: mutable u32
+            trace_schema: mutable u32
+            authenticated: mutable bool
+
+        struct RemoteChannel:
+            state: mutable RemoteState
+            handshake: mutable RemoteHandshake
+            missed_heartbeats: mutable u64
+            policy: mutable DebuggerSecurity::Policy
+            bytes_received: mutable u64
+
+        def remote_new(policy: DebuggerSecurity::Policy) -> RemoteChannel:
+            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, missed_heartbeats: 0, policy: policy, bytes_received: 0}
+
+        def remote_begin(channel: RemoteChannel) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            updated.state <- RemoteState.Authenticating
+            return updated
+
+        def remote_accept_handshake(channel: RemoteChannel, handshake: RemoteHandshake) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            if handshake.protocol_major != REMOTE_PROTOCOL_MAJOR or not handshake.authenticated:
+                updated.state <- RemoteState.Failed
+                return updated
+            updated.handshake <- handshake
+            updated.state <- RemoteState.Connected
+            updated.missed_heartbeats <- 0
+            return updated
+
+        def remote_receive(channel: RemoteChannel, bytes: u64) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Connected
+            return updated if bytes > channel.policy.quotas.remote_payload_bytes
+            return updated if channel.bytes_received > channel.policy.quotas.remote_payload_bytes - bytes
+            updated.bytes_received <- channel.bytes_received + bytes
+            updated.missed_heartbeats <- 0
+            return updated
+
+        def remote_heartbeat_missed(channel: RemoteChannel) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            updated.missed_heartbeats <- channel.missed_heartbeats + 1
+            if updated.missed_heartbeats >= REMOTE_HEARTBEAT_LIMIT:
+                updated.state <- RemoteState.Draining
+            return updated
+
+        def remote_is_connected(channel: RemoteChannel) -> bool:
+            return channel.state == RemoteState.Connected and channel.handshake.authenticated

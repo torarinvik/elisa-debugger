@@ -1,0 +1,29 @@
+include "../src/inspect/managed.elisa"
+include "../src/vm/edir.elisa"
+include "../src/core/identity.elisa"
+
+const PROGRAM_VERSION: u32 = 1
+const LOCAL_COUNT: u64 = 2
+const INSTRUCTION_COUNT: u64 = 4
+const RUN_BUDGET: u64 = 8
+const LOCAL_PAGE_SIZE: usize = 1
+const EXPECTED_ACCUMULATOR: i64 = 7
+
+def main() -> i64:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: LOCAL_COUNT, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: EXPECTED_ACCUMULATOR, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: 0, b: 0, source: zeroed}
+    image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.LoadLocal, a: 0, b: 0, source: zeroed}
+    image.instructions[3] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    engine: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_new(image, DebuggerIdentity::debug_id(1))
+    DebuggerReplayEngine::replay_engine_run(engine, RUN_BUDGET)
+    frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedInspection::current_frame(engine)
+    return 1 if frame.accumulator != EXPECTED_ACCUMULATOR or not DebuggerManagedInspection::frame_is_current(frame, engine)
+    page: DebuggerManagedInspection::LocalPage = DebuggerManagedInspection::locals_page(engine, 0, LOCAL_PAGE_SIZE)
+    first_entry: DebuggerManagedInspection::LocalSnapshot = page.entries[0]
+    return 2 if page.count != LOCAL_PAGE_SIZE or first_entry.value != EXPECTED_ACCUMULATOR or page.next != 1 or page.complete
+    second_page: DebuggerManagedInspection::LocalPage = DebuggerManagedInspection::locals_page(engine, 1, LOCAL_PAGE_SIZE)
+    second_entry: DebuggerManagedInspection::LocalSnapshot = second_page.entries[0]
+    return 3 if second_entry.value != 0
+    return 0

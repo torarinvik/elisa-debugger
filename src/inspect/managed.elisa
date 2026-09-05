@@ -1,0 +1,55 @@
+# Provider-neutral managed inspection.  Adapters can expose these bounded
+# snapshots through DAP, the session service, or a CLI without reading VM
+# internals or inventing handles in the host language.
+
+include "../replay/engine.elisa"
+include "../core/identity.elisa"
+
+module DebuggerManagedInspection:
+    private:
+        const LOCAL_PAGE_CAPACITY: usize = 32
+        const FIRST_LOCAL_INDEX: usize = 0
+        const NO_NEXT_LOCAL: usize = 0
+
+    public:
+        struct FrameSnapshot:
+            id: mutable DebuggerIdentity::DebugId
+            instruction: mutable DebuggerIdentity::DebugId
+            event: mutable u64
+            accumulator: mutable i64
+            result: mutable i64
+            return_depth: mutable usize
+
+        struct LocalSnapshot:
+            index: mutable usize
+            value: mutable i64
+            available: mutable bool
+
+        struct LocalPage:
+            entries: mutable LocalSnapshot[LOCAL_PAGE_CAPACITY]
+            count: mutable usize
+            next: mutable usize
+            complete: mutable bool
+
+        def current_frame(engine: DebuggerReplayEngine::ReplayEngine) -> FrameSnapshot:
+            return FrameSnapshot{id: DebuggerIdentity::debug_id(engine.machine.program_counter), instruction: DebuggerIdentity::debug_id(engine.machine.program_counter), event: engine.event_count.u64(), accumulator: engine.machine.accumulator, result: engine.machine.result, return_depth: engine.machine.return_stack_pointer}
+
+        def locals_page(engine: DebuggerReplayEngine::ReplayEngine, offset: usize, requested: usize) -> LocalPage:
+            page: mutable LocalPage = zeroed
+            limit: mutable usize = requested
+            limit <- LOCAL_PAGE_CAPACITY if requested == 0 or requested > LOCAL_PAGE_CAPACITY
+            machine: DebuggerEDIR::Machine = engine.machine
+            available: usize = engine.image.program.local_count.usize()
+            return page if offset >= available
+            remaining: usize = available - offset
+            count: usize = limit if limit < remaining else remaining
+            for index in 0..<count:
+                local_index: usize = offset + index
+                page.entries[index] <- LocalSnapshot{index: local_index, value: machine.locals[local_index], available: true}
+            page.count <- count
+            page.next <- offset + count if offset + count < available else NO_NEXT_LOCAL
+            page.complete <- page.next == NO_NEXT_LOCAL
+            return page
+
+        def frame_is_current(frame: FrameSnapshot, engine: DebuggerReplayEngine::ReplayEngine) -> bool:
+            return frame.event == engine.event_count.u64() and frame.instruction.value == engine.machine.program_counter

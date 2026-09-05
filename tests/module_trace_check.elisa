@@ -91,6 +91,14 @@ def check_corrupt_bundle() -> i64:
     return 1 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.verified_chunks != 0
     return 0
 
+def check_corrupt_bundle_state() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
+    bundle.state <- DebuggerTraceBundle::BundleState.Corrupt
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
+    return 1 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
+    return 0
+
 def check_pre_manifest() -> i64:
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
     chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: TEST_CHUNK_CHECKSUM}
@@ -219,9 +227,13 @@ def main() -> i64:
     return 15 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_scan(bundle))
     seal_error: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_seal(bundle, false)
     return 16 if not DebuggerErrors::error_is_ok(seal_error) or not DebuggerTraceBundle::bundle_is_replayable(bundle)
+    sealed_bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
+    _ = DebuggerTraceBundle::bundle_seal(sealed_bundle, false)
+    return 50 if DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_seal(sealed_bundle, true))
     verification: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
     return 17 if verification.state != DebuggerTraceVerify::VerificationState.Exact or not verification.replayable
     return 40 if check_corrupt_bundle() != 0
+    return 49 if check_corrupt_bundle_state() != 0
     partial_verification: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(encoded.bytes[0], TEST_TRUNCATED_CHUNK_BYTES)
     return 18 if partial_verification.state != DebuggerTraceVerify::VerificationState.Partial
     checkpoint_machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()

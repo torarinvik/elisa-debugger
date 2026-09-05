@@ -7,6 +7,8 @@ include "../core/capabilities.elisa"
 include "./messages.elisa"
 include "./request.elisa"
 include "./dispatcher.elisa"
+include "./managed_service.elisa"
+include "../engine/default_image.elisa"
 
 module DebuggerSessionService:
     private:
@@ -74,3 +76,21 @@ module DebuggerSessionService:
             service.session <- result.session
             return DebuggerProtocol::response_ok(request.request_id, result.stop_generation) if result.accepted
             return DebuggerProtocol::response_error(request.request_id, result.failure, result.stop_generation)
+
+        # Concrete managed-provider entrypoint. The lightweight Service above
+        # remains useful for provider state-machine tests; this helper exposes
+        # the same envelope contract while executing the EDIR engine.
+        def managed_new(session: DebuggerSession::Session, recording: u64) -> DebuggerManagedService::Service:
+            return DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(recording))
+
+        def service_handle_managed(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocol::RequestEnvelope) -> DebuggerProtocol::ResponseEnvelope:
+            session: DebuggerSession::Session = service.controller.session
+            validation: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION_MISMATCH) if request.session_id != NO_SESSION_ID and request.session_id != session.id.value
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_MESSAGE_KIND) if request.kind != DebuggerProtocol::MessageKind.Request
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, session.stop_generation.u32()) if request.expected_stop_generation != NO_EXPECTED_STOP_GENERATION and request.expected_stop_generation != session.stop_generation
+            return DebuggerProtocol::response_error(request.request_id, validation, session.stop_generation) if not DebuggerErrors::error_is_ok(validation)
+            typed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: request_method(request.method), id: request.request_id, has_id: true, expected_generation: request.expected_stop_generation, target_event: request.target_event, valid: true}
+            result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, typed)
+            return DebuggerProtocol::response_ok(request.request_id, service.controller.session.stop_generation) if result.accepted
+            return DebuggerProtocol::response_error(request.request_id, result.failure, service.controller.session.stop_generation)

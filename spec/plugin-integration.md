@@ -13,7 +13,9 @@ standard input/output transport. Forward the user's `program`, `args`,
 DAP `launch` request. Do not invoke a shell to assemble a command line.
 
 The adapter must be started once per debug session. The plugin should keep the
-returned session identity and use the normal DAP request/event lifecycle. A
+returned session identity and use the normal DAP request/event lifecycle. The
+managed adapter routes launch, pause, continue, next, step back, and stack
+positions through the same EDIR session engine used by the Elisa facade. A
 timeline or branch panel may open a second connection to the session service,
 but it must use the same session and stop generation rather than launch a
 second target.
@@ -41,4 +43,3 @@ All clients must handle cancellation, progress, stale stop generations,
 truncated history, missing source artifacts, and capability changes. A client
 that only supports ordinary debugging can ignore timeline extensions while
 using the same launch/stack/variables operations.
-

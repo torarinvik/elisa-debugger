@@ -10,8 +10,11 @@ managed provider facade. Construct it with a verified `ProgramImage`, dispatch
 typed requests through `service_dispatch`, and read bounded frames or locals
 with `service_frame` and `service_locals`. This path executes the same replay
 engine directly, including reverse-step and validated `targetEvent` seek.
-The standalone protocol executables currently dispatch session transitions;
-they are not wired to this managed execution facade.
+The DAP executable and CLI use this facade for managed launch, pause, resume,
+step, reverse-step, and seek operations. The standalone headless server keeps
+the provider-neutral lifecycle dispatcher for now; in-process clients that
+need managed execution can call `DebuggerSessionService::managed_new` and
+`service_handle_managed` with the same envelope model.
 
 ## VS Code
 

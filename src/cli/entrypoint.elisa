@@ -4,8 +4,10 @@
 include "../core/session.elisa"
 include "../core/capabilities.elisa"
 include "../core/identity.elisa"
+include "../engine/default_image.elisa"
 include "../protocol/request.elisa"
 include "../protocol/dispatcher.elisa"
+include "../protocol/managed_service.elisa"
 
 extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
 extern printf(format: cstr, ...) -> int can[Console]
@@ -58,9 +60,16 @@ module DebuggerCLIEntrypoint:
             build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
             return DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
 
+        def dispatch_request(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request) -> DebuggerProtocolDispatcher::DispatchResult:
+            if request.method == DebuggerProtocolRequest::RequestMethod.Launch or request.method == DebuggerProtocolRequest::RequestMethod.Pause or request.method == DebuggerProtocolRequest::RequestMethod.Continue or request.method == DebuggerProtocolRequest::RequestMethod.Step or request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep or request.method == DebuggerProtocolRequest::RequestMethod.Seek or request.method == DebuggerProtocolRequest::RequestMethod.Close:
+                result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
+            return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, 0)
+
     public:
         def run_cli() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             session: mutable DebuggerSession::Session = initial_session()
+            service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
             line: mutable u8[LINE_CAPACITY] = zeroed
             length: mutable usize = 0
             hash: mutable u64 = 0
@@ -71,8 +80,9 @@ module DebuggerCLIEntrypoint:
                 if byte == ASCII_NEWLINE:
                     method: DebuggerProtocolRequest::RequestMethod = method_from_hash(hash)
                     request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: 0, has_id: false, expected_generation: 0, target_event: 0, valid: method != DebuggerProtocolRequest::RequestMethod.Unknown}
-                    result: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(session, request, 0)
+                    result: DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
                     session <- result.session
+                    service.controller.session <- result.session
                     if result.accepted:
                         _ = printf("ok generation=%llu\n", session.stop_generation) can Console
                     else:

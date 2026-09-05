@@ -12,6 +12,12 @@ module DebuggerConcurrencyCheckpoint:
         const SYNCHRONIZATION_KIND_MAX: u16 = 4
         const RUNTIME_STATUS_MAX: u16 = 4
         const SCHEDULE_KIND_MAX: u16 = 6
+        const NO_TASK_ID: u64 = 0
+
+        def snapshot_has_task(snapshot: TaskSnapshot, id: DebuggerIdentity::DebugId) -> bool:
+            for index in 0..<snapshot.task_count:
+                return true if snapshot.tasks[index].id.value == id.value
+            return false
 
     public:
         struct TaskSnapshot:
@@ -46,15 +52,25 @@ module DebuggerConcurrencyCheckpoint:
             snapshot.scheduler_decisions <- runtime.scheduler.decisions
             return snapshot
 
-        def task_snapshot_restore(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, snapshot: TaskSnapshot) -> void:
-            return if snapshot.task_count > TASK_CHECKPOINT_CAPACITY or snapshot.wait_count > WAIT_CHECKPOINT_CAPACITY or snapshot.scheduler_count > SCHEDULE_CHECKPOINT_CAPACITY or snapshot.scheduler_cursor > snapshot.scheduler_count
-            return if snapshot.status.u16() > RUNTIME_STATUS_MAX
+        def task_snapshot_is_valid(snapshot: TaskSnapshot) -> bool:
+            return false if snapshot.task_count > TASK_CHECKPOINT_CAPACITY or snapshot.wait_count > WAIT_CHECKPOINT_CAPACITY or snapshot.scheduler_count > SCHEDULE_CHECKPOINT_CAPACITY or snapshot.scheduler_cursor > snapshot.scheduler_count
+            return false if snapshot.status.u16() > RUNTIME_STATUS_MAX or snapshot.next_id == NO_TASK_ID
             for index in 0..<snapshot.task_count:
-                return if snapshot.tasks[index].state.u16() > TASK_STATE_MAX
+                task: DebuggerConcurrency::TaskInfo = snapshot.tasks[index]
+                return false if task.id.value == NO_TASK_ID or task.state.u16() > TASK_STATE_MAX
+                return false if task.parent.value != NO_TASK_ID and not snapshot_has_task(snapshot, task.parent)
+                for previous in 0..<index:
+                    return false if snapshot.tasks[previous].id.value == task.id.value
             for index in 0..<snapshot.wait_count:
-                return if snapshot.waits[index].kind.u16() > SYNCHRONIZATION_KIND_MAX
+                edge: DebuggerConcurrency::WaitEdge = snapshot.waits[index]
+                return false if edge.waiter.value == NO_TASK_ID or edge.owner.value == NO_TASK_ID or not snapshot_has_task(snapshot, edge.waiter) or not snapshot_has_task(snapshot, edge.owner) or edge.kind.u16() > SYNCHRONIZATION_KIND_MAX
             for index in 0..<snapshot.scheduler_count:
-                return if snapshot.scheduler_decisions[index].ordinal != index.u64() or snapshot.scheduler_decisions[index].kind.u16() > SCHEDULE_KIND_MAX or snapshot.scheduler_decisions[index].task.state.u16() > TASK_STATE_MAX
+                decision: DebuggerScheduler::ScheduleDecision = snapshot.scheduler_decisions[index]
+                return false if decision.ordinal != index.u64() or decision.kind.u16() > SCHEDULE_KIND_MAX or decision.task.id.value == NO_TASK_ID or decision.task.state.u16() > TASK_STATE_MAX
+            return true
+
+        def task_snapshot_restore(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, snapshot: TaskSnapshot) -> void:
+            return if not task_snapshot_is_valid(snapshot)
             runtime.tasks <- snapshot.tasks
             runtime.task_count <- snapshot.task_count
             runtime.next_id <- snapshot.next_id
@@ -70,8 +86,8 @@ module DebuggerConcurrencyCheckpoint:
             runtime.scheduler.decisions <- snapshot.scheduler_decisions
 
         def task_snapshot_matches(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, snapshot: TaskSnapshot) -> bool:
+            return false if not task_snapshot_is_valid(snapshot)
             return false if runtime.task_count > TASK_CHECKPOINT_CAPACITY or runtime.wait_count > WAIT_CHECKPOINT_CAPACITY or runtime.scheduler.count > SCHEDULE_CHECKPOINT_CAPACITY or runtime.scheduler.cursor > runtime.scheduler.count
-            return false if snapshot.task_count > TASK_CHECKPOINT_CAPACITY or snapshot.wait_count > WAIT_CHECKPOINT_CAPACITY or snapshot.scheduler_count > SCHEDULE_CHECKPOINT_CAPACITY or snapshot.scheduler_cursor > snapshot.scheduler_count
             return false if runtime.status.u16() > RUNTIME_STATUS_MAX or snapshot.status.u16() > RUNTIME_STATUS_MAX
             for index in 0..<runtime.task_count:
                 return false if runtime.tasks[index].state.u16() > TASK_STATE_MAX

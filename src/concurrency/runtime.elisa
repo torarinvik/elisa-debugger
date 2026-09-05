@@ -110,7 +110,7 @@ module DebuggerConcurrencyRuntime:
             return false if runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Cancelled
             return false if runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Runnable and runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Running
             for edge_index in 0..<runtime.wait_count:
-                return false if runtime.waits[edge_index].waiter.value == waiter.value and runtime.waits[edge_index].owner.value == owner.value and runtime.waits[edge_index].resource.value == resource.value
+                return false if runtime.waits[edge_index].waiter.value == waiter.value
             return false if not runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Blocked)
             runtime.waits[runtime.wait_count] <- DebuggerConcurrency::WaitEdge{waiter: waiter, owner: owner, resource: resource, kind: kind}
             runtime.wait_count <- runtime.wait_count + 1
@@ -135,8 +135,16 @@ module DebuggerConcurrencyRuntime:
         def runtime_has_deadlock(runtime: mutable TaskRuntime&) -> bool:
             return false if runtime.wait_count > WAIT_EDGE_CAPACITY or runtime.task_count > TASK_RUNTIME_CAPACITY
             graph: mutable DebuggerConcurrencyAnalysis::WaitGraph = DebuggerConcurrencyAnalysis::wait_graph_new()
-            graph.edges <- runtime.waits
-            graph.count <- runtime.wait_count
+            for edge_index in 0..<runtime.wait_count:
+                edge: DebuggerConcurrency::WaitEdge = runtime.waits[edge_index]
+                waiter_index: usize = runtime_find_index(runtime, edge.waiter)
+                owner_index: usize = runtime_find_index(runtime, edge.owner)
+                continue if waiter_index == NO_TASK_INDEX or owner_index == NO_TASK_INDEX
+                continue if runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Blocked
+                continue if runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Cancelled
+                return false if graph.count >= WAIT_EDGE_CAPACITY
+                graph.edges[graph.count] <- edge
+                graph.count <- graph.count + 1
             for index in 0..<runtime.task_count:
                 return true if DebuggerConcurrencyAnalysis::wait_graph_has_cycle(graph, runtime.tasks[index])
             return false

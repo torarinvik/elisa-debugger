@@ -8,7 +8,13 @@ include "../security/policy.elisa"
 module DebuggerRemote:
     private:
         const REMOTE_PROTOCOL_MAJOR: u32 = 1
+        const REMOTE_PROTOCOL_MINOR: u32 = 0
+        const REMOTE_ENGINE_MANAGED: u32 = 1
+        const REMOTE_TRACE_SCHEMA: u32 = 1
         const REMOTE_HEARTBEAT_LIMIT: u64 = 3
+        const DETAIL_PROTOCOL: u32 = 1
+        const DETAIL_AUTHENTICATION: u32 = 2
+        const DETAIL_QUOTA: u32 = 3
 
     public:
         enum RemoteState:
@@ -31,9 +37,11 @@ module DebuggerRemote:
             missed_heartbeats: mutable u64
             policy: mutable DebuggerSecurity::Policy
             bytes_received: mutable u64
+            quota_exceeded: mutable bool
+            last_error: mutable DebuggerErrors::DebuggerError
 
         def remote_new(policy: DebuggerSecurity::Policy) -> RemoteChannel:
-            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, missed_heartbeats: 0, policy: policy, bytes_received: 0}
+            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, missed_heartbeats: 0, policy: policy, bytes_received: 0, quota_exceeded: false, last_error: DebuggerErrors::no_error()}
 
         def remote_begin(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
@@ -42,25 +50,35 @@ module DebuggerRemote:
 
         def remote_accept_handshake(channel: RemoteChannel, handshake: RemoteHandshake) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
-            if handshake.protocol_major != REMOTE_PROTOCOL_MAJOR or not handshake.authenticated:
+            if handshake.protocol_major != REMOTE_PROTOCOL_MAJOR or handshake.protocol_minor > REMOTE_PROTOCOL_MINOR or handshake.engine != REMOTE_ENGINE_MANAGED or handshake.trace_schema != REMOTE_TRACE_SCHEMA:
                 updated.state <- RemoteState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_PROTOCOL)
+                return updated
+            if not handshake.authenticated:
+                updated.state <- RemoteState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, DETAIL_AUTHENTICATION)
                 return updated
             updated.handshake <- handshake
             updated.state <- RemoteState.Connected
             updated.missed_heartbeats <- 0
+            updated.quota_exceeded <- false
+            updated.last_error <- DebuggerErrors::no_error()
             return updated
 
         def remote_receive(channel: RemoteChannel, bytes: u64) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.state != RemoteState.Connected
-            return updated if bytes > channel.policy.quotas.remote_payload_bytes
-            return updated if channel.bytes_received > channel.policy.quotas.remote_payload_bytes - bytes
+            if bytes > channel.policy.quotas.remote_payload_bytes or channel.bytes_received > channel.policy.quotas.remote_payload_bytes - bytes:
+                updated.quota_exceeded <- true
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA)
+                return updated
             updated.bytes_received <- channel.bytes_received + bytes
             updated.missed_heartbeats <- 0
             return updated
 
         def remote_heartbeat_missed(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Connected
             updated.missed_heartbeats <- channel.missed_heartbeats + 1
             if updated.missed_heartbeats >= REMOTE_HEARTBEAT_LIMIT:
                 updated.state <- RemoteState.Draining
@@ -71,6 +89,7 @@ module DebuggerRemote:
             updated.state <- RemoteState.Disconnected
             updated.handshake.authenticated <- false
             updated.missed_heartbeats <- 0
+            updated.quota_exceeded <- false
             return updated
 
         def remote_reconnect(channel: RemoteChannel) -> RemoteChannel:

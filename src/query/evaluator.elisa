@@ -55,11 +55,21 @@ module DebuggerQueryEvaluator:
             return QueryResult{status: QueryStatus.Match, event: first_match, scanned: scanned} if found
             return QueryResult{status: QueryStatus.NoMatch, event: 0, scanned: scanned}
 
-        def query_compare(left: DebuggerQueryIndex::EventIndex, right: DebuggerQueryIndex::EventIndex, budget: u64) -> QueryResult:
+        def query_compare_with_cancellation(left: DebuggerQueryIndex::EventIndex, right: DebuggerQueryIndex::EventIndex, token: DebuggerCancellation::CancellationToken, budget: u64) -> QueryResult:
             limit: u64 = QUERY_DEFAULT_BUDGET if budget == 0 else budget
             count: usize = left.count if left.count < right.count else right.count
             for position in 0..<count:
+                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: position.u64()} if DebuggerCancellation::cancellation_is_requested(token, position.u64())
                 return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: position.u64()} if position.u64() >= limit
                 if left.entries[position].state_hash != right.entries[position].state_hash or left.entries[position].statement.value != right.entries[position].statement.value:
                     return QueryResult{status: QueryStatus.Match, event: left.entries[position].event, scanned: position.u64() + 1}
+            if left.count != right.count:
+                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: count.u64()} if DebuggerCancellation::cancellation_is_requested(token, count.u64())
+                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: count.u64()} if count.u64() >= limit
+                differing: u64 = left.entries[count].event if left.count > count else right.entries[count].event
+                return QueryResult{status: QueryStatus.Match, event: differing, scanned: count.u64()}
             return QueryResult{status: QueryStatus.NoMatch, event: 0, scanned: count.u64()}
+
+        def query_compare(left: DebuggerQueryIndex::EventIndex, right: DebuggerQueryIndex::EventIndex, budget: u64) -> QueryResult:
+            token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
+            return query_compare_with_cancellation(left, right, token, budget)

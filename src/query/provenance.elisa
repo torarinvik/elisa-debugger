@@ -27,53 +27,65 @@ module DebuggerProvenance:
         struct ProvenanceIndex:
             mutations: mutable Mutation[PROVENANCE_CAPACITY]
             count: mutable usize
+            overflowed: mutable bool
 
         def provenance_new() -> ProvenanceIndex:
             index: mutable ProvenanceIndex = zeroed
             index.count <- 0
+            index.overflowed <- false
             return index
 
         def provenance_append(index: ProvenanceIndex, mutation: Mutation) -> ProvenanceIndex:
             updated: mutable ProvenanceIndex = index
-            return updated if index.count >= PROVENANCE_CAPACITY
+            if index.count >= PROVENANCE_CAPACITY:
+                updated.overflowed <- true
+                return updated
             updated.mutations[index.count] <- mutation
             updated.count <- index.count + 1
             return updated
 
         def provenance_last_write(index: ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, before_event: u64) -> Mutation:
             result: mutable Mutation = zeroed
-            for reverse in 0..<index.count:
-                index_from_end: usize = index.count - 1 - reverse
-                candidate: Mutation = index.mutations[index_from_end]
-                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event < before_event:
-                    return candidate
+            found: mutable bool = false
+            for position in 0..<index.count:
+                candidate: Mutation = index.mutations[position]
+                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event < before_event and (not found or candidate.event > result.event):
+                    result <- candidate
+                    found <- true
             return result
 
         def provenance_last_write_at_or_before(index: ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, event: u64) -> Mutation:
             result: mutable Mutation = zeroed
-            for reverse in 0..<index.count:
-                index_from_end: usize = index.count - 1 - reverse
-                candidate: Mutation = index.mutations[index_from_end]
-                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event <= event:
-                    return candidate
+            found: mutable bool = false
+            for position in 0..<index.count:
+                candidate: Mutation = index.mutations[position]
+                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event <= event and (not found or candidate.event > result.event):
+                    result <- candidate
+                    found <- true
             return result
 
         def provenance_count(index: ProvenanceIndex) -> usize:
             return index.count
 
+        def provenance_is_complete(index: ProvenanceIndex) -> bool:
+            return not index.overflowed
+
         def provenance_first_change(index: ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, first_event: u64, last_event: u64, previous_hash: u64) -> Mutation:
             result: mutable Mutation = zeroed
+            found: mutable bool = false
             for position in 0..<index.count:
                 candidate: Mutation = index.mutations[position]
-                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event >= first_event and candidate.event <= last_event and candidate.value_hash != previous_hash:
-                    return candidate
+                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event >= first_event and candidate.event <= last_event and candidate.value_hash != previous_hash and (not found or candidate.event < result.event):
+                    result <- candidate
+                    found <- true
             return result
 
         def provenance_last_allocation_write(index: ProvenanceIndex, allocation: DebuggerIdentity::AllocationIdentity, before_event: u64) -> Mutation:
             result: mutable Mutation = zeroed
-            for reverse in 0..<index.count:
-                index_from_end: usize = index.count - 1 - reverse
-                candidate: Mutation = index.mutations[index_from_end]
-                if candidate.allocation.allocation.value == allocation.allocation.value and candidate.allocation.generation == allocation.generation and candidate.event < before_event:
-                    return candidate
+            found: mutable bool = false
+            for position in 0..<index.count:
+                candidate: Mutation = index.mutations[position]
+                if candidate.allocation.allocation.value == allocation.allocation.value and candidate.allocation.generation == allocation.generation and candidate.event < before_event and (not found or candidate.event > result.event):
+                    result <- candidate
+                    found <- true
             return result

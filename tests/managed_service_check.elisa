@@ -1,0 +1,38 @@
+include "../src/protocol/managed_service.elisa"
+include "../src/core/identity.elisa"
+include "../src/core/capabilities.elisa"
+
+const PROGRAM_VERSION: u32 = 1
+const INSTRUCTION_COUNT: u64 = 2
+const STEP_REQUEST_ID: u64 = 1
+const TARGET_EVENT: u64 = 1
+const EXPECTED_RESULT: i64 = 7
+
+def main() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: 0, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: EXPECTED_RESULT, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, image, DebuggerIdentity::debug_id(9))
+    launch_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, launch_request)
+    return 1 if not launched.accepted
+    pause_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Pause, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    paused: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, pause_request)
+    return 2 if not paused.accepted
+    step_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, step_request)
+    return 3 if not stepped.accepted
+    frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
+    return 4 if frame.accumulator != EXPECTED_RESULT or frame.event != TARGET_EVENT
+    continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
+    return 5 if not continued.accepted or not DebuggerManagedService::service_is_exact(service)
+    continued_frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
+    return 6 if continued_frame.result != EXPECTED_RESULT
+    unsupported_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Threads, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    unsupported: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, unsupported_request)
+    return 7 if unsupported.accepted
+    return 0

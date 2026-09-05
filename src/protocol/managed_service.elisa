@@ -1,0 +1,60 @@
+# Managed session facade.  It is the executable bridge between the public
+# request model and the deterministic replay engine; editor transports can
+# delegate here without duplicating lifecycle or replay policy.
+
+include "../engine/managed.elisa"
+include "../inspect/managed.elisa"
+include "../protocol/request.elisa"
+include "../core/errors.elisa"
+
+module DebuggerManagedService:
+    private:
+        const DEFAULT_CONTINUE_STEPS: u64 = 64
+        const DETAIL_UNSUPPORTED: u32 = 1
+
+    public:
+        struct Service:
+            controller: mutable DebuggerManagedEngine::ManagedController
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct Result:
+            accepted: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def service_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> Service:
+            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error()}
+
+        def result_error(failure: DebuggerErrors::DebuggerError) -> Result:
+            return Result{accepted: false, failure: failure}
+
+        def result_ok() -> Result:
+            return Result{accepted: true, failure: DebuggerErrors::no_error()}
+
+        def service_dispatch(service: mutable Service&, request: DebuggerProtocolRequest::Request) -> Result:
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if request.method == DebuggerProtocolRequest::RequestMethod.Launch:
+                failure <- DebuggerManagedEngine::managed_launch(service.controller)
+            if request.method == DebuggerProtocolRequest::RequestMethod.Pause:
+                failure <- DebuggerManagedEngine::managed_pause(service.controller)
+            if request.method == DebuggerProtocolRequest::RequestMethod.Continue:
+                failure <- DebuggerManagedEngine::managed_continue(service.controller, DEFAULT_CONTINUE_STEPS)
+            if request.method == DebuggerProtocolRequest::RequestMethod.Step:
+                failure <- DebuggerManagedEngine::managed_step(service.controller)
+            if request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep:
+                failure <- DebuggerManagedEngine::managed_reverse_step(service.controller)
+            if request.method == DebuggerProtocolRequest::RequestMethod.Seek:
+                failure <- DebuggerManagedEngine::managed_seek(service.controller, request.target_event.usize())
+            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.Seek:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            return result_ok()
+
+        def service_frame(service: mutable Service&) -> DebuggerManagedInspection::FrameSnapshot:
+            return DebuggerManagedInspection::current_frame(service.controller.engine)
+
+        def service_locals(service: mutable Service&, offset: usize, requested: usize) -> DebuggerManagedInspection::LocalPage:
+            return DebuggerManagedInspection::locals_page(service.controller.engine, offset, requested)
+
+        def service_is_exact(service: mutable Service&) -> bool:
+            return DebuggerManagedEngine::managed_is_exact(service.controller)

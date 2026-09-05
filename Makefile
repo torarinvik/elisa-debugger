@@ -6,7 +6,7 @@ BUILD ?= build
 # strict product-freshness gate.
 ELISA_ALLOW_STALE_STAGE1 ?= 1
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -16,7 +16,7 @@ dap-server: $(BUILD)/elisa-debugger-dap-server
 
 cli: $(BUILD)/elisa-debugger-cli
 
-module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check
+module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check
 	"$(BUILD)/elisa-debugger-module-core-check"
 	"$(BUILD)/elisa-debugger-module-data-check"
 	"$(BUILD)/elisa-debugger-module-protocol-check"
@@ -24,9 +24,13 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 	"$(BUILD)/elisa-debugger-edir-call-check"
 	"$(BUILD)/elisa-debugger-session-check"
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
+	"$(BUILD)/elisa-debugger-managed-service-check"
 
 managed-inspection-check: $(BUILD)/elisa-debugger-managed-inspection-check
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
+
+managed-service-check: $(BUILD)/elisa-debugger-managed-service-check
+	"$(BUILD)/elisa-debugger-managed-service-check"
 
 ffi-check: $(BUILD)/elisa-debugger-ffi-probe
 	test "$$(printf 'ELI' | "$(BUILD)/elisa-debugger-ffi-probe")" = 'ELI'
@@ -76,6 +80,10 @@ $(BUILD)/elisa-debugger-ffi-probe: tests/ffi_probe.elisa
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 $(BUILD)/elisa-debugger-managed-inspection-check: tests/managed_inspection_check.elisa
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-managed-service-check: tests/managed_service_check.elisa
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 

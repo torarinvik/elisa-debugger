@@ -19,6 +19,9 @@ into qualified modules:
 - `DebuggerHistory` owns bounded historical query descriptors.
 - `DebuggerReplayEngine` executes verified EDIR images, records pre-step state,
   and performs bounded reverse-step/seek on logical machine state.
+- `DebuggerManagedEngine` binds that replay engine to a session and exposes
+  launch, pause, continue, step, reverse-step, seek, and durable checkpoint
+  operations through one provider-neutral controller.
 - `DebuggerEngine`, `DebuggerNative`, and `DebuggerAgent` define the provider
   contract and the explicit native-agent capability boundary.
 - `DebuggerEffects`, `DebuggerScheduler`, `DebuggerTraceStream`, and
@@ -29,6 +32,10 @@ into qualified modules:
 - `DebuggerTraceBinary` and `DebuggerTraceStorage` provide canonical
   little-endian encoding, checksums, chunk validation, and torn-write prefix
   recovery without serializing host memory layouts.
+- `DebuggerTraceRecorder`, `DebuggerTraceBundle`, `DebuggerTraceReader`, and
+  `DebuggerCheckpointCodec` provide bounded manifest/event recording,
+  append-only bundle verification, event decoding, and restart-safe managed
+  checkpoints.
 - `DebuggerProtocol`, `DebuggerSessionService`, `DebuggerSecurity`, and
   `DebuggerBuild` are public integration contracts for DAP, JetBrains, CLI,
   remote, and headless clients; private limits are named constants in each
@@ -73,23 +80,23 @@ invalid frame without attempting to execute target code.
 
 `build/elisa-debugger-dap-server` is the standard DAP transport entrypoint. It
 accepts `Content-Length` framed messages and dispatches initialize, launch,
-configuration, continue, next, reverse-step, pause, threads, and lifecycle
-commands. It correlates every response with the request sequence and applies
-the shared session state machine. The current adapter advertises only the
-capabilities it actually wires through; next and reverse-step return a standard
-DAP unavailable response until an execution provider is connected to that
-surface.
+configuration, continue, next, reverse-step, pause, threads, stack, scopes,
+variables, evaluate, breakpoint, and lifecycle commands. It correlates every
+response with the request sequence and applies the shared session state
+machine. Managed capability negotiation advertises reverse execution,
+watchpoints, and hover evaluation; unavailable values remain explicit in the
+response body rather than being fabricated.
 
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `pause`,
 `continue`, `step`, `reverseStep`, and `close`) and reports machine-readable
 generation/status lines through the same dispatcher used by the session server.
 
 The server remains intentionally bounded: launch, pause, continue, terminate,
-detach, and sequence correlation are live session operations, while target
-arguments, source breakpoints, stack data, variables, and managed execution
-provider selection are still explicit follow-up milestones. Clients must use
-capability negotiation and standard DAP failure responses instead of assuming
-those surfaces exist.
+detach, generation checks, and sequence correlation are live session
+operations. Target argument decoding, full source-file payloads, and provider
+selection are explicit protocol extensions; clients must use capability
+negotiation and standard DAP failure responses instead of assuming an
+unconfigured target exists.
 
 ## Integration boundary
 

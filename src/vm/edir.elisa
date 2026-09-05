@@ -241,7 +241,11 @@ module DebuggerEDIR:
 
         def machine_step(machine: Machine, instruction: Instruction) -> Machine:
             updated: mutable Machine = machine
-            if machine.halted:
+            if machine.halted or machine.faulted:
+                return updated
+            if machine.program_counter >= EDIR_MAX_INSTRUCTIONS.u64() or machine.return_stack_pointer > EDIR_MAX_CALL_DEPTH or machine.heap_next > EDIR_MAX_MEMORY:
+                updated.faulted <- true
+                updated.halted <- true
                 return updated
             if instruction.opcode == Opcode.Nop:
                 updated.program_counter <- updated.program_counter + EDIR_STEP_INCREMENT
@@ -325,7 +329,7 @@ module DebuggerEDIR:
             if instruction.opcode == Opcode.Allocate:
                 requested: mutable usize = 0
                 requested <- instruction.a.usize() if instruction.a > 0
-                if instruction.a <= 0 or updated.heap_next > EDIR_MAX_MEMORY - requested:
+                if instruction.a <= 0 or instruction.a > EDIR_MAX_MEMORY_INDEX or updated.heap_next > EDIR_MAX_MEMORY - requested:
                     updated.faulted <- true
                     updated.halted <- true
                 else:
@@ -372,6 +376,10 @@ module DebuggerEDIR:
         def machine_run(image: mutable ProgramImage&, machine: Machine, max_steps: u64) -> Machine:
             updated: mutable Machine = machine
             start_steps: u64 = updated.steps
+            if updated.program_counter >= EDIR_MAX_INSTRUCTIONS.u64() or updated.return_stack_pointer > EDIR_MAX_CALL_DEPTH or updated.heap_next > EDIR_MAX_MEMORY:
+                updated.faulted <- true
+                updated.halted <- true
+                return updated
             verification: Verification = verify_image(image)
             if not verification.valid:
                 updated.faulted <- true

@@ -33,6 +33,29 @@ const TEST_CHECKPOINT_ID: u64 = 70
 const TEST_BAD_EVENT_ORDINAL: u64 = 1
 const TEST_EXPORT_CHUNK_COUNT: usize = 1
 const CHECKPOINT_FLAGS_OFFSET: usize = 1148
+const CHECKPOINT_PROGRAM_COUNTER_OFFSET: usize = 28
+
+def check_checkpoint_validation() -> i64:
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(TEST_CHECKPOINT_ID), 0, TEST_EVENT_PAYLOAD)
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerCheckpointCodec::checkpoint_encode(snapshot)
+    offset_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
+    offset_reader.offset <- 1
+    return 1 if DebuggerCheckpointCodec::checkpoint_bytes_are_valid(offset_reader)
+    invalid_pc: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_pc.bytes[CHECKPOINT_PROGRAM_COUNTER_OFFSET] <- 0
+    invalid_pc.bytes[CHECKPOINT_PROGRAM_COUNTER_OFFSET + 1] <- 1
+    invalid_pc_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_pc.bytes[0], invalid_pc.length)
+    return 2 if DebuggerCheckpointCodec::checkpoint_bytes_are_valid(invalid_pc_reader)
+    return 0
+
+def check_export_rejects_partial() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
+    _ = DebuggerTraceBundle::bundle_seal(bundle, true)
+    exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle)
+    return 1 if DebuggerErrors::error_is_ok(exported.failure)
+    return 0
 
 def check_empty_event_chunk() -> i64:
     empty_events: mutable DebuggerTraceStorage::StoredChunk = zeroed
@@ -124,6 +147,8 @@ def check_opaque_validation() -> i64:
     return 0
 
 def main() -> i64:
+    return 78 if check_checkpoint_validation() != 0
+    return 79 if check_export_rejects_partial() != 0
     writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     writer <- DebuggerTraceBinary::writer_put_u16(writer, TEST_U16_VALUE)
     writer <- DebuggerTraceBinary::writer_put_u32(writer, TEST_U32_VALUE)

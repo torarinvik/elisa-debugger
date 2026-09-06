@@ -51,21 +51,48 @@ module DebuggerTraceRetention:
                 return index if store.chunks[index].sequence == sequence
             return RETENTION_CHUNK_CAPACITY
 
-        def retention_add_reference(store: RetentionStore, sequence: u64) -> RetentionStore:
+        def retention_chain_is_valid(store: RetentionStore, sequence: u64) -> bool:
+            current: mutable u64 = sequence
+            steps: mutable usize = 0
+            while current != 0:
+                index: usize = retention_find(store, current)
+                return false if index >= RETENTION_CHUNK_CAPACITY
+                steps <- steps + 1
+                return false if steps > store.count
+                current <- store.chunks[index].parent
+            return true
+
+        def retention_adjust_chain(store: RetentionStore, sequence: u64, increase: bool) -> RetentionStore:
             updated: mutable RetentionStore = store
-            index: usize = retention_find(store, sequence)
-            return updated if index >= RETENTION_CHUNK_CAPACITY
-            updated.chunks[index].references <- RETENTION_MAX_REFCOUNT if store.chunks[index].references == RETENTION_MAX_REFCOUNT
-            updated.chunks[index].references <- store.chunks[index].references + 1 if store.chunks[index].references < RETENTION_MAX_REFCOUNT
+            return updated if sequence == 0 or not retention_chain_is_valid(store, sequence)
+            current: mutable u64 = sequence
+            while current != 0:
+                index: usize = retention_find(updated, current)
+                return store if index >= RETENTION_CHUNK_CAPACITY
+                if increase:
+                    return store if updated.chunks[index].references == RETENTION_MAX_REFCOUNT
+                    updated.chunks[index].references <- updated.chunks[index].references + 1
+                else:
+                    return store if updated.chunks[index].references == 0
+                    updated.chunks[index].references <- updated.chunks[index].references - 1
+                current <- updated.chunks[index].parent
             return updated
+
+        def retention_add_reference(store: RetentionStore, sequence: u64) -> RetentionStore:
+            return retention_adjust_chain(store, sequence, true)
+
+        def retention_remove_reference(store: RetentionStore, sequence: u64) -> RetentionStore:
+            return retention_adjust_chain(store, sequence, false)
 
         def retention_pin(store: RetentionStore, sequence: u64) -> RetentionStore:
             updated: mutable RetentionStore = store
             index: usize = retention_find(store, sequence)
             return updated if index >= RETENTION_CHUNK_CAPACITY or store.pin_count >= RETENTION_PIN_CAPACITY
-            updated.chunks[index].pinned <- true
             for pin in 0..<store.pin_count:
                 return updated if store.pins[pin] == sequence
+            updated <- retention_adjust_chain(store, sequence, true)
+            return store if updated.chunks[index].references == store.chunks[index].references
+            updated.chunks[index].pinned <- true
             updated.pins[store.pin_count] <- sequence
             updated.pin_count <- store.pin_count + 1
             return updated
@@ -73,7 +100,9 @@ module DebuggerTraceRetention:
         def retention_unpin(store: RetentionStore, sequence: u64) -> RetentionStore:
             updated: mutable RetentionStore = store
             index: usize = retention_find(store, sequence)
-            return updated if index >= RETENTION_CHUNK_CAPACITY
+            return updated if index >= RETENTION_CHUNK_CAPACITY or not store.chunks[index].pinned
+            updated <- retention_adjust_chain(store, sequence, false)
+            return store if updated.chunks[index].references == store.chunks[index].references
             updated.chunks[index].pinned <- false
             for pin in 0..<store.pin_count:
                 if store.pins[pin] == sequence:

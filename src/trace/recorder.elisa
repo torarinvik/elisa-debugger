@@ -83,10 +83,19 @@ module DebuggerTraceRecorder:
             writer <- DebuggerTraceBinary::writer_put_u64(writer, event.payload_hash)
             return writer
 
+        def recorder_event_is_valid(recorder: TraceRecorder, event: DebuggerEvents::EventEnvelope) -> bool:
+            return event.schema == RECORDER_SCHEMA_VERSION and recorder.recording.value != RECORDER_NO_RECORDING and event.position.recording.value == recorder.recording.value and event.task.value == event.position.task.value and event.position.event == event.ordinal and DebuggerEvents::event_kind_is_valid(event.kind) and DebuggerEvents::event_quality_is_valid(event.quality)
+
         def recorder_flush(recorder: mutable TraceRecorder&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::no_error() if recorder.pending_count == 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, RECORDER_DETAIL_RESOURCE_LIMIT) if recorder.pending_count > RECORDER_EVENT_CAPACITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, RECORDER_DETAIL_RESOURCE_LIMIT) if recorder.chunk_count >= RECORDER_CHUNK_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_NON_MONOTONIC) if recorder.next_ordinal < recorder.pending_count.u64()
+            pending_first: u64 = recorder.next_ordinal - recorder.pending_count.u64()
+            for index in 0..<recorder.pending_count:
+                event: DebuggerEvents::EventEnvelope = recorder.pending[index]
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_NON_MONOTONIC) if pending_first > RECORDER_MAX_ORDINAL - index.u64() or event.ordinal != pending_first + index.u64()
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_RECORDING) if not recorder_event_is_valid(recorder, event)
             encoded: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
             for index in 0..<recorder.pending_count:
                 event_bytes: DebuggerTraceBinary::ByteWriter = encode_event(recorder.pending[index])
@@ -110,12 +119,12 @@ module DebuggerTraceRecorder:
 
         def recorder_append(recorder: mutable TraceRecorder&, event: DebuggerEvents::EventEnvelope) -> DebuggerErrors::DebuggerError:
             return recorder.last_error if recorder.status != RecorderStatus.Recording
-            if recorder.recording.value == RECORDER_NO_RECORDING or event.schema != RECORDER_SCHEMA_VERSION or event.position.recording.value != recorder.recording.value or event.task.value != event.position.task.value or not DebuggerEvents::event_kind_is_valid(event.kind) or not DebuggerEvents::event_quality_is_valid(event.quality):
+            if not recorder_event_is_valid(recorder, event):
                 recorder.status <- RecorderStatus.Corrupt
                 manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
                 manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
                 recorder.manifest <- manifest
-                detail: u32 = RECORDER_DETAIL_RECORDING if recorder.recording.value == RECORDER_NO_RECORDING else RECORDER_DETAIL_SCHEMA if event.schema != RECORDER_SCHEMA_VERSION else RECORDER_DETAIL_RECORDING if event.position.recording.value != recorder.recording.value else RECORDER_DETAIL_TASK if event.task.value != event.position.task.value else RECORDER_DETAIL_ENUM
+                detail: u32 = RECORDER_DETAIL_RECORDING if recorder.recording.value == RECORDER_NO_RECORDING else RECORDER_DETAIL_SCHEMA if event.schema != RECORDER_SCHEMA_VERSION else RECORDER_DETAIL_RECORDING if event.position.recording.value != recorder.recording.value else RECORDER_DETAIL_TASK if event.task.value != event.position.task.value else RECORDER_DETAIL_NON_MONOTONIC if event.position.event != event.ordinal else RECORDER_DETAIL_ENUM
                 recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, detail)
                 return recorder.last_error
             if event.ordinal != recorder.next_ordinal:

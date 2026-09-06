@@ -25,6 +25,7 @@ module DebuggerReplayEngine:
         const REPLAY_CHECKPOINT_ID_OFFSET: u64 = 1
         const HASH_FALSE: u64 = 0
         const HASH_TRUE: u64 = 1
+        const REPLAY_NO_BRANCH: u64 = 0
 
     public:
         enum EngineError:
@@ -206,11 +207,14 @@ module DebuggerReplayEngine:
             for index in 0..<engine.event_count:
                 event: DebuggerEvents::EventEnvelope = engine.events[index]
                 return false if event.ordinal != index.u64() or event.schema != REPLAY_SCHEMA_VERSION or event.kind != DebuggerEvents::EventKind.ExecutionBoundary or event.quality != DebuggerEvents::EventQuality.Exact or event.task.value != event.position.task.value or event.position.recording.value != engine.recording.value or event.position.event != index.u64()
+                return false if engine.branch.value == REPLAY_NO_BRANCH and event.position.branch.value != REPLAY_NO_BRANCH
+                return false if engine.branch.value != REPLAY_NO_BRANCH and index >= engine.fork_event and event.position.branch.value != engine.branch.value
                 return false if not DebuggerCheckpoint::snapshot_shape_is_valid(engine.history[index])
                 return false if engine.history[index].id.value != index.u64() + REPLAY_CHECKPOINT_ID_OFFSET or engine.history[index].event != index.u64() or engine.history[index].program_counter >= engine.image.program.instruction_count or engine.history[index].halted or engine.history[index].faulted
                 return false if engine.history[index].state_hash != replay_engine_snapshot_state_hash(engine.history[index])
                 replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
                 replay_machine <- DebuggerEDIR::machine_step(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
+                return false if event.position.statement.value != replay_machine.program_counter
                 return false if event.payload_hash != replay_engine_machine_state_hash(replay_machine, index.u64())
             return false if engine.event_count > 0 and engine.events[engine.event_count - 1].payload_hash != replay_engine_machine_state_hash(engine.machine, engine.event_count.u64() - REPLAY_CHECKPOINT_ID_OFFSET)
             return true

@@ -39,6 +39,12 @@ and requested extensions. The server returns its versions, `server`, supported
 engines, target/platform support, and feature capabilities. An incompatible
 major version is an explicit error. Minor versions are additive only.
 
+The Elisa implementation also exposes a typed discovery document containing
+product version, trace schema, installation health, resource limits, and the
+complete capability set. Mutating clients retain the ownership token returned
+by session creation; requests without that token are rejected before target
+state is touched.
+
 The client then sends `createSession` or `openTrace`, followed by `launch`,
 `attach`, or `replay`. State-changing requests carry `session`, `requestId`,
 and optionally `expectedStopGeneration`. A stale generation returns

@@ -24,6 +24,14 @@ bookmarks use `DebuggerTimeline`; managed heap and stack reads use
 `DebuggerProtocolEvents`. These public modules keep editor adapters independent
 of private replay and storage representations.
 
+`DebuggerProtocolIntegration` is the typed contract for clients that need the
+full discovery and session handshake. Its discovery document includes product
+version, trace schema, installation health, per-session capabilities, and
+bounded page/query/payload limits. Requests carry a client identity, session
+ownership token, expected stop generation, page size, and target event. The
+validator rejects stale generations, missing ownership for mutations, oversized
+targets, and unsupported trace operations before the provider is touched.
+
 ## VS Code
 
 Register `build/elisa-debugger-dap-server` as a debug adapter that is launched

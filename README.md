@@ -63,6 +63,9 @@ into qualified modules:
 - `DebuggerDiscovery`, `DebuggerProtocolEvents`, and `DebuggerMemory` expose
   machine-readable capability discovery, ordered event delivery, and bounded
   managed-memory inspection for editor-neutral clients.
+- `DebuggerProtocolIntegration` provides the typed discovery document,
+  ownership token, stale-generation, paging-limit, and trace capability
+  checks shared by editor and headless clients.
 - `DebuggerCLIEntrypoint` provides a line-oriented interactive/machine command
   mode without duplicating session policy.
 - `DebuggerProtocolFraming` owns bounded length-prefixed transport framing.

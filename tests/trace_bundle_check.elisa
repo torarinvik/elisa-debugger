@@ -14,6 +14,8 @@ const TEST_RECORDING: u64 = 32
 const TEST_HASH: u64 = 33
 const TEST_SCHEMA: u32 = 1
 const TEST_EVENT_COUNT: u64 = 1
+const MALFORMED_PAYLOAD_LENGTH: usize = 1
+const MALFORMED_PAYLOAD_BYTE: u8 = 0
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
@@ -44,7 +46,22 @@ def check_corrupt_bundle() -> i64:
     return 8 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
     return 0
 
+def check_rejects_malformed_exact_bundle() -> i64:
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    payload <- DebuggerTraceBinary::writer_put_byte(payload, MALFORMED_PAYLOAD_BYTE)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: MALFORMED_PAYLOAD_LENGTH.u64(), checksum: DebuggerTraceBinary::writer_checksum(payload)}
+    chunk.payload_length <- MALFORMED_PAYLOAD_LENGTH
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    chunk.payload[0] <- MALFORMED_PAYLOAD_BYTE
+    return 9 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, chunk))
+    sealed: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_seal(bundle, false)
+    return 10 if DebuggerErrors::error_is_ok(sealed) or bundle.state != DebuggerTraceBundle::BundleState.Partial
+    return 0
+
 def main() -> i64:
     return check_bundle_round_trip() if check_bundle_round_trip() != 0
     return check_corrupt_bundle() if check_corrupt_bundle() != 0
+    return check_rejects_malformed_exact_bundle() if check_rejects_malformed_exact_bundle() != 0
     return 0

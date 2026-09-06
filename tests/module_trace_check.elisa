@@ -45,6 +45,9 @@ const EMPTY_EVENT_ENCODING_RESULT: i64 = 81
 const INVALID_MANIFEST_RANGE_RESULT: i64 = 82
 const INVALID_MANIFEST_DECODE_RESULT: i64 = 83
 const EMPTY_MANIFEST_ENCODING_RESULT: i64 = 84
+const MISSING_MANIFEST_RESULT: i64 = 85
+const EXPORTED_STORAGE_RESULT: i64 = 86
+const INVALID_CHECKPOINT_FLAGS_RESULT: i64 = 87
 
 def check_checkpoint_validation() -> i64:
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -234,7 +237,9 @@ def main() -> i64:
     for footer_index in 0..<footer.length:
         combined <- DebuggerTraceBinary::writer_put_byte(combined, footer.bytes[footer_index])
     scan_with_footer: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(combined.bytes[0], combined.length)
-    return 10 if scan_with_footer.status != DebuggerTraceStorage::StorageStatus.Ready or not scan_with_footer.footer_verified
+    return 10 if scan_with_footer.status != DebuggerTraceStorage::StorageStatus.Ready or not scan_with_footer.footer_verified or scan_with_footer.manifest_seen
+    footer_only_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(combined.bytes[0], combined.length)
+    return MISSING_MANIFEST_RESULT if footer_only_report.state != DebuggerTraceVerify::VerificationState.Partial or footer_only_report.replayable
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
     manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
     manifest.last_event <- TEST_EXPECTED_LAST_EVENT
@@ -279,6 +284,11 @@ def main() -> i64:
     decoded_checkpoint: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpointCodec::checkpoint_decode(checkpoint_reader)
     checkpoint_validation_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(checkpoint_bytes.bytes[0], checkpoint_bytes.length)
     return 19 if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(checkpoint_validation_reader) or decoded_checkpoint.id.value != TEST_CHECKPOINT_ID or decoded_checkpoint.state_hash != TEST_EVENT_PAYLOAD
+    invalid_checkpoint_flags: mutable DebuggerTraceBinary::ByteWriter = checkpoint_bytes
+    invalid_checkpoint_flags.bytes[CHECKPOINT_FLAGS_OFFSET] <- 0
+    invalid_checkpoint_flags.bytes[CHECKPOINT_FLAGS_OFFSET + 1] <- 1
+    invalid_checkpoint_flags_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_checkpoint_flags.bytes[0], invalid_checkpoint_flags.length)
+    return INVALID_CHECKPOINT_FLAGS_RESULT if DebuggerCheckpointCodec::checkpoint_bytes_are_valid(invalid_checkpoint_flags_reader)
     checkpoint_bytes.bytes[0] <- 2
     invalid_checkpoint_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(checkpoint_bytes.bytes[0], checkpoint_bytes.length)
     return 28 if DebuggerCheckpointCodec::checkpoint_bytes_are_valid(invalid_checkpoint_reader)
@@ -328,7 +338,9 @@ def main() -> i64:
     exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle)
     return 26 if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count != TEST_EXPORT_CHUNK_COUNT
     exported_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(exported.bytes.bytes[0], exported.bytes.length)
-    return 27 if exported_scan.status != DebuggerTraceStorage::StorageStatus.Ready or exported_scan.verified_chunks != TEST_EXPORT_CHUNK_COUNT + 1
+    return 27 if exported_scan.status != DebuggerTraceStorage::StorageStatus.Ready or exported_scan.verified_chunks != TEST_EXPORT_CHUNK_COUNT + 1 or not exported_scan.manifest_seen
+    exported_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[0], exported.bytes.length)
+    return EXPORTED_STORAGE_RESULT if exported_report.state != DebuggerTraceVerify::VerificationState.Exact or not exported_report.replayable
     corrupt_manifest: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
     corrupt_manifest.checksum <- manifest_chunk.checksum + 1
     fresh_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()

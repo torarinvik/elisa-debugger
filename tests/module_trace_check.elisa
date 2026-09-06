@@ -59,6 +59,7 @@ const TAMPERED_READER_POSITION_RESULT: i64 = 94
 const TAMPERED_READER_CHECKPOINT_COUNT_RESULT: i64 = 95
 const MALFORMED_STORAGE_EVENT_RESULT: i64 = 96
 const GAPPED_STORAGE_EVENT_RESULT: i64 = 97
+const INVALID_STORAGE_CHECKPOINT_RESULT: i64 = 98
 const RECORDER_EVENT_ORDINAL_OFFSET: usize = 4
 const GAPPED_EVENT_ORDINAL: u8 = 2
 
@@ -437,6 +438,26 @@ def main() -> i64:
         gapped_storage <- DebuggerTraceBinary::writer_put_byte(gapped_storage, gap_footer.bytes[gap_index])
     gapped_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(gapped_storage.bytes[0], gapped_storage.length)
     return GAPPED_STORAGE_EVENT_RESULT if gapped_report.state != DebuggerTraceVerify::VerificationState.Corrupt or gapped_report.replayable
+    bad_checkpoint_manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+    bad_checkpoint_manifest.checkpoint_count <- recorder.manifest.checkpoint_count + 1
+    bad_checkpoint_payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(bad_checkpoint_manifest)
+    bad_checkpoint_chunk: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
+    bad_checkpoint_chunk.header.payload_length <- bad_checkpoint_payload.length.u64()
+    bad_checkpoint_chunk.header.checksum <- DebuggerTraceBinary::writer_checksum(bad_checkpoint_payload)
+    bad_checkpoint_chunk.payload_length <- bad_checkpoint_payload.length
+    bad_checkpoint_chunk.checksum <- DebuggerTraceBinary::writer_checksum(bad_checkpoint_payload)
+    for checkpoint_index in 0..<bad_checkpoint_payload.length:
+        bad_checkpoint_chunk.payload[checkpoint_index] <- bad_checkpoint_payload.bytes[checkpoint_index]
+    bad_checkpoint_manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(bad_checkpoint_chunk)
+    bad_checkpoint_storage: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for checkpoint_index in 0..<bad_checkpoint_manifest_bytes.length:
+        bad_checkpoint_storage <- DebuggerTraceBinary::writer_put_byte(bad_checkpoint_storage, bad_checkpoint_manifest_bytes.bytes[checkpoint_index])
+    for checkpoint_index in 0..<valid_event_bytes.length:
+        bad_checkpoint_storage <- DebuggerTraceBinary::writer_put_byte(bad_checkpoint_storage, valid_event_bytes.bytes[checkpoint_index])
+    for checkpoint_index in 0..<malformed_footer.length:
+        bad_checkpoint_storage <- DebuggerTraceBinary::writer_put_byte(bad_checkpoint_storage, malformed_footer.bytes[checkpoint_index])
+    bad_checkpoint_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(bad_checkpoint_storage.bytes[0], bad_checkpoint_storage.length)
+    return INVALID_STORAGE_CHECKPOINT_RESULT if bad_checkpoint_report.state != DebuggerTraceVerify::VerificationState.Corrupt or bad_checkpoint_report.replayable
     corrupt_manifest: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
     corrupt_manifest.checksum <- manifest_chunk.checksum + 1
     fresh_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()

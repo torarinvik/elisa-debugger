@@ -447,18 +447,21 @@ module DebuggerProtocolRequest:
             in_id: mutable bool = false
             id_field_seen: mutable bool = false
             id_digits: mutable usize = 0
+            id_quoted: mutable bool = false
             expected_prefix: mutable u8[REQUEST_EXPECTED_PREFIX_LENGTH] = [34, 101, 120, 112, 101, 99, 116, 101, 100, 83, 116, 111, 112, 71, 101, 110, 101, 114, 97, 116, 105, 111, 110, 34, 58]
             expected_position: mutable usize = 0
             in_expected: mutable bool = false
             expected_field_seen: mutable bool = false
             expected_has_digits: mutable bool = false
             expected_digits: mutable usize = 0
+            expected_quoted: mutable bool = false
             target_prefix: mutable u8[REQUEST_TARGET_PREFIX_LENGTH] = [34, 116, 97, 114, 103, 101, 116, 69, 118, 101, 110, 116, 34, 58]
             target_position: mutable usize = 0
             in_target: mutable bool = false
             target_field_seen: mutable bool = false
             target_has_digits: mutable bool = false
             target_digits: mutable usize = 0
+            target_quoted: mutable bool = false
             for index in 0..<length:
                 byte: u8 = payload[index]
                 if not in_method:
@@ -498,6 +501,7 @@ module DebuggerProtocolRequest:
                             id_field_seen <- true
                             id_position <- 0
                             id_digits <- 0
+                            id_quoted <- false
                             request.id <- 0
                     else:
                         if is_json_whitespace(byte) and id_position == REQUEST_ID_PREFIX_LENGTH - 1:
@@ -508,19 +512,36 @@ module DebuggerProtocolRequest:
                             else:
                                 id_position <- 0
                 else:
-                    if is_json_whitespace(byte) and id_digits == 0:
-                        id_digits <- 0
-                    else:
-                        if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    if id_quoted:
+                        if byte == ASCII_QUOTE:
+                            return invalid_request() if id_digits == 0
+                            id_quoted <- false
+                            in_id <- false
+                        else:
+                            return invalid_request() if byte < ASCII_ZERO or byte > ASCII_NINE
                             return invalid_request() if id_digits == FIRST_NUMBER_DIGIT_COUNT and request.id == 0
                             return invalid_request() if id_digits >= REQUEST_MAX_ID_DIGITS or request.id > (MAX_REQUEST_INTEGER - (byte - ASCII_ZERO).u64()) / DECIMAL_BASE
                             if id_digits < REQUEST_MAX_ID_DIGITS:
                                 request.id <- request.id * DECIMAL_BASE + (byte - ASCII_ZERO).u64()
                                 id_digits <- id_digits + 1
                                 request.has_id <- true
+                    else:
+                        if is_json_whitespace(byte) and id_digits == 0:
+                            id_digits <- 0
                         else:
-                            return invalid_request() if not is_numeric_terminator(byte)
-                            in_id <- false
+                            if byte == ASCII_QUOTE and id_digits == 0:
+                                id_quoted <- true
+                            else:
+                                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                                    return invalid_request() if id_digits == FIRST_NUMBER_DIGIT_COUNT and request.id == 0
+                                    return invalid_request() if id_digits >= REQUEST_MAX_ID_DIGITS or request.id > (MAX_REQUEST_INTEGER - (byte - ASCII_ZERO).u64()) / DECIMAL_BASE
+                                    if id_digits < REQUEST_MAX_ID_DIGITS:
+                                        request.id <- request.id * DECIMAL_BASE + (byte - ASCII_ZERO).u64()
+                                        id_digits <- id_digits + 1
+                                        request.has_id <- true
+                                else:
+                                    return invalid_request() if not is_numeric_terminator(byte)
+                                    in_id <- false
                 if not in_expected:
                     if byte == expected_prefix[expected_position]:
                         expected_position <- expected_position + 1
@@ -530,6 +551,7 @@ module DebuggerProtocolRequest:
                             expected_field_seen <- true
                             expected_position <- 0
                             expected_digits <- 0
+                            expected_quoted <- false
                     else:
                         if is_json_whitespace(byte) and (expected_position == REQUEST_EXPECTED_PREFIX_LENGTH - 1 or expected_position == REQUEST_EXPECTED_PREFIX_LENGTH - 2):
                             expected_position <- expected_position
@@ -539,19 +561,36 @@ module DebuggerProtocolRequest:
                             else:
                                 expected_position <- 0
                 else:
-                    if is_json_whitespace(byte) and not expected_has_digits:
-                        expected_has_digits <- false
-                    else:
-                        if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    if expected_quoted:
+                        if byte == ASCII_QUOTE:
+                            return invalid_request() if not expected_has_digits
+                            expected_quoted <- false
+                            in_expected <- false
+                        else:
+                            return invalid_request() if byte < ASCII_ZERO or byte > ASCII_NINE
                             return invalid_request() if expected_digits >= FIRST_NUMBER_DIGIT_COUNT and request.expected_generation == 0
                             return invalid_request() if expected_digits >= REQUEST_MAX_GENERATION_DIGITS or request.expected_generation > (MAX_REQUEST_INTEGER - (byte - ASCII_ZERO).u64()) / DECIMAL_BASE
                             if expected_digits < REQUEST_MAX_GENERATION_DIGITS:
                                 request.expected_generation <- request.expected_generation * DECIMAL_BASE + (byte - ASCII_ZERO).u64()
                                 expected_digits <- expected_digits + 1
                                 expected_has_digits <- true
+                    else:
+                        if is_json_whitespace(byte) and not expected_has_digits:
+                            expected_has_digits <- false
                         else:
-                            return invalid_request() if not is_numeric_terminator(byte)
-                            in_expected <- false
+                            if byte == ASCII_QUOTE and not expected_has_digits:
+                                expected_quoted <- true
+                            else:
+                                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                                    return invalid_request() if expected_digits >= FIRST_NUMBER_DIGIT_COUNT and request.expected_generation == 0
+                                    return invalid_request() if expected_digits >= REQUEST_MAX_GENERATION_DIGITS or request.expected_generation > (MAX_REQUEST_INTEGER - (byte - ASCII_ZERO).u64()) / DECIMAL_BASE
+                                    if expected_digits < REQUEST_MAX_GENERATION_DIGITS:
+                                        request.expected_generation <- request.expected_generation * DECIMAL_BASE + (byte - ASCII_ZERO).u64()
+                                        expected_digits <- expected_digits + 1
+                                        expected_has_digits <- true
+                                else:
+                                    return invalid_request() if not is_numeric_terminator(byte)
+                                    in_expected <- false
                 if not in_target:
                     if byte == target_prefix[target_position]:
                         target_position <- target_position + 1
@@ -561,6 +600,7 @@ module DebuggerProtocolRequest:
                             target_field_seen <- true
                             target_position <- 0
                             target_digits <- 0
+                            target_quoted <- false
                     else:
                         if is_json_whitespace(byte) and (target_position == REQUEST_TARGET_PREFIX_LENGTH - 1 or target_position == REQUEST_TARGET_PREFIX_LENGTH - 2):
                             target_position <- target_position
@@ -570,19 +610,36 @@ module DebuggerProtocolRequest:
                             else:
                                 target_position <- 0
                 else:
-                    if is_json_whitespace(byte) and not target_has_digits:
-                        target_has_digits <- false
-                    else:
-                        if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    if target_quoted:
+                        if byte == ASCII_QUOTE:
+                            return invalid_request() if not target_has_digits
+                            target_quoted <- false
+                            in_target <- false
+                        else:
+                            return invalid_request() if byte < ASCII_ZERO or byte > ASCII_NINE
                             return invalid_request() if target_digits >= FIRST_NUMBER_DIGIT_COUNT and request.target_event == 0
                             return invalid_request() if target_digits >= REQUEST_MAX_GENERATION_DIGITS or request.target_event > (MAX_REQUEST_INTEGER - (byte - ASCII_ZERO).u64()) / DECIMAL_BASE
                             if target_digits < REQUEST_MAX_GENERATION_DIGITS:
                                 request.target_event <- request.target_event * DECIMAL_BASE + (byte - ASCII_ZERO).u64()
                                 target_digits <- target_digits + 1
                                 target_has_digits <- true
+                    else:
+                        if is_json_whitespace(byte) and not target_has_digits:
+                            target_has_digits <- false
                         else:
-                            return invalid_request() if not is_numeric_terminator(byte)
-                            in_target <- false
+                            if byte == ASCII_QUOTE and not target_has_digits:
+                                target_quoted <- true
+                            else:
+                                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                                    return invalid_request() if target_digits >= FIRST_NUMBER_DIGIT_COUNT and request.target_event == 0
+                                    return invalid_request() if target_digits >= REQUEST_MAX_GENERATION_DIGITS or request.target_event > (MAX_REQUEST_INTEGER - (byte - ASCII_ZERO).u64()) / DECIMAL_BASE
+                                    if target_digits < REQUEST_MAX_GENERATION_DIGITS:
+                                        request.target_event <- request.target_event * DECIMAL_BASE + (byte - ASCII_ZERO).u64()
+                                        target_digits <- target_digits + 1
+                                        target_has_digits <- true
+                                else:
+                                    return invalid_request() if not is_numeric_terminator(byte)
+                                    in_target <- false
             return invalid_request() if in_method or in_id or in_expected or in_target
             return invalid_request() if id_field_seen and (not request.has_id or request.id == REQUEST_NO_ID)
             return invalid_request() if expected_field_seen and not expected_has_digits

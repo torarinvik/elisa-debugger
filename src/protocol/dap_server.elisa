@@ -38,6 +38,7 @@ module DebuggerDAPServer:
         const HEADER_TAIL_CRLF: u8 = 2
         const HEADER_TAIL_CRLFCR: u8 = 3
         const ASCII_ZERO: u8 = 48
+        const ASCII_ONE: u8 = 49
         const ASCII_NINE: u8 = 57
         const ASCII_COMMA: u8 = 44
         const ASCII_BRACE_OPEN: u8 = 123
@@ -72,10 +73,13 @@ module DebuggerDAPServer:
         const ASCII_P: u8 = 112
         const ASCII_H: u8 = 104
         const ASCII_HYPHEN: u8 = 45
+        const ASCII_PLUS: u8 = 43
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_L: u8 = 76
         const ASCII_UPPER_A: u8 = 65
         const ASCII_UPPER_F: u8 = 70
+        const ASCII_UPPER_E: u8 = 69
+        const ASCII_DOT: u8 = 46
         const JSON_NESTING_CAPACITY: usize = 64
         const JSON_STATE_ROOT_VALUE: u8 = 0
         const JSON_STATE_OBJECT_KEY_OR_END: u8 = 1
@@ -85,6 +89,18 @@ module DebuggerDAPServer:
         const JSON_STATE_ARRAY_VALUE_OR_END: u8 = 5
         const JSON_STATE_COMMA_OR_END: u8 = 6
         const JSON_STATE_ROOT_DONE: u8 = 7
+        const JSON_PRIMITIVE_NUMBER: u8 = 1
+        const JSON_PRIMITIVE_TRUE: u8 = 2
+        const JSON_PRIMITIVE_FALSE: u8 = 3
+        const JSON_PRIMITIVE_NULL: u8 = 4
+        const JSON_NUMBER_SIGN: u8 = 1
+        const JSON_NUMBER_ZERO: u8 = 2
+        const JSON_NUMBER_INTEGER: u8 = 3
+        const JSON_NUMBER_DOT: u8 = 4
+        const JSON_NUMBER_FRACTION: u8 = 5
+        const JSON_NUMBER_EXPONENT: u8 = 6
+        const JSON_NUMBER_EXPONENT_SIGN: u8 = 7
+        const JSON_NUMBER_EXPONENT_DIGITS: u8 = 8
         const HEADER_PREFIX_LENGTH: u8 = 15
         const COMMAND_PREFIX_LENGTH: u8 = 11
         const COMMAND_PREFIX_FINAL_POSITION: u8 = 10
@@ -225,6 +241,10 @@ module DebuggerDAPServer:
             json_escaped: mutable bool
             json_unicode_digits: mutable u8
             json_in_primitive: mutable bool
+            json_primitive_kind: mutable u8
+            json_primitive_number_state: mutable u8
+            json_primitive_literal_position: mutable u8
+            json_primitive_valid: mutable bool
             json_root_state: mutable u8
             json_closed: mutable bool
             json_structural_invalid: mutable bool
@@ -274,6 +294,124 @@ module DebuggerDAPServer:
             return true if byte >= ASCII_ZERO and byte <= ASCII_NINE
             return true if byte >= ASCII_A and byte <= ASCII_F
             return byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
+
+        def json_primitive_literal_length(kind: u8) -> u8:
+            return 4 if kind == JSON_PRIMITIVE_TRUE or kind == JSON_PRIMITIVE_NULL
+            return 5 if kind == JSON_PRIMITIVE_FALSE
+            return 0
+
+        def json_primitive_literal_byte(kind: u8, position: u8) -> u8:
+            if kind == JSON_PRIMITIVE_TRUE:
+                return ASCII_T if position == 0
+                return ASCII_R if position == 1
+                return ASCII_U if position == 2
+                return ASCII_E if position == 3
+            if kind == JSON_PRIMITIVE_FALSE:
+                return ASCII_F if position == 0
+                return ASCII_A if position == 1
+                return ASCII_L if position == 2
+                return ASCII_S if position == 3
+                return ASCII_E if position == 4
+            if kind == JSON_PRIMITIVE_NULL:
+                return ASCII_N if position == 0
+                return ASCII_U if position == 1
+                return ASCII_L
+            return 0
+
+        def decoder_json_primitive_start(decoder: mutable Decoder&, byte: u8) -> bool:
+            decoder.json_primitive_valid <- true
+            decoder.json_primitive_literal_position <- 0
+            if byte == ASCII_T:
+                decoder.json_primitive_kind <- JSON_PRIMITIVE_TRUE
+                decoder.json_primitive_literal_position <- 1
+                return true
+            if byte == ASCII_F:
+                decoder.json_primitive_kind <- JSON_PRIMITIVE_FALSE
+                decoder.json_primitive_literal_position <- 1
+                return true
+            if byte == ASCII_N:
+                decoder.json_primitive_kind <- JSON_PRIMITIVE_NULL
+                decoder.json_primitive_literal_position <- 1
+                return true
+            if byte == ASCII_HYPHEN:
+                decoder.json_primitive_kind <- JSON_PRIMITIVE_NUMBER
+                decoder.json_primitive_number_state <- JSON_NUMBER_SIGN
+                return true
+            if byte == ASCII_ZERO:
+                decoder.json_primitive_kind <- JSON_PRIMITIVE_NUMBER
+                decoder.json_primitive_number_state <- JSON_NUMBER_ZERO
+                return true
+            if byte >= ASCII_ONE and byte <= ASCII_NINE:
+                decoder.json_primitive_kind <- JSON_PRIMITIVE_NUMBER
+                decoder.json_primitive_number_state <- JSON_NUMBER_INTEGER
+                return true
+            decoder.json_primitive_valid <- false
+            return false
+
+        def decoder_json_primitive_continue(decoder: mutable Decoder&, byte: u8) -> bool:
+            if decoder.json_primitive_kind != JSON_PRIMITIVE_NUMBER:
+                expected_length: u8 = json_primitive_literal_length(decoder.json_primitive_kind)
+                return false if decoder.json_primitive_literal_position >= expected_length or byte != json_primitive_literal_byte(decoder.json_primitive_kind, decoder.json_primitive_literal_position)
+                decoder.json_primitive_literal_position <- decoder.json_primitive_literal_position + 1
+                return true
+            if decoder.json_primitive_number_state == JSON_NUMBER_SIGN:
+                if byte == ASCII_ZERO:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_ZERO
+                    return true
+                if byte >= ASCII_ONE and byte <= ASCII_NINE:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_INTEGER
+                    return true
+                return false
+            if decoder.json_primitive_number_state == JSON_NUMBER_ZERO:
+                if byte == ASCII_DOT:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_DOT
+                    return true
+                if byte == ASCII_E or byte == ASCII_UPPER_E:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_EXPONENT
+                    return true
+                return false
+            if decoder.json_primitive_number_state == JSON_NUMBER_INTEGER:
+                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    return true
+                if byte == ASCII_DOT:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_DOT
+                    return true
+                if byte == ASCII_E or byte == ASCII_UPPER_E:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_EXPONENT
+                    return true
+                return false
+            if decoder.json_primitive_number_state == JSON_NUMBER_DOT:
+                return false if byte < ASCII_ZERO or byte > ASCII_NINE
+                decoder.json_primitive_number_state <- JSON_NUMBER_FRACTION
+                return true
+            if decoder.json_primitive_number_state == JSON_NUMBER_FRACTION:
+                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    return true
+                if byte == ASCII_E or byte == ASCII_UPPER_E:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_EXPONENT
+                    return true
+                return false
+            if decoder.json_primitive_number_state == JSON_NUMBER_EXPONENT:
+                if byte == ASCII_HYPHEN or byte == ASCII_PLUS:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_EXPONENT_SIGN
+                    return true
+                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                    decoder.json_primitive_number_state <- JSON_NUMBER_EXPONENT_DIGITS
+                    return true
+                return false
+            if decoder.json_primitive_number_state == JSON_NUMBER_EXPONENT_SIGN:
+                return false if byte < ASCII_ZERO or byte > ASCII_NINE
+                decoder.json_primitive_number_state <- JSON_NUMBER_EXPONENT_DIGITS
+                return true
+            if decoder.json_primitive_number_state == JSON_NUMBER_EXPONENT_DIGITS:
+                return byte >= ASCII_ZERO and byte <= ASCII_NINE
+            return false
+
+        def decoder_json_primitive_is_complete(decoder: Decoder) -> bool:
+            return false if not decoder.json_primitive_valid
+            if decoder.json_primitive_kind != JSON_PRIMITIVE_NUMBER:
+                return decoder.json_primitive_literal_position == json_primitive_literal_length(decoder.json_primitive_kind)
+            return decoder.json_primitive_number_state == JSON_NUMBER_ZERO or decoder.json_primitive_number_state == JSON_NUMBER_INTEGER or decoder.json_primitive_number_state == JSON_NUMBER_FRACTION or decoder.json_primitive_number_state == JSON_NUMBER_EXPONENT_DIGITS
 
         def header_prefix_matches(position: u8, byte: u8) -> bool:
             return byte == ASCII_UPPER_C if position == 0
@@ -349,9 +487,17 @@ module DebuggerDAPServer:
                 return
             if decoder.json_in_primitive:
                 if is_json_whitespace(byte):
+                    if not decoder_json_primitive_is_complete(decoder):
+                        decoder_json_fail(decoder)
+                        return
                     decoder.json_in_primitive <- false
                     return
                 if byte != ASCII_COMMA and byte != ASCII_BRACE_CLOSE and byte != ASCII_BRACKET_CLOSE:
+                    if not decoder_json_primitive_continue(decoder, byte):
+                        decoder_json_fail(decoder)
+                        return
+                    return
+                if not decoder_json_primitive_is_complete(decoder):
                     decoder_json_fail(decoder)
                     return
                 decoder.json_in_primitive <- false
@@ -383,7 +529,11 @@ module DebuggerDAPServer:
                     return
                 decoder.json_in_string <- true if byte == ASCII_QUOTE
                 decoder.json_string_is_key <- false if byte == ASCII_QUOTE
-                decoder.json_in_primitive <- true if byte != ASCII_QUOTE
+                if byte != ASCII_QUOTE:
+                    if not decoder_json_primitive_start(decoder, byte):
+                        decoder_json_fail(decoder)
+                        return
+                    decoder.json_in_primitive <- true
                 decoder.json_root_state <- JSON_STATE_ROOT_DONE
                 decoder.json_closed <- true if byte != ASCII_QUOTE
                 return
@@ -449,6 +599,9 @@ module DebuggerDAPServer:
                 decoder.json_string_is_key <- false
                 return
             if byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE or byte == ASCII_COLON:
+                decoder_json_fail(decoder)
+                return
+            if not decoder_json_primitive_start(decoder, byte):
                 decoder_json_fail(decoder)
                 return
             decoder.json_in_primitive <- true
@@ -632,6 +785,10 @@ module DebuggerDAPServer:
                     decoder.json_escaped <- false
                     decoder.json_unicode_digits <- 0
                     decoder.json_in_primitive <- false
+                    decoder.json_primitive_kind <- 0
+                    decoder.json_primitive_number_state <- 0
+                    decoder.json_primitive_literal_position <- 0
+                    decoder.json_primitive_valid <- false
                     decoder.json_root_state <- JSON_STATE_ROOT_VALUE
                     decoder.json_closed <- false
                     decoder.json_structural_invalid <- false

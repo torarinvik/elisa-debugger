@@ -1,0 +1,91 @@
+# Bounded alternate-schedule and observed-race analysis.  Exploration results
+# are deliberately scoped to the configured bound and observed accesses.
+
+include "./model.elisa"
+include "./scheduler.elisa"
+include "./analysis.elisa"
+include "../core/identity.elisa"
+
+module DebuggerConcurrencyExploration:
+    private:
+        const EXPLORE_TASK_CAPACITY: usize = 32
+        const EXPLORE_EVENT_CAPACITY: usize = 256
+        const EXPLORE_MAX_PREEMPTIONS: u64 = 1024
+        const ACCESS_KIND_MAX: u16 = 1
+        const DETAIL_LIMIT: u32 = 1
+        const DETAIL_RACE: u32 = 2
+
+    public:
+        struct ExplorationLimits:
+            max_tasks: mutable u64
+            max_preemptions: mutable u64
+            max_events: mutable u64
+            max_branches: mutable u64
+
+        struct ScheduleAlternative:
+            decision: mutable u64
+            original_task: mutable DebuggerIdentity::DebugId
+            alternate_task: mutable DebuggerIdentity::DebugId
+            preemptions: mutable u64
+
+        struct ExplorationResult:
+            alternatives: mutable ScheduleAlternative[EXPLORE_EVENT_CAPACITY]
+            count: mutable usize
+            explored: mutable u64
+            bounded: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        struct AccessRecord:
+            event: mutable u64
+            task: mutable DebuggerIdentity::DebugId
+            allocation: mutable DebuggerIdentity::AllocationIdentity
+            write: mutable bool
+            clock: mutable DebuggerConcurrencyAnalysis::VectorClock
+
+        struct RaceResult:
+            race: mutable bool
+            first: mutable AccessRecord
+            second: mutable AccessRecord
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def exploration_limits_default() -> ExplorationLimits:
+            return ExplorationLimits{max_tasks: EXPLORE_TASK_CAPACITY.u64(), max_preemptions: EXPLORE_MAX_PREEMPTIONS, max_events: EXPLORE_EVENT_CAPACITY.u64(), max_branches: EXPLORE_EVENT_CAPACITY.u64()}
+
+        def explore_schedules(scheduler: DebuggerScheduler::DeterministicScheduler, tasks: DebuggerConcurrency::TaskInfo[EXPLORE_TASK_CAPACITY], task_count: usize, limits: ExplorationLimits) -> ExplorationResult:
+            result: mutable ExplorationResult = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            return ExplorationResult{alternatives: result.alternatives, count: 0, explored: 0, bounded: true, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_LIMIT)} if task_count == 0 or task_count > EXPLORE_TASK_CAPACITY or limits.max_tasks == 0 or limits.max_events == 0
+            return ExplorationResult{alternatives: result.alternatives, count: 0, explored: 0, bounded: true, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_LIMIT)} if scheduler.count > EXPLORE_EVENT_CAPACITY
+            for decision_index in 0..<scheduler.count:
+                return result if result.count >= limits.max_branches.usize() or result.count >= EXPLORE_EVENT_CAPACITY
+                decision: DebuggerScheduler::ScheduleDecision = scheduler.decisions[decision_index]
+                for task_index in 0..<task_count:
+                    candidate: DebuggerConcurrency::TaskInfo = tasks[task_index]
+                    continue if candidate.id.value == decision.task.id.value or candidate.state != DebuggerConcurrency::TaskState.Runnable
+                    alternative: ScheduleAlternative = ScheduleAlternative{decision: decision_index.u64(), original_task: decision.task.id, alternate_task: candidate.id, preemptions: 1}
+                    result.alternatives[result.count] <- alternative
+                    result.count <- result.count + 1
+                    result.explored <- result.explored + 1
+                    break if result.count.u64() >= limits.max_branches
+                break if result.count.u64() >= limits.max_branches
+            result.bounded <- result.count.u64() >= limits.max_branches or scheduler.count.u64() >= limits.max_events
+            return result
+
+        def access_records_conflict(left: AccessRecord, right: AccessRecord) -> bool:
+            return false if left.allocation.allocation.value != right.allocation.allocation.value or left.allocation.generation != right.allocation.generation or left.allocation.offset != right.allocation.offset
+            return false if left.task.value == right.task.value or (not left.write and not right.write)
+            return true if DebuggerConcurrencyAnalysis::vector_clock_concurrent(left.clock, right.clock)
+            return false
+
+        def find_observed_race(records: AccessRecord[EXPLORE_EVENT_CAPACITY], count: usize) -> RaceResult:
+            result: mutable RaceResult = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            return RaceResult{race: false, first: result.first, second: result.second, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_RACE)} if count > EXPLORE_EVENT_CAPACITY
+            for left_index in 0..<count:
+                for right_index in left_index + 1..<count:
+                    if access_records_conflict(records[left_index], records[right_index]):
+                        result.race <- true
+                        result.first <- records[left_index]
+                        result.second <- records[right_index]
+                        return result
+            return result

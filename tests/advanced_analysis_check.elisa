@@ -1,0 +1,42 @@
+include "../src/replay/compare.elisa"
+include "../src/concurrency/exploration.elisa"
+include "../src/vm/edir.elisa"
+include "../src/core/identity.elisa"
+
+const PROGRAM_VERSION: u32 = 1
+const INSTRUCTION_COUNT: u64 = 2
+const RECORDING_ID: u64 = 1
+const TASK_ONE: u64 = 1
+const TASK_TWO: u64 = 2
+const ALLOCATION_ID: u64 = 3
+const RACE_RESULT: i64 = 1
+const COMPARE_RESULT: i64 = 2
+
+def main() -> i64:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: 0, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: 7, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    left: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_new(image, DebuggerIdentity::debug_id(RECORDING_ID))
+    right: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_new(image, DebuggerIdentity::debug_id(RECORDING_ID))
+    DebuggerReplayEngine::replay_engine_run(left, 4)
+    DebuggerReplayEngine::replay_engine_run(right, 4)
+    comparison: DebuggerReplayCompare::BranchComparison = DebuggerReplayCompare::compare_engines(left, right)
+    return COMPARE_RESULT if not comparison.exact or not DebuggerReplayCompare::comparison_is_valid(comparison)
+    task_one: DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(TASK_ONE), parent: DebuggerIdentity::debug_id(0), state: DebuggerConcurrency::TaskState.Runnable, logical_time: 1, os_thread: 1}
+    task_two: DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(TASK_TWO), parent: DebuggerIdentity::debug_id(0), state: DebuggerConcurrency::TaskState.Runnable, logical_time: 1, os_thread: 2}
+    tasks: mutable DebuggerConcurrency::TaskInfo[32] = zeroed
+    tasks[0] <- task_one
+    tasks[1] <- task_two
+    scheduler: mutable DebuggerScheduler::DeterministicScheduler = DebuggerScheduler::scheduler_new(false)
+    scheduler <- DebuggerScheduler::scheduler_append(scheduler, DebuggerScheduler::ScheduleDecision{ordinal: 0, task: task_one, kind: DebuggerScheduler::ScheduleKind.Run, synchronization: 0})
+    explored: DebuggerConcurrencyExploration::ExplorationResult = DebuggerConcurrencyExploration::explore_schedules(scheduler, tasks, 2, DebuggerConcurrencyExploration::exploration_limits_default())
+    return 3 if explored.count == 0
+    clock_one: DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_tick(DebuggerConcurrencyAnalysis::vector_clock_new(), 0)
+    clock_two: DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_tick(DebuggerConcurrencyAnalysis::vector_clock_new(), 1)
+    records: mutable DebuggerConcurrencyExploration::AccessRecord[256] = zeroed
+    records[0] <- DebuggerConcurrencyExploration::AccessRecord{event: 1, task: task_one.id, allocation: DebuggerIdentity::AllocationIdentity{allocation: DebuggerIdentity::debug_id(ALLOCATION_ID), generation: 1, offset: 0}, write: true, clock: clock_one}
+    records[1] <- DebuggerConcurrencyExploration::AccessRecord{event: 2, task: task_two.id, allocation: DebuggerIdentity::AllocationIdentity{allocation: DebuggerIdentity::debug_id(ALLOCATION_ID), generation: 1, offset: 0}, write: false, clock: clock_two}
+    race: DebuggerConcurrencyExploration::RaceResult = DebuggerConcurrencyExploration::find_observed_race(records, 2)
+    return RACE_RESULT if not race.race
+    return 0

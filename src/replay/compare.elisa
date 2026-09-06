@@ -1,0 +1,66 @@
+# Branch comparison aligns immutable replay histories by their shared prefix
+# and reports the first semantic divergence, never relying on wall time or
+# raw host addresses.
+
+include "./engine.elisa"
+include "../core/errors.elisa"
+
+module DebuggerReplayCompare:
+    private:
+        const COMPARE_MAX_EVENTS: usize = 64
+        const DETAIL_INVALID_LEFT: u32 = 1
+        const DETAIL_INVALID_RIGHT: u32 = 2
+        const DETAIL_CAPACITY: u32 = 3
+        const NO_DIVERGENCE: u64 = 18446744073709551615
+
+    public:
+        struct BranchComparison:
+            shared_prefix: mutable u64
+            left_event: mutable u64
+            right_event: mutable u64
+            first_divergence: mutable u64
+            exact: mutable bool
+            heuristic_alignment: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def compare_engines(left: DebuggerReplayEngine::ReplayEngine, right: DebuggerReplayEngine::ReplayEngine) -> BranchComparison:
+            result: mutable BranchComparison = zeroed
+            result.first_divergence <- NO_DIVERGENCE
+            result.failure <- DebuggerErrors::no_error()
+            if left.event_count > COMPARE_MAX_EVENTS:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_INVALID_LEFT)
+                return result
+            if right.event_count > COMPARE_MAX_EVENTS:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_INVALID_RIGHT)
+                return result
+            if not DebuggerReplayEngine::replay_engine_is_exact(left):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_INVALID_LEFT)
+                return result
+            if not DebuggerReplayEngine::replay_engine_is_exact(right):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_INVALID_RIGHT)
+                return result
+            limit: usize = left.event_count if left.event_count < right.event_count else right.event_count
+            for index in 0..<limit:
+                left_hash: u64 = left.events[index].payload_hash
+                right_hash: u64 = right.events[index].payload_hash
+                if left_hash != right_hash:
+                    result.first_divergence <- index.u64()
+                    result.left_event <- index.u64()
+                    result.right_event <- index.u64()
+                    return result
+                result.shared_prefix <- result.shared_prefix + 1
+            if left.event_count != right.event_count:
+                result.first_divergence <- limit.u64()
+                result.left_event <- left.event_count.u64()
+                result.right_event <- right.event_count.u64()
+                return result
+            result.left_event <- left.event_count.u64()
+            result.right_event <- right.event_count.u64()
+            result.exact <- true
+            return result
+
+        def comparison_has_diverged(comparison: BranchComparison) -> bool:
+            return comparison.first_divergence != NO_DIVERGENCE
+
+        def comparison_is_valid(comparison: BranchComparison) -> bool:
+            return comparison.shared_prefix <= comparison.left_event and comparison.shared_prefix <= comparison.right_event and (comparison.exact or comparison_has_diverged(comparison) or not DebuggerErrors::error_is_ok(comparison.failure))

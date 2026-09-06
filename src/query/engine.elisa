@@ -16,6 +16,7 @@ module DebuggerQueryEngine:
         const QUERY_DETAIL_CANCELLED: u32 = 2
         const QUERY_DETAIL_CAPACITY: u32 = 3
         const QUERY_DETAIL_OVERFLOW: u32 = 4
+        const QUERY_MAX_EVENT: u64 = 18446744073709551615
 
     public:
         struct QueryMatch:
@@ -45,7 +46,7 @@ module DebuggerQueryEngine:
             return QueryExecution{window: window, matches: zeroed, count: 0, scanned: 0, next_event: window.first_event, complete: false, cancelled: false, failure: DebuggerErrors::no_error()}
 
         def query_execution_is_valid(execution: QueryExecution) -> bool:
-            return DebuggerHistory::query_window_is_valid(execution.window) and execution.count <= QUERY_RESULT_CAPACITY and execution.next_event >= execution.window.first_event and execution.scanned <= execution.window.max_steps
+            return DebuggerHistory::query_window_is_valid(execution.window) and execution.count <= QUERY_RESULT_CAPACITY and execution.next_event >= execution.window.first_event and execution.scanned <= execution.window.max_steps and not (execution.complete and execution.cancelled)
 
         def query_record(execution: QueryExecution, mutation: DebuggerProvenance::Mutation) -> QueryExecution:
             updated: mutable QueryExecution = execution
@@ -66,18 +67,22 @@ module DebuggerQueryEngine:
             for position in 0..<index.count:
                 candidate: DebuggerProvenance::Mutation = index.mutations[position]
                 result.scanned <- result.scanned + 1
-                result.next_event <- candidate.event + 1 if candidate.event >= result.next_event
+                result.next_event <- QUERY_MAX_EVENT if candidate.event == QUERY_MAX_EVENT and candidate.event >= result.next_event
+                result.next_event <- candidate.event + 1 if candidate.event != QUERY_MAX_EVENT and candidate.event >= result.next_event
                 if DebuggerCancellation::cancellation_is_requested(token, 0):
                     result.cancelled <- true
                     result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, QUERY_DETAIL_CANCELLED)
                     return result
                 if candidate.event < window.first_event or candidate.event > window.last_event or not DebuggerIdentity::binding_identity_equal(candidate.binding, binding):
+                    if result.scanned >= window.max_steps and position + 1 < index.count:
+                        result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, QUERY_DETAIL_CAPACITY)
+                        return result
                     continue
                 result <- query_record(result, candidate)
                 if result.count.u64() >= window.max_results:
                     result.complete <- false
                     return result
-                if result.scanned >= window.max_steps:
+                if result.scanned >= window.max_steps and position + 1 < index.count:
                     result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, QUERY_DETAIL_CAPACITY)
                     return result
             result.complete <- true
@@ -86,7 +91,7 @@ module DebuggerQueryEngine:
         def query_find_next_write(index: DebuggerProvenance::ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, after_event: u64, window: DebuggerHistory::QueryWindow) -> DebuggerProvenance::Mutation:
             result: mutable DebuggerProvenance::Mutation = zeroed
             found: mutable bool = false
-            return result if index.count > QUERY_RESULT_CAPACITY * 8 or index.overflowed
+            return result if not DebuggerHistory::query_window_is_valid(window) or index.count > QUERY_RESULT_CAPACITY * 8 or index.overflowed
             for position in 0..<index.count:
                 candidate: DebuggerProvenance::Mutation = index.mutations[position]
                 if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event > after_event and candidate.event >= window.first_event and candidate.event <= window.last_event and (not found or candidate.event < result.event):
@@ -99,6 +104,7 @@ module DebuggerQueryEngine:
             return result if result.cancelled or not DebuggerErrors::error_is_ok(result.failure)
             for position in 0..<result.count:
                 return QueryExecution{window: result.window, matches: result.matches, count: 1, scanned: result.scanned, next_event: result.next_event, complete: true, cancelled: false, failure: DebuggerErrors::no_error()} if result.matches[position].mutation.value_hash != previous_hash
+            return result if not result.complete
             empty: mutable QueryExecution = result
             empty.count <- 0
             return empty
@@ -109,7 +115,7 @@ module DebuggerQueryEngine:
         def query_compare_series(left: StateSample&, left_count: usize, right: StateSample&, right_count: usize) -> StateDifference:
             left_sample: mutable StateSample = zeroed
             right_sample: mutable StateSample = zeroed
-            return StateDifference{left: left_sample, right: right_sample, different: true} if left_count == 0 or right_count == 0
+            return StateDifference{left: left_sample, right: right_sample, different: true} if left_count == 0 or right_count == 0 or left_count > QUERY_RESULT_CAPACITY or right_count > QUERY_RESULT_CAPACITY
             left_sample <- left[0]
             right_sample <- right[0]
             for index in 0..<left_count:

@@ -1,0 +1,123 @@
+# Versioned, portable EDIR artifact codec.  The decoder never exposes a
+# partially decoded image: malformed bytes return a failed result and a zeroed
+# image for the caller to discard.
+
+include "./edir.elisa"
+include "../trace/binary.elisa"
+
+module DebuggerEDIRCodec:
+    private:
+        const EDIR_CODEC_SCHEMA: u32 = 1
+        const EDIR_CODEC_MAX_INSTRUCTIONS: usize = 128
+        const EDIR_CODEC_INSTRUCTION_BYTES: usize = 62
+        const EDIR_CODEC_HEADER_BYTES: usize = 25
+        const EDIR_CODEC_MAX_BYTES: usize = EDIR_CODEC_HEADER_BYTES + EDIR_CODEC_MAX_INSTRUCTIONS * EDIR_CODEC_INSTRUCTION_BYTES
+        const BOOLEAN_FALSE: u8 = 0
+        const BOOLEAN_TRUE: u8 = 1
+        const OPCODE_MAX: u16 = 19
+
+        def opcode_from_u16(value: u16, valid: mutable bool&) -> DebuggerEDIR::Opcode:
+            valid <- false if value > OPCODE_MAX
+            return DebuggerEDIR::Opcode.Nop if value == 0
+            return DebuggerEDIR::Opcode.Constant if value == 1
+            return DebuggerEDIR::Opcode.Add if value == 2
+            return DebuggerEDIR::Opcode.Subtract if value == 3
+            return DebuggerEDIR::Opcode.LoadLocal if value == 4
+            return DebuggerEDIR::Opcode.StoreLocal if value == 5
+            return DebuggerEDIR::Opcode.LoadGlobal if value == 6
+            return DebuggerEDIR::Opcode.StoreGlobal if value == 7
+            return DebuggerEDIR::Opcode.LoadMemory if value == 8
+            return DebuggerEDIR::Opcode.StoreMemory if value == 9
+            return DebuggerEDIR::Opcode.Allocate if value == 10
+            return DebuggerEDIR::Opcode.Multiply if value == 11
+            return DebuggerEDIR::Opcode.Divide if value == 12
+            return DebuggerEDIR::Opcode.Negate if value == 13
+            return DebuggerEDIR::Opcode.CompareEqual if value == 14
+            return DebuggerEDIR::Opcode.CompareLess if value == 15
+            return DebuggerEDIR::Opcode.Jump if value == 16
+            return DebuggerEDIR::Opcode.BranchZero if value == 17
+            return DebuggerEDIR::Opcode.Call if value == 18
+            return DebuggerEDIR::Opcode.Return if value == 19
+            return DebuggerEDIR::Opcode.Nop
+
+        def put_source(writer: DebuggerTraceBinary::ByteWriter, source: DebuggerIdentity::SourceSpan) -> DebuggerTraceBinary::ByteWriter:
+            updated: mutable DebuggerTraceBinary::ByteWriter = writer
+            updated <- DebuggerTraceBinary::writer_put_u64(updated, source.file.value)
+            updated <- DebuggerTraceBinary::writer_put_u64(updated, source.start_byte)
+            updated <- DebuggerTraceBinary::writer_put_u64(updated, source.end_byte)
+            updated <- DebuggerTraceBinary::writer_put_u32(updated, source.start_line)
+            updated <- DebuggerTraceBinary::writer_put_u32(updated, source.start_column)
+            updated <- DebuggerTraceBinary::writer_put_u32(updated, source.end_line)
+            updated <- DebuggerTraceBinary::writer_put_u32(updated, source.end_column)
+            updated <- DebuggerTraceBinary::writer_put_u32(updated, source.discriminator)
+            return updated
+
+        def take_source(reader: mutable DebuggerTraceBinary::ByteReader&) -> DebuggerIdentity::SourceSpan:
+            return DebuggerIdentity::SourceSpan{
+                file: DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader)),
+                start_byte: DebuggerTraceBinary::reader_take_u64(reader),
+                end_byte: DebuggerTraceBinary::reader_take_u64(reader),
+                start_line: DebuggerTraceBinary::reader_take_u32(reader),
+                start_column: DebuggerTraceBinary::reader_take_u32(reader),
+                end_line: DebuggerTraceBinary::reader_take_u32(reader),
+                end_column: DebuggerTraceBinary::reader_take_u32(reader),
+                discriminator: DebuggerTraceBinary::reader_take_u32(reader)
+            }
+
+    public:
+        struct DecodeResult:
+            image: mutable DebuggerEDIR::ProgramImage
+            valid: mutable bool
+
+        def artifact_encode(image: mutable DebuggerEDIR::ProgramImage&) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image(image)
+            if not verification.valid or image.program.instruction_count > EDIR_CODEC_MAX_INSTRUCTIONS.u64():
+                writer.failed <- true
+                return writer
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, EDIR_CODEC_SCHEMA)
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, image.program.version)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, image.program.instruction_count)
+            writer <- DebuggerTraceBinary::writer_put_u64(writer, image.program.local_count)
+            has_return: mutable u8 = BOOLEAN_FALSE
+            has_return <- BOOLEAN_TRUE if image.program.has_return
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, has_return)
+            for index in 0..<image.program.instruction_count.usize():
+                instruction: DebuggerEDIR::Instruction = image.instructions[index]
+                writer <- DebuggerTraceBinary::writer_put_u16(writer, instruction.opcode.u16())
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, instruction.a.u64())
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, instruction.b.u64())
+                writer <- put_source(writer, instruction.source)
+            return writer
+
+        def artifact_decode(reader: mutable DebuggerTraceBinary::ByteReader&) -> DecodeResult:
+            result: mutable DecodeResult = zeroed
+            schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
+            result.image.program.version <- DebuggerTraceBinary::reader_take_u32(reader)
+            result.image.program.instruction_count <- DebuggerTraceBinary::reader_take_u64(reader)
+            result.image.program.local_count <- DebuggerTraceBinary::reader_take_u64(reader)
+            has_return: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            result.image.program.has_return <- has_return == BOOLEAN_TRUE
+            decode_valid: mutable bool = schema == EDIR_CODEC_SCHEMA and has_return <= BOOLEAN_TRUE
+            decode_valid <- false if result.image.program.instruction_count > EDIR_CODEC_MAX_INSTRUCTIONS.u64()
+            if decode_valid:
+                for index in 0..<result.image.program.instruction_count.usize():
+                    opcode_valid: mutable bool = true
+                    opcode: DebuggerEDIR::Opcode = opcode_from_u16(DebuggerTraceBinary::reader_take_u16(reader), opcode_valid)
+                    result.image.instructions[index] <- DebuggerEDIR::Instruction{
+                        opcode: opcode,
+                        a: DebuggerTraceBinary::reader_take_u64(reader).i64(),
+                        b: DebuggerTraceBinary::reader_take_u64(reader).i64(),
+                        source: take_source(reader)
+                    }
+                    decode_valid <- false if not opcode_valid
+            decode_valid <- false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+            verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image(result.image)
+            result.valid <- decode_valid and verification.valid
+            return result
+
+        def artifact_is_valid(reader: DebuggerTraceBinary::ByteReader) -> bool:
+            return false if reader.length < EDIR_CODEC_HEADER_BYTES or reader.length > EDIR_CODEC_MAX_BYTES
+            copy: mutable DebuggerTraceBinary::ByteReader = reader
+            decoded: DecodeResult = artifact_decode(copy)
+            return decoded.valid

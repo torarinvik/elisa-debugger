@@ -1,0 +1,46 @@
+include "../src/vm/edir_codec.elisa"
+include "../src/core/identity.elisa"
+
+const PROGRAM_VERSION: u32 = 1
+const INSTRUCTION_COUNT: u64 = 3
+const LOCAL_COUNT: u64 = 1
+const ENTRY_CONSTANT: i64 = 7
+const ENTRY_OPCODE_OFFSET: usize = 25
+const INVALID_OPCODE_BYTE: u8 = 255
+const SOURCE_FILE: u64 = 11
+const SOURCE_START_BYTE: u64 = 4
+const SOURCE_END_BYTE: u64 = 5
+const SOURCE_LINE: u32 = 2
+const SOURCE_COLUMN: u32 = 3
+const SOURCE_DISCRIMINATOR: u32 = 1
+
+def main() -> i64:
+    source: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{
+        file: DebuggerIdentity::debug_id(SOURCE_FILE),
+        start_byte: SOURCE_START_BYTE,
+        end_byte: SOURCE_END_BYTE,
+        start_line: SOURCE_LINE,
+        start_column: SOURCE_COLUMN,
+        end_line: SOURCE_LINE,
+        end_column: SOURCE_COLUMN + 1,
+        discriminator: SOURCE_DISCRIMINATOR
+    }
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: LOCAL_COUNT, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: ENTRY_CONSTANT, b: 0, source: source}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: 0, b: 0, source: source}
+    image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: source}
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(image)
+    return 1 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
+    decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(reader)
+    return 2 if not decoded.valid or decoded.image.program.instruction_count != INSTRUCTION_COUNT or decoded.image.instructions[0].opcode != DebuggerEDIR::Opcode.Constant or decoded.image.instructions[0].a != ENTRY_CONSTANT
+    return 3 if decoded.image.instructions[0].source.file.value != SOURCE_FILE or decoded.image.instructions[0].source.start_line != SOURCE_LINE or decoded.image.instructions[0].source.discriminator != SOURCE_DISCRIMINATOR
+    invalid: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid.bytes[ENTRY_OPCODE_OFFSET] <- INVALID_OPCODE_BYTE
+    invalid_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid.bytes[0], invalid.length)
+    return 4 if DebuggerEDIRCodec::artifact_is_valid(invalid_reader)
+    short_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], ENTRY_OPCODE_OFFSET)
+    short_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(short_reader)
+    return 5 if short_decoded.valid
+    return 0

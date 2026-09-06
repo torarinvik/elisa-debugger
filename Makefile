@@ -17,6 +17,10 @@ BUILD ?= build
 # Keep the local debugger build usable by default; CI can set this to 0 for the
 # strict product-freshness gate.
 ELISA_ALLOW_STALE_STAGE1 ?= 1
+# Elisa's stage1 compiler does not emit make dependency files for `include`d
+# modules.  Keep focused checks dependent on every source module so a changed
+# include cannot leave a silently stale executable behind.
+ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
 .PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check protocol-events-check source-store-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check clean
 
@@ -107,7 +111,7 @@ capabilities-check: $(BUILD)/elisa-debugger-capabilities-check
 ffi-check: $(BUILD)/elisa-debugger-ffi-probe
 	test "$$(printf 'ELI' | "$(BUILD)/elisa-debugger-ffi-probe")" = 'ELI'
 
-$(BUILD)/elisa-debugger: $(shell find src -type f -name '*.elisa')
+$(BUILD)/elisa-debugger: $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" src/main.elisa
 
@@ -123,27 +127,27 @@ $(BUILD)/elisa-debugger-cli: src/cli/entrypoint.elisa src/protocol/dispatcher.el
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-core-check: tests/module_core_check.elisa
+$(BUILD)/elisa-debugger-module-core-check: tests/module_core_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-data-check: tests/module_data_check.elisa
+$(BUILD)/elisa-debugger-module-data-check: tests/module_data_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-protocol-check: tests/module_protocol_check.elisa
+$(BUILD)/elisa-debugger-module-protocol-check: tests/module_protocol_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-trace-codec-check: tests/trace_codec_check.elisa
+$(BUILD)/elisa-debugger-module-trace-codec-check: tests/trace_codec_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-trace-recording-check: tests/trace_recording_check.elisa
+$(BUILD)/elisa-debugger-module-trace-recording-check: tests/trace_recording_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-trace-bundle-check: tests/trace_bundle_check.elisa
+$(BUILD)/elisa-debugger-module-trace-bundle-check: tests/trace_bundle_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
@@ -156,18 +160,18 @@ trace-recording-check: $(BUILD)/elisa-debugger-module-trace-recording-check
 trace-bundle-check: $(BUILD)/elisa-debugger-module-trace-bundle-check
 	"$(BUILD)/elisa-debugger-module-trace-bundle-check"
 
-$(BUILD)/elisa-debugger-edir-call-check: tests/edir_call_check.elisa
+$(BUILD)/elisa-debugger-edir-call-check: tests/edir_call_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-edir-codec-check: tests/edir_codec_check.elisa
+$(BUILD)/elisa-debugger-edir-codec-check: tests/edir_codec_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 edir-codec-check: $(BUILD)/elisa-debugger-edir-codec-check
 	"$(BUILD)/elisa-debugger-edir-codec-check"
 
-$(BUILD)/elisa-debugger-session-check: tests/session_check.elisa
+$(BUILD)/elisa-debugger-session-check: tests/session_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
@@ -175,74 +179,74 @@ $(BUILD)/elisa-debugger-ffi-probe: tests/ffi_probe.elisa
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-managed-inspection-check: tests/managed_inspection_check.elisa
+$(BUILD)/elisa-debugger-managed-inspection-check: tests/managed_inspection_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-managed-service-check: tests/managed_service_check.elisa
+$(BUILD)/elisa-debugger-managed-service-check: tests/managed_service_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-protocol-events-check: tests/protocol_events_check.elisa
+$(BUILD)/elisa-debugger-protocol-events-check: tests/protocol_events_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-source-store-check: tests/source_store_check.elisa
+$(BUILD)/elisa-debugger-source-store-check: tests/source_store_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-request-whitespace-check: tests/request_whitespace_check.elisa
+$(BUILD)/elisa-debugger-request-whitespace-check: tests/request_whitespace_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-cli-commands-check: tests/cli_commands_check.elisa
+$(BUILD)/elisa-debugger-cli-commands-check: tests/cli_commands_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-value-store-check: tests/value_store_check.elisa
+$(BUILD)/elisa-debugger-value-store-check: tests/value_store_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-historical-values-check: tests/historical_values_check.elisa
+$(BUILD)/elisa-debugger-historical-values-check: tests/historical_values_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-query-engine-check: tests/query_engine_check.elisa
+$(BUILD)/elisa-debugger-query-engine-check: tests/query_engine_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-query-evaluator-check: tests/query_evaluator_check.elisa
+$(BUILD)/elisa-debugger-query-evaluator-check: tests/query_evaluator_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-breakpoint-manager-check: tests/breakpoint_manager_check.elisa
+$(BUILD)/elisa-debugger-breakpoint-manager-check: tests/breakpoint_manager_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-advanced-analysis-check: tests/advanced_analysis_check.elisa
+$(BUILD)/elisa-debugger-advanced-analysis-check: tests/advanced_analysis_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-integration-contract-check: tests/integration_contract_check.elisa
+$(BUILD)/elisa-debugger-integration-contract-check: tests/integration_contract_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-integration-surface-check: tests/integration_surface_check.elisa
+$(BUILD)/elisa-debugger-integration-surface-check: tests/integration_surface_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 integration-surface-check: $(BUILD)/elisa-debugger-integration-surface-check
 	"$(BUILD)/elisa-debugger-integration-surface-check"
 
-$(BUILD)/elisa-debugger-trace-retention-check: tests/trace_retention_check.elisa
+$(BUILD)/elisa-debugger-trace-retention-check: tests/trace_retention_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-coordinator-seek-check: tests/coordinator_seek_check.elisa
+$(BUILD)/elisa-debugger-coordinator-seek-check: tests/coordinator_seek_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-capabilities-check: tests/capabilities_check.elisa
+$(BUILD)/elisa-debugger-capabilities-check: tests/capabilities_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 

@@ -106,6 +106,12 @@ module DebuggerReplayEngine:
             machine: DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(snapshot)
             return replay_engine_machine_state_hash(machine, snapshot.event)
 
+        def replay_engine_snapshot_is_valid(engine: ReplayEngine&, index: usize, snapshot: DebuggerCheckpoint::MachineSnapshot) -> bool:
+            return false if not DebuggerCheckpoint::snapshot_shape_is_valid(snapshot)
+            return false if snapshot.id.value != index.u64() + REPLAY_CHECKPOINT_ID_OFFSET or snapshot.event != index.u64()
+            return false if snapshot.program_counter >= engine.image.program.instruction_count or snapshot.halted or snapshot.faulted
+            return snapshot.state_hash == replay_engine_snapshot_state_hash(snapshot)
+
         def replay_engine_step(engine: mutable ReplayEngine&) -> void:
             return if engine.machine.halted or engine.machine.faulted
             engine.engine_error <- EngineError.None
@@ -148,7 +154,7 @@ module DebuggerReplayEngine:
                 return
             target: usize = engine.event_count - 1
             snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[target]
-            if not DebuggerCheckpoint::snapshot_shape_is_valid(snapshot):
+            if not replay_engine_snapshot_is_valid(engine, target, snapshot):
                 engine.engine_error <- EngineError.HistoryUnavailable
                 return
             restored: DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(snapshot)
@@ -174,7 +180,7 @@ module DebuggerReplayEngine:
                 return
             if target < engine.event_count:
                 snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[target]
-                if not DebuggerCheckpoint::snapshot_shape_is_valid(snapshot):
+                if not replay_engine_snapshot_is_valid(engine, target, snapshot):
                     engine.engine_error <- EngineError.HistoryUnavailable
                     return
                 restored: DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(snapshot)
@@ -203,15 +209,18 @@ module DebuggerReplayEngine:
             return false if engine.recording.value == REPLAY_ROOT_BRANCH
             return false if engine.machine.program_counter >= REPLAY_MAX_PROGRAM_COUNTER or engine.machine.heap_next > REPLAY_MAX_HEAP or engine.machine.return_stack_pointer > REPLAY_CALL_DEPTH_CAPACITY
             return false if not DebuggerEDIR::verify_image(engine.image).valid
+            return false if engine.next_branch_id == REPLAY_ROOT_BRANCH or engine.next_branch_id > REPLAY_MAX_BRANCH_ID
+            if engine.branch.value == REPLAY_ROOT_BRANCH:
+                return false if engine.parent_branch.value != REPLAY_ROOT_BRANCH or engine.fork_event != 0 or engine.fork_state_hash != 0
+            else:
+                return false if engine.parent_branch.value == engine.branch.value or engine.fork_event > engine.event_count
             return false if engine.branch.value != REPLAY_ROOT_BRANCH and engine.event_count == engine.fork_event and replay_engine_state_hash(engine) != engine.fork_state_hash
             for index in 0..<engine.event_count:
                 event: DebuggerEvents::EventEnvelope = engine.events[index]
                 return false if event.ordinal != index.u64() or event.schema != REPLAY_SCHEMA_VERSION or event.kind != DebuggerEvents::EventKind.ExecutionBoundary or event.quality != DebuggerEvents::EventQuality.Exact or event.task.value != event.position.task.value or event.position.recording.value != engine.recording.value or event.position.event != index.u64()
                 return false if engine.branch.value == REPLAY_NO_BRANCH and event.position.branch.value != REPLAY_NO_BRANCH
                 return false if engine.branch.value != REPLAY_NO_BRANCH and index >= engine.fork_event and event.position.branch.value != engine.branch.value
-                return false if not DebuggerCheckpoint::snapshot_shape_is_valid(engine.history[index])
-                return false if engine.history[index].id.value != index.u64() + REPLAY_CHECKPOINT_ID_OFFSET or engine.history[index].event != index.u64() or engine.history[index].program_counter >= engine.image.program.instruction_count or engine.history[index].halted or engine.history[index].faulted
-                return false if engine.history[index].state_hash != replay_engine_snapshot_state_hash(engine.history[index])
+                return false if not replay_engine_snapshot_is_valid(engine, index, engine.history[index])
                 replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
                 replay_machine <- DebuggerEDIR::machine_step(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
                 return false if event.position.statement.value != replay_machine.program_counter

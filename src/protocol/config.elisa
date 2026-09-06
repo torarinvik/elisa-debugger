@@ -14,6 +14,9 @@ module DebuggerProtocolConfig:
         const DETAIL_WORKING_DIRECTORY: u32 = 2
         const DETAIL_ARGUMENTS: u32 = 3
         const DETAIL_MAPPING: u32 = 4
+        const DETAIL_ENGINE: u32 = 5
+        const DETAIL_TRACE: u32 = 6
+        const NO_ID: u64 = 0
 
     public:
         enum EngineSelection:
@@ -36,8 +39,10 @@ module DebuggerProtocolConfig:
             program: mutable u64
             arguments: mutable u64[CONFIG_ARGUMENT_CAPACITY]
             argument_count: mutable usize
+            arguments_overflowed: mutable bool
             environment: mutable u64[CONFIG_ENV_CAPACITY]
             environment_count: mutable usize
+            environment_overflowed: mutable bool
             working_directory: mutable u64
             compiler: mutable u64
             engine: mutable EngineSelection
@@ -46,20 +51,34 @@ module DebuggerProtocolConfig:
             stop_on_entry: mutable bool
             mappings: mutable PathMapping[CONFIG_MAPPING_CAPACITY]
             mapping_count: mutable usize
+            mappings_overflowed: mutable bool
 
         def configuration_new() -> LaunchConfiguration:
-            return LaunchConfiguration{program: 0, arguments: zeroed, argument_count: 0, environment: zeroed, environment_count: 0, working_directory: 0, compiler: 0, engine: EngineSelection.Managed, recording: RecordingSelection.Disabled, trace: 0, stop_on_entry: false, mappings: zeroed, mapping_count: 0}
+            return LaunchConfiguration{program: NO_ID, arguments: zeroed, argument_count: 0, arguments_overflowed: false, environment: zeroed, environment_count: 0, environment_overflowed: false, working_directory: NO_ID, compiler: NO_ID, engine: EngineSelection.Managed, recording: RecordingSelection.Disabled, trace: NO_ID, stop_on_entry: false, mappings: zeroed, mapping_count: 0, mappings_overflowed: false}
 
         def configuration_add_argument(configuration: LaunchConfiguration, argument: u64) -> LaunchConfiguration:
             updated: mutable LaunchConfiguration = configuration
-            return updated if configuration.argument_count >= CONFIG_ARGUMENT_CAPACITY
+            if configuration.argument_count >= CONFIG_ARGUMENT_CAPACITY or argument == NO_ID:
+                updated.arguments_overflowed <- true
+                return updated
             updated.arguments[configuration.argument_count] <- argument
             updated.argument_count <- configuration.argument_count + 1
             return updated
 
+        def configuration_add_environment(configuration: LaunchConfiguration, variable: u64) -> LaunchConfiguration:
+            updated: mutable LaunchConfiguration = configuration
+            if configuration.environment_count >= CONFIG_ENV_CAPACITY or variable == NO_ID:
+                updated.environment_overflowed <- true
+                return updated
+            updated.environment[configuration.environment_count] <- variable
+            updated.environment_count <- configuration.environment_count + 1
+            return updated
+
         def configuration_add_mapping(configuration: LaunchConfiguration, mapping: PathMapping) -> LaunchConfiguration:
             updated: mutable LaunchConfiguration = configuration
-            return updated if configuration.mapping_count >= CONFIG_MAPPING_CAPACITY or mapping.client_root == 0 or mapping.server_root == 0
+            if configuration.mapping_count >= CONFIG_MAPPING_CAPACITY or mapping.client_root == NO_ID or mapping.server_root == NO_ID:
+                updated.mappings_overflowed <- true
+                return updated
             updated.mappings[configuration.mapping_count] <- mapping
             updated.mapping_count <- configuration.mapping_count + 1
             return updated
@@ -67,9 +86,15 @@ module DebuggerProtocolConfig:
         def configuration_validate(configuration: LaunchConfiguration) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PROGRAM) if configuration.program == 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_WORKING_DIRECTORY) if configuration.working_directory == 0
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ARGUMENTS) if configuration.argument_count > CONFIG_ARGUMENT_CAPACITY or configuration.environment_count > CONFIG_ENV_CAPACITY
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.mapping_count > CONFIG_MAPPING_CAPACITY
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.engine.u16() > CONFIG_ENGINE_MAX or configuration.recording.u16() > CONFIG_HISTORY_MAX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ARGUMENTS) if configuration.arguments_overflowed or configuration.environment_overflowed or configuration.argument_count > CONFIG_ARGUMENT_CAPACITY or configuration.environment_count > CONFIG_ENV_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.mappings_overflowed or configuration.mapping_count > CONFIG_MAPPING_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENGINE) if configuration.engine.u16() > CONFIG_ENGINE_MAX or configuration.recording.u16() > CONFIG_HISTORY_MAX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_TRACE) if configuration.recording == RecordingSelection.Replay and configuration.trace == NO_ID
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_TRACE) if configuration.recording == RecordingSelection.Disabled and configuration.trace != NO_ID
             for index in 0..<configuration.mapping_count:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.mappings[index].client_root == 0 or configuration.mappings[index].server_root == 0
+            for index in 0..<configuration.argument_count:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ARGUMENTS) if configuration.arguments[index] == NO_ID
+            for index in 0..<configuration.environment_count:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ARGUMENTS) if configuration.environment[index] == NO_ID
             return DebuggerErrors::no_error()

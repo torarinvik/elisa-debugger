@@ -2,6 +2,7 @@
 
 include "../src/trace/stream.elisa"
 include "../src/replay/effects.elisa"
+include "../src/replay/adapters.elisa"
 include "../src/inspect/locations.elisa"
 include "../src/inspect/binding_evaluate.elisa"
 include "../src/query/evaluator.elisa"
@@ -73,6 +74,18 @@ const INVALID_VALUE_NEXT_ID_RESULT: i64 = 136
 const INVALID_VALUE_NEXT_ID: u64 = 65
 const INCOMPLETE_EFFECT_REPLAY_RESULT: i64 = 133
 const EFFECT_REPLAY_RESULT_FAILURE: i64 = 138
+const ADAPTER_REPLAY_RESULT_FAILURE: i64 = 140
+const ADAPTER_SOURCE_ID: u64 = 700
+const ADAPTER_WRONG_SOURCE_ID: u64 = 701
+const ADAPTER_CLOCK_VALUE: u64 = 123
+const ADAPTER_RANDOM_VALUE: u64 = 987
+const ADAPTER_INPUT_LENGTH: usize = 2
+const ADAPTER_OUTPUT_LENGTH: usize = 3
+const ADAPTER_INPUT_FIRST: u8 = 65
+const ADAPTER_INPUT_SECOND: u8 = 66
+const ADAPTER_OUTPUT_FIRST: u8 = 88
+const ADAPTER_OUTPUT_SECOND: u8 = 89
+const ADAPTER_OUTPUT_THIRD: u8 = 90
 const METADATA_STREAM_SCHEMA: u32 = 1
 const METADATA_STREAM_SEQUENCE: u64 = 0
 const METADATA_STREAM_FIRST_EVENT: u64 = 7
@@ -114,10 +127,49 @@ def check_corrupt_runtime() -> i64:
     return 1 if DebuggerConcurrencyRuntime::runtime_has_deadlock(runtime)
     return 0
 
+def check_managed_adapters() -> i64:
+    source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(ADAPTER_SOURCE_ID)
+    wrong_source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(ADAPTER_WRONG_SOURCE_ID)
+    clock_recording: mutable DebuggerReplayAdapters::Clock = DebuggerReplayAdapters::clock_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::clock_record(clock_recording, source, ADAPTER_CLOCK_VALUE))
+    clock_replay: mutable DebuggerReplayAdapters::Clock = clock_recording
+    clock_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    clock_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(clock_replay, source)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not clock_read.accepted or clock_read.value != ADAPTER_CLOCK_VALUE or not DebuggerReplayAdapters::clock_is_exact(clock_replay)
+    clock_mismatch: mutable DebuggerReplayAdapters::Clock = clock_recording
+    clock_mismatch.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    clock_mismatch_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(clock_mismatch, wrong_source)
+    return ADAPTER_REPLAY_RESULT_FAILURE if clock_mismatch_read.accepted or clock_mismatch_read.failure.code != DebuggerErrors::ErrorCode.Diverged or DebuggerReplayAdapters::clock_is_exact(clock_mismatch)
+    random_recording: mutable DebuggerReplayAdapters::Random = DebuggerReplayAdapters::random_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::random_record(random_recording, source, ADAPTER_RANDOM_VALUE))
+    random_replay: mutable DebuggerReplayAdapters::Random = random_recording
+    random_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    random_read: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read(random_replay, source)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not random_read.accepted or random_read.value != ADAPTER_RANDOM_VALUE or not DebuggerReplayAdapters::random_is_exact(random_replay)
+    input_bytes: mutable u8[ADAPTER_INPUT_LENGTH] = [ADAPTER_INPUT_FIRST, ADAPTER_INPUT_SECOND]
+    output_bytes: mutable u8[ADAPTER_OUTPUT_LENGTH] = [ADAPTER_OUTPUT_FIRST, ADAPTER_OUTPUT_SECOND, ADAPTER_OUTPUT_THIRD]
+    console_recording: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::console_record_input(console_recording, DebuggerReplayAdapters::ConsoleChannel.Stdout, input_bytes[0], ADAPTER_INPUT_LENGTH))
+    recorded_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console_recording, DebuggerReplayAdapters::ConsoleChannel.Stdout, output_bytes[0], ADAPTER_OUTPUT_LENGTH)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not recorded_write.accepted or recorded_write.transferred != ADAPTER_OUTPUT_LENGTH or recorded_write.suppressed
+    console_replay: mutable DebuggerReplayAdapters::Console = console_recording
+    console_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    replay_input: mutable u8[ADAPTER_INPUT_LENGTH] = zeroed
+    replay_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(console_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, replay_input[0], ADAPTER_INPUT_LENGTH)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not replay_read.accepted or replay_read.transferred != ADAPTER_INPUT_LENGTH or replay_input[0] != ADAPTER_INPUT_FIRST or replay_input[1] != ADAPTER_INPUT_SECOND
+    replay_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, output_bytes[0], ADAPTER_OUTPUT_LENGTH)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not replay_write.accepted or replay_write.transferred != ADAPTER_OUTPUT_LENGTH or not replay_write.suppressed or not DebuggerReplayAdapters::console_replay_complete(console_replay)
+    console_mismatch: mutable DebuggerReplayAdapters::Console = console_recording
+    console_mismatch.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    mismatch_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console_mismatch, DebuggerReplayAdapters::ConsoleChannel.Stdout, output_bytes[0], ADAPTER_OUTPUT_LENGTH)
+    return ADAPTER_REPLAY_RESULT_FAILURE if mismatch_write.accepted or mismatch_write.failure.code != DebuggerErrors::ErrorCode.Diverged or DebuggerReplayAdapters::console_is_exact(console_mismatch)
+    return 0
+
 def main() -> i64:
     return 74 if check_corrupt_metadata() != 0
     return 75 if check_corrupt_tables() != 0
     return 76 if check_corrupt_runtime() != 0
+    return ADAPTER_REPLAY_RESULT_FAILURE if check_managed_adapters() != 0
     expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
     evaluated: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, 8)
     return 1 if evaluated.value != 9 or not DebuggerErrors::error_is_ok(evaluated.failure)

@@ -1,0 +1,320 @@
+# Deterministic managed adapters for clocks, randomness, and console I/O.
+# Recording stores call-shaped samples; replay consumes the same shape and
+# suppresses real output. Branch callers can append virtual results without
+# touching the original recording.
+
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+
+module DebuggerReplayAdapters:
+    private:
+        const ADAPTER_SAMPLE_CAPACITY: usize = 128
+        const CONSOLE_RECORD_CAPACITY: usize = 64
+        const CONSOLE_CHUNK_CAPACITY: usize = 256
+        const ADAPTER_MODE_MAX: u16 = 2
+        const CONSOLE_CHANNEL_MAX: u16 = 1
+        const CONSOLE_RECORD_KIND_MAX: u16 = 1
+        const ADAPTER_NO_ID: u64 = 0
+        const DETAIL_MODE: u32 = 1
+        const DETAIL_ID: u32 = 2
+        const DETAIL_CAPACITY: u32 = 3
+        const DETAIL_SEQUENCE: u32 = 4
+        const DETAIL_REQUEST: u32 = 5
+        const DETAIL_OUTPUT: u32 = 6
+        const DETAIL_INPUT: u32 = 7
+        const DETAIL_BYTES: u32 = 8
+
+    public:
+        enum AdapterMode:
+            Recording
+            Replaying
+            Branch
+
+        enum ConsoleChannel:
+            Stdout
+            Stderr
+
+        enum ConsoleRecordKind:
+            Input
+            Output
+
+        struct AdapterSample:
+            sequence: mutable u64
+            source: mutable DebuggerIdentity::DebugId
+            value: mutable u64
+
+        struct Clock:
+            samples: mutable AdapterSample[ADAPTER_SAMPLE_CAPACITY]
+            count: mutable usize
+            cursor: mutable usize
+            mode: mutable AdapterMode
+            exact: mutable bool
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct ClockRead:
+            value: mutable u64
+            accepted: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        struct Random:
+            samples: mutable AdapterSample[ADAPTER_SAMPLE_CAPACITY]
+            count: mutable usize
+            cursor: mutable usize
+            mode: mutable AdapterMode
+            exact: mutable bool
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct RandomRead:
+            value: mutable u64
+            accepted: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        struct ConsoleRecord:
+            sequence: mutable u64
+            channel: mutable ConsoleChannel
+            kind: mutable ConsoleRecordKind
+            length: mutable usize
+            bytes: mutable u8[CONSOLE_CHUNK_CAPACITY]
+
+        struct Console:
+            records: mutable ConsoleRecord[CONSOLE_RECORD_CAPACITY]
+            count: mutable usize
+            cursor: mutable usize
+            mode: mutable AdapterMode
+            exact: mutable bool
+            output_suppressed: mutable bool
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct ConsoleRead:
+            transferred: mutable usize
+            eof: mutable bool
+            accepted: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        struct ConsoleWrite:
+            transferred: mutable usize
+            suppressed: mutable bool
+            accepted: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def adapter_mode_is_valid(mode: AdapterMode) -> bool:
+            return mode.u16() <= ADAPTER_MODE_MAX
+
+        def console_channel_is_valid(channel: ConsoleChannel) -> bool:
+            return channel.u16() <= CONSOLE_CHANNEL_MAX
+
+        def console_record_kind_is_valid(kind: ConsoleRecordKind) -> bool:
+            return kind.u16() <= CONSOLE_RECORD_KIND_MAX
+
+        def adapter_error(code: DebuggerErrors::ErrorCode, detail: u32, retryable: bool) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(code, retryable, detail)
+
+        def clock_new(mode: AdapterMode) -> Clock:
+            clock: mutable Clock = zeroed
+            clock.mode <- mode
+            clock.exact <- adapter_mode_is_valid(mode)
+            clock.last_error <- DebuggerErrors::no_error()
+            clock.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not clock.exact
+            return clock
+
+        def clock_record(clock: mutable Clock&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
+            return clock.last_error if not DebuggerErrors::error_is_ok(clock.last_error)
+            return adapter_error(DebuggerErrors::ErrorCode.InvalidState, DETAIL_MODE, false) if clock.mode == AdapterMode.Replaying
+            return adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_ID, false) if source.value == ADAPTER_NO_ID
+            return adapter_error(DebuggerErrors::ErrorCode.ResourceLimit, DETAIL_CAPACITY, false) if clock.count >= ADAPTER_SAMPLE_CAPACITY
+            clock.samples[clock.count] <- AdapterSample{sequence: clock.count.u64(), source: source, value: value}
+            clock.count <- clock.count + 1
+            return DebuggerErrors::no_error()
+
+        def clock_read(clock: mutable Clock&, source: DebuggerIdentity::DebugId) -> ClockRead:
+            result: mutable ClockRead = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            if clock.mode != AdapterMode.Replaying or not clock.exact or not DebuggerErrors::error_is_ok(clock.last_error):
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidState, DETAIL_MODE, false)
+                return result
+            if source.value == ADAPTER_NO_ID:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_ID, false)
+                return result
+            if clock.count > ADAPTER_SAMPLE_CAPACITY or clock.cursor > clock.count:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.Corrupt, DETAIL_CAPACITY, false)
+                clock.exact <- false
+                clock.last_error <- result.failure
+                return result
+            if clock.cursor >= clock.count:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_SEQUENCE, false)
+                clock.exact <- false
+                clock.last_error <- result.failure
+                return result
+            sample: AdapterSample = clock.samples[clock.cursor]
+            if sample.sequence != clock.cursor.u64() or sample.source.value != source.value:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_REQUEST, false)
+                clock.exact <- false
+                clock.last_error <- result.failure
+                return result
+            result.value <- sample.value
+            result.accepted <- true
+            clock.cursor <- clock.cursor + 1
+            return result
+
+        def clock_is_exact(clock: Clock) -> bool:
+            return clock.exact and DebuggerErrors::error_is_ok(clock.last_error) and clock.count <= ADAPTER_SAMPLE_CAPACITY and clock.cursor <= clock.count and clock.mode == AdapterMode.Replaying
+
+        def random_new(mode: AdapterMode) -> Random:
+            random: mutable Random = zeroed
+            random.mode <- mode
+            random.exact <- adapter_mode_is_valid(mode)
+            random.last_error <- DebuggerErrors::no_error()
+            random.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not random.exact
+            return random
+
+        def random_record(random: mutable Random&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
+            return random.last_error if not DebuggerErrors::error_is_ok(random.last_error)
+            return adapter_error(DebuggerErrors::ErrorCode.InvalidState, DETAIL_MODE, false) if random.mode == AdapterMode.Replaying
+            return adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_ID, false) if source.value == ADAPTER_NO_ID
+            return adapter_error(DebuggerErrors::ErrorCode.ResourceLimit, DETAIL_CAPACITY, false) if random.count >= ADAPTER_SAMPLE_CAPACITY
+            random.samples[random.count] <- AdapterSample{sequence: random.count.u64(), source: source, value: value}
+            random.count <- random.count + 1
+            return DebuggerErrors::no_error()
+
+        def random_read(random: mutable Random&, source: DebuggerIdentity::DebugId) -> RandomRead:
+            result: mutable RandomRead = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            if random.mode != AdapterMode.Replaying or not random.exact or not DebuggerErrors::error_is_ok(random.last_error):
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidState, DETAIL_MODE, false)
+                return result
+            if source.value == ADAPTER_NO_ID:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_ID, false)
+                return result
+            if random.count > ADAPTER_SAMPLE_CAPACITY or random.cursor > random.count:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.Corrupt, DETAIL_CAPACITY, false)
+                random.exact <- false
+                random.last_error <- result.failure
+                return result
+            if random.cursor >= random.count:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_SEQUENCE, false)
+                random.exact <- false
+                random.last_error <- result.failure
+                return result
+            sample: AdapterSample = random.samples[random.cursor]
+            if sample.sequence != random.cursor.u64() or sample.source.value != source.value:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_REQUEST, false)
+                random.exact <- false
+                random.last_error <- result.failure
+                return result
+            result.value <- sample.value
+            result.accepted <- true
+            random.cursor <- random.cursor + 1
+            return result
+
+        def random_is_exact(random: Random) -> bool:
+            return random.exact and DebuggerErrors::error_is_ok(random.last_error) and random.count <= ADAPTER_SAMPLE_CAPACITY and random.cursor <= random.count and random.mode == AdapterMode.Replaying
+
+        def console_new(mode: AdapterMode) -> Console:
+            console: mutable Console = zeroed
+            console.mode <- mode
+            console.exact <- adapter_mode_is_valid(mode)
+            console.output_suppressed <- mode == AdapterMode.Replaying or mode == AdapterMode.Branch
+            console.last_error <- DebuggerErrors::no_error()
+            console.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not console.exact
+            return console
+
+        def console_record(console: mutable Console&, kind: ConsoleRecordKind, channel: ConsoleChannel, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            return console.last_error if not DebuggerErrors::error_is_ok(console.last_error)
+            return adapter_error(DebuggerErrors::ErrorCode.InvalidState, DETAIL_MODE, false) if console.mode == AdapterMode.Replaying
+            return adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not console_record_kind_is_valid(kind) or not console_channel_is_valid(channel)
+            return adapter_error(DebuggerErrors::ErrorCode.ResourceLimit, DETAIL_BYTES, false) if length > CONSOLE_CHUNK_CAPACITY or console.count >= CONSOLE_RECORD_CAPACITY
+            console.records[console.count] <- ConsoleRecord{sequence: console.count.u64(), channel: channel, kind: kind, length: length, bytes: zeroed}
+            for index in 0..<length:
+                console.records[console.count].bytes[index] <- bytes[index]
+            console.count <- console.count + 1
+            return DebuggerErrors::no_error()
+
+        def console_read_input(console: mutable Console&, channel: ConsoleChannel, output: mutable u8&, requested: usize) -> ConsoleRead:
+            result: mutable ConsoleRead = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            if console.mode != AdapterMode.Replaying or not console.exact or not DebuggerErrors::error_is_ok(console.last_error):
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidState, DETAIL_MODE, false)
+                return result
+            return console_read_input_replay(console, channel, output, requested, result)
+
+        def console_read_input_replay(console: mutable Console&, channel: ConsoleChannel, output: mutable u8&, requested: usize, result: ConsoleRead) -> ConsoleRead:
+            updated: mutable ConsoleRead = result
+            if not console_channel_is_valid(channel) or requested > CONSOLE_CHUNK_CAPACITY:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_INPUT, false)
+                return updated
+            if console.count > CONSOLE_RECORD_CAPACITY or console.cursor > console.count:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Corrupt, DETAIL_CAPACITY, false)
+                console.exact <- false
+                console.last_error <- updated.failure
+                return updated
+            if console.cursor >= console.count:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_SEQUENCE, false)
+                console.exact <- false
+                console.last_error <- updated.failure
+                return updated
+            record: ConsoleRecord = console.records[console.cursor]
+            if record.sequence != console.cursor.u64() or record.kind != ConsoleRecordKind.Input or record.channel != channel or record.length != requested:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_REQUEST, false)
+                console.exact <- false
+                console.last_error <- updated.failure
+                return updated
+            for index in 0..<requested:
+                output[index] <- record.bytes[index]
+            updated.transferred <- requested
+            updated.eof <- requested == 0
+            updated.accepted <- true
+            console.cursor <- console.cursor + 1
+            return updated
+
+        def console_record_input(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            return console_record(console, ConsoleRecordKind.Input, channel, bytes, length)
+
+        def console_write(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, length: usize) -> ConsoleWrite:
+            result: mutable ConsoleWrite = zeroed
+            result.failure <- DebuggerErrors::no_error()
+            return console_write_record(console, channel, bytes, length, result) if console.mode != AdapterMode.Replaying
+            return console_write_replay(console, channel, bytes, length, result)
+
+        def console_write_record(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, length: usize, result: ConsoleWrite) -> ConsoleWrite:
+            updated: mutable ConsoleWrite = result
+            failure: DebuggerErrors::DebuggerError = console_record(console, ConsoleRecordKind.Output, channel, bytes, length)
+            updated.failure <- failure
+            return updated if not DebuggerErrors::error_is_ok(failure)
+            updated.transferred <- length
+            updated.suppressed <- console.output_suppressed
+            updated.accepted <- true
+            return updated
+
+        def console_write_replay(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, length: usize, result: ConsoleWrite) -> ConsoleWrite:
+            updated: mutable ConsoleWrite = result
+            if not console.exact or not DebuggerErrors::error_is_ok(console.last_error) or not console_channel_is_valid(channel) or length > CONSOLE_CHUNK_CAPACITY:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_OUTPUT, false)
+                return updated
+            if console.count > CONSOLE_RECORD_CAPACITY or console.cursor > console.count or console.cursor >= console.count:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_SEQUENCE, false)
+                console.exact <- false
+                console.last_error <- updated.failure
+                return updated
+            record: ConsoleRecord = console.records[console.cursor]
+            if record.sequence != console.cursor.u64() or record.kind != ConsoleRecordKind.Output or record.channel != channel or record.length != length:
+                updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_REQUEST, false)
+                console.exact <- false
+                console.last_error <- updated.failure
+                return updated
+            for index in 0..<length:
+                if record.bytes[index] != bytes[index]:
+                    updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_OUTPUT, false)
+                    console.exact <- false
+                    console.last_error <- updated.failure
+                    return updated
+            console.cursor <- console.cursor + 1
+            updated.transferred <- length
+            updated.suppressed <- true
+            updated.accepted <- true
+            return updated
+
+        def console_is_exact(console: Console) -> bool:
+            return console.exact and DebuggerErrors::error_is_ok(console.last_error) and console.count <= CONSOLE_RECORD_CAPACITY and console.cursor <= console.count and console.mode == AdapterMode.Replaying
+
+        def console_replay_complete(console: Console) -> bool:
+            return console_is_exact(console) and console.cursor == console.count

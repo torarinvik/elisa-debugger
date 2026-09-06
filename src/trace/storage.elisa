@@ -3,6 +3,7 @@
 
 include "./binary.elisa"
 include "./format.elisa"
+include "./manifest.elisa"
 
 extern write(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
 
@@ -162,7 +163,16 @@ module DebuggerTraceStorage:
                 if scan.verified_chunks >= TRACE_STORAGE_CHUNK_CAPACITY:
                     scan.status <- StorageStatus.Oversized
                     return scan
-                scan.manifest_seen <- true if kind == TRACE_MANIFEST_KIND
+                if kind == TRACE_MANIFEST_KIND:
+                    if scan.manifest_seen or scan.verified_chunks != 0 or payload_length == 0:
+                        scan.status <- StorageStatus.Invalid
+                        return scan
+                    manifest_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset + TRACE_HEADER_BYTES], payload_length.usize())
+                    manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_decode(manifest_reader)
+                    if not DebuggerTraceBinary::reader_is_valid(manifest_reader) or manifest_reader.offset != manifest_reader.length or not DebuggerTraceManifest::manifest_is_replayable(manifest) or manifest.schema != version or manifest.first_event != first_event or manifest.last_event != last_event:
+                        scan.status <- StorageStatus.Invalid
+                        return scan
+                    scan.manifest_seen <- true
                 scan.event_chunk_seen <- true if kind == TRACE_EVENTS_KIND
                 scan.verified_chunks <- scan.verified_chunks + 1
                 scan.verified_event <- last_event

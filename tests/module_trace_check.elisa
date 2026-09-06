@@ -58,6 +58,9 @@ const RECORDER_EVENT_POSITION_EVENT_OFFSET: usize = 36
 const TAMPERED_READER_POSITION_RESULT: i64 = 94
 const TAMPERED_READER_CHECKPOINT_COUNT_RESULT: i64 = 95
 const MALFORMED_STORAGE_EVENT_RESULT: i64 = 96
+const GAPPED_STORAGE_EVENT_RESULT: i64 = 97
+const RECORDER_EVENT_ORDINAL_OFFSET: usize = 4
+const GAPPED_EVENT_ORDINAL: u8 = 2
 
 def check_checkpoint_validation() -> i64:
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -409,6 +412,31 @@ def main() -> i64:
         malformed_storage <- DebuggerTraceBinary::writer_put_byte(malformed_storage, malformed_footer.bytes[malformed_index])
     malformed_storage_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(malformed_storage.bytes[0], malformed_storage.length)
     return MALFORMED_STORAGE_EVENT_RESULT if malformed_storage_report.state != DebuggerTraceVerify::VerificationState.Corrupt or malformed_storage_report.replayable
+    gap_event_chunk: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
+    gap_event_chunk.header.sequence <- 2
+    gap_event_chunk.header.first_event <- 2
+    gap_event_chunk.header.last_event <- 2
+    gap_event_chunk.payload[RECORDER_EVENT_ORDINAL_OFFSET] <- GAPPED_EVENT_ORDINAL
+    gap_event_chunk.payload[RECORDER_EVENT_POSITION_EVENT_OFFSET] <- GAPPED_EVENT_ORDINAL
+    gap_payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for gap_index in 0..<gap_event_chunk.payload_length:
+        gap_payload <- DebuggerTraceBinary::writer_put_byte(gap_payload, gap_event_chunk.payload[gap_index])
+    gap_event_chunk.checksum <- DebuggerTraceBinary::writer_checksum(gap_payload)
+    gap_event_chunk.header.checksum <- gap_event_chunk.checksum
+    gap_event_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(gap_event_chunk)
+    gap_footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(3, gap_event_chunk.header.last_event)
+    gapped_storage: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for gap_index in 0..<manifest_bytes_for_malformed.length:
+        gapped_storage <- DebuggerTraceBinary::writer_put_byte(gapped_storage, manifest_bytes_for_malformed.bytes[gap_index])
+    valid_event_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(recorder.chunks[0])
+    for gap_index in 0..<valid_event_bytes.length:
+        gapped_storage <- DebuggerTraceBinary::writer_put_byte(gapped_storage, valid_event_bytes.bytes[gap_index])
+    for gap_index in 0..<gap_event_bytes.length:
+        gapped_storage <- DebuggerTraceBinary::writer_put_byte(gapped_storage, gap_event_bytes.bytes[gap_index])
+    for gap_index in 0..<gap_footer.length:
+        gapped_storage <- DebuggerTraceBinary::writer_put_byte(gapped_storage, gap_footer.bytes[gap_index])
+    gapped_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(gapped_storage.bytes[0], gapped_storage.length)
+    return GAPPED_STORAGE_EVENT_RESULT if gapped_report.state != DebuggerTraceVerify::VerificationState.Corrupt or gapped_report.replayable
     corrupt_manifest: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
     corrupt_manifest.checksum <- manifest_chunk.checksum + 1
     fresh_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()

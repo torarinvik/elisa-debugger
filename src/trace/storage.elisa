@@ -122,10 +122,11 @@ module DebuggerTraceStorage:
             return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
             return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
 
-        def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64) -> bool:
+        def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
             return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
             event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
             return false if event_count == 0 or first_event > TRACE_MAX_EVENT - (event_count - 1).u64()
+            return false if last_event != first_event + (event_count - 1).u64()
             reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
             recording: mutable u64 = 0
             for index in 0..<event_count:
@@ -150,6 +151,11 @@ module DebuggerTraceStorage:
             scan: mutable StorageScan = zeroed
             scan.status <- StorageStatus.Ready
             scan.next_sequence <- 0
+            manifest_first_event: mutable u64 = 0
+            manifest_last_event: mutable u64 = 0
+            expected_event: mutable u64 = 0
+            event_exhausted: mutable bool = false
+            event_seen: mutable bool = false
             return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, event_chunk_seen: false} if length > TRACE_STORAGE_MAX_BYTES
             offset: mutable usize = 0
             while offset < length:
@@ -158,7 +164,7 @@ module DebuggerTraceStorage:
                     footer_magic: u32 = DebuggerTraceBinary::reader_take_u32(footer)
                     footer_sequence: u64 = DebuggerTraceBinary::reader_take_u64(footer)
                     footer_event: u64 = DebuggerTraceBinary::reader_take_u64(footer)
-                    if footer_magic != TRACE_FOOTER_MAGIC or footer_sequence != scan.next_sequence or footer_event != scan.verified_event:
+                    if footer_magic != TRACE_FOOTER_MAGIC or footer_sequence != scan.next_sequence or footer_event != scan.verified_event or (scan.manifest_seen and scan.event_chunk_seen and manifest_last_event != scan.verified_event):
                         scan.status <- StorageStatus.Invalid
                     else:
                         scan.footer_verified <- true
@@ -208,12 +214,18 @@ module DebuggerTraceStorage:
                         return scan
                     scan.manifest_seen <- true
                 if kind == TRACE_EVENTS_KIND:
-                    if not scan.manifest_seen or not storage_event_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), version.u32(), first_event):
+                    if not scan.manifest_seen or event_exhausted or (not event_seen and first_event != manifest_first_event) or (event_seen and first_event != expected_event) or not storage_event_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), version.u32(), first_event, last_event):
                         scan.status <- StorageStatus.Invalid
                         return scan
-                scan.event_chunk_seen <- true if kind == TRACE_EVENTS_KIND
+                    event_seen <- true
+                    scan.event_chunk_seen <- true
+                    scan.verified_event <- last_event
+                    event_exhausted <- last_event == TRACE_MAX_EVENT
+                    expected_event <- 0 if event_exhausted else last_event + 1
+                if kind == TRACE_MANIFEST_KIND:
+                    manifest_first_event <- first_event
+                    manifest_last_event <- last_event
                 scan.verified_chunks <- scan.verified_chunks + 1
-                scan.verified_event <- last_event
                 if scan.next_sequence == TRACE_MAX_SEQUENCE:
                     scan.status <- StorageStatus.Oversized
                     return scan

@@ -50,6 +50,11 @@ module DebuggerTraceBundle:
         def bundle_verify_chunk(bundle: mutable TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
             return bundle_verify_chunk_at(bundle, chunk, bundle.chunk_count.u64())
 
+        def bundle_manifest_matches_chunks(bundle: TraceBundle) -> bool:
+            return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == 0 if bundle.chunk_count == 0
+            return false if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
+            return bundle.manifest.first_event == bundle.chunks[0].header.first_event and bundle.manifest.last_event == bundle.chunks[bundle.chunk_count - 1].header.last_event and bundle.manifest.checkpoint_count == bundle.chunk_count.u64()
+
         def bundle_append(bundle: mutable TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_SEQUENCE) if bundle.state != BundleState.Open
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if bundle.chunk_count >= BUNDLE_CHUNK_CAPACITY
@@ -83,16 +88,18 @@ module DebuggerTraceBundle:
             return bundle.last_error if bundle.state == BundleState.Corrupt and not DebuggerErrors::error_is_ok(bundle.last_error)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_STATE) if bundle.state == BundleState.Corrupt
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SCHEMA) if bundle.manifest.schema == 0 or bundle.manifest.status == DebuggerTraceManifest::ManifestStatus.Corrupt
             for index in 0..<bundle.chunk_count:
                 verified: DebuggerErrors::DebuggerError = bundle_verify_chunk_at(bundle, bundle.chunks[index], index.u64())
                 return verified if not DebuggerErrors::error_is_ok(verified)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RANGE) if not bundle_manifest_matches_chunks(bundle)
             return DebuggerErrors::no_error()
 
         def bundle_manifest_bytes(bundle: TraceBundle) -> DebuggerTraceBinary::ByteWriter:
             return DebuggerTraceManifest::manifest_encode(bundle.manifest)
 
         def bundle_is_replayable(bundle: TraceBundle) -> bool:
-            return false if bundle.chunk_count == 0 or bundle.chunk_count > BUNDLE_CHUNK_CAPACITY or bundle.state != BundleState.Exact or not DebuggerTraceManifest::manifest_is_replayable(bundle.manifest) or not DebuggerErrors::error_is_ok(bundle.last_error)
+            return false if bundle.chunk_count == 0 or bundle.chunk_count > BUNDLE_CHUNK_CAPACITY or bundle.state != BundleState.Exact or not DebuggerTraceManifest::manifest_is_replayable(bundle.manifest) or not DebuggerErrors::error_is_ok(bundle.last_error) or not bundle_manifest_matches_chunks(bundle)
             checked_bundle: mutable TraceBundle = bundle
             for index in 0..<bundle.chunk_count:
                 return false if not DebuggerErrors::error_is_ok(bundle_verify_chunk_at(checked_bundle, bundle.chunks[index], index.u64()))

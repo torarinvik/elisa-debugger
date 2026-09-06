@@ -65,9 +65,15 @@ module DebuggerProtocolEvents:
             if queue.next_sequence == NO_SEQUENCE or queue.next_sequence == MAX_SEQUENCE:
                 queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SEQUENCE)
                 return queue.last_error
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE) if session.value == NO_SEQUENCE
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM) if kind.u16() > EVENT_KIND_MAX or channel.u16() > OUTPUT_CHANNEL_MAX
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE) if completed > total
+            if session.value == NO_SEQUENCE:
+                queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE)
+                return queue.last_error
+            if kind.u16() > EVENT_KIND_MAX or channel.u16() > OUTPUT_CHANNEL_MAX:
+                queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)
+                return queue.last_error
+            if completed > total:
+                queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE)
+                return queue.last_error
             queue.events[queue.count] <- Event{sequence: queue.next_sequence, session: session, stop_generation: generation, kind: kind, channel: channel, payload: payload, progress_completed: completed, progress_total: total}
             queue.count <- queue.count + 1
             queue.next_sequence <- queue.next_sequence + FIRST_SEQUENCE
@@ -81,8 +87,12 @@ module DebuggerProtocolEvents:
 
         def event_queue_ack(queue: mutable EventQueue&, sequence: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY) if queue.count > EVENT_QUEUE_CAPACITY
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_SEQUENCE) if queue.count == 0
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE) if sequence == NO_SEQUENCE or sequence != queue.events[0].sequence
+            if queue.count == 0:
+                queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_SEQUENCE)
+                return queue.last_error
+            if sequence == NO_SEQUENCE or sequence != queue.events[0].sequence:
+                queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SEQUENCE)
+                return queue.last_error
             for index in 1..<queue.count:
                 queue.events[index - 1] <- queue.events[index]
             queue.count <- queue.count - 1

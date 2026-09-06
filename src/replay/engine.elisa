@@ -73,55 +73,37 @@ module DebuggerReplayEngine:
             position.statement <- DebuggerIdentity::debug_id(engine.machine.program_counter)
             return position
 
-        def replay_engine_state_hash(engine: mutable ReplayEngine&) -> u64:
-            hash: mutable u64 = REPLAY_HASH_OFFSET_BASIS + engine.machine.program_counter
-            hash <- hash * REPLAY_HASH_PRIME + engine.machine.accumulator.u64()
-            hash <- hash * REPLAY_HASH_PRIME + engine.machine.result.u64()
-            hash <- hash * REPLAY_HASH_PRIME + engine.machine.return_stack_pointer.u64()
-            hash <- hash * REPLAY_HASH_PRIME + engine.machine.heap_next.u64()
+        def replay_engine_machine_state_hash(machine: DebuggerEDIR::Machine, event: u64) -> u64:
+            hash: mutable u64 = REPLAY_HASH_OFFSET_BASIS + machine.program_counter
+            hash <- hash * REPLAY_HASH_PRIME + machine.accumulator.u64()
+            hash <- hash * REPLAY_HASH_PRIME + machine.result.u64()
+            hash <- hash * REPLAY_HASH_PRIME + machine.return_stack_pointer.u64()
+            hash <- hash * REPLAY_HASH_PRIME + machine.heap_next.u64()
             for index in 0..<REPLAY_LOCAL_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + engine.machine.locals[index].u64()
+                hash <- hash * REPLAY_HASH_PRIME + machine.locals[index].u64()
             for index in 0..<REPLAY_CALL_DEPTH_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + engine.machine.return_stack[index]
+                hash <- hash * REPLAY_HASH_PRIME + machine.return_stack[index]
             for index in 0..<REPLAY_GLOBAL_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + engine.machine.globals[index].u64()
+                hash <- hash * REPLAY_HASH_PRIME + machine.globals[index].u64()
             for index in 0..<REPLAY_MEMORY_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + engine.machine.memory[index].u64()
+                hash <- hash * REPLAY_HASH_PRIME + machine.memory[index].u64()
                 initialized: mutable u64 = 0
-                initialized <- 1 if engine.machine.memory_initialized[index]
+                initialized <- 1 if machine.memory_initialized[index]
                 hash <- hash * REPLAY_HASH_PRIME + initialized
-            hash <- hash * REPLAY_HASH_PRIME + engine.event_count.u64()
-            halted: u64 = HASH_TRUE if engine.machine.halted else HASH_FALSE
-            faulted: u64 = HASH_TRUE if engine.machine.faulted else HASH_FALSE
+            hash <- hash * REPLAY_HASH_PRIME + event
+            halted: u64 = HASH_TRUE if machine.halted else HASH_FALSE
+            faulted: u64 = HASH_TRUE if machine.faulted else HASH_FALSE
             hash <- hash * REPLAY_HASH_PRIME + halted
             hash <- hash * REPLAY_HASH_PRIME + faulted
-            hash <- hash * REPLAY_HASH_PRIME + engine.machine.steps
+            hash <- hash * REPLAY_HASH_PRIME + machine.steps
             return hash
 
+        def replay_engine_state_hash(engine: mutable ReplayEngine&) -> u64:
+            return replay_engine_machine_state_hash(engine.machine, engine.event_count.u64())
+
         def replay_engine_snapshot_state_hash(snapshot: DebuggerCheckpoint::MachineSnapshot) -> u64:
-            hash: mutable u64 = REPLAY_HASH_OFFSET_BASIS + snapshot.program_counter
-            hash <- hash * REPLAY_HASH_PRIME + snapshot.accumulator.u64()
-            hash <- hash * REPLAY_HASH_PRIME + snapshot.result.u64()
-            hash <- hash * REPLAY_HASH_PRIME + snapshot.return_stack_pointer.u64()
-            hash <- hash * REPLAY_HASH_PRIME + snapshot.heap_next.u64()
-            for index in 0..<REPLAY_LOCAL_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + snapshot.locals[index].u64()
-            for index in 0..<REPLAY_CALL_DEPTH_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + snapshot.return_stack[index]
-            for index in 0..<REPLAY_GLOBAL_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + snapshot.globals[index].u64()
-            for index in 0..<REPLAY_MEMORY_CAPACITY:
-                hash <- hash * REPLAY_HASH_PRIME + snapshot.memory[index].u64()
-                initialized: mutable u64 = 0
-                initialized <- 1 if snapshot.memory_initialized[index]
-                hash <- hash * REPLAY_HASH_PRIME + initialized
-            hash <- hash * REPLAY_HASH_PRIME + snapshot.event
-            halted: u64 = HASH_TRUE if snapshot.halted else HASH_FALSE
-            faulted: u64 = HASH_TRUE if snapshot.faulted else HASH_FALSE
-            hash <- hash * REPLAY_HASH_PRIME + halted
-            hash <- hash * REPLAY_HASH_PRIME + faulted
-            hash <- hash * REPLAY_HASH_PRIME + snapshot.steps
-            return hash
+            machine: DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(snapshot)
+            return replay_engine_machine_state_hash(machine, snapshot.event)
 
         def replay_engine_step(engine: mutable ReplayEngine&) -> void:
             return if engine.machine.halted or engine.machine.faulted
@@ -224,8 +206,11 @@ module DebuggerReplayEngine:
                 event: DebuggerEvents::EventEnvelope = engine.events[index]
                 return false if event.ordinal != index.u64() or event.schema != REPLAY_SCHEMA_VERSION or event.kind != DebuggerEvents::EventKind.ExecutionBoundary or event.quality != DebuggerEvents::EventQuality.Exact or event.task.value != event.position.task.value or event.position.recording.value != engine.recording.value or event.position.event != index.u64()
                 return false if not DebuggerCheckpoint::snapshot_shape_is_valid(engine.history[index])
-                return false if engine.history[index].id.value != index.u64() + REPLAY_CHECKPOINT_ID_OFFSET or engine.history[index].event != index.u64()
+                return false if engine.history[index].id.value != index.u64() + REPLAY_CHECKPOINT_ID_OFFSET or engine.history[index].event != index.u64() or engine.history[index].program_counter >= engine.image.program.instruction_count or engine.history[index].halted or engine.history[index].faulted
                 return false if engine.history[index].state_hash != replay_engine_snapshot_state_hash(engine.history[index])
+                replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
+                replay_machine <- DebuggerEDIR::machine_step(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
+                return false if event.payload_hash != replay_engine_machine_state_hash(replay_machine, index.u64())
             return true
 
         def replay_engine_fork(engine: mutable ReplayEngine&, branch: DebuggerIdentity::DebugId) -> ReplayEngine:

@@ -22,6 +22,7 @@ module DebuggerManagedEngine:
         const VALUE_NAME_OFFSET: u64 = 1
         const VALUE_TYPE_ID: u64 = 1
         const MAX_LOCAL_VALUES: usize = 32
+        const COMPOUND_STEP_LIMIT: u64 = 64
 
     public:
         struct ManagedController:
@@ -107,6 +108,41 @@ module DebuggerManagedEngine:
             managed_refresh_values(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
+            return DebuggerErrors::no_error()
+
+        def managed_step_over(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            return managed_step(controller) if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count or controller.engine.image.instructions[controller.engine.machine.program_counter.usize()].opcode != DebuggerEDIR::Opcode.Call
+            initial_depth: usize = controller.engine.machine.return_stack_pointer
+            initial_event: usize = controller.engine.event_count
+            failure: mutable DebuggerErrors::DebuggerError = managed_step(controller)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            while controller.engine.machine.return_stack_pointer > initial_depth and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
+                failure <- managed_step(controller)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.machine.return_stack_pointer > initial_depth
+            return DebuggerErrors::no_error()
+
+        def managed_step_out(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            initial_depth: usize = controller.engine.machine.return_stack_pointer
+            initial_event: usize = controller.engine.event_count
+            failure: mutable DebuggerErrors::DebuggerError = managed_step(controller)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            while initial_depth > 0 and controller.engine.machine.return_stack_pointer >= initial_depth and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
+                failure <- managed_step(controller)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if initial_depth > 0 and controller.engine.machine.return_stack_pointer >= initial_depth
+            return DebuggerErrors::no_error()
+
+        def managed_reverse_continue(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)
+            steps: mutable u64 = 0
+            while controller.engine.event_count > 0 and steps < COMPOUND_STEP_LIMIT:
+                failure: DebuggerErrors::DebuggerError = managed_reverse_step(controller)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                steps <- steps + 1
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count > 0
             return DebuggerErrors::no_error()
 
         def managed_reverse_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:

@@ -1,0 +1,83 @@
+# Full managed checkpoint envelope.  A checkpoint is usable only when every
+# logical component validates as an exact, internally consistent state.
+
+include "./checkpoint.elisa"
+include "./effects.elisa"
+include "./resources.elisa"
+include "../concurrency/checkpoint.elisa"
+include "../concurrency/runtime.elisa"
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+include "../vm/edir.elisa"
+
+module DebuggerFullCheckpoint:
+    private:
+        const FULL_CHECKPOINT_SCHEMA: u32 = 1
+        const FULL_CHECKPOINT_NO_ID: u64 = 0
+        const FULL_CHECKPOINT_MAX_EVENT: u64 = 18446744073709551615
+        const FULL_CHECKPOINT_ID_OFFSET: u64 = 1
+        const DETAIL_SCHEMA: u32 = 1
+        const DETAIL_RECORDING: u32 = 2
+        const DETAIL_MACHINE: u32 = 3
+        const DETAIL_TASKS: u32 = 4
+        const DETAIL_EFFECTS: u32 = 5
+        const DETAIL_RESOURCES: u32 = 6
+
+    public:
+        struct ManagedCheckpoint:
+            schema: mutable u32
+            recording: mutable DebuggerIdentity::DebugId
+            branch: mutable DebuggerIdentity::DebugId
+            event: mutable u64
+            state_hash: mutable u64
+            machine: mutable DebuggerCheckpoint::MachineSnapshot
+            tasks: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot
+            effects: mutable DebuggerEffects::EffectOracle
+            resources: mutable DebuggerVirtualResources::ResourceStore
+
+        def full_checkpoint_validate(checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SCHEMA) if checkpoint.schema != FULL_CHECKPOINT_SCHEMA
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_RECORDING) if checkpoint.recording.value == FULL_CHECKPOINT_NO_ID
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_MACHINE) if checkpoint.machine.id.value == FULL_CHECKPOINT_NO_ID or checkpoint.machine.event != checkpoint.event or not DebuggerCheckpoint::snapshot_shape_is_valid(checkpoint.machine)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_EFFECTS) if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RESOURCES) if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+            return DebuggerErrors::no_error()
+
+        def full_checkpoint_capture(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> ManagedCheckpoint:
+            return ManagedCheckpoint{
+                schema: FULL_CHECKPOINT_SCHEMA,
+                recording: recording,
+                branch: branch,
+                event: event,
+                state_hash: state_hash,
+                machine: DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(FULL_CHECKPOINT_MAX_EVENT if event == FULL_CHECKPOINT_MAX_EVENT else event + FULL_CHECKPOINT_ID_OFFSET), event, state_hash),
+                tasks: tasks,
+                effects: effects,
+                resources: resources
+            }
+
+        def full_checkpoint_is_valid(checkpoint: ManagedCheckpoint) -> bool:
+            return DebuggerErrors::error_is_ok(full_checkpoint_validate(checkpoint))
+
+        def full_checkpoint_restore_machine(checkpoint: ManagedCheckpoint) -> DebuggerEDIR::Machine:
+            restored: mutable DebuggerEDIR::Machine = zeroed
+            return restored if not full_checkpoint_is_valid(checkpoint)
+            return DebuggerCheckpoint::snapshot_restore(checkpoint.machine)
+
+        def full_checkpoint_restore_tasks(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+            failure: DebuggerErrors::DebuggerError = full_checkpoint_validate(checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            DebuggerConcurrencyCheckpoint::task_snapshot_restore(runtime, checkpoint.tasks)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_matches(runtime, checkpoint.tasks)
+            return DebuggerErrors::no_error()
+
+        def full_checkpoint_effects(checkpoint: ManagedCheckpoint) -> DebuggerEffects::EffectOracle:
+            result: mutable DebuggerEffects::EffectOracle = zeroed
+            return result if not full_checkpoint_is_valid(checkpoint)
+            return checkpoint.effects
+
+        def full_checkpoint_resources(checkpoint: ManagedCheckpoint) -> DebuggerVirtualResources::ResourceStore:
+            result: mutable DebuggerVirtualResources::ResourceStore = zeroed
+            return result if not full_checkpoint_is_valid(checkpoint)
+            return checkpoint.resources

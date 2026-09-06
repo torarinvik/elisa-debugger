@@ -3,6 +3,7 @@
 include "../src/trace/stream.elisa"
 include "../src/replay/effects.elisa"
 include "../src/replay/adapters.elisa"
+include "../src/replay/full_checkpoint.elisa"
 include "../src/inspect/locations.elisa"
 include "../src/inspect/binding_evaluate.elisa"
 include "../src/query/evaluator.elisa"
@@ -86,6 +87,12 @@ const ADAPTER_INPUT_SECOND: u8 = 66
 const ADAPTER_OUTPUT_FIRST: u8 = 88
 const ADAPTER_OUTPUT_SECOND: u8 = 89
 const ADAPTER_OUTPUT_THIRD: u8 = 90
+const FULL_CHECKPOINT_RECORDING_ID: u64 = 710
+const FULL_CHECKPOINT_BRANCH_ID: u64 = 711
+const FULL_CHECKPOINT_EVENT: u64 = 3
+const FULL_CHECKPOINT_HASH: u64 = 991
+const FULL_CHECKPOINT_RESULT_FAILURE: i64 = 146
+const INVALID_FULL_CHECKPOINT_SCHEMA: u32 = 2
 const METADATA_STREAM_SCHEMA: u32 = 1
 const METADATA_STREAM_SEQUENCE: u64 = 0
 const METADATA_STREAM_FIRST_EVENT: u64 = 7
@@ -165,11 +172,29 @@ def check_managed_adapters() -> i64:
     return ADAPTER_REPLAY_RESULT_FAILURE if mismatch_write.accepted or mismatch_write.failure.code != DebuggerErrors::ErrorCode.Diverged or DebuggerReplayAdapters::console_is_exact(console_mismatch)
     return 0
 
+def check_full_checkpoint() -> i64:
+    machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
+    effects: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
+    resources: DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording)
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerFullCheckpoint::full_checkpoint_capture(machine, tasks, effects, resources, DebuggerIdentity::debug_id(FULL_CHECKPOINT_RECORDING_ID), DebuggerIdentity::debug_id(FULL_CHECKPOINT_BRANCH_ID), FULL_CHECKPOINT_EVENT, FULL_CHECKPOINT_HASH)
+    return FULL_CHECKPOINT_RESULT_FAILURE if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+    restored: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(checkpoint)
+    return FULL_CHECKPOINT_RESULT_FAILURE if not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, restored)
+    restored_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    return FULL_CHECKPOINT_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_restore_tasks(restored_runtime, checkpoint))
+    corrupt: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    corrupt.schema <- INVALID_FULL_CHECKPOINT_SCHEMA
+    return FULL_CHECKPOINT_RESULT_FAILURE if DebuggerFullCheckpoint::full_checkpoint_is_valid(corrupt)
+    return 0
+
 def main() -> i64:
     return 74 if check_corrupt_metadata() != 0
     return 75 if check_corrupt_tables() != 0
     return 76 if check_corrupt_runtime() != 0
     return ADAPTER_REPLAY_RESULT_FAILURE if check_managed_adapters() != 0
+    return FULL_CHECKPOINT_RESULT_FAILURE if check_full_checkpoint() != 0
     expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
     evaluated: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, 8)
     return 1 if evaluated.value != 9 or not DebuggerErrors::error_is_ok(evaluated.failure)

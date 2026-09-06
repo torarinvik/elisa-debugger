@@ -27,6 +27,7 @@ module DebuggerDAPServer:
         const DAP_SERVER_SUCCESS_EXIT_CODE: i64 = 0
         const DAP_SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
         const DAP_NO_EXPECTED_GENERATION: u64 = 0
+        const DAP_MAX_SOURCE_LINE: u64 = 18446744073709551615
         const DECODER_HEADER_STATE: u8 = 0
         const DECODER_PAYLOAD_STATE: u8 = 2
         const DECODER_FAILED_STATE: u8 = 3
@@ -56,6 +57,8 @@ module DebuggerDAPServer:
         const ASCII_T: u8 = 116
         const ASCII_L: u8 = 108
         const ASCII_G: u8 = 103
+        const ASCII_Y: u8 = 121
+        const ASCII_P: u8 = 112
         const ASCII_H: u8 = 104
         const ASCII_HYPHEN: u8 = 45
         const ASCII_UPPER_C: u8 = 67
@@ -63,6 +66,10 @@ module DebuggerDAPServer:
         const HEADER_PREFIX_LENGTH: u8 = 15
         const COMMAND_PREFIX_LENGTH: u8 = 11
         const COMMAND_PREFIX_FINAL_POSITION: u8 = 10
+        const TYPE_PREFIX_LENGTH: u8 = 8
+        const TYPE_PREFIX_FINAL_POSITION: u8 = 7
+        const TYPE_REQUEST_LENGTH: usize = 7
+        const TYPE_REQUEST_HASH: u64 = 104174908047
         const SEQUENCE_PREFIX_LENGTH: u8 = 6
         const SEQUENCE_PREFIX_FINAL_POSITION: u8 = 5
         const COMMAND_HASH_INITIALIZE: u64 = 2872973214862224
@@ -172,6 +179,11 @@ module DebuggerDAPServer:
             in_command: mutable bool
             command_seen: mutable bool
             command_hash: mutable u64
+            type_prefix_position: mutable u8
+            in_type: mutable bool
+            type_seen: mutable bool
+            type_hash: mutable u64
+            type_length: mutable usize
             sequence_prefix_position: mutable u8
             in_sequence: mutable bool
             sequence_seen: mutable bool
@@ -204,6 +216,17 @@ module DebuggerDAPServer:
             return byte == ASCII_Q if position == 3
             return byte == ASCII_QUOTE if position == 4
             return byte == ASCII_COLON if position == SEQUENCE_PREFIX_FINAL_POSITION
+            return false
+
+        def type_prefix_matches(position: u8, byte: u8) -> bool:
+            return byte == ASCII_QUOTE if position == 0
+            return byte == ASCII_T if position == 1
+            return byte == ASCII_Y if position == 2
+            return byte == ASCII_P if position == 3
+            return byte == ASCII_E if position == 4
+            return byte == ASCII_QUOTE if position == 5
+            return byte == ASCII_COLON if position == 6
+            return byte == ASCII_QUOTE if position == TYPE_PREFIX_FINAL_POSITION
             return false
 
         def header_prefix_matches(position: u8, byte: u8) -> bool:
@@ -242,6 +265,31 @@ module DebuggerDAPServer:
                     decoder.command_seen <- true
                 else:
                     decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
+            if not decoder.in_type:
+                if type_prefix_matches(decoder.type_prefix_position, byte):
+                    decoder.type_prefix_position <- decoder.type_prefix_position + 1
+                    if decoder.type_prefix_position == TYPE_PREFIX_LENGTH:
+                        if decoder.type_seen:
+                            decoder_fail(decoder)
+                            return
+                        decoder.in_type <- true
+                        decoder.type_hash <- 0
+                        decoder.type_length <- 0
+                else:
+                    decoder.type_prefix_position <- 1 if byte == ASCII_QUOTE else 0
+            else:
+                if byte == ASCII_QUOTE:
+                    if decoder.type_length != TYPE_REQUEST_LENGTH or decoder.type_hash != TYPE_REQUEST_HASH:
+                        decoder_fail(decoder)
+                        return
+                    decoder.in_type <- false
+                    decoder.type_seen <- true
+                else:
+                    if decoder.type_length >= TYPE_REQUEST_LENGTH + 1:
+                        decoder_fail(decoder)
+                        return
+                    decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                    decoder.type_length <- decoder.type_length + 1
             if not decoder.in_sequence:
                 if sequence_prefix_matches(decoder.sequence_prefix_position, byte):
                     decoder.sequence_prefix_position <- decoder.sequence_prefix_position + 1
@@ -324,7 +372,7 @@ module DebuggerDAPServer:
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
                 if decoder.payload_received == decoder.content_length:
-                    if not decoder.command_seen or not decoder.sequence_seen:
+                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence:
                         decoder_fail(decoder)
                         return false
                     decoder.state <- DECODER_HEADER_STATE
@@ -336,6 +384,13 @@ module DebuggerDAPServer:
                     decoder.command_prefix_position <- 0
                     decoder.in_command <- false
                     decoder.command_seen <- false
+                    decoder.type_prefix_position <- 0
+                    decoder.in_type <- false
+                    decoder.type_seen <- false
+                    decoder.type_hash <- 0
+                    decoder.type_length <- 0
+                    decoder.sequence_prefix_position <- 0
+                    decoder.in_sequence <- false
                     decoder.sequence_seen <- false
                     return true
                 return false
@@ -363,7 +418,7 @@ module DebuggerDAPServer:
             _ = printf("\n") can Console
 
         def write_stack_response(result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
-            line: u64 = result.session.position.statement.value + 1
+            line: u64 = DAP_MAX_SOURCE_LINE if result.session.position.statement.value == DAP_MAX_SOURCE_LINE else result.session.position.statement.value + 1
             body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(line) + DAP_STACK_DYNAMIC_AFTER_LINE_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(DAP_BODY_PREFIX) can Console

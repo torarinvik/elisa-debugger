@@ -6,7 +6,7 @@ BUILD ?= build
 # strict product-freshness gate.
 ELISA_ALLOW_STALE_STAGE1 ?= 1
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check protocol-events-check source-store-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check advanced-analysis-check integration-contract-check trace-retention-check coordinator-seek-check capabilities-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check protocol-events-check source-store-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check advanced-analysis-check integration-contract-check trace-retention-check coordinator-seek-check capabilities-check trace-codec-check trace-recording-check trace-bundle-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -16,11 +16,13 @@ dap-server: $(BUILD)/elisa-debugger-dap-server
 
 cli: $(BUILD)/elisa-debugger-cli
 
-module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check
+module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check
 	"$(BUILD)/elisa-debugger-module-core-check"
 	"$(BUILD)/elisa-debugger-module-data-check"
 	"$(BUILD)/elisa-debugger-module-protocol-check"
-	"$(BUILD)/elisa-debugger-module-trace-check"
+	"$(BUILD)/elisa-debugger-module-trace-codec-check"
+	"$(BUILD)/elisa-debugger-module-trace-recording-check"
+	"$(BUILD)/elisa-debugger-module-trace-bundle-check"
 	"$(BUILD)/elisa-debugger-edir-call-check"
 	"$(BUILD)/elisa-debugger-session-check"
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
@@ -111,9 +113,26 @@ $(BUILD)/elisa-debugger-module-protocol-check: tests/module_protocol_check.elisa
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
-$(BUILD)/elisa-debugger-module-trace-check: tests/module_trace_check.elisa
+$(BUILD)/elisa-debugger-module-trace-codec-check: tests/trace_codec_check.elisa
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-module-trace-recording-check: tests/trace_recording_check.elisa
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-module-trace-bundle-check: tests/trace_bundle_check.elisa
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+trace-codec-check: $(BUILD)/elisa-debugger-module-trace-codec-check
+	"$(BUILD)/elisa-debugger-module-trace-codec-check"
+
+trace-recording-check: $(BUILD)/elisa-debugger-module-trace-recording-check
+	"$(BUILD)/elisa-debugger-module-trace-recording-check"
+
+trace-bundle-check: $(BUILD)/elisa-debugger-module-trace-bundle-check
+	"$(BUILD)/elisa-debugger-module-trace-bundle-check"
 
 $(BUILD)/elisa-debugger-edir-call-check: tests/edir_call_check.elisa
 	mkdir -p $(BUILD)
@@ -217,4 +236,4 @@ clean:
 	rm -rf $(BUILD)
 
 # Included Elisa modules must invalidate executable and test products too.
-$(BUILD)/elisa-debugger-server $(BUILD)/elisa-debugger-dap-server $(BUILD)/elisa-debugger-cli $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check: $(shell find src -type f -name '*.elisa')
+$(BUILD)/elisa-debugger-server $(BUILD)/elisa-debugger-dap-server $(BUILD)/elisa-debugger-cli $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check: $(shell find src -type f -name '*.elisa')

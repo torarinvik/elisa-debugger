@@ -1,0 +1,50 @@
+# Focused compile-time coverage for verified bundles and canonical export.
+
+include "../src/trace/binary.elisa"
+include "../src/trace/storage.elisa"
+include "../src/trace/manifest.elisa"
+include "../src/trace/recorder.elisa"
+include "../src/trace/reader.elisa"
+include "../src/trace/bundle.elisa"
+include "../src/trace/verify.elisa"
+include "../src/trace/export.elisa"
+
+const TEST_BUILD: u64 = 31
+const TEST_RECORDING: u64 = 32
+const TEST_HASH: u64 = 33
+const TEST_SCHEMA: u32 = 1
+const TEST_EVENT_COUNT: u64 = 1
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
+
+def check_bundle_round_trip() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
+    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING))
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_SCHEMA, 0, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_HASH)
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
+    return 2 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(recorder))
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    chunk: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
+    chunk.header.sequence <- 0
+    return 3 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, chunk))
+    return 4 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_seal(bundle, false))
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
+    return 5 if report.state != DebuggerTraceVerify::VerificationState.Exact or not report.replayable or report.verified_chunks != TEST_EVENT_COUNT
+    exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle)
+    return 6 if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count != TEST_EVENT_COUNT
+    exported_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[0], exported.bytes.length)
+    return 7 if exported_report.state != DebuggerTraceVerify::VerificationState.Exact or not exported_report.replayable
+    return 0
+
+def check_corrupt_bundle() -> i64:
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    bundle.state <- DebuggerTraceBundle::BundleState.Corrupt
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
+    return 8 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
+    return 0
+
+def main() -> i64:
+    return check_bundle_round_trip() if check_bundle_round_trip() != 0
+    return check_corrupt_bundle() if check_corrupt_bundle() != 0
+    return 0

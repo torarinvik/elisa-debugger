@@ -1,0 +1,65 @@
+# Focused compile-time coverage for canonical bytes, manifests, and checkpoints.
+
+include "../src/trace/binary.elisa"
+include "../src/trace/manifest.elisa"
+include "../src/replay/checkpoint.elisa"
+include "../src/replay/checkpoint_codec.elisa"
+include "../src/vm/edir.elisa"
+
+const TEST_U16: u16 = 4660
+const TEST_U32: u32 = 2309737967
+const TEST_U64: u64 = 1234605616436508552
+const TEST_BUILD: u64 = 11
+const TEST_RECORDING: u64 = 12
+const TEST_CHECKPOINT: u64 = 13
+const TEST_HASH: u64 = 14
+const EMPTY_ID: u64 = 0
+const SHORT_BYTES: usize = 4
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
+
+def check_binary() -> i64:
+    writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    writer <- DebuggerTraceBinary::writer_put_u16(writer, TEST_U16)
+    writer <- DebuggerTraceBinary::writer_put_u32(writer, TEST_U32)
+    writer <- DebuggerTraceBinary::writer_put_u64(writer, TEST_U64)
+    return 1 if not DebuggerTraceBinary::writer_is_valid(writer)
+    reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(writer.bytes[0], writer.length)
+    return 2 if DebuggerTraceBinary::reader_take_u16(reader) != TEST_U16
+    return 3 if DebuggerTraceBinary::reader_take_u32(reader) != TEST_U32
+    return 4 if DebuggerTraceBinary::reader_take_u64(reader) != TEST_U64
+    return 5 if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != writer.length
+    return 0
+
+def check_manifest() -> i64:
+    manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build_identity(), DebuggerTraceManifest::ManifestStatus.Exact)
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    return 6 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    decoded_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
+    decoded: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_decode(decoded_reader)
+    return 7 if decoded.schema != manifest.schema or decoded.compiler.value != manifest.compiler.value or not DebuggerTraceManifest::manifest_is_replayable(decoded)
+    invalid: mutable DebuggerTraceManifest::BundleManifest = decoded
+    invalid.runtime <- DebuggerIdentity::debug_id(EMPTY_ID)
+    return 8 if DebuggerTraceManifest::manifest_is_replayable(invalid)
+    return 0
+
+def check_checkpoint() -> i64:
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(TEST_CHECKPOINT), 0, TEST_HASH)
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerCheckpointCodec::checkpoint_encode(snapshot)
+    return 9 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
+    decoded: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpointCodec::checkpoint_decode(reader)
+    validation_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
+    return 10 if decoded.id.value != TEST_CHECKPOINT or decoded.state_hash != TEST_HASH or not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(validation_reader)
+    short_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], SHORT_BYTES)
+    short_snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpointCodec::checkpoint_decode(short_reader)
+    return 11 if short_snapshot.id.value != EMPTY_ID
+    return 0
+
+def main() -> i64:
+    return check_binary() if check_binary() != 0
+    return check_manifest() if check_manifest() != 0
+    return check_checkpoint() if check_checkpoint() != 0
+    return 0

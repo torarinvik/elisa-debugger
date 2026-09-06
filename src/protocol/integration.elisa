@@ -37,6 +37,11 @@ module DebuggerProtocolIntegration:
             Pause
             Continue
 
+        enum RetrySafety:
+            Safe
+            SameRequestOnly
+            Forbidden
+
         struct ClientIdentity:
             name: mutable DebuggerIdentity::DebugId
             version: mutable DebuggerIdentity::DebugId
@@ -84,6 +89,14 @@ module DebuggerProtocolIntegration:
             next_page: mutable u64
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct CancelRequest:
+            client: mutable ClientIdentity
+            request_id: mutable u64
+            target_request_id: mutable u64
+            session_id: mutable u64
+            owner_token: mutable u64
+            expected_generation: mutable u64
+
         def integration_limits_default() -> IntegrationLimits:
             return IntegrationLimits{max_page_size: DEFAULT_MAX_PAGE_SIZE, max_trace_events: DEFAULT_MAX_TRACE_EVENTS, max_query_steps: DEFAULT_MAX_QUERY_STEPS, max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES}
 
@@ -98,8 +111,14 @@ module DebuggerProtocolIntegration:
             return true
 
         def integration_method_is_mutating(method: DebuggerProtocol::Method) -> bool:
-            return true if method == DebuggerProtocol::Method.Launch or method == DebuggerProtocol::Method.Attach or method == DebuggerProtocol::Method.OpenTrace or method == DebuggerProtocol::Method.Replay or method == DebuggerProtocol::Method.Pause or method == DebuggerProtocol::Method.Continue or method == DebuggerProtocol::Method.Step or method == DebuggerProtocol::Method.ReverseStep or method == DebuggerProtocol::Method.Seek or method == DebuggerProtocol::Method.SetBreakpoints or method == DebuggerProtocol::Method.SetDataBreakpoints or method == DebuggerProtocol::Method.Checkpoint or method == DebuggerProtocol::Method.Branch or method == DebuggerProtocol::Method.Detach or method == DebuggerProtocol::Method.Terminate or method == DebuggerProtocol::Method.Close
+            return true if method == DebuggerProtocol::Method.Launch or method == DebuggerProtocol::Method.Attach or method == DebuggerProtocol::Method.OpenTrace or method == DebuggerProtocol::Method.Replay or method == DebuggerProtocol::Method.Pause or method == DebuggerProtocol::Method.Continue or method == DebuggerProtocol::Method.Step or method == DebuggerProtocol::Method.ReverseStep or method == DebuggerProtocol::Method.Seek or method == DebuggerProtocol::Method.SetBreakpoints or method == DebuggerProtocol::Method.SetDataBreakpoints or method == DebuggerProtocol::Method.Checkpoint or method == DebuggerProtocol::Method.Branch or method == DebuggerProtocol::Method.Detach or method == DebuggerProtocol::Method.Terminate or method == DebuggerProtocol::Method.Close or method == DebuggerProtocol::Method.Cancel
             return false
+
+        def retry_is_safe(method: DebuggerProtocol::Method) -> bool:
+            return method == DebuggerProtocol::Method.Discover or method == DebuggerProtocol::Method.Initialize or method == DebuggerProtocol::Method.Threads or method == DebuggerProtocol::Method.Stack or method == DebuggerProtocol::Method.Scopes or method == DebuggerProtocol::Method.Variables or method == DebuggerProtocol::Method.Memory or method == DebuggerProtocol::Method.TraceVerify
+
+        def retry_is_forbidden(method: DebuggerProtocol::Method) -> bool:
+            return method == DebuggerProtocol::Method.Launch or method == DebuggerProtocol::Method.Attach or method == DebuggerProtocol::Method.Branch or method == DebuggerProtocol::Method.Terminate
 
         def session_request_validate(request: SessionRequest, session: DebuggerSession::Session, document: DiscoveryDocument) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PRODUCT) if not discovery_document_is_valid(document)
@@ -111,6 +130,13 @@ module DebuggerProtocolIntegration:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_TARGET) if request.target_event > document.limits.max_trace_events
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceExport and not session.capabilities.trace_export
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceVerify and not session.capabilities.trace_verification
+            return DebuggerErrors::no_error()
+
+        def cancel_request_validate(request: CancelRequest, session: DebuggerSession::Session, document: DiscoveryDocument) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PRODUCT) if not discovery_document_is_valid(document)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if request.request_id == NO_ID or request.target_request_id == NO_ID or request.session_id != NO_ID and request.session_id != session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if request.owner_token == NO_ID
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_GENERATION) if request.expected_generation != NO_ID and request.expected_generation != session.stop_generation
             return DebuggerErrors::no_error()
 
         def response_ok(request: SessionRequest, session: DebuggerSession::Session, next_page: u64) -> SessionResponse:

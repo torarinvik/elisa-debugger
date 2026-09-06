@@ -1,0 +1,85 @@
+# Historical values keep their availability state and the position that
+# produced them.  A client can therefore distinguish a missing value from a
+# value that existed but was optimized away or redacted.
+
+include "./values.elisa"
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+
+module DebuggerHistoricalValues:
+    private:
+        const HISTORY_VALUE_CAPACITY: usize = 128
+        const HISTORY_PAGE_CAPACITY: usize = 32
+        const HISTORY_NO_VALUE: u64 = 0
+        const HISTORY_STATE_MAX: u16 = 6
+        const DETAIL_CAPACITY: u32 = 1
+        const DETAIL_STATE: u32 = 2
+        const DETAIL_GENERATION: u32 = 3
+
+    public:
+        struct HistoricalValue:
+            handle: mutable DebuggerValues::ValueHandle
+            position: mutable DebuggerIdentity::Position
+            type_id: mutable DebuggerIdentity::DebugId
+            state: mutable DebuggerValues::ValueState
+            signed_value: mutable i64
+            value_hash: mutable u64
+
+        struct ValueTimeline:
+            values: mutable HistoricalValue[HISTORY_VALUE_CAPACITY]
+            count: mutable usize
+            complete: mutable bool
+            generation: mutable u64
+
+        struct HistoricalPage:
+            entries: mutable HistoricalValue[HISTORY_PAGE_CAPACITY]
+            first: mutable usize
+            count: mutable usize
+            next: mutable usize
+            complete: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def timeline_new(generation: u64) -> ValueTimeline:
+            return ValueTimeline{values: zeroed, count: 0, complete: true, generation: generation}
+
+        def historical_value_is_valid(value: HistoricalValue, generation: u64) -> bool:
+            return value.handle.stop_generation == generation and value.type_id.value != HISTORY_NO_VALUE and value.state.u16() <= HISTORY_STATE_MAX
+
+        def timeline_append(timeline: ValueTimeline, value: HistoricalValue) -> ValueTimeline:
+            updated: mutable ValueTimeline = timeline
+            if timeline.count >= HISTORY_VALUE_CAPACITY or not historical_value_is_valid(value, timeline.generation):
+                updated.complete <- false
+                return updated
+            updated.values[timeline.count] <- value
+            updated.count <- timeline.count + 1
+            return updated
+
+        def timeline_page(timeline: ValueTimeline, requested: usize) -> HistoricalPage:
+            page: mutable HistoricalPage = zeroed
+            page.first <- requested if requested < timeline.count else timeline.count
+            return HistoricalPage{entries: page.entries, first: page.first, count: 0, next: page.first, complete: timeline.complete, failure: DebuggerErrors::no_error()} if timeline.generation == 0
+            remaining: usize = timeline.count - page.first
+            page.count <- HISTORY_PAGE_CAPACITY if remaining > HISTORY_PAGE_CAPACITY else remaining
+            for index in 0..<page.count:
+                page.entries[index] <- timeline.values[page.first + index]
+            page.next <- page.first + page.count
+            page.complete <- timeline.complete and page.next >= timeline.count
+            return page
+
+        def timeline_value_at(timeline: ValueTimeline, event: u64) -> HistoricalValue:
+            result: mutable HistoricalValue = zeroed
+            result.state <- DebuggerValues::ValueState.Absent
+            return result if timeline.count > HISTORY_VALUE_CAPACITY
+            for index in 0..<timeline.count:
+                return timeline.values[index] if timeline.values[index].position.event == event
+            return result
+
+        def historical_value_is_available(value: HistoricalValue) -> bool:
+            return value.state == DebuggerValues::ValueState.Available and value.handle.id.value != HISTORY_NO_VALUE
+
+        def historical_value_failure(value: HistoricalValue, generation: u64) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_STATE) if value.state == DebuggerValues::ValueState.Absent
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_GENERATION) if value.handle.stop_generation != generation
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_STATE) if value.state.u16() > HISTORY_STATE_MAX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_STATE) if value.state != DebuggerValues::ValueState.Available
+            return DebuggerErrors::no_error()

@@ -8,6 +8,8 @@ include "../inspect/memory.elisa"
 include "../protocol/request.elisa"
 include "../core/errors.elisa"
 include "../replay/compare.elisa"
+include "../replay/full_checkpoint.elisa"
+include "../replay/branches.elisa"
 
 module DebuggerManagedService:
     private:
@@ -30,6 +32,11 @@ module DebuggerManagedService:
             accepted: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct CheckpointResult:
+            accepted: mutable bool
+            checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint
+            failure: mutable DebuggerErrors::DebuggerError
+
         def service_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> Service:
             return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error()}
 
@@ -38,6 +45,12 @@ module DebuggerManagedService:
 
         def result_ok() -> Result:
             return Result{accepted: true, failure: DebuggerErrors::no_error()}
+
+        def checkpoint_error(failure: DebuggerErrors::DebuggerError) -> CheckpointResult:
+            return CheckpointResult{accepted: false, checkpoint: zeroed, failure: failure}
+
+        def checkpoint_ok(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> CheckpointResult:
+            return CheckpointResult{accepted: true, checkpoint: checkpoint, failure: DebuggerErrors::no_error()}
 
         def service_dispatch(service: mutable Service&, request: DebuggerProtocolRequest::Request) -> Result:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
@@ -129,6 +142,27 @@ module DebuggerManagedService:
 
         def service_checkpoint(service: mutable Service&) -> DebuggerTraceBinary::ByteWriter:
             return DebuggerManagedEngine::managed_checkpoint(service.controller)
+
+        def service_full_checkpoint(service: mutable Service&) -> CheckpointResult:
+            checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+            failure: DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
+            return checkpoint_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            return checkpoint_ok(checkpoint)
+
+        def service_restore_full_checkpoint(service: mutable Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> Result:
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_restore_full_checkpoint(service.controller, checkpoint)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            return result_ok()
+
+        def service_create_branch(service: mutable Service&) -> DebuggerIdentity::DebugId:
+            return DebuggerManagedEngine::managed_create_branch(service.controller)
+
+        def service_add_intervention(service: mutable Service&, branch: DebuggerIdentity::DebugId, intervention: DebuggerBranches::Intervention) -> Result:
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_add_intervention(service.controller, branch, intervention)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            return result_ok()
 
         def service_fork(service: mutable Service&, branch: DebuggerIdentity::DebugId) -> DebuggerReplayEngine::ReplayEngine:
             return DebuggerManagedEngine::managed_fork(service.controller, branch)

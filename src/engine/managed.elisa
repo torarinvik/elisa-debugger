@@ -6,6 +6,7 @@ include "../core/session.elisa"
 include "../core/errors.elisa"
 include "../replay/engine.elisa"
 include "../replay/checkpoint_codec.elisa"
+include "./state.elisa"
 
 module DebuggerManagedEngine:
     private:
@@ -19,10 +20,11 @@ module DebuggerManagedEngine:
         struct ManagedController:
             session: mutable DebuggerSession::Session
             engine: mutable DebuggerReplayEngine::ReplayEngine
+            state: mutable DebuggerManagedState::State
             last_error: mutable DebuggerErrors::DebuggerError
 
         def managed_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> ManagedController:
-            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), last_error: DebuggerErrors::no_error()}
+            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error()}
 
         def managed_sync_position(controller: mutable ManagedController&) -> void:
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
@@ -112,6 +114,37 @@ module DebuggerManagedEngine:
             checkpoint_id: u64 = MAX_CHECKPOINT_ID if controller.engine.event_count.u64() == MAX_CHECKPOINT_ID else controller.engine.event_count.u64() + CHECKPOINT_ID_OFFSET
             snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(controller.engine.machine, DebuggerIdentity::debug_id(checkpoint_id), controller.engine.event_count.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
             return DebuggerCheckpointCodec::checkpoint_encode(snapshot)
+
+        def managed_full_checkpoint(controller: mutable ManagedController&) -> DebuggerFullCheckpoint::ManagedCheckpoint:
+            return DebuggerManagedState::state_capture(controller.state, controller.engine.machine, controller.engine.recording, controller.engine.branch, controller.engine.event_count.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+
+        def managed_restore_full_checkpoint(controller: mutable ManagedController&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENGINE_FAULT) if checkpoint.recording.value != controller.engine.recording.value
+            failure <- DebuggerManagedState::state_restore(controller.state, checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            restored: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(checkpoint)
+            controller.engine.machine <- restored
+            controller.engine.event_count <- checkpoint.event.usize()
+            controller.engine.branch <- checkpoint.branch
+            controller.engine.engine_error <- DebuggerReplayEngine::EngineError.None
+            managed_sync_position(controller)
+            return DebuggerErrors::no_error()
+
+        def managed_create_branch(controller: mutable ManagedController&) -> DebuggerIdentity::DebugId:
+            branch_value: u64 = controller.state.branches.next_id
+            return DebuggerIdentity::debug_id(0) if branch_value == 0
+            updated: DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(controller.state.branches, controller.engine.branch, controller.engine.event_count.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+            return DebuggerIdentity::debug_id(0) if updated.count == controller.state.branches.count
+            controller.state.branches <- updated
+            return DebuggerIdentity::debug_id(branch_value)
+
+        def managed_add_intervention(controller: mutable ManagedController&, branch: DebuggerIdentity::DebugId, intervention: DebuggerBranches::Intervention) -> DebuggerErrors::DebuggerError:
+            updated: DebuggerBranches::BranchStore = DebuggerBranches::branches_add_intervention(controller.state.branches, branch, intervention)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_HISTORY) if updated.count != controller.state.branches.count
+            controller.state.branches <- updated
+            return DebuggerErrors::no_error()
 
         def managed_is_exact(controller: mutable ManagedController&) -> bool:
             return DebuggerReplayEngine::replay_engine_is_exact(controller.engine)

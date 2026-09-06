@@ -17,6 +17,7 @@ module DebuggerReplayEngine:
         const REPLAY_GLOBAL_CAPACITY: usize = 16
         const REPLAY_MEMORY_CAPACITY: usize = 64
         const REPLAY_LOCAL_CAPACITY: usize = 32
+        const REPLAY_FRAME_LOCAL_CAPACITY: usize = 512
         const REPLAY_CALL_DEPTH_CAPACITY: usize = 16
         const REPLAY_MAX_PROGRAM_COUNTER: u64 = 256
         const REPLAY_MAX_HEAP: usize = 64
@@ -82,6 +83,14 @@ module DebuggerReplayEngine:
             hash <- hash * REPLAY_HASH_PRIME + machine.heap_next.u64()
             for index in 0..<REPLAY_LOCAL_CAPACITY:
                 hash <- hash * REPLAY_HASH_PRIME + machine.locals[index].u64()
+                initialized: mutable u64 = HASH_FALSE
+                initialized <- HASH_TRUE if machine.locals_initialized[index]
+                hash <- hash * REPLAY_HASH_PRIME + initialized
+            for index in 0..<REPLAY_FRAME_LOCAL_CAPACITY:
+                hash <- hash * REPLAY_HASH_PRIME + machine.frame_locals[index].u64()
+                initialized: mutable u64 = HASH_FALSE
+                initialized <- HASH_TRUE if machine.frame_locals_initialized[index]
+                hash <- hash * REPLAY_HASH_PRIME + initialized
             for index in 0..<REPLAY_CALL_DEPTH_CAPACITY:
                 hash <- hash * REPLAY_HASH_PRIME + machine.return_stack[index]
             for index in 0..<REPLAY_GLOBAL_CAPACITY:
@@ -131,7 +140,7 @@ module DebuggerReplayEngine:
             snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(engine.machine, DebuggerIdentity::debug_id(engine.event_count.u64() + REPLAY_CHECKPOINT_ID_OFFSET), engine.event_count.u64(), replay_engine_state_hash(engine))
             engine.history[engine.event_count] <- snapshot
             instruction: DebuggerEDIR::Instruction = engine.image.instructions[engine.machine.program_counter.usize()]
-            engine.machine <- DebuggerEDIR::machine_step(engine.machine, instruction)
+            DebuggerEDIR::machine_step_in_place(engine.machine, instruction)
             position: DebuggerIdentity::Position = replay_engine_position(engine)
             engine.events[engine.event_count] <- DebuggerEvents::event_envelope(REPLAY_SCHEMA_VERSION, engine.event_count.u64(), position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, replay_engine_state_hash(engine))
             engine.event_count <- engine.event_count + 1
@@ -221,7 +230,7 @@ module DebuggerReplayEngine:
                 return false if engine.branch.value != REPLAY_NO_BRANCH and index >= engine.fork_event and event.position.branch.value != engine.branch.value
                 return false if not replay_engine_snapshot_is_valid(engine, index, engine.history[index])
                 replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
-                replay_machine <- DebuggerEDIR::machine_step(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
+                DebuggerEDIR::machine_step_in_place(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
                 return false if event.position.statement.value != replay_machine.program_counter
                 return false if event.payload_hash != replay_engine_machine_state_hash(replay_machine, index.u64())
             return false if engine.event_count > 0 and engine.events[engine.event_count - 1].payload_hash != replay_engine_machine_state_hash(engine.machine, engine.event_count.u64() - REPLAY_CHECKPOINT_ID_OFFSET)

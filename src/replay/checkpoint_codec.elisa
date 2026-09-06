@@ -6,8 +6,9 @@ include "../trace/binary.elisa"
 
 module DebuggerCheckpointCodec:
     private:
-        const CHECKPOINT_SCHEMA: u32 = 1
+        const CHECKPOINT_SCHEMA: u32 = 2
         const CHECKPOINT_LOCAL_CAPACITY: usize = 32
+        const CHECKPOINT_FRAME_LOCAL_CAPACITY: usize = 512
         const CHECKPOINT_GLOBAL_CAPACITY: usize = 16
         const CHECKPOINT_MEMORY_CAPACITY: usize = 64
         const CHECKPOINT_STACK_CAPACITY: usize = 16
@@ -17,19 +18,15 @@ module DebuggerCheckpointCodec:
         const CHECKPOINT_INTEGER_BYTES: usize = 8
         const CHECKPOINT_SCALAR_COUNT: usize = 9
         const CHECKPOINT_FLAG_COUNT: usize = 2
-        const CHECKPOINT_ENCODED_BYTES: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALAR_COUNT + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY + CHECKPOINT_MEMORY_CAPACITY + CHECKPOINT_STACK_CAPACITY) + CHECKPOINT_MEMORY_CAPACITY + CHECKPOINT_FLAG_COUNT
-        const CHECKPOINT_SCHEMA_BYTE_0: u8 = 1
+        const CHECKPOINT_BOOLEAN_ARRAY_COUNT: usize = CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_FRAME_LOCAL_CAPACITY
+        const CHECKPOINT_ENCODED_BYTES: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALAR_COUNT + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_FRAME_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY + CHECKPOINT_MEMORY_CAPACITY + CHECKPOINT_STACK_CAPACITY) + CHECKPOINT_MEMORY_CAPACITY + CHECKPOINT_BOOLEAN_ARRAY_COUNT + CHECKPOINT_FLAG_COUNT
+        const CHECKPOINT_SCHEMA_BYTE_0: u8 = 2
         const CHECKPOINT_SCHEMA_BYTE_1: u8 = 0
         const CHECKPOINT_SCHEMA_BYTE_2: u8 = 0
         const CHECKPOINT_SCHEMA_BYTE_3: u8 = 0
         const CHECKPOINT_MAX_PROGRAM_COUNTER: u64 = 256
         const CHECKPOINT_MAX_HEAP: usize = 64
         const CHECKPOINT_MAX_STACK_POINTER: usize = 16
-        const CHECKPOINT_SCALARS_BEFORE_MEMORY: usize = 5
-        const CHECKPOINT_PROGRAM_COUNTER_OFFSET: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * 3
-        const CHECKPOINT_HEAP_OFFSET: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALARS_BEFORE_MEMORY + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY + CHECKPOINT_MEMORY_CAPACITY) + CHECKPOINT_MEMORY_CAPACITY
-        const CHECKPOINT_STACK_POINTER_OFFSET: usize = CHECKPOINT_HEAP_OFFSET + CHECKPOINT_INTEGER_BYTES * (1 + CHECKPOINT_STACK_CAPACITY)
-        const CHECKPOINT_FLAGS_OFFSET: usize = CHECKPOINT_STACK_POINTER_OFFSET + CHECKPOINT_INTEGER_BYTES
         const CHECKPOINT_INVALID_ID: u64 = 0
         const CHECKPOINT_ID_OFFSET: usize = CHECKPOINT_SCHEMA_BYTES
 
@@ -66,6 +63,16 @@ module DebuggerCheckpointCodec:
             writer <- DebuggerTraceBinary::writer_put_byte(writer, faulted)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.steps)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.result.u64())
+            for index in 0..<CHECKPOINT_LOCAL_CAPACITY:
+                initialized: mutable u8 = BOOLEAN_FALSE
+                initialized <- BOOLEAN_TRUE if snapshot.locals_initialized[index]
+                writer <- DebuggerTraceBinary::writer_put_byte(writer, initialized)
+            for index in 0..<CHECKPOINT_FRAME_LOCAL_CAPACITY:
+                writer <- DebuggerTraceBinary::writer_put_u64(writer, snapshot.frame_locals[index].u64())
+            for index in 0..<CHECKPOINT_FRAME_LOCAL_CAPACITY:
+                initialized: mutable u8 = BOOLEAN_FALSE
+                initialized <- BOOLEAN_TRUE if snapshot.frame_locals_initialized[index]
+                writer <- DebuggerTraceBinary::writer_put_byte(writer, initialized)
             return writer
 
         def checkpoint_decode(reader: mutable DebuggerTraceBinary::ByteReader&) -> DebuggerCheckpoint::MachineSnapshot:
@@ -100,6 +107,16 @@ module DebuggerCheckpointCodec:
             decode_valid <- false if snapshot.faulted and not snapshot.halted
             snapshot.steps <- DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.result <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+            for index in 0..<CHECKPOINT_LOCAL_CAPACITY:
+                initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                decode_valid <- false if initialized > BOOLEAN_TRUE
+                snapshot.locals_initialized[index] <- initialized == BOOLEAN_TRUE
+            for index in 0..<CHECKPOINT_FRAME_LOCAL_CAPACITY:
+                snapshot.frame_locals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
+            for index in 0..<CHECKPOINT_FRAME_LOCAL_CAPACITY:
+                initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+                decode_valid <- false if initialized > BOOLEAN_TRUE
+                snapshot.frame_locals_initialized[index] <- initialized == BOOLEAN_TRUE
             decode_valid <- false if schema != CHECKPOINT_SCHEMA or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
             decode_valid <- false if snapshot.id.value == CHECKPOINT_INVALID_ID
             decode_valid <- false if snapshot.program_counter >= CHECKPOINT_MAX_PROGRAM_COUNTER or heap_next > CHECKPOINT_MAX_HEAP.u64() or stack_pointer > CHECKPOINT_MAX_STACK_POINTER.u64()
@@ -111,20 +128,6 @@ module DebuggerCheckpointCodec:
         def checkpoint_bytes_are_valid(reader: DebuggerTraceBinary::ByteReader) -> bool:
             return false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != 0 or reader.length != CHECKPOINT_ENCODED_BYTES
             return false if reader.bytes[0] != CHECKPOINT_SCHEMA_BYTE_0 or reader.bytes[1] != CHECKPOINT_SCHEMA_BYTE_1 or reader.bytes[2] != CHECKPOINT_SCHEMA_BYTE_2 or reader.bytes[3] != CHECKPOINT_SCHEMA_BYTE_3
-            id_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_ID_OFFSET], CHECKPOINT_INTEGER_BYTES)
-            return false if DebuggerTraceBinary::reader_take_u64(id_reader) == CHECKPOINT_INVALID_ID
-            return false if reader.bytes[CHECKPOINT_FLAGS_OFFSET] > BOOLEAN_TRUE or reader.bytes[CHECKPOINT_FLAGS_OFFSET + 1] > BOOLEAN_TRUE
-            return false if reader.bytes[CHECKPOINT_FLAGS_OFFSET + 1] == BOOLEAN_TRUE and reader.bytes[CHECKPOINT_FLAGS_OFFSET] != BOOLEAN_TRUE
-            for index in 0..<CHECKPOINT_MEMORY_CAPACITY:
-                flag_offset: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALARS_BEFORE_MEMORY + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY) + index * (CHECKPOINT_INTEGER_BYTES + 1) + CHECKPOINT_INTEGER_BYTES
-                return false if reader.bytes[flag_offset] > BOOLEAN_TRUE
-            heap_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_HEAP_OFFSET], CHECKPOINT_INTEGER_BYTES)
-            heap_next: u64 = DebuggerTraceBinary::reader_take_u64(heap_reader)
-            pc_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_PROGRAM_COUNTER_OFFSET], CHECKPOINT_INTEGER_BYTES)
-            program_counter: u64 = DebuggerTraceBinary::reader_take_u64(pc_reader)
-            stack_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(reader.bytes[CHECKPOINT_STACK_POINTER_OFFSET], CHECKPOINT_INTEGER_BYTES)
-            stack_pointer: u64 = DebuggerTraceBinary::reader_take_u64(stack_reader)
-            return false if program_counter >= CHECKPOINT_MAX_PROGRAM_COUNTER or heap_next > CHECKPOINT_MAX_HEAP.u64() or stack_pointer > CHECKPOINT_MAX_STACK_POINTER.u64()
             decoded_reader: mutable DebuggerTraceBinary::ByteReader = reader
             decoded: DebuggerCheckpoint::MachineSnapshot = checkpoint_decode(decoded_reader)
             return false if decoded.id.value == CHECKPOINT_INVALID_ID or decoded.state_hash != DebuggerCheckpoint::snapshot_state_hash(decoded)

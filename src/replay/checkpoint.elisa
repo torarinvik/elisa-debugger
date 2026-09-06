@@ -10,6 +10,7 @@ module DebuggerCheckpoint:
         const SNAPSHOT_MAX_GLOBALS: usize = 16
         const SNAPSHOT_MAX_MEMORY: usize = 64
         const SNAPSHOT_MAX_CALL_DEPTH: usize = 16
+        const SNAPSHOT_FRAME_LOCAL_CAPACITY: usize = SNAPSHOT_MAX_CALL_DEPTH * SNAPSHOT_MAX_LOCALS
         const SNAPSHOT_MAX_PROGRAM_COUNTER: u64 = 256
         const SNAPSHOT_INVALID_ID: u64 = 0
         const SNAPSHOT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
@@ -25,6 +26,9 @@ module DebuggerCheckpoint:
             program_counter: mutable u64
             accumulator: mutable i64
             locals: mutable i64[SNAPSHOT_MAX_LOCALS]
+            locals_initialized: mutable bool[SNAPSHOT_MAX_LOCALS]
+            frame_locals: mutable i64[SNAPSHOT_FRAME_LOCAL_CAPACITY]
+            frame_locals_initialized: mutable bool[SNAPSHOT_FRAME_LOCAL_CAPACITY]
             globals: mutable i64[SNAPSHOT_MAX_GLOBALS]
             memory: mutable i64[SNAPSHOT_MAX_MEMORY]
             memory_initialized: mutable bool[SNAPSHOT_MAX_MEMORY]
@@ -44,6 +48,9 @@ module DebuggerCheckpoint:
             snapshot.program_counter <- machine.program_counter
             snapshot.accumulator <- machine.accumulator
             snapshot.locals <- machine.locals
+            snapshot.locals_initialized <- machine.locals_initialized
+            snapshot.frame_locals <- machine.frame_locals
+            snapshot.frame_locals_initialized <- machine.frame_locals_initialized
             snapshot.globals <- machine.globals
             snapshot.memory <- machine.memory
             snapshot.memory_initialized <- machine.memory_initialized
@@ -65,6 +72,9 @@ module DebuggerCheckpoint:
             machine.program_counter <- snapshot.program_counter
             machine.accumulator <- snapshot.accumulator
             machine.locals <- snapshot.locals
+            machine.locals_initialized <- snapshot.locals_initialized
+            machine.frame_locals <- snapshot.frame_locals
+            machine.frame_locals_initialized <- snapshot.frame_locals_initialized
             machine.globals <- snapshot.globals
             machine.memory <- snapshot.memory
             machine.memory_initialized <- snapshot.memory_initialized
@@ -81,6 +91,10 @@ module DebuggerCheckpoint:
             return false if snapshot.id.value == SNAPSHOT_INVALID_ID or snapshot.program_counter >= SNAPSHOT_MAX_PROGRAM_COUNTER or snapshot.heap_next > SNAPSHOT_MAX_MEMORY or snapshot.return_stack_pointer > SNAPSHOT_MAX_CALL_DEPTH or snapshot.faulted and not snapshot.halted
             for index in snapshot.heap_next..<SNAPSHOT_MAX_MEMORY:
                 return false if snapshot.memory_initialized[index]
+            for depth in snapshot.return_stack_pointer..<SNAPSHOT_MAX_CALL_DEPTH:
+                for local in 0..<SNAPSHOT_MAX_LOCALS:
+                    frame_index: usize = depth * SNAPSHOT_MAX_LOCALS + local
+                    return false if snapshot.frame_locals_initialized[frame_index]
             return true
 
         def snapshot_state_hash(snapshot: MachineSnapshot) -> u64:
@@ -91,6 +105,14 @@ module DebuggerCheckpoint:
             hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.heap_next.u64()
             for index in 0..<SNAPSHOT_MAX_LOCALS:
                 hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.locals[index].u64()
+                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
+                initialized <- SNAPSHOT_HASH_TRUE if snapshot.locals_initialized[index]
+                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
+            for index in 0..<SNAPSHOT_FRAME_LOCAL_CAPACITY:
+                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.frame_locals[index].u64()
+                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
+                initialized <- SNAPSHOT_HASH_TRUE if snapshot.frame_locals_initialized[index]
+                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
             for index in 0..<SNAPSHOT_MAX_CALL_DEPTH:
                 hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.return_stack[index]
             for index in 0..<SNAPSHOT_MAX_GLOBALS:
@@ -115,6 +137,9 @@ module DebuggerCheckpoint:
             return false if snapshot.program_counter != machine.program_counter or snapshot.accumulator != machine.accumulator or snapshot.heap_next != machine.heap_next or snapshot.return_stack_pointer != machine.return_stack_pointer or snapshot.halted != machine.halted or snapshot.faulted != machine.faulted or snapshot.steps != machine.steps or snapshot.result != machine.result
             for index in 0..<SNAPSHOT_MAX_LOCALS:
                 return false if snapshot.locals[index] != machine.locals[index]
+                return false if snapshot.locals_initialized[index] != machine.locals_initialized[index]
+            for index in 0..<SNAPSHOT_FRAME_LOCAL_CAPACITY:
+                return false if snapshot.frame_locals[index] != machine.frame_locals[index] or snapshot.frame_locals_initialized[index] != machine.frame_locals_initialized[index]
             for index in 0..<SNAPSHOT_MAX_GLOBALS:
                 return false if snapshot.globals[index] != machine.globals[index]
             for index in 0..<SNAPSHOT_MAX_MEMORY:

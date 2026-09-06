@@ -12,6 +12,10 @@ module DebuggerCheckpoint:
         const SNAPSHOT_MAX_CALL_DEPTH: usize = 16
         const SNAPSHOT_MAX_PROGRAM_COUNTER: u64 = 256
         const SNAPSHOT_INVALID_ID: u64 = 0
+        const SNAPSHOT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const SNAPSHOT_HASH_PRIME: u64 = 1099511628211
+        const SNAPSHOT_HASH_FALSE: u64 = 0
+        const SNAPSHOT_HASH_TRUE: u64 = 1
 
     public:
         struct MachineSnapshot:
@@ -75,6 +79,33 @@ module DebuggerCheckpoint:
 
         def snapshot_shape_is_valid(snapshot: MachineSnapshot) -> bool:
             return snapshot.id.value != SNAPSHOT_INVALID_ID and snapshot.program_counter < SNAPSHOT_MAX_PROGRAM_COUNTER and snapshot.heap_next <= SNAPSHOT_MAX_MEMORY and snapshot.return_stack_pointer <= SNAPSHOT_MAX_CALL_DEPTH and (not snapshot.faulted or snapshot.halted)
+
+        def snapshot_state_hash(snapshot: MachineSnapshot) -> u64:
+            hash: mutable u64 = SNAPSHOT_HASH_OFFSET_BASIS + snapshot.program_counter
+            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.accumulator.u64()
+            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.result.u64()
+            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.return_stack_pointer.u64()
+            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.heap_next.u64()
+            for index in 0..<SNAPSHOT_MAX_LOCALS:
+                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.locals[index].u64()
+            for index in 0..<SNAPSHOT_MAX_CALL_DEPTH:
+                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.return_stack[index]
+            for index in 0..<SNAPSHOT_MAX_GLOBALS:
+                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.globals[index].u64()
+            for index in 0..<SNAPSHOT_MAX_MEMORY:
+                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.memory[index].u64()
+                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
+                initialized <- SNAPSHOT_HASH_TRUE if snapshot.memory_initialized[index]
+                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
+            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.event
+            halted: mutable u64 = SNAPSHOT_HASH_FALSE
+            halted <- SNAPSHOT_HASH_TRUE if snapshot.halted
+            hash <- hash * SNAPSHOT_HASH_PRIME + halted
+            faulted: mutable u64 = SNAPSHOT_HASH_FALSE
+            faulted <- SNAPSHOT_HASH_TRUE if snapshot.faulted
+            hash <- hash * SNAPSHOT_HASH_PRIME + faulted
+            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.steps
+            return hash
 
         def snapshot_matches_machine(snapshot: MachineSnapshot, machine: DebuggerEDIR::Machine) -> bool:
             return false if not snapshot_shape_is_valid(snapshot)

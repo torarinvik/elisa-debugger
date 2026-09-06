@@ -413,6 +413,11 @@ module DebuggerDAPServer:
                 return decoder.json_primitive_literal_position == json_primitive_literal_length(decoder.json_primitive_kind)
             return decoder.json_primitive_number_state == JSON_NUMBER_ZERO or decoder.json_primitive_number_state == JSON_NUMBER_INTEGER or decoder.json_primitive_number_state == JSON_NUMBER_FRACTION or decoder.json_primitive_number_state == JSON_NUMBER_EXPONENT_DIGITS
 
+        def decoder_json_top_level_field_context(decoder: mutable Decoder&, prefix_position: u8, final_position: u8, byte: u8) -> bool:
+            return false if decoder.json_nesting_count != 1
+            return true if decoder.json_string_is_key
+            return prefix_position == final_position and byte == ASCII_QUOTE
+
         def header_prefix_matches(position: u8, byte: u8) -> bool:
             return byte == ASCII_UPPER_C if position == 0
             return byte == ASCII_O if position == 1
@@ -615,88 +620,100 @@ module DebuggerDAPServer:
                     decoder.json_first <- byte
                     decoder.json_has_content <- true
                 decoder.json_last <- byte
-            if not decoder.in_command:
-                if command_prefix_matches(decoder.command_prefix_position, byte):
-                    decoder.command_prefix_position <- decoder.command_prefix_position + 1
-                    if decoder.command_prefix_position == COMMAND_PREFIX_LENGTH:
-                        if decoder.command_seen:
-                            decoder_fail(decoder)
-                            return
-                        decoder.in_command <- true
-                        decoder.command_hash <- 0
-                else:
-                    if is_json_whitespace(byte) and (decoder.command_prefix_position == COMMAND_PREFIX_LENGTH - 2 or decoder.command_prefix_position == COMMAND_PREFIX_LENGTH - 1):
-                        decoder.command_prefix_position <- decoder.command_prefix_position
+            command_context: bool = decoder.in_command or decoder_json_top_level_field_context(decoder, decoder.command_prefix_position, COMMAND_PREFIX_FINAL_POSITION, byte)
+            if command_context:
+                if not decoder.in_command:
+                    if command_prefix_matches(decoder.command_prefix_position, byte):
+                        decoder.command_prefix_position <- decoder.command_prefix_position + 1
+                        if decoder.command_prefix_position == COMMAND_PREFIX_LENGTH:
+                            if decoder.command_seen:
+                                decoder_fail(decoder)
+                                return
+                            decoder.in_command <- true
+                            decoder.command_hash <- 0
                     else:
-                        decoder.command_prefix_position <- 1 if byte == ASCII_QUOTE else 0
-            else:
-                if byte == ASCII_QUOTE:
-                    decoder.in_command <- false
-                    decoder.command_seen <- true
+                        if is_json_whitespace(byte) and (decoder.command_prefix_position == COMMAND_PREFIX_LENGTH - 2 or decoder.command_prefix_position == COMMAND_PREFIX_LENGTH - 1):
+                            decoder.command_prefix_position <- decoder.command_prefix_position
+                        else:
+                            decoder.command_prefix_position <- 1 if byte == ASCII_QUOTE else 0
                 else:
-                    decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
-            if not decoder.in_type:
-                if type_prefix_matches(decoder.type_prefix_position, byte):
-                    decoder.type_prefix_position <- decoder.type_prefix_position + 1
-                    if decoder.type_prefix_position == TYPE_PREFIX_LENGTH:
-                        if decoder.type_seen:
-                            decoder_fail(decoder)
-                            return
-                        decoder.in_type <- true
-                        decoder.type_hash <- 0
-                        decoder.type_length <- 0
-                else:
-                    if is_json_whitespace(byte) and (decoder.type_prefix_position == TYPE_PREFIX_LENGTH - 2 or decoder.type_prefix_position == TYPE_PREFIX_LENGTH - 1):
-                        decoder.type_prefix_position <- decoder.type_prefix_position
+                    if byte == ASCII_QUOTE:
+                        decoder.in_command <- false
+                        decoder.command_seen <- true
                     else:
-                        decoder.type_prefix_position <- 1 if byte == ASCII_QUOTE else 0
+                        decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
             else:
-                if byte == ASCII_QUOTE:
-                    if decoder.type_length != TYPE_REQUEST_LENGTH or decoder.type_hash != TYPE_REQUEST_HASH:
-                        decoder_fail(decoder)
-                        return
-                    decoder.in_type <- false
-                    decoder.type_seen <- true
+                decoder.command_prefix_position <- 0 if not decoder.in_command
+            type_context: bool = decoder.in_type or decoder_json_top_level_field_context(decoder, decoder.type_prefix_position, TYPE_PREFIX_FINAL_POSITION, byte)
+            if type_context:
+                if not decoder.in_type:
+                    if type_prefix_matches(decoder.type_prefix_position, byte):
+                        decoder.type_prefix_position <- decoder.type_prefix_position + 1
+                        if decoder.type_prefix_position == TYPE_PREFIX_LENGTH:
+                            if decoder.type_seen:
+                                decoder_fail(decoder)
+                                return
+                            decoder.in_type <- true
+                            decoder.type_hash <- 0
+                            decoder.type_length <- 0
+                    else:
+                        if is_json_whitespace(byte) and (decoder.type_prefix_position == TYPE_PREFIX_LENGTH - 2 or decoder.type_prefix_position == TYPE_PREFIX_LENGTH - 1):
+                            decoder.type_prefix_position <- decoder.type_prefix_position
+                        else:
+                            decoder.type_prefix_position <- 1 if byte == ASCII_QUOTE else 0
                 else:
-                    if decoder.type_length >= TYPE_REQUEST_LENGTH + 1:
-                        decoder_fail(decoder)
-                        return
-                    decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
-                    decoder.type_length <- decoder.type_length + 1
-            if not decoder.in_sequence:
-                if sequence_prefix_matches(decoder.sequence_prefix_position, byte):
-                    decoder.sequence_prefix_position <- decoder.sequence_prefix_position + 1
-                    if decoder.sequence_prefix_position == SEQUENCE_PREFIX_LENGTH:
-                        if decoder.sequence_seen:
+                    if byte == ASCII_QUOTE:
+                        if decoder.type_length != TYPE_REQUEST_LENGTH or decoder.type_hash != TYPE_REQUEST_HASH:
                             decoder_fail(decoder)
                             return
-                        decoder.in_sequence <- true
-                        decoder.request_sequence <- 0
+                        decoder.in_type <- false
+                        decoder.type_seen <- true
+                    else:
+                        if decoder.type_length >= TYPE_REQUEST_LENGTH + 1:
+                            decoder_fail(decoder)
+                            return
+                        decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                        decoder.type_length <- decoder.type_length + 1
+            else:
+                decoder.type_prefix_position <- 0 if not decoder.in_type
+            sequence_context: bool = decoder.in_sequence or decoder_json_top_level_field_context(decoder, decoder.sequence_prefix_position, SEQUENCE_PREFIX_FINAL_POSITION, byte)
+            if sequence_context:
+                if not decoder.in_sequence:
+                    if sequence_prefix_matches(decoder.sequence_prefix_position, byte):
+                        decoder.sequence_prefix_position <- decoder.sequence_prefix_position + 1
+                        if decoder.sequence_prefix_position == SEQUENCE_PREFIX_LENGTH:
+                            if decoder.sequence_seen:
+                                decoder_fail(decoder)
+                                return
+                            decoder.in_sequence <- true
+                            decoder.request_sequence <- 0
+                            decoder.sequence_digits <- 0
+                    else:
+                        if is_json_whitespace(byte) and decoder.sequence_prefix_position == SEQUENCE_PREFIX_FINAL_POSITION:
+                            decoder.sequence_prefix_position <- decoder.sequence_prefix_position
+                        else:
+                            decoder.sequence_prefix_position <- 1 if byte == ASCII_QUOTE else 0
+                else:
+                    if is_json_whitespace(byte) and decoder.sequence_digits == 0:
                         decoder.sequence_digits <- 0
-                else:
-                    if is_json_whitespace(byte) and decoder.sequence_prefix_position == SEQUENCE_PREFIX_FINAL_POSITION:
-                        decoder.sequence_prefix_position <- decoder.sequence_prefix_position
                     else:
-                        decoder.sequence_prefix_position <- 1 if byte == ASCII_QUOTE else 0
+                        if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                            if decoder.sequence_digits == FIRST_DAP_SEQUENCE_DIGIT_COUNT and decoder.request_sequence == 0:
+                                decoder_fail(decoder)
+                                return
+                            if decoder.sequence_digits >= MAX_DAP_SEQUENCE_DIGITS or decoder.request_sequence > (MAX_DAP_SEQUENCE_VALUE - (byte - ASCII_ZERO).u64()) / DAP_DECIMAL_BASE:
+                                decoder_fail(decoder)
+                                return
+                            decoder.request_sequence <- decoder.request_sequence * DAP_DECIMAL_BASE + (byte - ASCII_ZERO).u64()
+                            decoder.sequence_digits <- decoder.sequence_digits + 1
+                            decoder.sequence_seen <- true
+                        else:
+                            if byte != ASCII_COMMA and byte != ASCII_BRACE_CLOSE and byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LF and byte != ASCII_CR:
+                                decoder_fail(decoder)
+                                return
+                            decoder.in_sequence <- false
             else:
-                if is_json_whitespace(byte) and decoder.sequence_digits == 0:
-                    decoder.sequence_digits <- 0
-                else:
-                    if byte >= ASCII_ZERO and byte <= ASCII_NINE:
-                        if decoder.sequence_digits == FIRST_DAP_SEQUENCE_DIGIT_COUNT and decoder.request_sequence == 0:
-                            decoder_fail(decoder)
-                            return
-                        if decoder.sequence_digits >= MAX_DAP_SEQUENCE_DIGITS or decoder.request_sequence > (MAX_DAP_SEQUENCE_VALUE - (byte - ASCII_ZERO).u64()) / DAP_DECIMAL_BASE:
-                            decoder_fail(decoder)
-                            return
-                        decoder.request_sequence <- decoder.request_sequence * DAP_DECIMAL_BASE + (byte - ASCII_ZERO).u64()
-                        decoder.sequence_digits <- decoder.sequence_digits + 1
-                        decoder.sequence_seen <- true
-                    else:
-                        if byte != ASCII_COMMA and byte != ASCII_BRACE_CLOSE and byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LF and byte != ASCII_CR:
-                            decoder_fail(decoder)
-                            return
-                        decoder.in_sequence <- false
+                decoder.sequence_prefix_position <- 0 if not decoder.in_sequence
 
         def decoder_fail(decoder: mutable Decoder&) -> void:
             decoder.state <- DECODER_FAILED_STATE

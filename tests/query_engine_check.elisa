@@ -1,0 +1,34 @@
+include "../src/query/engine.elisa"
+
+const QUERY_FIRST_EVENT: u64 = 0
+const QUERY_LAST_EVENT: u64 = 10
+const QUERY_MAX_RESULTS: u64 = 8
+const QUERY_MAX_STEPS: u64 = 64
+const TEST_BINDING: u64 = 11
+const TEST_ALLOCATION: u64 = 12
+const TEST_SOURCE: u64 = 13
+const CANCELLED_RESULT: i64 = 1
+const MATCH_RESULT: i64 = 2
+const NEXT_RESULT: i64 = 3
+
+def main() -> i64:
+    binding: DebuggerIdentity::BindingIdentity = DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(TEST_BINDING), incarnation: 1}
+    mutation: DebuggerProvenance::Mutation = DebuggerProvenance::Mutation{
+        event: 4,
+        binding: binding,
+        allocation: DebuggerIdentity::AllocationIdentity{allocation: DebuggerIdentity::debug_id(TEST_ALLOCATION), generation: 1, offset: 0},
+        kind: DebuggerProvenance::MutationKind.Assignment,
+        value_hash: 99,
+        source: DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(TEST_SOURCE), start_byte: 0, end_byte: 1, start_line: 1, start_column: 0, end_line: 1, end_column: 1, discriminator: 0}
+    }
+    index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_append(DebuggerProvenance::provenance_new(), mutation)
+    window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: QUERY_FIRST_EVENT, last_event: QUERY_LAST_EVENT, max_results: QUERY_MAX_RESULTS, max_steps: QUERY_MAX_STEPS}
+    token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
+    result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, window, token)
+    return MATCH_RESULT if result.count != 1 or result.matches[0].event != mutation.event or not result.complete
+    next: DebuggerProvenance::Mutation = DebuggerQueryEngine::query_find_next_write(index, binding, 0, window)
+    return NEXT_RESULT if next.event != mutation.event
+    cancelled_token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_cancel(token)
+    cancelled: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, window, cancelled_token)
+    return CANCELLED_RESULT if not cancelled.cancelled or cancelled.failure.code != DebuggerErrors::ErrorCode.Cancelled
+    return 0

@@ -1,9 +1,17 @@
 ELISA_COMPILER ?= ../Elisa-compiler/scripts/elisac_stage1.sh
 ELISA_RUNTIME ?= $(abspath ../Elisa-compiler/build/runtime/elisacore_runtime.o)
+# Large aggregate fixtures exercise the modules in one executable entry point. Keep their
+# generated stack frames above macOS's default 8 MiB thread stack while leaving other hosts'
+# linker defaults untouched.
+ifeq ($(shell uname -s),Darwin)
+ELISA_LINK_FLAGS ?= -Wl,-stack_size,0x2000000
+else
+ELISA_LINK_FLAGS ?=
+endif
 # Keep both spellings while older stage1 binaries are still in circulation. The wrapper's
 # public name is ELISA_RUNTIME_OBJ; ELISA_STAGE1_RUNTIME_OBJ is the legacy name understood by
 # pre-wrapper product binaries. Supplying both makes this Makefile independent of that rollout.
-ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OBJ="$(ELISA_RUNTIME)"
+ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_LINK="$(ELISA_LINK_FLAGS)"
 BUILD ?= build
 # The sibling compiler checkout may contain unrelated uncommitted source edits.
 # Keep the local debugger build usable by default; CI can set this to 0 for the

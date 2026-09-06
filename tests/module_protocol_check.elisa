@@ -42,6 +42,9 @@ const INVALID_AGENT_ACK_RESULT: i64 = 122
 const UNRESOLVED_FUNCTION_RESULT: i64 = 130
 const NO_RESOLUTION_INSTRUCTION: u64 = 18446744073709551615
 const INVALID_MEMORY_METHOD_RESULT: i64 = 131
+const POSTMORTEM_LAUNCH_RESULT: i64 = 134
+const POSTMORTEM_RECORDING_RESULT: i64 = 135
+const ATTACHED_DISCOVERY_RESULT: i64 = 136
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -56,6 +59,23 @@ def main() -> i64:
     return 85 if not DebuggerDiscovery::discovery_is_valid(discovery) or not DebuggerDiscovery::discovery_supports(discovery, DebuggerProtocol::Method.Memory)
     return INVALID_MEMORY_METHOD_RESULT if not DebuggerProtocol::method_is_valid(DebuggerProtocol::Method.Memory)
     return 86 if DebuggerDiscovery::discovery_supports(discovery, DebuggerProtocol::Method.Attach)
+    postmortem_capabilities: mutable DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::managed_capabilities()
+    postmortem_capabilities.engine <- DebuggerCapabilities::EngineKind.Postmortem
+    postmortem_capabilities.history <- DebuggerCapabilities::HistoryKind.None
+    postmortem_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(10), build, postmortem_capabilities)
+    postmortem_discovery: DebuggerDiscovery::Discovery = DebuggerDiscovery::discovery_for(postmortem_session)
+    return POSTMORTEM_LAUNCH_RESULT if DebuggerDiscovery::discovery_supports(postmortem_discovery, DebuggerProtocol::Method.Launch) or DebuggerDiscovery::discovery_supports(postmortem_discovery, DebuggerProtocol::Method.Attach)
+    postmortem_launch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(postmortem_session, DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: 17, has_id: true, expected_generation: 0, target_event: 0, valid: true}, 0)
+    return POSTMORTEM_LAUNCH_RESULT if postmortem_launch.accepted or postmortem_launch.session.state != DebuggerSession::SessionState.Created or postmortem_launch.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    postmortem_stopped: DebuggerSession::Session = postmortem_session
+    postmortem_stopped.state <- DebuggerSession::SessionState.Stopped
+    postmortem_recording: DebuggerSession::Session = DebuggerSession::session_begin_recording(postmortem_stopped)
+    return POSTMORTEM_RECORDING_RESULT if postmortem_recording.state != DebuggerSession::SessionState.Stopped or postmortem_recording.last_error != DebuggerSession::SessionError.Unsupported
+    attached_capabilities: mutable DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::native_live_capabilities()
+    attached_capabilities.engine <- DebuggerCapabilities::EngineKind.AttachedNative
+    attached_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(11), build, attached_capabilities)
+    attached_discovery: DebuggerDiscovery::Discovery = DebuggerDiscovery::discovery_for(attached_session)
+    return ATTACHED_DISCOVERY_RESULT if not DebuggerDiscovery::discovery_supports(attached_discovery, DebuggerProtocol::Method.Attach) or DebuggerDiscovery::discovery_supports(attached_discovery, DebuggerProtocol::Method.Launch)
     no_reverse_discovery: mutable DebuggerDiscovery::Discovery = discovery
     no_reverse_discovery.capabilities.reverse_execution <- false
     return INVALID_REVERSE_DISCOVERY_RESULT if DebuggerDiscovery::discovery_supports(no_reverse_discovery, DebuggerProtocol::Method.ReverseStep)

@@ -1,0 +1,58 @@
+# Architecture decisions
+
+This document records decisions that are already reflected in the Elisa
+implementation. It is deliberately separate from the local implementation
+plan so clients and contributors can review the supported contracts without
+depending on ignored planning material.
+
+## Ownership and module boundaries
+
+Debugger-owned executable behavior is implemented in Elisa modules under
+`src/`. The compiler, runtime object, linker, libc, and editor hosts are
+infrastructure dependencies. `core`, metadata, trace, and protocol models do
+not import editor or operating-system UI code. CLI, DAP, and headless service
+entrypoints dispatch through shared session and error models.
+
+Public types and operations are inside a module's `public` section. Capacity,
+sentinel, protocol, and error-detail constants remain private. Persistent data
+is encoded field by field through `DebuggerTraceBinary`; host struct layout and
+raw pointers are never written to a trace.
+
+## Execution providers
+
+The managed EDIR provider is the first exact-history provider. It owns logical
+machine state and bounded reverse navigation. Native and postmortem modules
+advertise their narrower capability sets and reject unsupported lifecycle or
+replay claims. A provider must return a typed capability or state error before
+an adapter exposes an operation.
+
+## State and concurrency
+
+Every mutating session request is checked against a stop generation. A stale
+generation is rejected without applying the operation. Checkpoint validation
+derives runtime status from task states, rejects cyclic parent trees and
+duplicate waiters, and preserves historical scheduler decisions without
+mistaking their captured state for the current task state.
+
+## Exactness and external effects
+
+Exactness is explicit. The trace and effect modules distinguish exact,
+observational, incomplete, diverged, and corrupt states. Replayed effects must
+match the recorded kind and request identity; external writes carry a recorded
+suppression policy and are never implicitly sent to the real world.
+
+## Protocols
+
+The headless protocol uses a decimal byte count, one space, exactly that many
+UTF-8 payload bytes, and a newline. DAP uses standard `Content-Length` framing
+where the declared length covers only the JSON body. Numeric IDs at the compact
+headless boundary are rendered as decimal strings in responses. Discovery is
+allowed to omit an ID; stateful requests may not use the reserved zero ID.
+
+## Current resource limits
+
+The initial implementation uses fixed bounded arrays so malformed input cannot
+allocate unbounded memory. Limits are advertised by discovery where exposed,
+and every reader validates lengths before indexing. Increasing a limit requires
+updating the named module constant, its format/protocol specification, and the
+focused corruption tests together.

@@ -12,6 +12,8 @@ const MAX_U64_VALUE: u64 = 18446744073709551615
 const INVALID_SEEK_RESULT: i64 = 17
 const FULL_CHECKPOINT_RESULT_FAILURE: i64 = 19
 const BRANCH_RESULT_FAILURE: i64 = 20
+const BREAKPOINT_FILE_ID: u64 = 44
+const BREAKPOINT_LINE: u32 = 2
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
@@ -19,7 +21,7 @@ def main() -> i64:
     image: mutable DebuggerEDIR::ProgramImage = zeroed
     image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: 0, has_return: true}
     image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: EXPECTED_RESULT, b: 0, source: zeroed}
-    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(BREAKPOINT_FILE_ID), start_byte: 1, end_byte: 2, start_line: BREAKPOINT_LINE, start_column: 1, end_line: BREAKPOINT_LINE, end_column: 2, discriminator: 0}}
     service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, image, DebuggerIdentity::debug_id(9))
     discover_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Discover, id: STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     discovered: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, discover_request)
@@ -83,6 +85,11 @@ def main() -> i64:
     intervention: DebuggerBranches::Intervention = DebuggerBranches::Intervention{event: TARGET_EVENT, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(1), value_hash: 99}
     intervention_result: DebuggerManagedService::Result = DebuggerManagedService::service_add_intervention(service, branch_id, intervention)
     return BRANCH_RESULT_FAILURE if not intervention_result.accepted
+    breakpoint_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(BREAKPOINT_FILE_ID), line: BREAKPOINT_LINE, column: 1, discriminator: 0}
+    breakpoint_id: DebuggerIdentity::DebugId = DebuggerManagedService::service_set_source_breakpoint(service, breakpoint_location)
+    return BRANCH_RESULT_FAILURE if breakpoint_id.value == 0
+    breakpoint_continue: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
+    return BRANCH_RESULT_FAILURE if not breakpoint_continue.accepted or service.controller.engine.event_count != TARGET_EVENT
     service.controller.session <- DebuggerSession::session_resume(service.controller.session)
     running_seek: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, seek_request)
     reverse_request: mutable DebuggerProtocolRequest::Request = step_request

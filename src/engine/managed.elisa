@@ -6,6 +6,10 @@ include "../core/session.elisa"
 include "../core/errors.elisa"
 include "../replay/engine.elisa"
 include "../replay/checkpoint_codec.elisa"
+include "../breakpoint/breakpoint.elisa"
+include "../breakpoint/manager.elisa"
+include "../metadata/source.elisa"
+include "../inspect/store.elisa"
 include "./state.elisa"
 
 module DebuggerManagedEngine:
@@ -15,6 +19,9 @@ module DebuggerManagedEngine:
         const DETAIL_UNSUPPORTED: u32 = 3
         const CHECKPOINT_ID_OFFSET: u64 = 1
         const MAX_CHECKPOINT_ID: u64 = 18446744073709551615
+        const VALUE_NAME_OFFSET: u64 = 1
+        const VALUE_TYPE_ID: u64 = 1
+        const MAX_LOCAL_VALUES: usize = 32
 
     public:
         struct ManagedController:
@@ -29,26 +36,50 @@ module DebuggerManagedEngine:
         def managed_sync_position(controller: mutable ManagedController&) -> void:
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
 
+        def managed_refresh_values(controller: mutable ManagedController&) -> void:
+            DebuggerManagedState::state_reset_values(controller.state, controller.session.stop_generation)
+            available: usize = controller.engine.image.program.local_count.usize() if controller.engine.image.program.local_count <= MAX_LOCAL_VALUES.u64() else MAX_LOCAL_VALUES
+            for index in 0..<available:
+                DebuggerValueStore::value_store_add_scalar(controller.state.values, DebuggerIdentity::debug_id(index.u64() + VALUE_NAME_OFFSET), DebuggerIdentity::debug_id(VALUE_TYPE_ID), controller.engine.machine.locals[index])
+
+        def managed_breakpoint_should_stop(controller: mutable ManagedController&) -> bool:
+            return false if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
+            instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
+            return DebuggerBreakpointManager::breakpoint_table_should_stop(controller.state.breakpoints, controller.engine.branch, instruction.source)
+
         def managed_launch(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
             controller.session <- DebuggerSession::session_launch(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
             managed_sync_position(controller)
+            managed_refresh_values(controller)
             return DebuggerErrors::no_error()
 
         def managed_pause(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             controller.session <- DebuggerSession::session_pause(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
             managed_sync_position(controller)
+            managed_refresh_values(controller)
             return DebuggerErrors::no_error()
 
         def managed_continue(controller: mutable ManagedController&, max_steps: u64) -> DebuggerErrors::DebuggerError:
             controller.session <- DebuggerSession::session_resume(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
-            DebuggerReplayEngine::replay_engine_run(controller.engine, max_steps)
+            start: u64 = controller.engine.event_count.u64()
+            hit_breakpoint: mutable bool = false
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count.u64() - start < max_steps:
+                if managed_breakpoint_should_stop(controller):
+                    hit_breakpoint <- true
+                    break
+                DebuggerReplayEngine::replay_engine_step(controller.engine)
+                break if controller.engine.engine_error != DebuggerReplayEngine::EngineError.None
+            if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count.u64() - start >= max_steps:
+                controller.engine.engine_error <- DebuggerReplayEngine::EngineError.StepLimit
             managed_sync_position(controller)
             controller.session <- DebuggerSession::session_stop(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
+            managed_sync_position(controller)
+            managed_refresh_values(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull or controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable or controller.engine.engine_error == DebuggerReplayEngine::EngineError.StepLimit
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::no_error()
@@ -72,6 +103,7 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if session_failure == DebuggerSession::SessionError.HistoryUnavailable
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT)
             managed_sync_position(controller)
+            managed_refresh_values(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::no_error()
@@ -91,6 +123,7 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if session_failure == DebuggerSession::SessionError.HistoryUnavailable
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT)
             managed_sync_position(controller)
+            managed_refresh_values(controller)
             return DebuggerErrors::no_error()
 
         def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
@@ -109,6 +142,32 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT)
             managed_sync_position(controller)
             return DebuggerErrors::no_error()
+
+        def managed_set_source_breakpoint(controller: mutable ManagedController&, location: DebuggerMetadata::SourceLocation) -> DebuggerIdentity::DebugId:
+            point: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{
+                id: DebuggerIdentity::debug_id(0),
+                branch: controller.engine.branch,
+                kind: DebuggerBreakpoints::BreakpointKind.Source,
+                status: DebuggerBreakpoints::BreakpointStatus.Pending,
+                source: location,
+                condition: DebuggerIdentity::debug_id(0),
+                hit_target: 0,
+                hit_count: 0,
+                hit_stride: VALUE_NAME_OFFSET,
+                task: DebuggerIdentity::debug_id(0),
+                logpoint: false,
+                temporary: false
+            }
+            next_id: u64 = controller.state.breakpoints.next_id
+            previous_count: usize = controller.state.breakpoints.count
+            updated: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_add(controller.state.breakpoints, point)
+            return DebuggerIdentity::debug_id(0) if updated.count == previous_count
+            updated <- DebuggerBreakpointManager::breakpoint_table_resolve(updated, location.file, location.line.u64())
+            controller.state.breakpoints <- updated
+            return DebuggerIdentity::debug_id(next_id)
+
+        def managed_values(controller: mutable ManagedController&) -> DebuggerValueStore::ValueStore:
+            return controller.state.values
 
         def managed_checkpoint(controller: mutable ManagedController&) -> DebuggerTraceBinary::ByteWriter:
             checkpoint_id: u64 = MAX_CHECKPOINT_ID if controller.engine.event_count.u64() == MAX_CHECKPOINT_ID else controller.engine.event_count.u64() + CHECKPOINT_ID_OFFSET

@@ -85,3 +85,9 @@ session, and use the returned stop generation as the optimistic concurrency
 token. For a remote runner, carry the same messages through an authenticated
 tunnel and use the Elisa remote-artifact transfer checks before opening a
 trace.
+
+Remote sessions make disconnect behavior explicit through
+`RemoteDisconnectPolicy`: a client can request detach, pause, or continue when
+the transport disappears. The selected policy remains attached to the remote
+channel across heartbeat draining and reconnect attempts; quota failures still
+block reconnect until a new channel is created.

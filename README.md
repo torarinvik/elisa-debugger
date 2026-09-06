@@ -115,9 +115,13 @@ machine. Managed capability negotiation advertises reverse execution,
 watchpoints, and hover evaluation; unavailable values remain explicit in the
 response body rather than being fabricated.
 
-`build/elisa-debugger-cli` accepts one command per line (`launch`, `pause`,
-`continue`, `step`, `reverseStep`, and `close`) and reports machine-readable
-generation/status lines through the same dispatcher used by the session server.
+`build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
+`pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
+`checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`) and reports
+machine-readable generation/status lines through the same dispatcher used by
+the session server. Commands that require a request payload remain available
+through the framed session service, while the line mode keeps one stable,
+argument-free operation vocabulary.
 
 The server remains intentionally bounded: launch, pause, continue, terminate,
 detach, generation checks, and sequence correlation are live session

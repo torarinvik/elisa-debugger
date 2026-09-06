@@ -25,6 +25,11 @@ module DebuggerRemote:
             Draining
             Failed
 
+        enum RemoteDisconnectPolicy:
+            Detach
+            Pause
+            Continue
+
         struct RemoteHandshake:
             protocol_major: mutable u32
             protocol_minor: mutable u32
@@ -35,6 +40,7 @@ module DebuggerRemote:
         struct RemoteChannel:
             state: mutable RemoteState
             handshake: mutable RemoteHandshake
+            disconnect_policy: mutable RemoteDisconnectPolicy
             missed_heartbeats: mutable u64
             policy: mutable DebuggerSecurity::Policy
             bytes_received: mutable u64
@@ -42,7 +48,12 @@ module DebuggerRemote:
             last_error: mutable DebuggerErrors::DebuggerError
 
         def remote_new(policy: DebuggerSecurity::Policy) -> RemoteChannel:
-            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, missed_heartbeats: 0, policy: policy, bytes_received: 0, quota_exceeded: false, last_error: DebuggerErrors::no_error()}
+            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, disconnect_policy: RemoteDisconnectPolicy.Detach, missed_heartbeats: 0, policy: policy, bytes_received: 0, quota_exceeded: false, last_error: DebuggerErrors::no_error()}
+
+        def remote_new_with_policy(policy: DebuggerSecurity::Policy, disconnect_policy: RemoteDisconnectPolicy) -> RemoteChannel:
+            updated: mutable RemoteChannel = remote_new(policy)
+            updated.disconnect_policy <- disconnect_policy
+            return updated
 
         def remote_begin(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
@@ -147,3 +158,12 @@ module DebuggerRemote:
 
         def remote_is_connected(channel: RemoteChannel) -> bool:
             return channel.state == RemoteState.Connected and channel.handshake.authenticated and not channel.quota_exceeded and channel.missed_heartbeats < REMOTE_HEARTBEAT_LIMIT
+
+        def remote_should_detach(channel: RemoteChannel) -> bool:
+            return channel.disconnect_policy == RemoteDisconnectPolicy.Detach
+
+        def remote_should_pause(channel: RemoteChannel) -> bool:
+            return channel.disconnect_policy == RemoteDisconnectPolicy.Pause
+
+        def remote_should_continue(channel: RemoteChannel) -> bool:
+            return channel.disconnect_policy == RemoteDisconnectPolicy.Continue

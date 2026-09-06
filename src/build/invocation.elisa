@@ -1,0 +1,43 @@
+# Structured compiler invocation configuration.  The debugger never builds a
+# shell command string; adapters pass validated argument identities instead.
+
+include "./discovery.elisa"
+include "../core/errors.elisa"
+
+module DebuggerBuildInvocation:
+    private:
+        const ARGUMENT_CAPACITY: usize = 64
+        const DETAIL_TOOLCHAIN: u32 = 1
+        const DETAIL_ARGUMENTS: u32 = 2
+        const DETAIL_OUTPUT: u32 = 3
+        const NO_ID: u64 = 0
+
+    public:
+        struct Invocation:
+            toolchain: mutable DebuggerCompilerDiscovery::Toolchain
+            arguments: mutable u64[ARGUMENT_CAPACITY]
+            argument_count: mutable usize
+            source: mutable u64
+            output: mutable u64
+            debug_metadata: mutable bool
+            managed_edir: mutable bool
+            recording: mutable bool
+
+        def invocation_new(toolchain: DebuggerCompilerDiscovery::Toolchain) -> Invocation:
+            return Invocation{toolchain: toolchain, arguments: zeroed, argument_count: 0, source: NO_ID, output: NO_ID, debug_metadata: false, managed_edir: false, recording: false}
+
+        def invocation_add_argument(invocation: Invocation, argument: u64) -> Invocation:
+            updated: mutable Invocation = invocation
+            return updated if invocation.argument_count >= ARGUMENT_CAPACITY or argument == NO_ID
+            updated.arguments[invocation.argument_count] <- argument
+            updated.argument_count <- invocation.argument_count + 1
+            return updated
+
+        def invocation_validate(invocation: Invocation) -> DebuggerErrors::DebuggerError:
+            return DebuggerCompilerDiscovery::toolchain_validate(invocation.toolchain) if not DebuggerCompilerDiscovery::toolchain_is_compatible(invocation.toolchain)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ARGUMENTS) if invocation.argument_count > ARGUMENT_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, DETAIL_OUTPUT) if invocation.source == NO_ID or invocation.output == NO_ID
+            return DebuggerErrors::no_error()
+
+        def invocation_is_recordable(invocation: Invocation) -> bool:
+            return invocation.debug_metadata and invocation.managed_edir and invocation.recording and DebuggerErrors::error_is_ok(invocation_validate(invocation))

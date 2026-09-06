@@ -1,0 +1,75 @@
+# Versioned launch configuration shared by DAP, the session service, and
+# plugin bridges.  Paths are opaque content/path IDs at this boundary.
+
+include "../core/errors.elisa"
+
+module DebuggerProtocolConfig:
+    private:
+        const CONFIG_ARGUMENT_CAPACITY: usize = 64
+        const CONFIG_ENV_CAPACITY: usize = 32
+        const CONFIG_MAPPING_CAPACITY: usize = 32
+        const CONFIG_ENGINE_MAX: u16 = 3
+        const CONFIG_HISTORY_MAX: u16 = 3
+        const DETAIL_PROGRAM: u32 = 1
+        const DETAIL_WORKING_DIRECTORY: u32 = 2
+        const DETAIL_ARGUMENTS: u32 = 3
+        const DETAIL_MAPPING: u32 = 4
+
+    public:
+        enum EngineSelection:
+            Managed
+            InstrumentedNative
+            Attach
+            Postmortem
+
+        enum RecordingSelection:
+            Disabled
+            Record
+            Replay
+            Observational
+
+        struct PathMapping:
+            client_root: mutable u64
+            server_root: mutable u64
+
+        struct LaunchConfiguration:
+            program: mutable u64
+            arguments: mutable u64[CONFIG_ARGUMENT_CAPACITY]
+            argument_count: mutable usize
+            environment: mutable u64[CONFIG_ENV_CAPACITY]
+            environment_count: mutable usize
+            working_directory: mutable u64
+            compiler: mutable u64
+            engine: mutable EngineSelection
+            recording: mutable RecordingSelection
+            trace: mutable u64
+            stop_on_entry: mutable bool
+            mappings: mutable PathMapping[CONFIG_MAPPING_CAPACITY]
+            mapping_count: mutable usize
+
+        def configuration_new() -> LaunchConfiguration:
+            return LaunchConfiguration{program: 0, arguments: zeroed, argument_count: 0, environment: zeroed, environment_count: 0, working_directory: 0, compiler: 0, engine: EngineSelection.Managed, recording: RecordingSelection.Disabled, trace: 0, stop_on_entry: false, mappings: zeroed, mapping_count: 0}
+
+        def configuration_add_argument(configuration: LaunchConfiguration, argument: u64) -> LaunchConfiguration:
+            updated: mutable LaunchConfiguration = configuration
+            return updated if configuration.argument_count >= CONFIG_ARGUMENT_CAPACITY
+            updated.arguments[configuration.argument_count] <- argument
+            updated.argument_count <- configuration.argument_count + 1
+            return updated
+
+        def configuration_add_mapping(configuration: LaunchConfiguration, mapping: PathMapping) -> LaunchConfiguration:
+            updated: mutable LaunchConfiguration = configuration
+            return updated if configuration.mapping_count >= CONFIG_MAPPING_CAPACITY or mapping.client_root == 0 or mapping.server_root == 0
+            updated.mappings[configuration.mapping_count] <- mapping
+            updated.mapping_count <- configuration.mapping_count + 1
+            return updated
+
+        def configuration_validate(configuration: LaunchConfiguration) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PROGRAM) if configuration.program == 0
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_WORKING_DIRECTORY) if configuration.working_directory == 0
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ARGUMENTS) if configuration.argument_count > CONFIG_ARGUMENT_CAPACITY or configuration.environment_count > CONFIG_ENV_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.mapping_count > CONFIG_MAPPING_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.engine.u16() > CONFIG_ENGINE_MAX or configuration.recording.u16() > CONFIG_HISTORY_MAX
+            for index in 0..<configuration.mapping_count:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MAPPING) if configuration.mappings[index].client_root == 0 or configuration.mappings[index].server_root == 0
+            return DebuggerErrors::no_error()

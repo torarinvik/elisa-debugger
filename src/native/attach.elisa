@@ -1,0 +1,122 @@
+# Native attach/postmortem data model.  Platform bindings fill machine bytes at
+# this boundary; durable state remains explicit and never stores raw pointers.
+
+include "../platform/process.elisa"
+include "../native/symbols.elisa"
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+
+module DebuggerNativeAttach:
+    private:
+        const REGISTER_CAPACITY: usize = 32
+        const BREAKPOINT_CAPACITY: usize = 128
+        const MEMORY_CAPACITY: usize = 4096
+        const DETAIL_PROCESS: u32 = 1
+        const DETAIL_REGISTER: u32 = 2
+        const DETAIL_BREAKPOINT: u32 = 3
+        const DETAIL_MEMORY: u32 = 4
+        const DETAIL_ADDRESS: u32 = 5
+        const NO_ID: u64 = 0
+
+    public:
+        struct Register:
+            id: mutable DebuggerIdentity::DebugId
+            value: mutable u64
+            valid: mutable bool
+
+        struct UnwindFrame:
+            depth: mutable u32
+            instruction_pointer: mutable u64
+            stack_pointer: mutable u64
+            function: mutable DebuggerIdentity::DebugId
+            source: mutable DebuggerIdentity::SourceSpan
+            complete: mutable bool
+
+        struct SoftwareBreakpoint:
+            id: mutable DebuggerIdentity::DebugId
+            address: mutable u64
+            original_byte: mutable u8
+            enabled: mutable bool
+
+        struct AttachSession:
+            process: mutable DebuggerProcess::ProcessHandle
+            registers: mutable Register[REGISTER_CAPACITY]
+            register_count: mutable usize
+            frames: mutable UnwindFrame[REGISTER_CAPACITY]
+            frame_count: mutable usize
+            breakpoints: mutable SoftwareBreakpoint[BREAKPOINT_CAPACITY]
+            breakpoint_count: mutable usize
+            next_breakpoint: mutable u64
+            load_bias: mutable i64
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct AttachMemory:
+            address: mutable u64
+            bytes: mutable u8[MEMORY_CAPACITY]
+            length: mutable usize
+            complete: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def attach_new(process: DebuggerProcess::ProcessHandle) -> AttachSession:
+            return AttachSession{process: process, registers: zeroed, register_count: 0, frames: zeroed, frame_count: 0, breakpoints: zeroed, breakpoint_count: 0, next_breakpoint: 1, load_bias: 0, last_error: DebuggerErrors::no_error()}
+
+        def attach_is_stopped(session: AttachSession) -> bool:
+            return DebuggerProcess::process_is_valid(session.process) and session.process.state == DebuggerProcess::ProcessState.Stopped and DebuggerErrors::error_is_ok(session.last_error)
+
+        def attach_set_load_bias(session: AttachSession, bias: i64) -> AttachSession:
+            updated: mutable AttachSession = session
+            return updated if not DebuggerProcess::process_is_valid(session.process)
+            updated.load_bias <- bias
+            return updated
+
+        def attach_add_register(session: AttachSession, register: Register) -> AttachSession:
+            updated: mutable AttachSession = session
+            return updated if session.register_count >= REGISTER_CAPACITY or register.id.value == NO_ID
+            updated.registers[session.register_count] <- register
+            updated.register_count <- session.register_count + 1
+            return updated
+
+        def attach_add_frame(session: AttachSession, frame: UnwindFrame) -> AttachSession:
+            updated: mutable AttachSession = session
+            return updated if session.frame_count >= REGISTER_CAPACITY or frame.depth.u64() >= REGISTER_CAPACITY.u64()
+            updated.frames[session.frame_count] <- frame
+            updated.frame_count <- session.frame_count + 1
+            return updated
+
+        def attach_add_breakpoint(session: AttachSession, address: u64, original_byte: u8) -> AttachSession:
+            updated: mutable AttachSession = session
+            return updated if not attach_is_stopped(session) or session.breakpoint_count >= BREAKPOINT_CAPACITY or address == 0 or session.next_breakpoint == 0
+            updated.breakpoints[session.breakpoint_count] <- SoftwareBreakpoint{id: DebuggerIdentity::debug_id(session.next_breakpoint), address: address, original_byte: original_byte, enabled: true}
+            updated.breakpoint_count <- session.breakpoint_count + 1
+            updated.next_breakpoint <- session.next_breakpoint + 1
+            return updated
+
+        def attach_remove_breakpoint(session: AttachSession, id: DebuggerIdentity::DebugId) -> AttachSession:
+            updated: mutable AttachSession = session
+            return updated if session.breakpoint_count > BREAKPOINT_CAPACITY
+            for index in 0..<session.breakpoint_count:
+                if session.breakpoints[index].id.value == id.value:
+                    updated.breakpoints[index] <- session.breakpoints[session.breakpoint_count - 1]
+                    updated.breakpoint_count <- session.breakpoint_count - 1
+                    return updated
+            return updated
+
+        def attach_read_memory(session: AttachSession, address: u64, source: u8&, length: usize) -> AttachMemory:
+            result: mutable AttachMemory = zeroed
+            result.address <- address
+            result.failure <- DebuggerErrors::no_error()
+            return AttachMemory{address: address, bytes: result.bytes, length: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_PROCESS)} if not attach_is_stopped(session)
+            return AttachMemory{address: address, bytes: result.bytes, length: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_MEMORY)} if length > MEMORY_CAPACITY
+            return AttachMemory{address: address, bytes: result.bytes, length: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ADDRESS)} if address == 0
+            for index in 0..<length:
+                result.bytes[index] <- source[index]
+            result.length <- length
+            result.complete <- true
+            return result
+
+        def attach_validate(session: AttachSession) -> bool:
+            return false if session.register_count > REGISTER_CAPACITY or session.frame_count > REGISTER_CAPACITY or session.breakpoint_count > BREAKPOINT_CAPACITY
+            return false if not DebuggerProcess::process_is_valid(session.process)
+            for index in 0..<session.breakpoint_count:
+                return false if session.breakpoints[index].id.value == NO_ID or session.breakpoints[index].address == 0
+            return true

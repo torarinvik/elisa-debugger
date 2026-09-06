@@ -37,6 +37,19 @@ module DebuggerProtocolRequest:
         const DECIMAL_BASE: u64 = 10
         const MAX_REQUEST_INTEGER: u64 = 18446744073709551615
         const JSON_NESTING_CAPACITY: usize = 64
+        const REQUEST_KEY_NONE: u8 = 0
+        const REQUEST_KEY_METHOD: u8 = 1
+        const REQUEST_KEY_ID: u8 = 2
+        const REQUEST_KEY_EXPECTED: u8 = 3
+        const REQUEST_KEY_TARGET: u8 = 4
+        const REQUEST_KEY_METHOD_LENGTH: usize = 6
+        const REQUEST_KEY_ID_LENGTH: usize = 2
+        const REQUEST_KEY_EXPECTED_LENGTH: usize = 22
+        const REQUEST_KEY_TARGET_LENGTH: usize = 11
+        const REQUEST_KEY_METHOD_HASH: u64 = 3217412321
+        const REQUEST_KEY_ID_HASH: u64 = 3355
+        const REQUEST_KEY_EXPECTED_HASH: u64 = 6143712305181352850
+        const REQUEST_KEY_TARGET_HASH: u64 = 97741681043071881
 
         const HASH_DISCOVER: u64 = 2847836501993
         const HASH_INITIALIZE: u64 = 2872973214862224
@@ -156,6 +169,71 @@ module DebuggerProtocolRequest:
         def is_json_whitespace(byte: u8) -> bool:
             return byte == ASCII_SPACE or byte == ASCII_TAB or byte == ASCII_LINE_FEED or byte == ASCII_CARRIAGE_RETURN
 
+        def request_key_kind(hash: u64, length: usize) -> u8:
+            return REQUEST_KEY_METHOD if length == REQUEST_KEY_METHOD_LENGTH and hash == REQUEST_KEY_METHOD_HASH
+            return REQUEST_KEY_ID if length == REQUEST_KEY_ID_LENGTH and hash == REQUEST_KEY_ID_HASH
+            return REQUEST_KEY_EXPECTED if length == REQUEST_KEY_EXPECTED_LENGTH and hash == REQUEST_KEY_EXPECTED_HASH
+            return REQUEST_KEY_TARGET if length == REQUEST_KEY_TARGET_LENGTH and hash == REQUEST_KEY_TARGET_HASH
+            return REQUEST_KEY_NONE
+
+        def request_top_level_fields_are_valid(payload: u8&, length: usize) -> bool:
+            object_depth: mutable usize = 0
+            array_depth: mutable usize = 0
+            in_string: mutable bool = false
+            escaped: mutable bool = false
+            string_hash: mutable u64 = 0
+            string_length: mutable usize = 0
+            top_level_method_seen: mutable bool = false
+            index: mutable usize = 0
+            while index < length:
+                byte: u8 = payload[index]
+                if in_string:
+                    if escaped:
+                        escaped <- false
+                        string_hash <- request_hash_byte(string_hash, byte)
+                        string_length <- string_length + 1
+                    else:
+                        if byte == ASCII_BACKSLASH:
+                            escaped <- true
+                            string_hash <- request_hash_byte(string_hash, byte)
+                            string_length <- string_length + 1
+                        else:
+                            if byte == ASCII_QUOTE:
+                                in_string <- false
+                                lookahead: mutable usize = index + 1
+                                while lookahead < length and is_json_whitespace(payload[lookahead]):
+                                    lookahead <- lookahead + 1
+                                if lookahead < length and payload[lookahead] == ASCII_COLON:
+                                    key_kind: u8 = request_key_kind(string_hash, string_length)
+                                    if key_kind != REQUEST_KEY_NONE:
+                                        return false if object_depth != 1 or array_depth != 0
+                                        top_level_method_seen <- true if key_kind == REQUEST_KEY_METHOD
+                            else:
+                                string_hash <- request_hash_byte(string_hash, byte)
+                                string_length <- string_length + 1
+                else:
+                    if byte == ASCII_QUOTE:
+                        in_string <- true
+                        escaped <- false
+                        string_hash <- 0
+                        string_length <- 0
+                    else:
+                        if byte == ASCII_BRACE_OPEN:
+                            object_depth <- object_depth + 1
+                        else:
+                            if byte == ASCII_BRACE_CLOSE:
+                                return false if object_depth == 0
+                                object_depth <- object_depth - 1
+                            else:
+                                if byte == ASCII_BRACKET_OPEN:
+                                    array_depth <- array_depth + 1
+                                else:
+                                    if byte == ASCII_BRACKET_CLOSE:
+                                        return false if array_depth == 0
+                                        array_depth <- array_depth - 1
+                index <- index + 1
+            return not in_string and not escaped and object_depth == 0 and array_depth == 0 and top_level_method_seen
+
         def request_has_object_shape(payload: u8&, length: usize) -> bool:
             return false if length < 2
             first: mutable usize = 0
@@ -215,7 +293,7 @@ module DebuggerProtocolRequest:
                                         array_depth <- array_depth - 1
                                 if byte == ASCII_COMMA:
                                     return false if previous_significant == ASCII_BRACE_OPEN or previous_significant == ASCII_BRACKET_OPEN or previous_significant == ASCII_COMMA or previous_significant == ASCII_COLON
-                        previous_significant <- byte if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LINE_FEED and byte != ASCII_CARRIAGE_RETURN
+                    previous_significant <- byte if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LINE_FEED and byte != ASCII_CARRIAGE_RETURN
                 index <- index + 1
             return not in_string and not escaped and object_depth == 0 and array_depth == 0 and nesting_count == 0
 
@@ -224,6 +302,7 @@ module DebuggerProtocolRequest:
             request.method <- RequestMethod.Unknown
             request.valid <- false
             return invalid_request() if not request_has_object_shape(payload, length)
+            return invalid_request() if not request_top_level_fields_are_valid(payload, length)
             prefix: mutable u8[REQUEST_METHOD_PREFIX_LENGTH] = [ASCII_QUOTE, ASCII_M, ASCII_E, ASCII_T, ASCII_H, ASCII_O, ASCII_D, ASCII_QUOTE, ASCII_COLON, ASCII_QUOTE]
             prefix_position: mutable usize = 0
             in_method: mutable bool = false

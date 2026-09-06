@@ -20,6 +20,7 @@ module DebuggerProtocolRequest:
         const ASCII_BRACKET_CLOSE: u8 = 93
         const ASCII_BACKSLASH: u8 = 92
         const ASCII_ZERO: u8 = 48
+        const ASCII_ONE: u8 = 49
         const ASCII_NINE: u8 = 57
         const ASCII_COMMA: u8 = 44
         const ASCII_SPACE: u8 = 32
@@ -33,6 +34,9 @@ module DebuggerProtocolRequest:
         const ASCII_O: u8 = 111
         const ASCII_D: u8 = 100
         const ASCII_I: u8 = 105
+        const ASCII_A: u8 = 97
+        const ASCII_L: u8 = 108
+        const ASCII_S: u8 = 115
         const REQUEST_HASH_MULTIPLIER: u64 = 31
         const DECIMAL_BASE: u64 = 10
         const MAX_REQUEST_INTEGER: u64 = 18446744073709551615
@@ -50,6 +54,29 @@ module DebuggerProtocolRequest:
         const REQUEST_KEY_ID_HASH: u64 = 3355
         const REQUEST_KEY_EXPECTED_HASH: u64 = 6143712305181352850
         const REQUEST_KEY_TARGET_HASH: u64 = 97741681043071881
+
+        const JSON_STATE_VALUE: u8 = 0
+        const JSON_STATE_KEY_OR_END: u8 = 1
+        const JSON_STATE_COLON: u8 = 2
+        const JSON_STATE_COMMA_OR_END: u8 = 3
+        const JSON_STATE_ROOT_DONE: u8 = 4
+        const JSON_STATE_VALUE_OR_END: u8 = 5
+        const JSON_STATE_KEY_REQUIRED: u8 = 6
+        const JSON_NO_INDEX: usize = 18446744073709551615
+        const ASCII_MINUS: u8 = 45
+        const ASCII_PLUS: u8 = 43
+        const ASCII_DOT: u8 = 46
+        const ASCII_LOWER_E: u8 = 101
+        const ASCII_UPPER_E: u8 = 69
+        const ASCII_SLASH: u8 = 47
+        const ASCII_B: u8 = 98
+        const ASCII_F: u8 = 102
+        const ASCII_N: u8 = 110
+        const ASCII_R: u8 = 114
+        const ASCII_U: u8 = 117
+        const ASCII_UPPER_A: u8 = 65
+        const ASCII_UPPER_F: u8 = 70
+        const JSON_LITERAL_SENTINEL: u8 = 0
 
         const HASH_DISCOVER: u64 = 2847836501993
         const HASH_INITIALIZE: u64 = 2872973214862224
@@ -169,6 +196,11 @@ module DebuggerProtocolRequest:
         def is_json_whitespace(byte: u8) -> bool:
             return byte == ASCII_SPACE or byte == ASCII_TAB or byte == ASCII_LINE_FEED or byte == ASCII_CARRIAGE_RETURN
 
+        def is_json_hex_digit(byte: u8) -> bool:
+            return true if byte >= ASCII_ZERO and byte <= ASCII_NINE
+            return true if byte >= ASCII_A and byte <= ASCII_F
+            return byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
+
         def request_key_kind(hash: u64, length: usize) -> u8:
             return REQUEST_KEY_METHOD if length == REQUEST_KEY_METHOD_LENGTH and hash == REQUEST_KEY_METHOD_HASH
             return REQUEST_KEY_ID if length == REQUEST_KEY_ID_LENGTH and hash == REQUEST_KEY_ID_HASH
@@ -234,6 +266,84 @@ module DebuggerProtocolRequest:
                 index <- index + 1
             return not in_string and not escaped and object_depth == 0 and array_depth == 0 and top_level_method_seen
 
+        def json_string_end(payload: u8&, length: usize, start: usize) -> usize:
+            return JSON_NO_INDEX if start >= length or payload[start] != ASCII_QUOTE
+            index: mutable usize = start + 1
+            escaped: mutable bool = false
+            unicode_digits: mutable usize = 0
+            while index < length:
+                byte: u8 = payload[index]
+                if unicode_digits > 0:
+                    return JSON_NO_INDEX if not is_json_hex_digit(byte)
+                    unicode_digits <- unicode_digits - 1
+                else:
+                    if escaped:
+                        return JSON_NO_INDEX if byte != ASCII_QUOTE and byte != ASCII_BACKSLASH and byte != ASCII_SLASH and byte != ASCII_B and byte != ASCII_F and byte != ASCII_N and byte != ASCII_R and byte != ASCII_T and byte != ASCII_U
+                        escaped <- false
+                        unicode_digits <- 4 if byte == ASCII_U
+                    else:
+                        if byte == ASCII_BACKSLASH:
+                            escaped <- true
+                        else:
+                            return index + 1 if byte == ASCII_QUOTE
+                            return JSON_NO_INDEX if byte < ASCII_SPACE
+                index <- index + 1
+            return JSON_NO_INDEX if escaped or unicode_digits > 0
+            return JSON_NO_INDEX
+
+        def json_literal_matches(payload: u8&, start: usize, end: usize, first: u8, second: u8, third: u8, fourth: u8, fifth: u8) -> bool:
+            length: usize = end - start
+            return payload[start] == first and payload[start + 1] == second and payload[start + 2] == third and payload[start + 3] == fourth and (length == 4 or payload[start + 4] == fifth)
+
+        def json_primitive_is_valid(payload: u8&, start: usize, end: usize) -> bool:
+            return false if start >= end
+            length: usize = end - start
+            return true if length == 4 and json_literal_matches(payload, start, end, ASCII_T, ASCII_R, ASCII_U, ASCII_E, JSON_LITERAL_SENTINEL)
+            return true if length == 5 and json_literal_matches(payload, start, end, ASCII_F, ASCII_A, ASCII_L, ASCII_S, ASCII_E)
+            return true if length == 4 and json_literal_matches(payload, start, end, ASCII_N, ASCII_U, ASCII_L, ASCII_L, JSON_LITERAL_SENTINEL)
+            index: mutable usize = start
+            if payload[index] == ASCII_MINUS:
+                index <- index + 1
+            return false if index >= end
+            if payload[index] == ASCII_ZERO:
+                index <- index + 1
+                return false if index < end and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE
+            else:
+                return false if payload[index] < ASCII_ONE or payload[index] > ASCII_NINE
+                while index < end and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
+                    index <- index + 1
+            if index < end and payload[index] == ASCII_DOT:
+                index <- index + 1
+                return false if index >= end or payload[index] < ASCII_ZERO or payload[index] > ASCII_NINE
+                while index < end and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
+                    index <- index + 1
+            if index < end and (payload[index] == ASCII_LOWER_E or payload[index] == ASCII_UPPER_E):
+                index <- index + 1
+                if index < end and (payload[index] == ASCII_MINUS or payload[index] == ASCII_PLUS):
+                    index <- index + 1
+                return false if index >= end or payload[index] < ASCII_ZERO or payload[index] > ASCII_NINE
+                while index < end and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
+                    index <- index + 1
+            return index == end
+
+        def json_primitive_end(payload: u8&, length: usize, start: usize) -> usize:
+            return JSON_NO_INDEX if start >= length
+            index: mutable usize = start
+            while index < length:
+                byte: u8 = payload[index]
+                return index if is_json_whitespace(byte) or byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE
+                return JSON_NO_INDEX if byte == ASCII_COLON or byte == ASCII_BRACE_OPEN or byte == ASCII_BRACKET_OPEN or byte == ASCII_QUOTE
+                index <- index + 1
+            return index
+
+        def json_value_end(payload: u8&, length: usize, start: usize) -> usize:
+            return JSON_NO_INDEX if start >= length
+            return json_string_end(payload, length, start) if payload[start] == ASCII_QUOTE
+            return JSON_NO_INDEX if payload[start] == ASCII_BRACE_OPEN or payload[start] == ASCII_BRACKET_OPEN or payload[start] == ASCII_BRACE_CLOSE or payload[start] == ASCII_BRACKET_CLOSE or payload[start] == ASCII_COMMA or payload[start] == ASCII_COLON
+            end: usize = json_primitive_end(payload, length, start)
+            return JSON_NO_INDEX if end == JSON_NO_INDEX or not json_primitive_is_valid(payload, start, end)
+            return end
+
         def request_has_object_shape(payload: u8&, length: usize) -> bool:
             return false if length < 2
             first: mutable usize = 0
@@ -244,58 +354,80 @@ module DebuggerProtocolRequest:
             while last > first + 1 and (payload[last - 1] == ASCII_SPACE or payload[last - 1] == ASCII_TAB or payload[last - 1] == ASCII_LINE_FEED or payload[last - 1] == ASCII_CARRIAGE_RETURN):
                 last <- last - 1
             return false if last <= first + 1 or payload[last - 1] != ASCII_BRACE_CLOSE
-            object_depth: mutable usize = 0
-            array_depth: mutable usize = 0
-            in_string: mutable bool = false
-            escaped: mutable bool = false
-            previous_significant: mutable u8 = 0
             nesting: mutable u8[JSON_NESTING_CAPACITY] = zeroed
+            states: mutable u8[JSON_NESTING_CAPACITY] = zeroed
             nesting_count: mutable usize = 0
+            root_state: mutable u8 = JSON_STATE_VALUE
             index: mutable usize = first
             while index < last:
-                byte: u8 = payload[index]
-                if in_string:
-                    if escaped:
-                        escaped <- false
+                while index < last and is_json_whitespace(payload[index]):
+                    index <- index + 1
+                continue if index >= last
+                if nesting_count == 0:
+                    return false if root_state == JSON_STATE_ROOT_DONE
+                    if payload[index] == ASCII_BRACE_OPEN or payload[index] == ASCII_BRACKET_OPEN:
+                        return false if nesting_count >= JSON_NESTING_CAPACITY
+                        nesting[nesting_count] <- payload[index]
+                        states[nesting_count] <- JSON_STATE_KEY_OR_END if payload[index] == ASCII_BRACE_OPEN else JSON_STATE_VALUE_OR_END
+                        nesting_count <- nesting_count + 1
+                        index <- index + 1
                     else:
-                        if byte == ASCII_BACKSLASH:
-                            escaped <- true
-                        else:
-                            if byte == ASCII_QUOTE:
-                                in_string <- false
+                        value_end: usize = json_value_end(payload, last, index)
+                        return false if value_end == JSON_NO_INDEX
+                        root_state <- JSON_STATE_ROOT_DONE
+                        index <- value_end
                 else:
-                    if byte == ASCII_QUOTE:
-                        in_string <- true
-                    else:
-                        if byte == ASCII_BRACE_OPEN:
-                            return false if nesting_count >= JSON_NESTING_CAPACITY
-                            nesting[nesting_count] <- ASCII_BRACE_OPEN
-                            nesting_count <- nesting_count + 1
-                            object_depth <- object_depth + 1
+                    state: u8 = states[nesting_count - 1]
+                    container: u8 = nesting[nesting_count - 1]
+                    if state == JSON_STATE_KEY_OR_END or state == JSON_STATE_KEY_REQUIRED:
+                        return false if container != ASCII_BRACE_OPEN
+                        if payload[index] == ASCII_BRACE_CLOSE:
+                            return false if state == JSON_STATE_KEY_REQUIRED
+                            nesting_count <- nesting_count - 1
+                            root_state <- JSON_STATE_ROOT_DONE if nesting_count == 0
+                            states[nesting_count - 1] <- JSON_STATE_COMMA_OR_END if nesting_count > 0
+                            index <- index + 1
                         else:
-                            if byte == ASCII_BRACE_CLOSE:
-                                return false if object_depth == 0 or nesting_count == 0 or nesting[nesting_count - 1] != ASCII_BRACE_OPEN
+                            return false if payload[index] != ASCII_QUOTE
+                            key_end: usize = json_string_end(payload, last, index)
+                            return false if key_end == JSON_NO_INDEX
+                            states[nesting_count - 1] <- JSON_STATE_COLON
+                            index <- key_end
+                    else:
+                        if state == JSON_STATE_COLON:
+                            return false if payload[index] != ASCII_COLON
+                            states[nesting_count - 1] <- JSON_STATE_VALUE
+                            index <- index + 1
+                        else:
+                            if state == JSON_STATE_VALUE_OR_END and payload[index] == ASCII_BRACKET_CLOSE:
                                 nesting_count <- nesting_count - 1
-                                object_depth <- object_depth - 1
-                                return false if previous_significant == ASCII_COMMA or previous_significant == ASCII_COLON
-                                return false if object_depth == 0 and index + 1 < last
+                                root_state <- JSON_STATE_ROOT_DONE if nesting_count == 0
+                                states[nesting_count - 1] <- JSON_STATE_COMMA_OR_END if nesting_count > 0
+                                index <- index + 1
                             else:
-                                if byte == ASCII_BRACKET_OPEN:
-                                    return false if nesting_count >= JSON_NESTING_CAPACITY
-                                    nesting[nesting_count] <- ASCII_BRACKET_OPEN
-                                    nesting_count <- nesting_count + 1
-                                    array_depth <- array_depth + 1
-                                else:
-                                    if byte == ASCII_BRACKET_CLOSE:
-                                        return false if array_depth == 0 or nesting_count == 0 or nesting[nesting_count - 1] != ASCII_BRACKET_OPEN
+                                if state == JSON_STATE_COMMA_OR_END:
+                                    if (container == ASCII_BRACE_OPEN and payload[index] == ASCII_BRACE_CLOSE) or (container == ASCII_BRACKET_OPEN and payload[index] == ASCII_BRACKET_CLOSE):
                                         nesting_count <- nesting_count - 1
-                                        return false if previous_significant == ASCII_COMMA or previous_significant == ASCII_COLON
-                                        array_depth <- array_depth - 1
-                                if byte == ASCII_COMMA:
-                                    return false if previous_significant == ASCII_BRACE_OPEN or previous_significant == ASCII_BRACKET_OPEN or previous_significant == ASCII_COMMA or previous_significant == ASCII_COLON
-                    previous_significant <- byte if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LINE_FEED and byte != ASCII_CARRIAGE_RETURN
-                index <- index + 1
-            return not in_string and not escaped and object_depth == 0 and array_depth == 0 and nesting_count == 0
+                                        root_state <- JSON_STATE_ROOT_DONE if nesting_count == 0
+                                        states[nesting_count - 1] <- JSON_STATE_COMMA_OR_END if nesting_count > 0
+                                        index <- index + 1
+                                    else:
+                                        return false if payload[index] != ASCII_COMMA
+                                        states[nesting_count - 1] <- JSON_STATE_KEY_REQUIRED if container == ASCII_BRACE_OPEN else JSON_STATE_VALUE
+                                        index <- index + 1
+                                else:
+                                    if payload[index] == ASCII_BRACE_OPEN or payload[index] == ASCII_BRACKET_OPEN:
+                                        return false if nesting_count >= JSON_NESTING_CAPACITY
+                                        nesting[nesting_count] <- payload[index]
+                                        states[nesting_count] <- JSON_STATE_KEY_OR_END if payload[index] == ASCII_BRACE_OPEN else JSON_STATE_VALUE_OR_END
+                                        nesting_count <- nesting_count + 1
+                                        index <- index + 1
+                                    else:
+                                        value_end: usize = json_value_end(payload, last, index)
+                                        return false if value_end == JSON_NO_INDEX
+                                        states[nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+                                        index <- value_end
+            return root_state == JSON_STATE_ROOT_DONE and nesting_count == 0
 
         def request_parse(payload: u8&, length: usize) -> Request:
             request: mutable Request = zeroed

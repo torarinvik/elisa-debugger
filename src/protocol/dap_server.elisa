@@ -38,6 +38,7 @@ module DebuggerDAPServer:
         const ASCII_ZERO: u8 = 48
         const ASCII_NINE: u8 = 57
         const ASCII_COMMA: u8 = 44
+        const ASCII_BRACE_OPEN: u8 = 123
         const ASCII_BRACE_CLOSE: u8 = 125
         const ASCII_CR: u8 = 13
         const ASCII_LF: u8 = 10
@@ -190,6 +191,9 @@ module DebuggerDAPServer:
             request_sequence: mutable u64
             sequence_digits: mutable usize
             header_prefix_position: mutable u8
+            json_has_content: mutable bool
+            json_first: mutable u8
+            json_last: mutable u8
 
         def decoder_new() -> Decoder:
             decoder: Decoder = zeroed
@@ -248,6 +252,11 @@ module DebuggerDAPServer:
             return false
 
         def decoder_accept_payload_byte(decoder: mutable Decoder&, byte: u8) -> void:
+            if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LF and byte != ASCII_CR:
+                if not decoder.json_has_content:
+                    decoder.json_first <- byte
+                    decoder.json_has_content <- true
+                decoder.json_last <- byte
             if not decoder.in_command:
                 if command_prefix_matches(decoder.command_prefix_position, byte):
                     decoder.command_prefix_position <- decoder.command_prefix_position + 1
@@ -372,7 +381,7 @@ module DebuggerDAPServer:
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
                 if decoder.payload_received == decoder.content_length:
-                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence:
+                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE:
                         decoder_fail(decoder)
                         return false
                     decoder.state <- DECODER_HEADER_STATE
@@ -392,6 +401,9 @@ module DebuggerDAPServer:
                     decoder.sequence_prefix_position <- 0
                     decoder.in_sequence <- false
                     decoder.sequence_seen <- false
+                    decoder.json_has_content <- false
+                    decoder.json_first <- 0
+                    decoder.json_last <- 0
                     return true
                 return false
             decoder_fail(decoder)

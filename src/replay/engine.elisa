@@ -202,6 +202,7 @@ module DebuggerReplayEngine:
             return false if engine.recording.value == REPLAY_ROOT_BRANCH
             return false if engine.machine.program_counter >= REPLAY_MAX_PROGRAM_COUNTER or engine.machine.heap_next > REPLAY_MAX_HEAP or engine.machine.return_stack_pointer > REPLAY_CALL_DEPTH_CAPACITY
             return false if not DebuggerEDIR::verify_image(engine.image).valid
+            return false if engine.branch.value != REPLAY_ROOT_BRANCH and engine.event_count == engine.fork_event and replay_engine_state_hash(engine) != engine.fork_state_hash
             for index in 0..<engine.event_count:
                 event: DebuggerEvents::EventEnvelope = engine.events[index]
                 return false if event.ordinal != index.u64() or event.schema != REPLAY_SCHEMA_VERSION or event.kind != DebuggerEvents::EventKind.ExecutionBoundary or event.quality != DebuggerEvents::EventQuality.Exact or event.task.value != event.position.task.value or event.position.recording.value != engine.recording.value or event.position.event != index.u64()
@@ -211,6 +212,7 @@ module DebuggerReplayEngine:
                 replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
                 replay_machine <- DebuggerEDIR::machine_step(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
                 return false if event.payload_hash != replay_engine_machine_state_hash(replay_machine, index.u64())
+            return false if engine.event_count > 0 and engine.events[engine.event_count - 1].payload_hash != replay_engine_machine_state_hash(engine.machine, engine.event_count.u64() - REPLAY_CHECKPOINT_ID_OFFSET)
             return true
 
         def replay_engine_fork(engine: mutable ReplayEngine&, branch: DebuggerIdentity::DebugId) -> ReplayEngine:
@@ -235,7 +237,7 @@ module DebuggerReplayEngine:
             return result
 
         def replay_engine_set_accumulator(engine: mutable ReplayEngine&, value: i64) -> bool:
-            return false if engine.machine.halted or engine.machine.faulted
+            return false if engine.branch.value == REPLAY_ROOT_BRANCH or engine.machine.halted or engine.machine.faulted
             engine.machine.accumulator <- value
             engine.engine_error <- EngineError.None
             return true

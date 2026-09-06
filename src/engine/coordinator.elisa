@@ -176,3 +176,28 @@ module DebuggerCoordinator:
 
         def coordinator_is_idle(coordinator: Coordinator) -> bool:
             return not coordinator.busy
+
+        # Seek carries a target ordinal, so it has a dedicated typed entry
+        # point instead of overloading the ordinary operation request.
+        def coordinator_seek(coordinator: Coordinator, request_id: u64, expected_generation: u64, target_event: u64, token: DebuggerCancellation::CancellationToken) -> Result:
+            updated: mutable Coordinator = coordinator
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if request_id == NO_REQUEST
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, true, DETAIL_BUSY)) if coordinator.busy
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_INVALID_OPERATION)) if DebuggerCancellation::cancellation_is_requested(token, 0)
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)) if expected_generation != NO_EXPECTED_GENERATION and expected_generation != coordinator.session.stop_generation
+            updated.busy <- true
+            updated.active_request <- request_id
+            updated.last_request <- request_id
+            updated.session <- DebuggerSession::session_seek(coordinator.session, target_event)
+            updated.busy <- false
+            return result_error(updated, Operation.Seek, request_id, map_session_error(updated.session.last_error)) if updated.session.last_error != DebuggerSession::SessionError.None
+            return result_ok(updated, Operation.Seek, request_id)
+
+        def coordinator_cancel(coordinator: Coordinator, request_id: u64) -> Result:
+            updated: mutable Coordinator = coordinator
+            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if request_id == NO_REQUEST
+            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_INVALID_OPERATION)) if not coordinator.busy
+            updated.busy <- false
+            updated.active_request <- NO_REQUEST
+            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_INVALID_OPERATION)
+            return result_error(updated, Operation.Cancel, request_id, updated.last_error)

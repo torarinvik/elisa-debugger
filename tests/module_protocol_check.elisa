@@ -16,6 +16,7 @@ include "../src/breakpoint/resolver.elisa"
 include "../src/platform/process.elisa"
 include "../src/protocol/client.elisa"
 include "../src/concurrency/runtime.elisa"
+include "../src/concurrency/checkpoint.elisa"
 include "../src/protocol/discovery.elisa"
 include "../src/protocol/events.elisa"
 
@@ -49,6 +50,7 @@ const ATTACHED_DISCOVERY_RESULT: i64 = 136
 const STALE_GENERATION_DETAIL: u32 = 4
 const INVALID_APPENDED_ORDINAL_RESULT: i64 = 138
 const INVALID_NATIVE_PROVIDER_RESULT: i64 = 139
+const INVALID_TASK_PARENT_CYCLE_RESULT: i64 = 140
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -144,6 +146,12 @@ def main() -> i64:
     return 39 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, child_task, root_task, DebuggerIdentity::debug_id(78), DebuggerConcurrency::SynchronizationKind.Mutex)
     return 40 if not DebuggerConcurrencyRuntime::runtime_has_deadlock(runtime)
     return 41 if not DebuggerConcurrencyRuntime::runtime_wake(runtime, root_task)
+    cycle_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    cycle_root: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(cycle_runtime, DebuggerIdentity::debug_id(0))
+    cycle_child: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(cycle_runtime, cycle_root)
+    cycle_snapshot: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(cycle_runtime)
+    cycle_snapshot.tasks[0].parent <- cycle_child
+    return INVALID_TASK_PARENT_CYCLE_RESULT if DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(cycle_snapshot)
     service: mutable DebuggerSessionService::Service = DebuggerSessionService::service_new(stopped.session)
     service_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.Replay, request_id: 10, session_id: stopped.session.id.value, expected_stop_generation: stopped.session.stop_generation, page_size: 0, target_event: 0}
     service_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle(service, service_request)

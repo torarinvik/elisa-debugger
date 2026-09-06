@@ -50,6 +50,8 @@ module DebuggerTraceReader:
             event_count: mutable usize
             next_sequence: mutable u64
             next_event: mutable u64
+            recording: mutable DebuggerIdentity::DebugId
+            recording_seen: mutable bool
             manifest_seen: mutable bool
             chunk_count: mutable usize
             state: mutable ReaderState
@@ -59,6 +61,8 @@ module DebuggerTraceReader:
             reader: mutable TraceReader = zeroed
             reader.next_sequence <- READER_FIRST_SEQUENCE
             reader.next_event <- 0
+            reader.recording <- DebuggerIdentity::debug_id(0)
+            reader.recording_seen <- false
             reader.manifest_seen <- false
             reader.chunk_count <- 0
             reader.state <- ReaderState.Empty
@@ -155,6 +159,12 @@ module DebuggerTraceReader:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if schema != reader.manifest.schema.u32()
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if ordinal != reader.next_event
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_TASK) if task.value != position_task.value
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if recording.value == 0
+                if not reader.recording_seen:
+                    reader.recording <- recording
+                    reader.recording_seen <- true
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if recording.value != reader.recording.value
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if event_id != ordinal
                 event.schema <- schema
                 event.ordinal <- ordinal
                 event.task <- task
@@ -216,6 +226,7 @@ module DebuggerTraceReader:
 
         def reader_is_exact(reader: TraceReader) -> bool:
             return false if reader.event_count > READER_EVENT_CAPACITY or reader.chunk_count > READER_CHUNK_CAPACITY or reader.state != ReaderState.Ready or not DebuggerErrors::error_is_ok(reader.last_error) or not DebuggerTraceManifest::manifest_is_replayable(reader.manifest)
+            return false if reader.event_count == 0 or not reader.recording_seen
             return false if reader.event_count > 0 and reader.manifest.first_event > READER_MAX_EVENT - (reader.event_count - READER_EVENT_INDEX_OFFSET).u64()
             expected_last: mutable u64 = reader.manifest.first_event
             expected_last <- reader.manifest.first_event + (reader.event_count - READER_EVENT_INDEX_OFFSET).u64() if reader.event_count > 0

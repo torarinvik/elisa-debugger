@@ -4,6 +4,7 @@
 include "./storage.elisa"
 include "./manifest.elisa"
 include "./binary.elisa"
+include "./reader.elisa"
 include "../core/errors.elisa"
 
 module DebuggerTraceBundle:
@@ -17,6 +18,8 @@ module DebuggerTraceBundle:
         const DETAIL_RANGE: u32 = 4
         const DETAIL_STATE: u32 = 5
         const DETAIL_SCHEMA: u32 = 6
+        const BUNDLE_MANIFEST_SEQUENCE: u64 = 0
+        const BUNDLE_EVENT_SEQUENCE_OFFSET: u64 = 1
 
     public:
         enum BundleState:
@@ -107,7 +110,22 @@ module DebuggerTraceBundle:
                 return false if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Manifest
                 return false if not DebuggerErrors::error_is_ok(bundle_verify_chunk_at(checked_bundle, bundle.chunks[index], index.u64()))
                 saw_events <- true if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events
-            return saw_events
+            return false if not saw_events
+            manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(bundle.manifest)
+            return false if not DebuggerTraceBinary::writer_is_valid(manifest_bytes)
+            manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+            manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: bundle.manifest.schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest, sequence: BUNDLE_MANIFEST_SEQUENCE, first_event: bundle.manifest.first_event, last_event: bundle.manifest.last_event, payload_length: manifest_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_bytes)}
+            manifest_chunk.payload_length <- manifest_bytes.length
+            manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_bytes)
+            for byte_index in 0..<manifest_bytes.length:
+                manifest_chunk.payload[byte_index] <- manifest_bytes.bytes[byte_index]
+            reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+            return false if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk))
+            for index in 0..<bundle.chunk_count:
+                checked_chunk: mutable DebuggerTraceStorage::StoredChunk = bundle.chunks[index]
+                checked_chunk.header.sequence <- index.u64() + BUNDLE_EVENT_SEQUENCE_OFFSET
+                return false if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, checked_chunk))
+            return DebuggerTraceReader::reader_is_exact(reader)
 
         def bundle_chunk_count(bundle: TraceBundle) -> usize:
             return bundle.chunk_count

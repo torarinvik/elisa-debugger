@@ -6,7 +6,7 @@ BUILD ?= build
 # strict product-freshness gate.
 ELISA_ALLOW_STALE_STAGE1 ?= 1
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check protocol-events-check source-store-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check trace-codec-check trace-recording-check trace-bundle-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check protocol-events-check source-store-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check trace-codec-check trace-recording-check trace-bundle-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -34,6 +34,7 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 	"$(BUILD)/elisa-debugger-value-store-check"
 	"$(BUILD)/elisa-debugger-historical-values-check"
 	"$(BUILD)/elisa-debugger-query-engine-check"
+	"$(BUILD)/elisa-debugger-query-evaluator-check"
 	"$(BUILD)/elisa-debugger-advanced-analysis-check"
 	"$(BUILD)/elisa-debugger-integration-contract-check"
 	"$(BUILD)/elisa-debugger-integration-surface-check"
@@ -67,6 +68,9 @@ historical-values-check: $(BUILD)/elisa-debugger-historical-values-check
 
 query-engine-check: $(BUILD)/elisa-debugger-query-engine-check
 	"$(BUILD)/elisa-debugger-query-engine-check"
+
+query-evaluator-check: $(BUILD)/elisa-debugger-query-evaluator-check
+	"$(BUILD)/elisa-debugger-query-evaluator-check"
 
 advanced-analysis-check: $(BUILD)/elisa-debugger-advanced-analysis-check
 	"$(BUILD)/elisa-debugger-advanced-analysis-check"
@@ -180,6 +184,10 @@ $(BUILD)/elisa-debugger-historical-values-check: tests/historical_values_check.e
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 $(BUILD)/elisa-debugger-query-engine-check: tests/query_engine_check.elisa
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-query-evaluator-check: tests/query_evaluator_check.elisa
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 

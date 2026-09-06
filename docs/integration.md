@@ -31,6 +31,10 @@ bounded page/query/payload limits. Requests carry a client identity, session
 ownership token, expected stop generation, page size, and target event. The
 validator rejects stale generations, missing ownership for mutations, oversized
 targets, and unsupported trace operations before the provider is touched.
+Retry classification is explicit: discovery and read-only inspection operations
+are safe to repeat, launch/attach/branch/terminate are forbidden to repeat after
+an uncertain result, and other mutations are same-request-only so a client can
+deduplicate by request ID without creating a second operation.
 
 ## VS Code
 

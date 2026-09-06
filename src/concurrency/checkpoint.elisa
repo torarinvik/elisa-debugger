@@ -50,6 +50,19 @@ module DebuggerConcurrencyCheckpoint:
                 current <- snapshot.tasks[parent_index].parent
             return false
 
+        def snapshot_status_is_consistent(snapshot: TaskSnapshot) -> bool:
+            has_runnable: mutable bool = false
+            has_running: mutable bool = false
+            has_blocked: mutable bool = false
+            for index in 0..<snapshot.task_count:
+                has_runnable <- true if snapshot.tasks[index].state == DebuggerConcurrency::TaskState.Runnable
+                has_running <- true if snapshot.tasks[index].state == DebuggerConcurrency::TaskState.Running
+                has_blocked <- true if snapshot.tasks[index].state == DebuggerConcurrency::TaskState.Blocked
+            return snapshot.status == DebuggerConcurrencyRuntime::RuntimeStatus.Running if has_running
+            return snapshot.status == DebuggerConcurrencyRuntime::RuntimeStatus.Blocked if has_blocked
+            return snapshot.status == DebuggerConcurrencyRuntime::RuntimeStatus.Ready if has_runnable or snapshot.task_count == 0
+            return snapshot.status == DebuggerConcurrencyRuntime::RuntimeStatus.Completed
+
     public:
         struct TaskSnapshot:
             tasks: mutable DebuggerConcurrency::TaskInfo[TASK_CHECKPOINT_CAPACITY]
@@ -87,6 +100,7 @@ module DebuggerConcurrencyCheckpoint:
             return false if snapshot.task_count > TASK_CHECKPOINT_CAPACITY or snapshot.wait_count > WAIT_CHECKPOINT_CAPACITY or snapshot.scheduler_count > SCHEDULE_CHECKPOINT_CAPACITY or snapshot.scheduler_cursor > snapshot.scheduler_count
             return false if not snapshot.scheduler_replaying and snapshot.scheduler_cursor != 0
             return false if snapshot.status.u16() > RUNTIME_STATUS_MAX or snapshot.next_id == NO_TASK_ID
+            return false if not snapshot_status_is_consistent(snapshot)
             return false if snapshot.current.value != NO_TASK_ID and not snapshot_has_task(snapshot, snapshot.current)
             for index in 0..<snapshot.task_count:
                 task: DebuggerConcurrency::TaskInfo = snapshot.tasks[index]
@@ -99,6 +113,8 @@ module DebuggerConcurrencyCheckpoint:
                 edge: DebuggerConcurrency::WaitEdge = snapshot.waits[index]
                 return false if edge.waiter.value == NO_TASK_ID or edge.owner.value == NO_TASK_ID or edge.resource.value == NO_TASK_ID or not snapshot_has_task(snapshot, edge.waiter) or not snapshot_has_task(snapshot, edge.owner) or edge.kind.u16() > SYNCHRONIZATION_KIND_MAX
                 return false if not snapshot_task_is_blocked(snapshot, edge.waiter) or not snapshot_task_is_active(snapshot, edge.owner)
+                for previous in 0..<index:
+                    return false if snapshot.waits[previous].waiter.value == edge.waiter.value
             for index in 0..<snapshot.scheduler_count:
                 decision: DebuggerScheduler::ScheduleDecision = snapshot.scheduler_decisions[index]
                 return false if decision.ordinal != index.u64() or decision.kind.u16() > SCHEDULE_KIND_MAX or decision.task.id.value == NO_TASK_ID or decision.task.state.u16() > TASK_STATE_MAX or not snapshot_task_matches(snapshot, decision.task)

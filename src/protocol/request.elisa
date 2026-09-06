@@ -36,6 +36,7 @@ module DebuggerProtocolRequest:
         const REQUEST_HASH_MULTIPLIER: u64 = 31
         const DECIMAL_BASE: u64 = 10
         const MAX_REQUEST_INTEGER: u64 = 18446744073709551615
+        const JSON_NESTING_CAPACITY: usize = 64
 
         const HASH_DISCOVER: u64 = 2847836501993
         const HASH_INITIALIZE: u64 = 2872973214862224
@@ -170,6 +171,8 @@ module DebuggerProtocolRequest:
             in_string: mutable bool = false
             escaped: mutable bool = false
             previous_significant: mutable u8 = 0
+            nesting: mutable u8[JSON_NESTING_CAPACITY] = zeroed
+            nesting_count: mutable usize = 0
             index: mutable usize = first
             while index < last:
                 byte: u8 = payload[index]
@@ -187,26 +190,34 @@ module DebuggerProtocolRequest:
                         in_string <- true
                     else:
                         if byte == ASCII_BRACE_OPEN:
+                            return false if nesting_count >= JSON_NESTING_CAPACITY
+                            nesting[nesting_count] <- ASCII_BRACE_OPEN
+                            nesting_count <- nesting_count + 1
                             object_depth <- object_depth + 1
                         else:
                             if byte == ASCII_BRACE_CLOSE:
-                                return false if object_depth == 0
+                                return false if object_depth == 0 or nesting_count == 0 or nesting[nesting_count - 1] != ASCII_BRACE_OPEN
+                                nesting_count <- nesting_count - 1
                                 object_depth <- object_depth - 1
                                 return false if previous_significant == ASCII_COMMA
                                 return false if object_depth == 0 and index + 1 < last
                             else:
                                 if byte == ASCII_BRACKET_OPEN:
+                                    return false if nesting_count >= JSON_NESTING_CAPACITY
+                                    nesting[nesting_count] <- ASCII_BRACKET_OPEN
+                                    nesting_count <- nesting_count + 1
                                     array_depth <- array_depth + 1
                                 else:
                                     if byte == ASCII_BRACKET_CLOSE:
-                                        return false if array_depth == 0
+                                        return false if array_depth == 0 or nesting_count == 0 or nesting[nesting_count - 1] != ASCII_BRACKET_OPEN
+                                        nesting_count <- nesting_count - 1
                                         return false if previous_significant == ASCII_COMMA
                                         array_depth <- array_depth - 1
                                 if byte == ASCII_COMMA:
                                     return false if previous_significant == ASCII_BRACE_OPEN or previous_significant == ASCII_BRACKET_OPEN
                         previous_significant <- byte
                 index <- index + 1
-            return not in_string and not escaped and object_depth == 0 and array_depth == 0
+            return not in_string and not escaped and object_depth == 0 and array_depth == 0 and nesting_count == 0
 
         def request_parse(payload: u8&, length: usize) -> Request:
             request: mutable Request = zeroed

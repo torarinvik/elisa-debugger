@@ -63,8 +63,11 @@ module DebuggerEffects:
             oracle.mode <- mode
             oracle.exactness <- Exactness.Observational if mode == EffectMode.Live or mode == EffectMode.Barrier
             oracle.exactness <- Exactness.Exact if mode != EffectMode.Live and mode != EffectMode.Barrier
+            if mode.u16() > EFFECT_MODE_MAX:
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)
             oracle.overflowed <- false
-            oracle.last_error <- DebuggerErrors::no_error()
+            oracle.last_error <- DebuggerErrors::no_error() if mode.u16() <= EFFECT_MODE_MAX
             return oracle
 
         def effect_is_external_write(kind: EffectKind) -> bool:
@@ -73,6 +76,11 @@ module DebuggerEffects:
 
         def effect_oracle_record(oracle: EffectOracle, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> EffectOracle:
             updated: mutable EffectOracle = oracle
+            return updated if oracle.exactness == Exactness.Diverged or not DebuggerErrors::error_is_ok(oracle.last_error)
+            if oracle.mode.u16() > EFFECT_MODE_MAX:
+                updated.exactness <- Exactness.Diverged
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)
+                return updated
             if kind.u16() > EFFECT_KIND_MAX:
                 updated.exactness <- Exactness.Diverged
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)
@@ -94,6 +102,10 @@ module DebuggerEffects:
 
         def effect_oracle_replay(oracle: EffectOracle, kind: EffectKind, request_hash: u64) -> EffectOracle:
             updated: mutable EffectOracle = oracle
+            if oracle.mode.u16() > EFFECT_MODE_MAX:
+                updated.exactness <- Exactness.Diverged
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)
+                return updated
             return updated if oracle.mode != EffectMode.Replaying
             return updated if oracle.exactness == Exactness.Diverged or not DebuggerErrors::error_is_ok(oracle.last_error)
             if kind.u16() > EFFECT_KIND_MAX:

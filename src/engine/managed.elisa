@@ -44,18 +44,27 @@ module DebuggerManagedEngine:
             DebuggerReplayEngine::replay_engine_run(controller.engine, max_steps)
             managed_sync_position(controller)
             controller.session <- DebuggerSession::session_stop(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull or controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable or controller.engine.engine_error == DebuggerReplayEngine::EngineError.StepLimit
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::no_error()
 
         def managed_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            original_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
+            original_session: DebuggerSession::Session = controller.session
             before_event: usize = controller.engine.event_count
             DebuggerReplayEngine::replay_engine_step(controller.engine)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count == before_event
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
             controller.session <- DebuggerSession::session_step(controller.session)
+            if controller.session.last_error != DebuggerSession::SessionError.None:
+                session_failure: DebuggerSession::SessionError = controller.session.last_error
+                controller.engine <- original_engine
+                controller.session <- original_session
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if session_failure == DebuggerSession::SessionError.HistoryUnavailable
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT)
             managed_sync_position(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
@@ -64,9 +73,17 @@ module DebuggerManagedEngine:
         def managed_reverse_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count == 0
+            original_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
+            original_session: DebuggerSession::Session = controller.session
             DebuggerReplayEngine::replay_engine_reverse_one(controller.engine)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
             controller.session <- DebuggerSession::session_reverse_step(controller.session)
+            if controller.session.last_error != DebuggerSession::SessionError.None:
+                session_failure: DebuggerSession::SessionError = controller.session.last_error
+                controller.engine <- original_engine
+                controller.session <- original_session
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if session_failure == DebuggerSession::SessionError.HistoryUnavailable
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT)
             managed_sync_position(controller)
             return DebuggerErrors::no_error()
 

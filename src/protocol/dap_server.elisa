@@ -69,6 +69,7 @@ module DebuggerDAPServer:
         const ASCII_HYPHEN: u8 = 45
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_L: u8 = 76
+        const JSON_NESTING_CAPACITY: usize = 64
         const HEADER_PREFIX_LENGTH: u8 = 15
         const COMMAND_PREFIX_LENGTH: u8 = 11
         const COMMAND_PREFIX_FINAL_POSITION: u8 = 10
@@ -201,6 +202,8 @@ module DebuggerDAPServer:
             json_last: mutable u8
             json_object_depth: mutable usize
             json_array_depth: mutable usize
+            json_nesting: mutable u8[JSON_NESTING_CAPACITY]
+            json_nesting_count: mutable usize
             json_in_string: mutable bool
             json_escaped: mutable bool
             json_closed: mutable bool
@@ -299,13 +302,20 @@ module DebuggerDAPServer:
                             decoder_fail(decoder)
                             return
                         if byte == ASCII_BRACE_OPEN:
+                            if decoder.json_nesting_count >= JSON_NESTING_CAPACITY:
+                                decoder.json_structural_invalid <- true
+                                decoder_fail(decoder)
+                                return
+                            decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACE_OPEN
+                            decoder.json_nesting_count <- decoder.json_nesting_count + 1
                             decoder.json_object_depth <- decoder.json_object_depth + 1
                         else:
                             if byte == ASCII_BRACE_CLOSE:
-                                if decoder.json_object_depth == 0:
+                                if decoder.json_object_depth == 0 or decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN:
                                     decoder.json_structural_invalid <- true
                                     decoder_fail(decoder)
                                     return
+                                decoder.json_nesting_count <- decoder.json_nesting_count - 1
                                 decoder.json_object_depth <- decoder.json_object_depth - 1
                                 if decoder.json_object_depth == 0:
                                     if decoder.json_array_depth != 0:
@@ -315,13 +325,20 @@ module DebuggerDAPServer:
                                     decoder.json_closed <- true
                             else:
                                 if byte == ASCII_BRACKET_OPEN:
+                                    if decoder.json_nesting_count >= JSON_NESTING_CAPACITY:
+                                        decoder.json_structural_invalid <- true
+                                        decoder_fail(decoder)
+                                        return
+                                    decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACKET_OPEN
+                                    decoder.json_nesting_count <- decoder.json_nesting_count + 1
                                     decoder.json_array_depth <- decoder.json_array_depth + 1
                                 else:
                                     if byte == ASCII_BRACKET_CLOSE:
-                                        if decoder.json_array_depth == 0:
+                                        if decoder.json_array_depth == 0 or decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACKET_OPEN:
                                             decoder.json_structural_invalid <- true
                                             decoder_fail(decoder)
                                             return
+                                        decoder.json_nesting_count <- decoder.json_nesting_count - 1
                                         decoder.json_array_depth <- decoder.json_array_depth - 1
             if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LF and byte != ASCII_CR:
                 if not decoder.json_has_content:
@@ -467,7 +484,7 @@ module DebuggerDAPServer:
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
                 if decoder.payload_received == decoder.content_length:
-                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_in_string or decoder.json_escaped or not decoder.json_closed or decoder.json_structural_invalid:
+                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or not decoder.json_closed or decoder.json_structural_invalid:
                         decoder_fail(decoder)
                         return false
                     decoder.state <- DECODER_HEADER_STATE
@@ -492,6 +509,7 @@ module DebuggerDAPServer:
                     decoder.json_last <- 0
                     decoder.json_object_depth <- 0
                     decoder.json_array_depth <- 0
+                    decoder.json_nesting_count <- 0
                     decoder.json_in_string <- false
                     decoder.json_escaped <- false
                     decoder.json_closed <- false

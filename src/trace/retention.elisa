@@ -1,0 +1,104 @@
+# Retention bookkeeping protects checkpoint and branch dependency closures.
+# Collection only marks unpinned, unreferenced chunks; a caller can then delete
+# them atomically from its durable store.
+
+include "../core/errors.elisa"
+
+module DebuggerTraceRetention:
+    private:
+        const RETENTION_CHUNK_CAPACITY: usize = 128
+        const RETENTION_PIN_CAPACITY: usize = 64
+        const RETENTION_MAX_REFCOUNT: u64 = 18446744073709551615
+        const DETAIL_CAPACITY: u32 = 1
+        const DETAIL_REFERENCE: u32 = 2
+        const DETAIL_PIN: u32 = 3
+
+    public:
+        struct ChunkReference:
+            sequence: mutable u64
+            parent: mutable u64
+            references: mutable u64
+            pinned: mutable bool
+            live: mutable bool
+
+        struct RetentionStore:
+            chunks: mutable ChunkReference[RETENTION_CHUNK_CAPACITY]
+            count: mutable usize
+            pins: mutable u64[RETENTION_PIN_CAPACITY]
+            pin_count: mutable usize
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        struct CollectionPlan:
+            sequences: mutable u64[RETENTION_CHUNK_CAPACITY]
+            count: mutable usize
+            complete: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def retention_new() -> RetentionStore:
+            return RetentionStore{chunks: zeroed, count: 0, pins: zeroed, pin_count: 0, last_error: DebuggerErrors::no_error()}
+
+        def retention_add_chunk(store: RetentionStore, sequence: u64, parent: u64) -> RetentionStore:
+            updated: mutable RetentionStore = store
+            return updated if store.count >= RETENTION_CHUNK_CAPACITY or sequence == 0
+            for index in 0..<store.count:
+                return updated if store.chunks[index].sequence == sequence
+            updated.chunks[store.count] <- ChunkReference{sequence: sequence, parent: parent, references: 0, pinned: false, live: true}
+            updated.count <- store.count + 1
+            return updated
+
+        def retention_find(store: RetentionStore, sequence: u64) -> usize:
+            for index in 0..<store.count:
+                return index if store.chunks[index].sequence == sequence
+            return RETENTION_CHUNK_CAPACITY
+
+        def retention_add_reference(store: RetentionStore, sequence: u64) -> RetentionStore:
+            updated: mutable RetentionStore = store
+            index: usize = retention_find(store, sequence)
+            return updated if index >= RETENTION_CHUNK_CAPACITY
+            updated.chunks[index].references <- RETENTION_MAX_REFCOUNT if store.chunks[index].references == RETENTION_MAX_REFCOUNT
+            updated.chunks[index].references <- store.chunks[index].references + 1 if store.chunks[index].references < RETENTION_MAX_REFCOUNT
+            return updated
+
+        def retention_pin(store: RetentionStore, sequence: u64) -> RetentionStore:
+            updated: mutable RetentionStore = store
+            index: usize = retention_find(store, sequence)
+            return updated if index >= RETENTION_CHUNK_CAPACITY or store.pin_count >= RETENTION_PIN_CAPACITY
+            updated.chunks[index].pinned <- true
+            for pin in 0..<store.pin_count:
+                return updated if store.pins[pin] == sequence
+            updated.pins[store.pin_count] <- sequence
+            updated.pin_count <- store.pin_count + 1
+            return updated
+
+        def retention_unpin(store: RetentionStore, sequence: u64) -> RetentionStore:
+            updated: mutable RetentionStore = store
+            index: usize = retention_find(store, sequence)
+            return updated if index >= RETENTION_CHUNK_CAPACITY
+            updated.chunks[index].pinned <- false
+            for pin in 0..<store.pin_count:
+                if store.pins[pin] == sequence:
+                    updated.pins[pin] <- store.pins[store.pin_count - 1]
+                    updated.pin_count <- store.pin_count - 1
+                    break
+            return updated
+
+        def retention_plan_collection(store: RetentionStore) -> CollectionPlan:
+            plan: mutable CollectionPlan = zeroed
+            plan.complete <- true
+            return CollectionPlan{sequences: plan.sequences, count: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY)} if store.count > RETENTION_CHUNK_CAPACITY or store.pin_count > RETENTION_PIN_CAPACITY
+            for index in 0..<store.count:
+                chunk: ChunkReference = store.chunks[index]
+                continue if not chunk.live or chunk.pinned or chunk.references != 0
+                return CollectionPlan{sequences: plan.sequences, count: plan.count, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_CAPACITY)} if plan.count >= RETENTION_CHUNK_CAPACITY
+                plan.sequences[plan.count] <- chunk.sequence
+                plan.count <- plan.count + 1
+            return plan
+
+        def retention_apply_collection(store: RetentionStore, plan: CollectionPlan) -> RetentionStore:
+            updated: mutable RetentionStore = store
+            return updated if not plan.complete or plan.count > RETENTION_CHUNK_CAPACITY
+            for candidate in 0..<plan.count:
+                index: usize = retention_find(updated, plan.sequences[candidate])
+                if index < RETENTION_CHUNK_CAPACITY:
+                    updated.chunks[index].live <- false
+            return updated

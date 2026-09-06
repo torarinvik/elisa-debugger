@@ -1,0 +1,50 @@
+# Trace quality is monotonic: a verified prefix remains available after a
+# later failure, while exact replay is withdrawn at the first unsupported or
+# corrupt boundary.
+
+include "../core/errors.elisa"
+
+module DebuggerTraceHealth:
+    private:
+        const TRACE_DETAIL_BOUNDARY: u32 = 1
+        const TRACE_DETAIL_REASON: u32 = 2
+
+    public:
+        enum HealthState:
+            Exact
+            Partial
+            Observational
+            Diverged
+            Corrupt
+
+        struct Health:
+            state: mutable HealthState
+            last_verified_event: mutable u64
+            failure_event: mutable u64
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def health_exact() -> Health:
+            return Health{state: HealthState.Exact, last_verified_event: 0, failure_event: 0, failure: DebuggerErrors::no_error()}
+
+        def health_downgrade(health: Health, state: HealthState, event: u64, failure: DebuggerErrors::DebuggerError) -> Health:
+            updated: mutable Health = health
+            return updated if state == HealthState.Exact or state.u16() < health.state.u16()
+            updated.state <- state
+            updated.failure_event <- event
+            updated.failure <- failure
+            return updated
+
+        def health_verify(health: Health, event: u64) -> Health:
+            updated: mutable Health = health
+            return updated if health.state == HealthState.Corrupt or health.state == HealthState.Diverged
+            updated.last_verified_event <- event if event >= health.last_verified_event
+            return updated
+
+        def health_can_replay(health: Health, event: u64) -> bool:
+            return health.state == HealthState.Exact and event <= health.last_verified_event and DebuggerErrors::error_is_ok(health.failure)
+
+        def health_failure(health: Health) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, TRACE_DETAIL_BOUNDARY) if health.state == HealthState.Partial or health.state == HealthState.Observational
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, TRACE_DETAIL_REASON) if health.state == HealthState.Diverged
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, TRACE_DETAIL_REASON) if health.state == HealthState.Corrupt
+            return DebuggerErrors::no_error()

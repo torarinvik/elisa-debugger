@@ -70,6 +70,14 @@ module DebuggerDAPServer:
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_L: u8 = 76
         const JSON_NESTING_CAPACITY: usize = 64
+        const JSON_STATE_ROOT_VALUE: u8 = 0
+        const JSON_STATE_OBJECT_KEY_OR_END: u8 = 1
+        const JSON_STATE_OBJECT_KEY_REQUIRED: u8 = 2
+        const JSON_STATE_OBJECT_COLON: u8 = 3
+        const JSON_STATE_VALUE: u8 = 4
+        const JSON_STATE_ARRAY_VALUE_OR_END: u8 = 5
+        const JSON_STATE_COMMA_OR_END: u8 = 6
+        const JSON_STATE_ROOT_DONE: u8 = 7
         const HEADER_PREFIX_LENGTH: u8 = 15
         const COMMAND_PREFIX_LENGTH: u8 = 11
         const COMMAND_PREFIX_FINAL_POSITION: u8 = 10
@@ -203,9 +211,13 @@ module DebuggerDAPServer:
             json_object_depth: mutable usize
             json_array_depth: mutable usize
             json_nesting: mutable u8[JSON_NESTING_CAPACITY]
+            json_states: mutable u8[JSON_NESTING_CAPACITY]
             json_nesting_count: mutable usize
             json_in_string: mutable bool
+            json_string_is_key: mutable bool
             json_escaped: mutable bool
+            json_in_primitive: mutable bool
+            json_root_state: mutable u8
             json_closed: mutable bool
             json_structural_invalid: mutable bool
 
@@ -268,9 +280,23 @@ module DebuggerDAPServer:
             return byte == ASCII_COLON if position == 14
             return false
 
-        def decoder_accept_payload_byte(decoder: mutable Decoder&, byte: u8) -> void:
-            if decoder.json_structural_invalid:
-                return
+        def decoder_json_fail(decoder: mutable Decoder&) -> void:
+            decoder.json_structural_invalid <- true
+            decoder_fail(decoder)
+
+        def decoder_json_close_container(decoder: mutable Decoder&, expected: u8) -> void:
+            return decoder_json_fail(decoder) if decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != expected
+            decoder.json_object_depth <- decoder.json_object_depth - 1 if expected == ASCII_BRACE_OPEN
+            decoder.json_array_depth <- decoder.json_array_depth - 1 if expected == ASCII_BRACKET_OPEN
+            decoder.json_nesting_count <- decoder.json_nesting_count - 1
+            if decoder.json_nesting_count == 0:
+                decoder.json_root_state <- JSON_STATE_ROOT_DONE
+                decoder.json_closed <- true
+            else:
+                decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+
+        def decoder_json_accept_payload_byte(decoder: mutable Decoder&, byte: u8) -> void:
+            return if decoder.json_structural_invalid
             if decoder.json_in_string:
                 if decoder.json_escaped:
                     decoder.json_escaped <- false
@@ -280,71 +306,100 @@ module DebuggerDAPServer:
                     else:
                         if byte == ASCII_QUOTE:
                             decoder.json_in_string <- false
-            else:
-                if byte == ASCII_QUOTE:
-                    decoder.json_in_string <- true
-                else:
-                    if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LF and byte != ASCII_CR:
-                        if byte == ASCII_COMMA:
-                            if decoder.json_last == ASCII_BRACE_OPEN or decoder.json_last == ASCII_BRACKET_OPEN:
-                                decoder.json_structural_invalid <- true
-                                decoder_fail(decoder)
-                                return
-                            if decoder.json_last == ASCII_COMMA:
-                                decoder.json_structural_invalid <- true
-                                decoder_fail(decoder)
-                                return
-                        if (byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE) and decoder.json_last == ASCII_COMMA:
-                            decoder.json_structural_invalid <- true
-                            decoder_fail(decoder)
-                            return
-                        if decoder.json_closed:
-                            decoder.json_structural_invalid <- true
-                            decoder_fail(decoder)
-                            return
-                        if not decoder.json_has_content and byte != ASCII_BRACE_OPEN:
-                            decoder.json_structural_invalid <- true
-                            decoder_fail(decoder)
-                            return
-                        if byte == ASCII_BRACE_OPEN:
-                            if decoder.json_nesting_count >= JSON_NESTING_CAPACITY:
-                                decoder.json_structural_invalid <- true
-                                decoder_fail(decoder)
-                                return
-                            decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACE_OPEN
-                            decoder.json_nesting_count <- decoder.json_nesting_count + 1
-                            decoder.json_object_depth <- decoder.json_object_depth + 1
-                        else:
-                            if byte == ASCII_BRACE_CLOSE:
-                                if decoder.json_object_depth == 0 or decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN:
-                                    decoder.json_structural_invalid <- true
-                                    decoder_fail(decoder)
-                                    return
-                                decoder.json_nesting_count <- decoder.json_nesting_count - 1
-                                decoder.json_object_depth <- decoder.json_object_depth - 1
-                                if decoder.json_object_depth == 0:
-                                    if decoder.json_array_depth != 0:
-                                        decoder.json_structural_invalid <- true
-                                        decoder_fail(decoder)
-                                        return
-                                    decoder.json_closed <- true
+                            if decoder.json_string_is_key:
+                                return decoder_json_fail(decoder) if decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN or decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_OR_END and decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_REQUIRED
+                                decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_OBJECT_COLON
                             else:
-                                if byte == ASCII_BRACKET_OPEN:
-                                    if decoder.json_nesting_count >= JSON_NESTING_CAPACITY:
-                                        decoder.json_structural_invalid <- true
-                                        decoder_fail(decoder)
-                                        return
-                                    decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACKET_OPEN
-                                    decoder.json_nesting_count <- decoder.json_nesting_count + 1
-                                    decoder.json_array_depth <- decoder.json_array_depth + 1
+                                if decoder.json_nesting_count == 0:
+                                    decoder.json_root_state <- JSON_STATE_ROOT_DONE
+                                    decoder.json_closed <- true
                                 else:
-                                    if byte == ASCII_BRACKET_CLOSE:
-                                        if decoder.json_array_depth == 0 or decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACKET_OPEN:
-                                            decoder.json_structural_invalid <- true
-                                            decoder_fail(decoder)
-                                            return
-                                        decoder.json_nesting_count <- decoder.json_nesting_count - 1
-                                        decoder.json_array_depth <- decoder.json_array_depth - 1
+                                    decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+                        else:
+                            decoder_json_fail(decoder) if byte < ASCII_SPACE
+                return
+            if decoder.json_in_primitive:
+                if is_json_whitespace(byte):
+                    decoder.json_in_primitive <- false
+                    return
+                return decoder_json_fail(decoder) if byte != ASCII_COMMA and byte != ASCII_BRACE_CLOSE and byte != ASCII_BRACKET_CLOSE
+                decoder.json_in_primitive <- false
+            return if is_json_whitespace(byte)
+            if decoder.json_nesting_count == 0:
+                return decoder_json_fail(decoder) if decoder.json_root_state == JSON_STATE_ROOT_DONE
+                if byte == ASCII_BRACE_OPEN:
+                    return decoder_json_fail(decoder) if decoder.json_nesting_count >= JSON_NESTING_CAPACITY
+                    decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACE_OPEN
+                    decoder.json_states[decoder.json_nesting_count] <- JSON_STATE_OBJECT_KEY_OR_END
+                    decoder.json_nesting_count <- decoder.json_nesting_count + 1
+                    decoder.json_object_depth <- decoder.json_object_depth + 1
+                    return
+                if byte == ASCII_BRACKET_OPEN:
+                    return decoder_json_fail(decoder) if decoder.json_nesting_count >= JSON_NESTING_CAPACITY
+                    decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACKET_OPEN
+                    decoder.json_states[decoder.json_nesting_count] <- JSON_STATE_ARRAY_VALUE_OR_END
+                    decoder.json_nesting_count <- decoder.json_nesting_count + 1
+                    decoder.json_array_depth <- decoder.json_array_depth + 1
+                    return
+                return decoder_json_fail(decoder) if byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE or byte == ASCII_COLON
+                decoder.json_in_string <- true if byte == ASCII_QUOTE
+                decoder.json_string_is_key <- false if byte == ASCII_QUOTE
+                decoder.json_in_primitive <- true if byte != ASCII_QUOTE
+                decoder.json_root_state <- JSON_STATE_ROOT_DONE
+                decoder.json_closed <- true if byte != ASCII_QUOTE
+                return
+            state: u8 = decoder.json_states[decoder.json_nesting_count - 1]
+            container: u8 = decoder.json_nesting[decoder.json_nesting_count - 1]
+            if state == JSON_STATE_OBJECT_KEY_OR_END or state == JSON_STATE_OBJECT_KEY_REQUIRED:
+                return decoder_json_fail(decoder) if container != ASCII_BRACE_OPEN
+                if byte == ASCII_BRACE_CLOSE:
+                    return decoder_json_fail(decoder) if state == JSON_STATE_OBJECT_KEY_REQUIRED
+                    decoder_json_close_container(decoder, ASCII_BRACE_OPEN)
+                    return
+                decoder.json_in_string <- true if byte == ASCII_QUOTE
+                decoder.json_string_is_key <- true if byte == ASCII_QUOTE
+                return decoder_json_fail(decoder) if byte != ASCII_QUOTE
+            if state == JSON_STATE_OBJECT_COLON:
+                decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_VALUE if byte == ASCII_COLON
+                return decoder_json_fail(decoder) if byte != ASCII_COLON
+                return
+            if state == JSON_STATE_COMMA_OR_END:
+                if (container == ASCII_BRACE_OPEN and byte == ASCII_BRACE_CLOSE) or (container == ASCII_BRACKET_OPEN and byte == ASCII_BRACKET_CLOSE):
+                    decoder_json_close_container(decoder, container)
+                    return
+                if byte == ASCII_COMMA:
+                    decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_OBJECT_KEY_REQUIRED if container == ASCII_BRACE_OPEN else JSON_STATE_VALUE
+                    return
+                return decoder_json_fail(decoder)
+            if state == JSON_STATE_ARRAY_VALUE_OR_END and byte == ASCII_BRACKET_CLOSE:
+                decoder_json_close_container(decoder, ASCII_BRACKET_OPEN)
+                return
+            return decoder_json_fail(decoder) if state != JSON_STATE_VALUE and state != JSON_STATE_ARRAY_VALUE_OR_END
+            if byte == ASCII_BRACE_OPEN:
+                return decoder_json_fail(decoder) if decoder.json_nesting_count >= JSON_NESTING_CAPACITY
+                decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACE_OPEN
+                decoder.json_states[decoder.json_nesting_count] <- JSON_STATE_OBJECT_KEY_OR_END
+                decoder.json_nesting_count <- decoder.json_nesting_count + 1
+                decoder.json_object_depth <- decoder.json_object_depth + 1
+                return
+            if byte == ASCII_BRACKET_OPEN:
+                return decoder_json_fail(decoder) if decoder.json_nesting_count >= JSON_NESTING_CAPACITY
+                decoder.json_nesting[decoder.json_nesting_count] <- ASCII_BRACKET_OPEN
+                decoder.json_states[decoder.json_nesting_count] <- JSON_STATE_ARRAY_VALUE_OR_END
+                decoder.json_nesting_count <- decoder.json_nesting_count + 1
+                decoder.json_array_depth <- decoder.json_array_depth + 1
+                return
+            if byte == ASCII_QUOTE:
+                decoder.json_in_string <- true
+                decoder.json_string_is_key <- false
+                return
+            return decoder_json_fail(decoder) if byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE or byte == ASCII_COLON
+            decoder.json_in_primitive <- true
+            decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+
+        def decoder_accept_payload_byte(decoder: mutable Decoder&, byte: u8) -> void:
+            decoder_json_accept_payload_byte(decoder, byte)
+            return if decoder.state == DECODER_FAILED_STATE
             if byte != ASCII_SPACE and byte != ASCII_TAB and byte != ASCII_LF and byte != ASCII_CR:
                 if not decoder.json_has_content:
                     decoder.json_first <- byte
@@ -489,7 +544,7 @@ module DebuggerDAPServer:
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
                 if decoder.payload_received == decoder.content_length:
-                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or not decoder.json_closed or decoder.json_structural_invalid:
+                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or decoder.json_in_primitive or not decoder.json_closed or decoder.json_structural_invalid:
                         decoder_fail(decoder)
                         return false
                     decoder.state <- DECODER_HEADER_STATE
@@ -516,7 +571,10 @@ module DebuggerDAPServer:
                     decoder.json_array_depth <- 0
                     decoder.json_nesting_count <- 0
                     decoder.json_in_string <- false
+                    decoder.json_string_is_key <- false
                     decoder.json_escaped <- false
+                    decoder.json_in_primitive <- false
+                    decoder.json_root_state <- JSON_STATE_ROOT_VALUE
                     decoder.json_closed <- false
                     decoder.json_structural_invalid <- false
                     return true

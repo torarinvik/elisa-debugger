@@ -51,16 +51,21 @@ module DebuggerDAPServer:
         const ASCII_SPACE: u8 = 32
         const ASCII_QUOTE: u8 = 34
         const ASCII_COLON: u8 = 58
+        const ASCII_SLASH: u8 = 47
+        const ASCII_B: u8 = 98
         const ASCII_C: u8 = 99
+        const ASCII_F: u8 = 102
         const ASCII_O: u8 = 111
         const ASCII_M: u8 = 109
         const ASCII_A: u8 = 97
         const ASCII_N: u8 = 110
         const ASCII_D: u8 = 100
+        const ASCII_R: u8 = 114
         const ASCII_S: u8 = 115
         const ASCII_Q: u8 = 113
         const ASCII_E: u8 = 101
         const ASCII_T: u8 = 116
+        const ASCII_U: u8 = 117
         const ASCII_L: u8 = 108
         const ASCII_G: u8 = 103
         const ASCII_Y: u8 = 121
@@ -69,6 +74,8 @@ module DebuggerDAPServer:
         const ASCII_HYPHEN: u8 = 45
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_L: u8 = 76
+        const ASCII_UPPER_A: u8 = 65
+        const ASCII_UPPER_F: u8 = 70
         const JSON_NESTING_CAPACITY: usize = 64
         const JSON_STATE_ROOT_VALUE: u8 = 0
         const JSON_STATE_OBJECT_KEY_OR_END: u8 = 1
@@ -216,6 +223,7 @@ module DebuggerDAPServer:
             json_in_string: mutable bool
             json_string_is_key: mutable bool
             json_escaped: mutable bool
+            json_unicode_digits: mutable u8
             json_in_primitive: mutable bool
             json_root_state: mutable u8
             json_closed: mutable bool
@@ -262,6 +270,11 @@ module DebuggerDAPServer:
         def is_json_whitespace(byte: u8) -> bool:
             return byte == ASCII_SPACE or byte == ASCII_TAB or byte == ASCII_LF or byte == ASCII_CR
 
+        def is_json_hex_digit(byte: u8) -> bool:
+            return true if byte >= ASCII_ZERO and byte <= ASCII_NINE
+            return true if byte >= ASCII_A and byte <= ASCII_F
+            return byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
+
         def header_prefix_matches(position: u8, byte: u8) -> bool:
             return byte == ASCII_UPPER_C if position == 0
             return byte == ASCII_O if position == 1
@@ -300,27 +313,39 @@ module DebuggerDAPServer:
         def decoder_json_accept_payload_byte(decoder: mutable Decoder&, byte: u8) -> void:
             return if decoder.json_structural_invalid
             if decoder.json_in_string:
-                if decoder.json_escaped:
-                    decoder.json_escaped <- false
+                if decoder.json_unicode_digits > 0:
+                    if not is_json_hex_digit(byte):
+                        decoder_json_fail(decoder)
+                        return
+                    decoder.json_unicode_digits <- decoder.json_unicode_digits - 1
                 else:
-                    if byte == ASCII_BACKSLASH:
-                        decoder.json_escaped <- true
-                    else:
-                        if byte == ASCII_QUOTE:
-                            decoder.json_in_string <- false
-                            if decoder.json_string_is_key:
-                                if decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN or decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_OR_END and decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_REQUIRED:
-                                    decoder_json_fail(decoder)
-                                    return
-                                decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_OBJECT_COLON
-                            else:
-                                if decoder.json_nesting_count == 0:
-                                    decoder.json_root_state <- JSON_STATE_ROOT_DONE
-                                    decoder.json_closed <- true
-                                else:
-                                    decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+                    if decoder.json_escaped:
+                        if byte == ASCII_U:
+                            decoder.json_unicode_digits <- 4
                         else:
-                            decoder_json_fail(decoder) if byte < ASCII_SPACE
+                            if byte != ASCII_QUOTE and byte != ASCII_BACKSLASH and byte != ASCII_SLASH and byte != ASCII_B and byte != ASCII_F and byte != ASCII_N and byte != ASCII_R and byte != ASCII_T:
+                                decoder_json_fail(decoder)
+                                return
+                        decoder.json_escaped <- false
+                    else:
+                        if byte == ASCII_BACKSLASH:
+                            decoder.json_escaped <- true
+                        else:
+                            if byte == ASCII_QUOTE:
+                                decoder.json_in_string <- false
+                                if decoder.json_string_is_key:
+                                    if decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN or decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_OR_END and decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_REQUIRED:
+                                        decoder_json_fail(decoder)
+                                        return
+                                    decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_OBJECT_COLON
+                                else:
+                                    if decoder.json_nesting_count == 0:
+                                        decoder.json_root_state <- JSON_STATE_ROOT_DONE
+                                        decoder.json_closed <- true
+                                    else:
+                                        decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+                            else:
+                                decoder_json_fail(decoder) if byte < ASCII_SPACE
                 return
             if decoder.json_in_primitive:
                 if is_json_whitespace(byte):
@@ -576,7 +601,7 @@ module DebuggerDAPServer:
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
                 if decoder.payload_received == decoder.content_length:
-                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or decoder.json_in_primitive or not decoder.json_closed or decoder.json_structural_invalid:
+                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or decoder.json_unicode_digits != 0 or decoder.json_in_primitive or not decoder.json_closed or decoder.json_structural_invalid:
                         decoder_fail(decoder)
                         return false
                     decoder.state <- DECODER_HEADER_STATE
@@ -605,6 +630,7 @@ module DebuggerDAPServer:
                     decoder.json_in_string <- false
                     decoder.json_string_is_key <- false
                     decoder.json_escaped <- false
+                    decoder.json_unicode_digits <- 0
                     decoder.json_in_primitive <- false
                     decoder.json_root_state <- JSON_STATE_ROOT_VALUE
                     decoder.json_closed <- false

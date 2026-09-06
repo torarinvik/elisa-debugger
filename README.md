@@ -42,6 +42,20 @@ into qualified modules:
   `DebuggerCheckpointCodec` provide bounded manifest/event recording,
   append-only bundle verification, event decoding, and restart-safe managed
   checkpoints.
+- `DebuggerHistoricalValues` preserves absent, unavailable, optimized-away,
+  uninitialized, invalid, and redacted values across historical positions.
+- `DebuggerQueryEngine` provides cancellable last-write and first-change
+  queries over bounded provenance indexes.
+- `DebuggerReplayCompare` aligns verified branches by shared semantic event
+  prefixes and reports the first divergence.
+- `DebuggerConcurrencyExploration` provides bounded alternate schedule and
+  observed race analysis with explicit exploration limits.
+- `DebuggerTraceHealth` and `DebuggerTraceRetention` preserve verified trace
+  prefixes and protect pinned checkpoint/branch dependency closures during
+  collection.
+- `DebuggerNativeAttach`, `DebuggerBuildInvocation`, and
+  `DebuggerProtocolConfig` define explicit native attach, structured compiler,
+  and editor launch contracts without shell command construction.
 - `DebuggerProtocol`, `DebuggerSessionService`, `DebuggerSecurity`, and
   `DebuggerBuild` are public integration contracts for DAP, JetBrains, CLI,
   remote, and headless clients; private limits are named constants in each

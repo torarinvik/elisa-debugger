@@ -48,6 +48,14 @@ truncated history, missing source artifacts, and capability changes. A client
 that only supports ordinary debugging can ignore timeline extensions while
 using the same launch/stack/variables operations.
 
+The reference Elisa client can issue advanced operations without opening the
+interactive CLI. Plugin panels should retain the session ownership token and
+expected stop generation they received from `initialize`; a second panel must
+reuse that session rather than launch another debuggee. When a trace is
+partial, the plugin should show the last verified event and disable reverse
+actions beyond it. When a value is unavailable, the plugin should render the
+reported state verbatim instead of displaying a numeric zero.
+
 The optional `timeline`, `memory`, and `events` surfaces are public protocol
 contracts backed by `DebuggerTimeline`, `DebuggerMemory`, and
 `DebuggerProtocolEvents`. They return typed unavailable, stale, corrupt, and

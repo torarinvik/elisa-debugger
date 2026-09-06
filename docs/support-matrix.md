@@ -10,17 +10,19 @@ human-readable guide, not a substitute for negotiation.
 | Attach | Unsupported | Controller contract present | Process attach model present |
 | Source and function metadata | Bounded source/function tables | Symbol table and source spans | Symbol table and artifact checks |
 | Source breakpoints | Resolver and pending statuses | Resolver contract | Metadata dependent |
-| Typed value states | Supported bounded store | Capability contract | Availability depends on metadata |
+| Typed value states | Supported bounded store, including absent and historical states | Capability contract | Availability depends on metadata |
 | Expression arithmetic | Bounded side-effect-free evaluator | Provider dependent | Provider dependent |
 | Record/replay effects | Effect oracle contract with mismatch detection | Not exact | Unsupported |
 | Reverse step and seek | Supported within retained EDIR history | Disabled | Unsupported |
 | Durable checkpoint codec | Supported for the current EDIR machine state | Not resumable | Core artifacts are inspect-only |
 | Deterministic task model | Bounded scheduler and wait graph | Not exact | Unsupported |
-| Branch lineage | Bounded immutable branch records | Unsupported | Unsupported |
+| Branch lineage | Bounded immutable branch records and verified branch comparison | Unsupported | Unsupported |
+| Historical queries | Cancellable last-write/first-change queries over captured provenance | Capability contract | Unsupported |
+| Concurrency diagnostics | Deterministic scheduler, wait graph, bounded alternate schedules, observed races | Capability contract | Unsupported |
 | Trace storage | Checksummed chunks, manifests, recovery scan | Format contract | Read-only artifact mode |
 | DAP | Bounded adapter | Capability dependent | Capability dependent |
 | Headless session service | Versioned compact framing | Capability dependent | Capability dependent |
-| Remote transport | Handshake, quotas, artifact transfer checks | Not qualified | Not qualified |
+| Remote transport | Handshake, quotas, resumable artifact transfer, reconnect state | Not qualified | Not qualified |
 
 ## Exactness rules
 

@@ -56,3 +56,26 @@ allocate unbounded memory. Limits are advertised by discovery where exposed,
 and every reader validates lengths before indexing. Increasing a limit requires
 updating the named module constant, its format/protocol specification, and the
 focused corruption tests together.
+
+## Public advanced surfaces
+
+The managed provider exposes inspection, breakpoint, checkpoint, branch,
+comparison, trace verification, and trace export operation names through the
+same service used by the headless server and DAP adapter. Operations that
+require request payloads are validated through typed service contracts; the
+service never falls back to parsing interactive CLI output.
+
+Historical values use an explicit `Absent` state in addition to unavailable,
+optimized-away, uninitialized, invalid, and redacted states. Query results
+carry cancellation and resource-limit outcomes, and never turn an incomplete
+scan into a complete answer.
+
+Concurrency exploration is bounded by task, event, preemption, branch, and
+work limits. Race reports describe observed concurrent accesses under the
+captured vector-clock model; they do not claim race freedom for schedules
+outside the explored bound.
+
+Trace health is monotonic. A later corrupt or unsupported event records the
+last verified prefix and downgrades capabilities at that boundary. Retention
+marks only unpinned, unreferenced chunks for collection so checkpoint and
+branch dependency closures remain recoverable after interrupted cleanup.

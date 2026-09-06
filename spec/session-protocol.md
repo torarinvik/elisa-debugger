@@ -67,6 +67,32 @@ Large results are paginated with an opaque `next` token. Requests that may run
 longer than a client timeout emit `progress` events and honor `cancel` by
 request ID. Mutation requests declare whether retrying the same ID is safe.
 
+## Timeline, history, and branch extensions
+
+The managed session service uses the reserved `checkpoint`, `branch`,
+`compare`, `trace.verify`, and `trace.export` methods for advanced clients.
+Requests carry structured fields only:
+
+- `seek` uses `targetEvent` and `expectedStopGeneration`.
+- `checkpoint` returns a checkpoint identity and its state digest.
+- `branch` returns parent branch, fork event, replay policy, and intervention
+  validation status.
+- `compare` returns shared-prefix length, first divergence, and whether an
+  alignment is exact or heuristic.
+- `trace.verify` returns health state and the last verified event.
+- `trace.export` returns an artifact identity, replayability, and dependency
+  closure status.
+
+Historical query requests use `firstEvent`, `lastEvent`, `maxResults`, and
+`maxSteps`. Results include `complete`, `cancelled`, `scannedEvents`, and an
+opaque continuation token. A value result always includes its availability
+state; `absent`, `unavailable`, `optimizedAway`, `uninitialized`, `invalid`,
+and `redacted` are distinct states.
+
+Branch outputs remain virtual until a client explicitly requests an external
+effect under a policy granting that permission. Reusing a parent input after a
+branch request mismatch is a protocol error and reports the first divergence.
+
 ## Compatibility requirements
 
 The protocol specifies source lines as one-based, columns as zero-based UTF-16

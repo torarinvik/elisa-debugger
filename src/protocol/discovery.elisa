@@ -6,6 +6,7 @@ include "./messages.elisa"
 include "./request.elisa"
 include "../core/session.elisa"
 include "../core/errors.elisa"
+include "../core/identity.elisa"
 
 module DebuggerDiscovery:
     private:
@@ -15,6 +16,13 @@ module DebuggerDiscovery:
         const DISCOVERY_MAX_MEMORY_READ: u64 = 64
         const DISCOVERY_MAX_BOOKMARKS: u64 = 128
         const DISCOVERY_MAX_TRACE_EVENTS: u64 = 1024
+        const DISCOVERY_PRODUCT_ID: u64 = 1
+        const DISCOVERY_PRODUCT_MAJOR: u32 = 0
+        const DISCOVERY_PRODUCT_MINOR: u32 = 1
+        const DISCOVERY_PRODUCT_PATCH: u32 = 0
+        const DISCOVERY_TRACE_SCHEMA: u32 = 1
+        const DISCOVERY_NO_ID: u64 = 0
+        const DISCOVERY_NO_METADATA_VERSION: u32 = 0
         const ENGINE_KIND_MAX: u16 = 3
         const HISTORY_KIND_MAX: u16 = 3
         const DETAIL_PROTOCOL: u32 = 1
@@ -29,23 +37,37 @@ module DebuggerDiscovery:
             max_trace_events: mutable u64
 
         struct Discovery:
+            product: mutable DebuggerIdentity::DebugId
+            product_major: mutable u32
+            product_minor: mutable u32
+            product_patch: mutable u32
             protocol: mutable DebuggerProtocol::ProtocolVersion
+            trace_schema: mutable u32
             engine: mutable DebuggerCapabilities::EngineKind
             history: mutable DebuggerCapabilities::HistoryKind
             capabilities: mutable DebuggerCapabilities::CapabilitySet
             limits: mutable DiscoveryLimits
+            installation_healthy: mutable bool
 
         def discovery_for(session: DebuggerSession::Session) -> Discovery:
             return Discovery{
+                product: DebuggerIdentity::debug_id(DISCOVERY_PRODUCT_ID),
+                product_major: DISCOVERY_PRODUCT_MAJOR,
+                product_minor: DISCOVERY_PRODUCT_MINOR,
+                product_patch: DISCOVERY_PRODUCT_PATCH,
                 protocol: DebuggerProtocol::ProtocolVersion{major: DISCOVERY_PROTOCOL_MAJOR, minor: DISCOVERY_PROTOCOL_MINOR},
+                trace_schema: DISCOVERY_TRACE_SCHEMA,
                 engine: session.capabilities.engine,
                 history: session.capabilities.history,
                 capabilities: session.capabilities,
-                limits: DiscoveryLimits{max_page_size: DISCOVERY_MAX_PAGE_SIZE, max_memory_read: DISCOVERY_MAX_MEMORY_READ, max_bookmarks: DISCOVERY_MAX_BOOKMARKS, max_trace_events: DISCOVERY_MAX_TRACE_EVENTS}
+                limits: DiscoveryLimits{max_page_size: DISCOVERY_MAX_PAGE_SIZE, max_memory_read: DISCOVERY_MAX_MEMORY_READ, max_bookmarks: DISCOVERY_MAX_BOOKMARKS, max_trace_events: DISCOVERY_MAX_TRACE_EVENTS},
+                installation_healthy: session.build.compiler.value != DISCOVERY_NO_ID and session.build.runtime.value != DISCOVERY_NO_ID and session.build.source.value != DISCOVERY_NO_ID and session.build.target.value != DISCOVERY_NO_ID and session.build.metadata_version != DISCOVERY_NO_METADATA_VERSION
             }
 
         def discovery_is_valid(discovery: Discovery) -> bool:
             return false if discovery.protocol.major != DISCOVERY_PROTOCOL_MAJOR or discovery.protocol.minor > DISCOVERY_PROTOCOL_MINOR
+            return false if discovery.product.value == 0 or discovery.product_major != DISCOVERY_PRODUCT_MAJOR or discovery.product_minor != DISCOVERY_PRODUCT_MINOR or discovery.product_patch != DISCOVERY_PRODUCT_PATCH
+            return false if discovery.trace_schema != DISCOVERY_TRACE_SCHEMA
             return false if discovery.engine.u16() > ENGINE_KIND_MAX or discovery.history.u16() > HISTORY_KIND_MAX
             return false if discovery.limits.max_page_size == 0 or discovery.limits.max_memory_read == 0 or discovery.limits.max_bookmarks == 0 or discovery.limits.max_trace_events == 0
             return false if discovery.capabilities.engine != discovery.engine or discovery.capabilities.history != discovery.history
@@ -55,6 +77,7 @@ module DebuggerDiscovery:
         def discovery_supports(discovery: Discovery, method: DebuggerProtocol::Method) -> bool:
             return false if not discovery_is_valid(discovery)
             return true if method == DebuggerProtocol::Method.Discover or method == DebuggerProtocol::Method.Initialize
+            return false if not discovery.installation_healthy
             return discovery.capabilities.native_attach if method == DebuggerProtocol::Method.Attach
             return discovery.capabilities.engine == DebuggerCapabilities::EngineKind.Managed or discovery.capabilities.engine == DebuggerCapabilities::EngineKind.InstrumentedNative if method == DebuggerProtocol::Method.Launch
             return discovery.history != DebuggerCapabilities::HistoryKind.None if method == DebuggerProtocol::Method.OpenTrace
@@ -76,6 +99,7 @@ module DebuggerDiscovery:
 
         def discovery_error(discovery: Discovery) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PROTOCOL) if discovery.protocol.major != DISCOVERY_PROTOCOL_MAJOR or discovery.protocol.minor > DISCOVERY_PROTOCOL_MINOR
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PROTOCOL) if discovery.product.value == DISCOVERY_NO_ID or discovery.product_major != DISCOVERY_PRODUCT_MAJOR or discovery.product_minor != DISCOVERY_PRODUCT_MINOR or discovery.product_patch != DISCOVERY_PRODUCT_PATCH or discovery.trace_schema != DISCOVERY_TRACE_SCHEMA
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CAPABILITY) if discovery.engine.u16() > ENGINE_KIND_MAX or discovery.history.u16() > HISTORY_KIND_MAX
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_LIMITS) if discovery.limits.max_page_size == 0 or discovery.limits.max_memory_read == 0 or discovery.limits.max_bookmarks == 0 or discovery.limits.max_trace_events == 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CAPABILITY) if discovery.capabilities.engine != discovery.engine or discovery.capabilities.history != discovery.history

@@ -16,6 +16,11 @@ const DEADLINE_RESULT: i64 = 5
 const FIRST_CHANGE_RESULT: i64 = 6
 const PARTIAL_FIRST_CHANGE_RESULT: i64 = 7
 const SINGLE_RESULT_LIMIT: u64 = 1
+const QUERY_RESULT_CAPACITY: usize = 64
+const LARGE_RESULT_LIMIT: u64 = 65
+const LARGE_INDEX_COUNT: usize = QUERY_RESULT_CAPACITY + 1
+const LARGE_RESULT_FAILURE: i64 = 8
+const EMPTY_CANCEL_FAILURE: i64 = 9
 
 def main() -> i64:
     binding: DebuggerIdentity::BindingIdentity = DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(TEST_BINDING), incarnation: 1}
@@ -30,11 +35,22 @@ def main() -> i64:
     index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_append(DebuggerProvenance::provenance_new(), mutation)
     window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: QUERY_FIRST_EVENT, last_event: QUERY_LAST_EVENT, max_results: QUERY_MAX_RESULTS, max_steps: QUERY_MAX_STEPS}
     token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
+    cancelled_empty_token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_cancel(token)
+    cancelled_empty: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(DebuggerProvenance::provenance_new(), binding, window, cancelled_empty_token)
+    return EMPTY_CANCEL_FAILURE if not cancelled_empty.cancelled or cancelled_empty.failure.code != DebuggerErrors::ErrorCode.Cancelled
     result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, window, token)
     return MATCH_RESULT if result.count != 1 or result.matches[0].event != mutation.event or not result.complete
     capped_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: QUERY_FIRST_EVENT, last_event: QUERY_LAST_EVENT, max_results: SINGLE_RESULT_LIMIT, max_steps: QUERY_MAX_STEPS}
     capped_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, capped_window, token)
     return MATCH_RESULT if capped_result.count != SINGLE_RESULT_LIMIT or not capped_result.complete
+    large_index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+    for event_index in 0..<LARGE_INDEX_COUNT:
+        large_mutation: mutable DebuggerProvenance::Mutation = mutation
+        large_mutation.event <- event_index.u64()
+        large_index <- DebuggerProvenance::provenance_append(large_index, large_mutation)
+    large_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: QUERY_FIRST_EVENT, last_event: QUERY_LAST_EVENT + LARGE_INDEX_COUNT.u64(), max_results: LARGE_RESULT_LIMIT, max_steps: QUERY_MAX_STEPS}
+    large_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(large_index, binding, large_window, token)
+    return LARGE_RESULT_FAILURE if large_result.count != QUERY_RESULT_CAPACITY or large_result.complete or large_result.failure.code != DebuggerErrors::ErrorCode.ResourceLimit
     deadline_token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(1)
     deadline_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, window, deadline_token)
     return DEADLINE_RESULT if not deadline_result.cancelled or deadline_result.failure.code != DebuggerErrors::ErrorCode.Cancelled

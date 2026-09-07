@@ -1,0 +1,38 @@
+# Partial and observational manifests remain valid storage metadata while
+# exact replay eligibility stays a separate predicate.
+
+include "../src/trace/binary.elisa"
+include "../src/trace/manifest.elisa"
+include "../src/trace/storage.elisa"
+include "../src/trace/verify.elisa"
+
+const TEST_ID: u64 = 41
+const TEST_SCHEMA: u32 = 1
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_ID), runtime: DebuggerIdentity::debug_id(TEST_ID + 1), source: DebuggerIdentity::debug_id(TEST_ID + 2), target: DebuggerIdentity::debug_id(TEST_ID + 3), metadata_version: 1}
+
+def main() -> i64:
+    manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build_identity(), DebuggerTraceManifest::ManifestStatus.Partial)
+    manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    return 1 if not DebuggerTraceManifest::manifest_is_well_formed(manifest) or DebuggerTraceManifest::manifest_is_replayable(manifest)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: 0, first_event: 0, last_event: 0, payload_length: manifest_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_bytes)}
+    chunk.payload_length <- manifest_bytes.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_bytes)
+    for index in 0..<manifest_bytes.length:
+        chunk.payload[index] <- manifest_bytes.bytes[index]
+    encoded_chunk: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(1, 0)
+    combined: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for index in 0..<encoded_chunk.length:
+        combined <- DebuggerTraceBinary::writer_put_byte(combined, encoded_chunk.bytes[index])
+    for index in 0..<footer.length:
+        combined <- DebuggerTraceBinary::writer_put_byte(combined, footer.bytes[index])
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(combined.bytes[0], combined.length)
+    return 2 if scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or not scan.manifest_seen or scan.event_chunk_seen
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(combined.bytes[0], combined.length)
+    return 3 if report.state != DebuggerTraceVerify::VerificationState.Partial or report.replayable
+    manifest.status <- DebuggerTraceManifest::ManifestStatus.Observational
+    return 4 if not DebuggerTraceManifest::manifest_is_well_formed(manifest) or DebuggerTraceManifest::manifest_is_replayable(manifest)
+    return 0

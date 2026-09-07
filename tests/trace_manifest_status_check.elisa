@@ -14,6 +14,7 @@ def build_identity() -> DebuggerIdentity::BuildIdentity:
 
 def main() -> i64:
     manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build_identity(), DebuggerTraceManifest::ManifestStatus.Partial)
+    manifest.checkpoint_count <- 1
     manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
     return 1 if not DebuggerTraceManifest::manifest_is_well_formed(manifest) or DebuggerTraceManifest::manifest_is_replayable(manifest)
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
@@ -23,14 +24,37 @@ def main() -> i64:
     for index in 0..<manifest_bytes.length:
         chunk.payload[index] <- manifest_bytes.bytes[index]
     encoded_chunk: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
-    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(1, 0)
     combined: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     for index in 0..<encoded_chunk.length:
         combined <- DebuggerTraceBinary::writer_put_byte(combined, encoded_chunk.bytes[index])
+    event_payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    event_payload <- DebuggerTraceBinary::writer_put_u32(event_payload, TEST_SCHEMA)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 0)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 1)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, TEST_ID)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 0)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 0)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 1)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 1)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 1)
+    event_payload <- DebuggerTraceBinary::writer_put_u32(event_payload, 0)
+    event_payload <- DebuggerTraceBinary::writer_put_u16(event_payload, 0)
+    event_payload <- DebuggerTraceBinary::writer_put_u16(event_payload, 0)
+    event_payload <- DebuggerTraceBinary::writer_put_u64(event_payload, 0)
+    event_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    event_chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 1, first_event: 0, last_event: 0, payload_length: event_payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(event_payload)}
+    event_chunk.payload_length <- event_payload.length
+    event_chunk.checksum <- DebuggerTraceBinary::writer_checksum(event_payload)
+    for index in 0..<event_payload.length:
+        event_chunk.payload[index] <- event_payload.bytes[index]
+    encoded_event_chunk: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(event_chunk)
+    for index in 0..<encoded_event_chunk.length:
+        combined <- DebuggerTraceBinary::writer_put_byte(combined, encoded_event_chunk.bytes[index])
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(2, 0)
     for index in 0..<footer.length:
         combined <- DebuggerTraceBinary::writer_put_byte(combined, footer.bytes[index])
     scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(combined.bytes[0], combined.length)
-    return 2 if scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or not scan.manifest_seen or scan.event_chunk_seen
+    return 2 if scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or not scan.manifest_seen or scan.manifest_exact or not scan.event_chunk_seen
     report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(combined.bytes[0], combined.length)
     return 3 if report.state != DebuggerTraceVerify::VerificationState.Partial or report.replayable
     manifest.status <- DebuggerTraceManifest::ManifestStatus.Observational

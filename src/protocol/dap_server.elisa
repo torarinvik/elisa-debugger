@@ -215,10 +215,12 @@ module DebuggerDAPServer:
             payload_received: mutable usize
             command_prefix_position: mutable u8
             in_command: mutable bool
+            command_escaped: mutable bool
             command_seen: mutable bool
             command_hash: mutable u64
             type_prefix_position: mutable u8
             in_type: mutable bool
+            type_escaped: mutable bool
             type_seen: mutable bool
             type_hash: mutable u64
             type_length: mutable usize
@@ -630,6 +632,7 @@ module DebuggerDAPServer:
                                 decoder_fail(decoder)
                                 return
                             decoder.in_command <- true
+                            decoder.command_escaped <- false
                             decoder.command_hash <- 0
                     else:
                         if is_json_whitespace(byte) and (decoder.command_prefix_position == COMMAND_PREFIX_LENGTH - 2 or decoder.command_prefix_position == COMMAND_PREFIX_LENGTH - 1):
@@ -637,11 +640,19 @@ module DebuggerDAPServer:
                         else:
                             decoder.command_prefix_position <- 1 if byte == ASCII_QUOTE else 0
                 else:
-                    if byte == ASCII_QUOTE:
-                        decoder.in_command <- false
-                        decoder.command_seen <- true
-                    else:
+                    if decoder.command_escaped:
                         decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                        decoder.command_escaped <- false
+                    else:
+                        if byte == ASCII_BACKSLASH:
+                            decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                            decoder.command_escaped <- true
+                        else:
+                            if byte == ASCII_QUOTE:
+                                decoder.in_command <- false
+                                decoder.command_seen <- true
+                            else:
+                                decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
             else:
                 decoder.command_prefix_position <- 0 if not decoder.in_command
             type_context: bool = decoder.in_type or decoder_json_top_level_field_context(decoder, decoder.type_prefix_position, TYPE_PREFIX_FINAL_POSITION, byte)
@@ -654,6 +665,7 @@ module DebuggerDAPServer:
                                 decoder_fail(decoder)
                                 return
                             decoder.in_type <- true
+                            decoder.type_escaped <- false
                             decoder.type_hash <- 0
                             decoder.type_length <- 0
                     else:
@@ -662,18 +674,28 @@ module DebuggerDAPServer:
                         else:
                             decoder.type_prefix_position <- 1 if byte == ASCII_QUOTE else 0
                 else:
-                    if byte == ASCII_QUOTE:
-                        if decoder.type_length != TYPE_REQUEST_LENGTH or decoder.type_hash != TYPE_REQUEST_HASH:
-                            decoder_fail(decoder)
-                            return
-                        decoder.in_type <- false
-                        decoder.type_seen <- true
-                    else:
-                        if decoder.type_length >= TYPE_REQUEST_LENGTH + 1:
-                            decoder_fail(decoder)
-                            return
+                    if decoder.type_escaped:
                         decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
                         decoder.type_length <- decoder.type_length + 1
+                        decoder.type_escaped <- false
+                    else:
+                        if byte == ASCII_BACKSLASH:
+                            decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                            decoder.type_length <- decoder.type_length + 1
+                            decoder.type_escaped <- true
+                        else:
+                            if byte == ASCII_QUOTE:
+                                if decoder.type_length != TYPE_REQUEST_LENGTH or decoder.type_hash != TYPE_REQUEST_HASH:
+                                    decoder_fail(decoder)
+                                    return
+                                decoder.in_type <- false
+                                decoder.type_seen <- true
+                            else:
+                                if decoder.type_length >= TYPE_REQUEST_LENGTH + 1:
+                                    decoder_fail(decoder)
+                                    return
+                                decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                                decoder.type_length <- decoder.type_length + 1
             else:
                 decoder.type_prefix_position <- 0 if not decoder.in_type
             sequence_context: bool = decoder.in_sequence or decoder_json_top_level_field_context(decoder, decoder.sequence_prefix_position, SEQUENCE_PREFIX_FINAL_POSITION, byte)
@@ -782,9 +804,11 @@ module DebuggerDAPServer:
                     decoder.payload_received <- 0
                     decoder.command_prefix_position <- 0
                     decoder.in_command <- false
+                    decoder.command_escaped <- false
                     decoder.command_seen <- false
                     decoder.type_prefix_position <- 0
                     decoder.in_type <- false
+                    decoder.type_escaped <- false
                     decoder.type_seen <- false
                     decoder.type_hash <- 0
                     decoder.type_length <- 0

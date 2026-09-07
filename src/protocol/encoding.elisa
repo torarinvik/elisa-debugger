@@ -1,0 +1,115 @@
+# Bounded JSON encoding for the public session service.  The encoder owns its
+# storage, emits canonical decimal identifiers as JSON strings, and fails
+# closed when a response exceeds the transport budget.
+
+include "./messages.elisa"
+include "./vocabulary.elisa"
+include "../core/errors.elisa"
+
+module DebuggerProtocolEncoding:
+    private:
+        const JSON_BUFFER_CAPACITY: usize = 4096
+        const DECIMAL_DIGIT_CAPACITY: usize = 20
+        const DECIMAL_BASE: u64 = 10
+        const ASCII_QUOTE: u8 = 34
+        const ASCII_BACKSLASH: u8 = 92
+        const ASCII_LINE_FEED: u8 = 10
+        const ASCII_CARRIAGE_RETURN: u8 = 13
+        const ASCII_TAB: u8 = 9
+        const ASCII_ZERO: u8 = 48
+        const ASCII_SPACE: u8 = 32
+        const NO_PAGE: u64 = 0
+
+        def buffer_put_byte(buffer: mutable JsonBuffer&, byte: u8) -> void:
+            if buffer.failed or buffer.length >= JSON_BUFFER_CAPACITY:
+                buffer.failed <- true
+                return
+            buffer.bytes[buffer.length] <- byte
+            buffer.length <- buffer.length + 1
+
+        def buffer_put_cstr(buffer: mutable JsonBuffer&, text: cstr) -> void:
+            index: mutable usize = 0
+            while text[index] != 0:
+                buffer_put_byte(buffer, text[index].u8())
+                return if buffer.failed
+                index <- index + 1
+
+        def buffer_put_u64(buffer: mutable JsonBuffer&, value: u64) -> void:
+            digits: mutable u8[DECIMAL_DIGIT_CAPACITY] = zeroed
+            count: mutable usize = 0
+            remaining: mutable u64 = value
+            if remaining == 0:
+                buffer_put_byte(buffer, ASCII_ZERO)
+                return
+            while remaining > 0:
+                return if count >= DECIMAL_DIGIT_CAPACITY
+                digits[count] <- (remaining % DECIMAL_BASE).u8() + ASCII_ZERO
+                count <- count + 1
+                remaining <- remaining / DECIMAL_BASE
+            for index in 0..<count:
+                buffer_put_byte(buffer, digits[count - index - 1])
+
+        def buffer_put_json_string(buffer: mutable JsonBuffer&, text: cstr) -> void:
+            buffer_put_byte(buffer, ASCII_QUOTE)
+            index: mutable usize = 0
+            while text[index] != 0:
+                byte: u8 = text[index].u8()
+                if byte == ASCII_QUOTE or byte == ASCII_BACKSLASH:
+                    buffer_put_byte(buffer, ASCII_BACKSLASH)
+                    buffer_put_byte(buffer, byte)
+                else:
+                    if byte == ASCII_LINE_FEED:
+                        buffer_put_cstr(buffer, "\\n")
+                    else:
+                        if byte == ASCII_CARRIAGE_RETURN:
+                            buffer_put_cstr(buffer, "\\r")
+                        else:
+                            if byte == ASCII_TAB:
+                                buffer_put_cstr(buffer, "\\t")
+                            else:
+                                if byte < ASCII_SPACE:
+                                    buffer.failed <- true
+                                    return
+                                buffer_put_byte(buffer, byte)
+                return if buffer.failed
+                index <- index + 1
+            buffer_put_byte(buffer, ASCII_QUOTE)
+
+        def buffer_put_id_string(buffer: mutable JsonBuffer&, value: u64) -> void:
+            buffer_put_byte(buffer, ASCII_QUOTE)
+            buffer_put_u64(buffer, value)
+            buffer_put_byte(buffer, ASCII_QUOTE)
+
+        def buffer_put_next_page(buffer: mutable JsonBuffer&, next_page: u64) -> void:
+            return if next_page == NO_PAGE
+            buffer_put_cstr(buffer, ",\"next\":")
+            buffer_put_id_string(buffer, next_page)
+
+    public:
+        struct JsonBuffer:
+            bytes: mutable u8[JSON_BUFFER_CAPACITY]
+            length: mutable usize
+            failed: mutable bool
+
+        def json_buffer_new() -> JsonBuffer:
+            return JsonBuffer{bytes: zeroed, length: 0, failed: false}
+
+        def json_buffer_is_valid(buffer: JsonBuffer) -> bool:
+            return not buffer.failed and buffer.length <= JSON_BUFFER_CAPACITY
+
+        def response_encode(response: DebuggerProtocol::ResponseEnvelope) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            buffer_put_cstr(buffer, "{\"kind\":\"response\",\"id\":")
+            buffer_put_id_string(buffer, response.request_id)
+            if response.ok:
+                buffer_put_cstr(buffer, ",\"ok\":true,\"result\":{\"accepted\":true,\"stopGeneration\":")
+                buffer_put_id_string(buffer, response.stop_generation)
+                buffer_put_next_page(buffer, response.next_page)
+                buffer_put_cstr(buffer, "}}")
+            else:
+                buffer_put_cstr(buffer, ",\"ok\":false,\"error\":{\"code\":")
+                buffer_put_json_string(buffer, DebuggerProtocolVocabulary::error_code_name(response.failure.code))
+                buffer_put_cstr(buffer, ",\"message\":\"debugger request failed\",\"detail\":")
+                buffer_put_u64(buffer, response.failure.detail.u64())
+                buffer_put_cstr(buffer, "}}")
+            return buffer

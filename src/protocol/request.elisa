@@ -202,6 +202,22 @@ module DebuggerProtocolRequest:
             return true if byte >= ASCII_A and byte <= ASCII_F
             return byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
 
+        # The lightweight field scanner runs alongside the structural parser.
+        # A quoted field name embedded in a string value must not be mistaken
+        # for another top-level member (for example, an escaped `"method":`).
+        # Count the immediately preceding backslashes so escaped quotes are
+        # ignored while a quote preceded by an even number remains structural.
+        def json_byte_is_escaped(payload: u8&, index: usize) -> bool:
+            return false if payload[index] != ASCII_QUOTE
+            slash_count: mutable usize = 0
+            cursor: mutable usize = index
+            while cursor > 0:
+                cursor <- cursor - 1
+                return false if payload[cursor] != ASCII_BACKSLASH and slash_count % 2 == 0
+                return true if payload[cursor] != ASCII_BACKSLASH and slash_count % 2 == 1
+                slash_count <- slash_count + 1
+            return slash_count % 2 == 1
+
         def request_key_kind(hash: u64, length: usize) -> u8:
             return REQUEST_KEY_METHOD if length == REQUEST_KEY_METHOD_LENGTH and hash == REQUEST_KEY_METHOD_HASH
             return REQUEST_KEY_ID if length == REQUEST_KEY_ID_LENGTH and hash == REQUEST_KEY_ID_HASH
@@ -465,7 +481,7 @@ module DebuggerProtocolRequest:
             for index in 0..<length:
                 byte: u8 = payload[index]
                 if not in_method:
-                    if byte == prefix[prefix_position]:
+                    if byte == prefix[prefix_position] and (prefix_position != 0 or not json_byte_is_escaped(payload, index)):
                         prefix_position <- prefix_position + 1
                         if prefix_position == REQUEST_METHOD_PREFIX_LENGTH:
                             return invalid_request() if method_field_seen
@@ -476,7 +492,7 @@ module DebuggerProtocolRequest:
                         if is_json_whitespace(byte) and (prefix_position == REQUEST_METHOD_PREFIX_LENGTH - 2 or prefix_position == REQUEST_METHOD_PREFIX_LENGTH - 1):
                             prefix_position <- prefix_position
                         else:
-                            if byte == prefix[0]:
+                            if byte == prefix[0] and not json_byte_is_escaped(payload, index):
                                 prefix_position <- 1
                             else:
                                 prefix_position <- 0
@@ -493,7 +509,7 @@ module DebuggerProtocolRequest:
                             method_length <- method_length + 1
                             return invalid_request() if method_length > REQUEST_MAX_METHOD_LENGTH
                 if not in_id:
-                    if byte == id_prefix[id_position]:
+                    if byte == id_prefix[id_position] and (id_position != 0 or not json_byte_is_escaped(payload, index)):
                         id_position <- id_position + 1
                         if id_position == REQUEST_ID_PREFIX_LENGTH:
                             return invalid_request() if id_field_seen
@@ -507,7 +523,7 @@ module DebuggerProtocolRequest:
                         if is_json_whitespace(byte) and id_position == REQUEST_ID_PREFIX_LENGTH - 1:
                             id_position <- id_position
                         else:
-                            if byte == id_prefix[0]:
+                            if byte == id_prefix[0] and not json_byte_is_escaped(payload, index):
                                 id_position <- 1
                             else:
                                 id_position <- 0
@@ -543,7 +559,7 @@ module DebuggerProtocolRequest:
                                     return invalid_request() if not is_numeric_terminator(byte)
                                     in_id <- false
                 if not in_expected:
-                    if byte == expected_prefix[expected_position]:
+                    if byte == expected_prefix[expected_position] and (expected_position != 0 or not json_byte_is_escaped(payload, index)):
                         expected_position <- expected_position + 1
                         if expected_position == REQUEST_EXPECTED_PREFIX_LENGTH:
                             return invalid_request() if expected_field_seen
@@ -556,7 +572,7 @@ module DebuggerProtocolRequest:
                         if is_json_whitespace(byte) and (expected_position == REQUEST_EXPECTED_PREFIX_LENGTH - 1 or expected_position == REQUEST_EXPECTED_PREFIX_LENGTH - 2):
                             expected_position <- expected_position
                         else:
-                            if byte == expected_prefix[0]:
+                            if byte == expected_prefix[0] and not json_byte_is_escaped(payload, index):
                                 expected_position <- 1
                             else:
                                 expected_position <- 0
@@ -592,7 +608,7 @@ module DebuggerProtocolRequest:
                                     return invalid_request() if not is_numeric_terminator(byte)
                                     in_expected <- false
                 if not in_target:
-                    if byte == target_prefix[target_position]:
+                    if byte == target_prefix[target_position] and (target_position != 0 or not json_byte_is_escaped(payload, index)):
                         target_position <- target_position + 1
                         if target_position == REQUEST_TARGET_PREFIX_LENGTH:
                             return invalid_request() if target_field_seen
@@ -605,7 +621,7 @@ module DebuggerProtocolRequest:
                         if is_json_whitespace(byte) and (target_position == REQUEST_TARGET_PREFIX_LENGTH - 1 or target_position == REQUEST_TARGET_PREFIX_LENGTH - 2):
                             target_position <- target_position
                         else:
-                            if byte == target_prefix[0]:
+                            if byte == target_prefix[0] and not json_byte_is_escaped(payload, index):
                                 target_position <- 1
                             else:
                                 target_position <- 0

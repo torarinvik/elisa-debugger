@@ -17,6 +17,7 @@ module DebuggerConcurrencyRuntime:
         const ROOT_TASK_ID: u64 = 0
         const NO_TASK_INDEX: usize = TASK_RUNTIME_CAPACITY
         const SYNCHRONIZATION_KIND_MAX: u16 = 4
+        const TASK_STATE_MAX: u16 = 5
 
         def next_logical_time(current: u64) -> u64:
             return MAX_LOGICAL_TIME if current == MAX_LOGICAL_TIME
@@ -160,3 +161,23 @@ module DebuggerConcurrencyRuntime:
 
         def runtime_task_count(runtime: TaskRuntime) -> usize:
             return runtime.task_count
+
+        def runtime_is_valid(runtime: mutable TaskRuntime&) -> bool:
+            return false if runtime.task_count > TASK_RUNTIME_CAPACITY or runtime.wait_count > WAIT_EDGE_CAPACITY
+            return false if runtime.next_id == ROOT_TASK_ID or runtime.status.u16() > RuntimeStatus.Diverged.u16()
+            for index in 0..<runtime.task_count:
+                task: DebuggerConcurrency::TaskInfo = runtime.tasks[index]
+                return false if task.id.value == ROOT_TASK_ID or task.state.u16() > TASK_STATE_MAX
+                return false if task.id.value >= runtime.next_id
+                for previous in 0..<index:
+                    return false if runtime.tasks[previous].id.value == task.id.value
+            for index in 0..<runtime.wait_count:
+                edge: DebuggerConcurrency::WaitEdge = runtime.waits[index]
+                return false if edge.waiter.value == ROOT_TASK_ID or edge.owner.value == ROOT_TASK_ID or edge.resource.value == ROOT_TASK_ID or edge.kind.u16() > SYNCHRONIZATION_KIND_MAX
+                waiter_index: usize = runtime_find_index(runtime, edge.waiter)
+                owner_index: usize = runtime_find_index(runtime, edge.owner)
+                return false if waiter_index == NO_TASK_INDEX or owner_index == NO_TASK_INDEX or runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Blocked
+                return false if runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Cancelled
+                for previous in 0..<index:
+                    return false if runtime.waits[previous].waiter.value == edge.waiter.value
+            return true

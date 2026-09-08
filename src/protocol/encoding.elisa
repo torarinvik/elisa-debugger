@@ -26,6 +26,13 @@ module DebuggerProtocolEncoding:
         const PRODUCT_VERSION: cstr = "0.1.0"
         const MANAGED_ENGINE_NAME: cstr = "managed"
         const NO_PAGE: u64 = 0
+        const NO_REQUEST_ID: u64 = 0
+        const REQUEST_KIND_PREFIX: cstr = "{\"kind\":\"request\",\"method\":"
+        const REQUEST_ID_PREFIX: cstr = ",\"id\":"
+        const REQUEST_SESSION_PREFIX: cstr = ",\"sessionId\":"
+        const REQUEST_EXPECTED_PREFIX: cstr = ",\"expectedStopGeneration\":"
+        const REQUEST_PAGE_PREFIX: cstr = ",\"pageSize\":"
+        const REQUEST_TARGET_PREFIX: cstr = ",\"targetEvent\":"
 
         def buffer_put_byte(buffer: mutable JsonBuffer&, byte: u8) -> void:
             if buffer.failed or buffer.length >= JSON_BUFFER_CAPACITY:
@@ -87,6 +94,26 @@ module DebuggerProtocolEncoding:
             buffer_put_u64(buffer, value)
             buffer_put_byte(buffer, ASCII_QUOTE)
 
+        def buffer_put_named_id_string(buffer: mutable JsonBuffer&, name: cstr, value: u64) -> void:
+            buffer_put_cstr(buffer, name)
+            buffer_put_id_string(buffer, value)
+
+        def request_id_is_valid(request: DebuggerProtocol::RequestEnvelope) -> bool:
+            return request.request_id > NO_REQUEST_ID if request.method != DebuggerProtocol::Method.Discover
+            return true
+
+        def buffer_put_request_fields(buffer: mutable JsonBuffer&, request: DebuggerProtocol::RequestEnvelope&) -> void:
+            buffer_put_cstr(buffer, REQUEST_KIND_PREFIX)
+            buffer_put_json_string(buffer, DebuggerProtocolVocabulary::method_name(request.method))
+            if request.request_id > NO_REQUEST_ID:
+                buffer_put_named_id_string(buffer, REQUEST_ID_PREFIX, request.request_id)
+            buffer_put_named_id_string(buffer, REQUEST_SESSION_PREFIX, request.session_id)
+            buffer_put_named_id_string(buffer, REQUEST_EXPECTED_PREFIX, request.expected_stop_generation)
+            buffer_put_cstr(buffer, REQUEST_PAGE_PREFIX)
+            buffer_put_u64(buffer, request.page_size)
+            buffer_put_named_id_string(buffer, REQUEST_TARGET_PREFIX, request.target_event)
+            buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
+
         def buffer_put_next_page(buffer: mutable JsonBuffer&, next_page: u64) -> void:
             return if next_page == NO_PAGE
             buffer_put_cstr(buffer, ",\"next\":")
@@ -134,6 +161,19 @@ module DebuggerProtocolEncoding:
                 buffer_put_cstr(buffer, ",\"message\":\"debugger request failed\",\"detail\":")
                 buffer_put_u64(buffer, response.failure.detail.u64())
                 buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        # Encode the stable editor-neutral request envelope.  Numeric identity
+        # fields are strings so JavaScript clients cannot lose precision;
+        # pageSize remains a bounded JSON number because it is a count.
+        # Discovery may omit its id by passing zero.  Every other method needs
+        # a non-zero request id so responses can be correlated safely.
+        def request_encode(request: DebuggerProtocol::RequestEnvelope) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request.kind != DebuggerProtocol::MessageKind.Request or not DebuggerProtocol::method_is_valid(request.method) or not request_id_is_valid(request) or request.page_size > DebuggerProtocol::protocol_bound_page_size(request.page_size):
+                buffer.failed <- true
+                return buffer
+            buffer_put_request_fields(buffer, request)
             return buffer
 
         def discovery_response_encode(request_id: u64) -> JsonBuffer:

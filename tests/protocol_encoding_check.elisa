@@ -1,11 +1,54 @@
 include "../src/protocol/encoding.elisa"
+include "../src/protocol/request.elisa"
 
 const SUCCESS_ID: u64 = 42
 const SUCCESS_GENERATION: u64 = 9
+const SESSION_ID: u64 = 7
+const TARGET_EVENT: u64 = 11
+const PAGE_SIZE: u64 = 32
+const MAX_PAGE_SIZE: u64 = 256
+
 def main() -> i64:
     success: DebuggerProtocol::ResponseEnvelope = DebuggerProtocol::response_ok(SUCCESS_ID, SUCCESS_GENERATION)
     encoded: mutable DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::response_encode(success)
     return 1 if not DebuggerProtocolEncoding::json_buffer_is_valid(encoded)
     return 2 if encoded.length != 87 or encoded.bytes[0] != 123 or encoded.bytes[86] != 125
-    return 0
+
+    request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{
+        kind: DebuggerProtocol::MessageKind.Request,
+        method: DebuggerProtocol::Method.Seek,
+        request_id: SUCCESS_ID,
+        session_id: SESSION_ID,
+        expected_stop_generation: SUCCESS_GENERATION,
+        page_size: PAGE_SIZE,
+        target_event: TARGET_EVENT
+    }
+    request_encoded: mutable DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::request_encode(request)
+    return 3 if not DebuggerProtocolEncoding::json_buffer_is_valid(request_encoded)
+    parsed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(request_encoded.bytes[0], request_encoded.length)
+    return 4 if not parsed.valid or parsed.method != DebuggerProtocolRequest::RequestMethod.Seek
+    return 5 if not parsed.has_id or parsed.id != SUCCESS_ID or parsed.expected_generation != SUCCESS_GENERATION or parsed.target_event != TARGET_EVENT
+
+    discovery: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{
+        kind: DebuggerProtocol::MessageKind.Request,
+        method: DebuggerProtocol::Method.Discover,
+        request_id: 0,
+        session_id: 0,
+        expected_stop_generation: 0,
+        page_size: 0,
+        target_event: 0
+    }
+    discovery_encoded: mutable DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::request_encode(discovery)
+    discovery_parsed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(discovery_encoded.bytes[0], discovery_encoded.length)
+    return 6 if discovery_encoded.failed or not discovery_parsed.valid or discovery_parsed.has_id
+
+    invalid_id: DebuggerProtocol::RequestEnvelope = request
+    invalid_id.request_id <- 0
+    invalid_encoded: mutable DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::request_encode(invalid_id)
+    return 7 if not invalid_encoded.failed
+
+    invalid_page: DebuggerProtocol::RequestEnvelope = request
+    invalid_page.page_size <- MAX_PAGE_SIZE + 1
+    invalid_page_encoded: mutable DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::request_encode(invalid_page)
+    return 8 if not invalid_page_encoded.failed
     return 0

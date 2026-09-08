@@ -28,7 +28,11 @@ module DebuggerTraceStorage:
         const TRACE_HASH_PRIME: u64 = 1099511628211
         const TRACE_KIND_MAX: u16 = 5
         const TRACE_MANIFEST_KIND: u16 = 0
+        const TRACE_METADATA_KIND: u16 = 1
         const TRACE_EVENTS_KIND: u16 = 2
+        const TRACE_CHECKPOINT_KIND: u16 = 3
+        const TRACE_RESOURCE_KIND: u16 = 4
+        const TRACE_INDEX_KIND: u16 = 5
         const TRACE_EVENT_SCHEMA_BYTES: usize = 4
         const TRACE_EVENT_ORDINAL_BYTES: usize = 8
         const TRACE_EVENT_ID_BYTES: usize = 8
@@ -64,6 +68,18 @@ module DebuggerTraceStorage:
             manifest_exact: mutable bool
             event_chunk_seen: mutable bool
 
+        struct ChunkDecode:
+            chunk: mutable StoredChunk
+            status: mutable StorageStatus
+
+        struct Footer:
+            next_sequence: mutable u64
+            verified_event: mutable u64
+
+        struct FooterDecode:
+            footer: mutable Footer
+            status: mutable StorageStatus
+
         def storage_write_all(fd: int, bytes: u8&, length: usize) -> StorageStatus can[Blocking.IO]:
             offset: mutable usize = 0
             while offset < length:
@@ -72,6 +88,60 @@ module DebuggerTraceStorage:
                 return StorageStatus.IoFailure if written.usize() > length - offset
                 offset <- offset + written.usize()
             return StorageStatus.Ready
+
+        # Decode one complete canonical chunk. The result is invalid unless
+        # the caller supplied exactly one header plus its declared payload.
+        # This prevents a transport adapter from accidentally accepting a
+        # valid prefix while leaving trailing bytes to be interpreted as a
+        # second message.
+        def storage_decode_chunk(bytes: u8&, length: usize) -> ChunkDecode:
+            result: mutable ChunkDecode = zeroed
+            result.status <- StorageStatus.Truncated if length < TRACE_HEADER_BYTES
+            return result if length < TRACE_HEADER_BYTES
+            result.status <- StorageStatus.Oversized if length > TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY
+            return result if length > TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY
+            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], length)
+            magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            magic3: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            schema: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+            kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+            sequence: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            first_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            last_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            payload_length: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            checksum: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader)
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if magic0 != TRACE_MAGIC_0 or magic1 != TRACE_MAGIC_1 or magic2 != TRACE_MAGIC_2 or magic3 != TRACE_MAGIC_3 or schema != TRACE_FORMAT_VERSION or kind > TRACE_KIND_MAX or last_event < first_event
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Oversized} if payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY.u64()
+            declared_length: usize = TRACE_HEADER_BYTES + payload_length.usize()
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if declared_length > length
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if declared_length != length
+            result.chunk.header <- DebuggerTrace::ChunkHeader{schema: schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest if kind == TRACE_MANIFEST_KIND else DebuggerTrace::ChunkKind.Metadata if kind == TRACE_METADATA_KIND else DebuggerTrace::ChunkKind.Events if kind == TRACE_EVENTS_KIND else DebuggerTrace::ChunkKind.Checkpoint if kind == TRACE_CHECKPOINT_KIND else DebuggerTrace::ChunkKind.Resource if kind == TRACE_RESOURCE_KIND else DebuggerTrace::ChunkKind.Index, sequence: sequence, first_event: first_event, last_event: last_event, payload_length: payload_length, checksum: checksum}
+            result.chunk.payload_length <- payload_length.usize()
+            result.chunk.checksum <- checksum
+            for index in 0..<result.chunk.payload_length:
+                result.chunk.payload[index] <- DebuggerTraceBinary::reader_take_byte(reader)
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if not DebuggerTrace::trace_chunk_range_valid(result.chunk.header)
+            computed: mutable u64 = TRACE_HASH_OFFSET_BASIS
+            for index in 0..<result.chunk.payload_length:
+                computed <- (computed ^ result.chunk.payload[index].u64()) * TRACE_HASH_PRIME
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if computed != checksum
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and result.chunk.payload_length == 0
+            result.status <- StorageStatus.Ready
+            return result
+
+        def storage_decode_footer(bytes: u8&, length: usize) -> FooterDecode:
+            return FooterDecode{footer: zeroed, status: StorageStatus.Truncated} if length < TRACE_FOOTER_BYTES
+            return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if length != TRACE_FOOTER_BYTES
+            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], length)
+            magic: u32 = DebuggerTraceBinary::reader_take_u32(reader)
+            next_sequence: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            verified_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if magic != TRACE_FOOTER_MAGIC or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+            return FooterDecode{footer: Footer{next_sequence: next_sequence, verified_event: verified_event}, status: StorageStatus.Ready}
 
         def storage_encode_chunk(chunk: StoredChunk) -> DebuggerTraceBinary::ByteWriter:
             writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()

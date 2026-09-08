@@ -1,0 +1,41 @@
+include "../src/trace/storage.elisa"
+include "../src/trace/binary.elisa"
+
+const RECORDING_ID: u64 = 9
+const CHUNK_SEQUENCE: u64 = 1
+const FIRST_EVENT: u64 = 4
+const LAST_EVENT: u64 = 4
+const PAYLOAD_LENGTH: usize = 3
+const TRAILING_BYTE_LENGTH: usize = 1
+
+def main() -> i64:
+    payload_writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    payload_writer <- DebuggerTraceBinary::writer_put_byte(payload_writer, 65)
+    payload_writer <- DebuggerTraceBinary::writer_put_byte(payload_writer, 66)
+    payload_writer <- DebuggerTraceBinary::writer_put_byte(payload_writer, 67)
+    checksum: u64 = DebuggerTraceBinary::writer_checksum(payload_writer)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: 1, kind: DebuggerTrace::ChunkKind.Metadata, sequence: CHUNK_SEQUENCE, first_event: FIRST_EVENT, last_event: LAST_EVENT, payload_length: PAYLOAD_LENGTH.u64(), checksum: checksum}
+    chunk.payload_length <- PAYLOAD_LENGTH
+    chunk.checksum <- checksum
+    for index in 0..<PAYLOAD_LENGTH:
+        chunk.payload[index] <- payload_writer.bytes[index]
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    return 1 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    decoded: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(encoded.bytes[0], encoded.length)
+    return 2 if decoded.status != DebuggerTraceStorage::StorageStatus.Ready or decoded.chunk.header.kind != DebuggerTrace::ChunkKind.Metadata or decoded.chunk.header.sequence != CHUNK_SEQUENCE or decoded.chunk.payload_length != PAYLOAD_LENGTH or decoded.chunk.payload[2] != 67
+    truncated: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(encoded.bytes[0], encoded.length - TRAILING_BYTE_LENGTH)
+    return 3 if truncated.status != DebuggerTraceStorage::StorageStatus.Truncated
+    with_trailing: mutable u8[8192] = zeroed
+    for index in 0..<encoded.length:
+        with_trailing[index] <- encoded.bytes[index]
+    with_trailing[encoded.length] <- 88
+    trailing: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(with_trailing[0], encoded.length + TRAILING_BYTE_LENGTH)
+    return 4 if trailing.status != DebuggerTraceStorage::StorageStatus.Invalid
+    with_trailing[encoded.length - 1] <- with_trailing[encoded.length - 1] + 1
+    corrupt: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(with_trailing[0], encoded.length)
+    return 5 if corrupt.status != DebuggerTraceStorage::StorageStatus.Invalid
+    footer_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(CHUNK_SEQUENCE + 1, LAST_EVENT)
+    footer: DebuggerTraceStorage::FooterDecode = DebuggerTraceStorage::storage_decode_footer(footer_bytes.bytes[0], footer_bytes.length)
+    return 6 if footer.status != DebuggerTraceStorage::StorageStatus.Ready or footer.footer.next_sequence != CHUNK_SEQUENCE + 1 or footer.footer.verified_event != LAST_EVENT
+    return 0

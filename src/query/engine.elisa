@@ -38,12 +38,13 @@ module DebuggerQueryEngine:
             count: mutable usize
             scanned: mutable u64
             next_event: mutable u64
+            next_index: mutable usize
             complete: mutable bool
             cancelled: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
         def query_execution_new(window: DebuggerHistory::QueryWindow) -> QueryExecution:
-            return QueryExecution{window: window, matches: zeroed, count: 0, scanned: 0, next_event: window.first_event, complete: false, cancelled: false, failure: DebuggerErrors::no_error()}
+            return QueryExecution{window: window, matches: zeroed, count: 0, scanned: 0, next_event: window.first_event, next_index: 0, complete: false, cancelled: false, failure: DebuggerErrors::no_error()}
 
         def query_execution_is_valid(execution: QueryExecution) -> bool:
             return DebuggerHistory::query_window_is_valid(execution.window) and execution.count <= QUERY_RESULT_CAPACITY and execution.next_event >= execution.window.first_event and execution.scanned <= execution.window.max_steps and not (execution.complete and execution.cancelled)
@@ -71,6 +72,7 @@ module DebuggerQueryEngine:
             for position in 0..<index.count:
                 candidate: DebuggerProvenance::Mutation = index.mutations[position]
                 result.scanned <- result.scanned + 1
+                result.next_index <- position + 1
                 result.next_event <- QUERY_MAX_EVENT if candidate.event == QUERY_MAX_EVENT and candidate.event >= result.next_event
                 result.next_event <- candidate.event + 1 if candidate.event != QUERY_MAX_EVENT and candidate.event >= result.next_event
                 if DebuggerCancellation::cancellation_is_requested(token, result.scanned):
@@ -93,7 +95,26 @@ module DebuggerQueryEngine:
                     result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, QUERY_DETAIL_CAPACITY)
                     return result
             result.complete <- true
+            result.next_index <- index.count
             return result
+
+        # Continue a paged write query from the exact index position at which
+        # the previous page stopped.  Provenance is append-only but callers
+        # may provide an unordered index, so an event number alone cannot be a
+        # safe cursor.  The suffix copy keeps the public index immutable while
+        # reusing all validation, cancellation, and limit handling above.
+        def query_resume_writes(execution: QueryExecution, index: DebuggerProvenance::ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
+            return execution if execution.complete or execution.cancelled
+            if execution.next_index > index.count or index.count > QUERY_RESULT_CAPACITY * 8 or index.overflowed:
+                failed: mutable QueryExecution = execution
+                failed.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, QUERY_DETAIL_OVERFLOW)
+                return failed
+            suffix: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+            for position in execution.next_index..<index.count:
+                suffix <- DebuggerProvenance::provenance_append(suffix, index.mutations[position])
+            resumed: mutable QueryExecution = query_find_writes(suffix, binding, execution.window, token)
+            resumed.next_index <- execution.next_index + resumed.next_index
+            return resumed
 
         def query_find_next_write(index: DebuggerProvenance::ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, after_event: u64, window: DebuggerHistory::QueryWindow) -> DebuggerProvenance::Mutation:
             result: mutable DebuggerProvenance::Mutation = zeroed

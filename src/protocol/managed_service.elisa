@@ -12,6 +12,7 @@ include "../replay/full_checkpoint.elisa"
 include "../replay/branches.elisa"
 include "../metadata/source.elisa"
 include "../inspect/store.elisa"
+include "../query/timeline.elisa"
 
 module DebuggerManagedService:
     private:
@@ -33,6 +34,7 @@ module DebuggerManagedService:
             last_checkpoint_hash: mutable u64
             has_checkpoint: mutable bool
             last_branch: mutable DebuggerIdentity::DebugId
+            timeline: mutable DebuggerTimeline::Timeline
 
         struct Result:
             accepted: mutable bool
@@ -44,7 +46,7 @@ module DebuggerManagedService:
             failure: mutable DebuggerErrors::DebuggerError
 
         def service_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> Service:
-            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error(), last_checkpoint_event: 0, last_checkpoint_hash: 0, has_checkpoint: false, last_branch: DebuggerIdentity::debug_id(0)}
+            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error(), last_checkpoint_event: 0, last_checkpoint_hash: 0, has_checkpoint: false, last_branch: DebuggerIdentity::debug_id(0), timeline: DebuggerTimeline::timeline_new(session.position, session.capabilities)}
 
         def result_error(failure: DebuggerErrors::DebuggerError) -> Result:
             return Result{accepted: false, failure: failure}
@@ -57,6 +59,28 @@ module DebuggerManagedService:
 
         def checkpoint_ok(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> CheckpointResult:
             return CheckpointResult{accepted: true, checkpoint: checkpoint, failure: DebuggerErrors::no_error()}
+
+        # Keep the public history view aligned with the provider after every
+        # operation that can move the stop position.  Bounds are monotonic for
+        # a service lifetime: moving backward changes the current position but
+        # never erases retained history.
+        def service_sync_timeline(service: mutable Service&) -> void:
+            position: DebuggerIdentity::Position = service.controller.session.position
+            bounds: mutable DebuggerTimeline::HistoryBounds = service.timeline.bounds
+            if not bounds.has_retained:
+                bounds <- DebuggerTimeline::history_bounds_new(position.event)
+            bounds.retained_first <- position.event if position.event < bounds.retained_first
+            bounds.retained_last <- position.event if position.event > bounds.retained_last
+            if service.controller.session.capabilities.history == DebuggerCapabilities::HistoryKind.Exact:
+                had_exact: mutable bool = bounds.has_exact
+                bounds.has_exact <- true
+                bounds.exact_first <- position.event if not had_exact or position.event < bounds.exact_first
+                bounds.exact_last <- position.event if not had_exact or position.event > bounds.exact_last
+                bounds.exact_first <- bounds.retained_first if bounds.exact_first < bounds.retained_first
+                bounds.exact_last <- bounds.retained_last if bounds.exact_last > bounds.retained_last
+            service.timeline.bounds <- bounds
+            service.timeline.position <- position
+            service.timeline.bounds.current <- position.event
 
         def service_dispatch(service: mutable Service&, request: DebuggerProtocolRequest::Request) -> Result:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
@@ -160,7 +184,9 @@ module DebuggerManagedService:
             if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Memory and request.method != DebuggerProtocolRequest::RequestMethod.Threads and request.method != DebuggerProtocolRequest::RequestMethod.Stack and request.method != DebuggerProtocolRequest::RequestMethod.Scopes and request.method != DebuggerProtocolRequest::RequestMethod.Variables and request.method != DebuggerProtocolRequest::RequestMethod.Evaluate and request.method != DebuggerProtocolRequest::RequestMethod.SetBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.Checkpoint and request.method != DebuggerProtocolRequest::RequestMethod.Branch and request.method != DebuggerProtocolRequest::RequestMethod.Compare and request.method != DebuggerProtocolRequest::RequestMethod.TraceVerify and request.method != DebuggerProtocolRequest::RequestMethod.TraceExport:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method != DebuggerProtocolRequest::RequestMethod.Discover and request.method != DebuggerProtocolRequest::RequestMethod.Initialize and request.method != DebuggerProtocolRequest::RequestMethod.CreateSession and request.method != DebuggerProtocolRequest::RequestMethod.OpenTrace and request.method != DebuggerProtocolRequest::RequestMethod.Replay and request.method != DebuggerProtocolRequest::RequestMethod.Detach and request.method != DebuggerProtocolRequest::RequestMethod.Terminate and request.method != DebuggerProtocolRequest::RequestMethod.Close
             service.last_error <- failure
+            service_sync_timeline(service)
             return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            service_sync_timeline(service)
             return result_ok()
 
         def service_frame(service: mutable Service&) -> DebuggerManagedInspection::FrameSnapshot:
@@ -217,6 +243,20 @@ module DebuggerManagedService:
 
         def service_last_branch(service: Service) -> DebuggerIdentity::DebugId:
             return service.last_branch
+
+        def service_timeline(service: Service) -> DebuggerTimeline::Timeline:
+            return service.timeline
+
+        def service_add_bookmark(service: mutable Service&, label: DebuggerIdentity::DebugId, note: DebuggerIdentity::DebugId, pinned: bool) -> DebuggerTimeline::TimelineResult:
+            service_sync_timeline(service)
+            result: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_add_bookmark(service.timeline, label, note, pinned)
+            service.timeline <- result.timeline
+            return result
+
+        def service_remove_bookmark(service: mutable Service&, bookmark: DebuggerIdentity::DebugId) -> DebuggerTimeline::TimelineResult:
+            result: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_remove_bookmark(service.timeline, bookmark)
+            service.timeline <- result.timeline
+            return result
 
         def service_step_over(service: mutable Service&) -> Result:
             failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_over(service.controller)

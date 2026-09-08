@@ -4,6 +4,8 @@ module DebuggerProtocolFraming:
     private:
         const FRAME_MAX_PAYLOAD: usize = 65536
         const FRAME_MAX_HEADER_DIGITS: usize = 10
+        const FRAME_HEADER_SUFFIX_BYTES: usize = 2
+        const FRAME_OUTPUT_CAPACITY: usize = FRAME_MAX_HEADER_DIGITS + FRAME_HEADER_SUFFIX_BYTES + FRAME_MAX_PAYLOAD
         const ASCII_ZERO: u8 = 48
         const ASCII_NINE: u8 = 57
         const ASCII_SPACE: u8 = 32
@@ -15,7 +17,13 @@ module DebuggerProtocolFraming:
             Header
             Payload
             Trailer
+            Complete
             Failed
+
+        struct FrameBuffer:
+            bytes: mutable u8[FRAME_OUTPUT_CAPACITY]
+            length: mutable usize
+            failed: mutable bool
 
         struct FrameDecoder:
             state: mutable FrameDecoderState
@@ -36,6 +44,46 @@ module DebuggerProtocolFraming:
             decoder.payload_received <- 0
             decoder.header_value <- 0
             decoder.header_digits <- 0
+
+        def frame_buffer_new() -> FrameBuffer:
+            return FrameBuffer{bytes: zeroed, length: 0, failed: false}
+
+        def frame_buffer_put_byte(buffer: mutable FrameBuffer&, byte: u8) -> void:
+            if buffer.failed or buffer.length >= FRAME_OUTPUT_CAPACITY:
+                buffer.failed <- true
+                return
+            buffer.bytes[buffer.length] <- byte
+            buffer.length <- buffer.length + 1
+
+        # Encode the transport format as `<decimal byte length> <payload>\n`.
+        # The caller owns the payload storage and the result owns its output,
+        # so adapters can write a frame without exposing internal buffers.
+        def frame_encode(payload: u8&, length: usize) -> FrameBuffer:
+            buffer: mutable FrameBuffer = frame_buffer_new()
+            if length > FRAME_MAX_PAYLOAD:
+                buffer.failed <- true
+                return buffer
+            digits: mutable u8[FRAME_MAX_HEADER_DIGITS] = zeroed
+            digit_count: mutable usize = 0
+            remaining: mutable usize = length
+            if remaining == 0:
+                digits[0] <- ASCII_ZERO
+                digit_count <- 1
+            else:
+                while remaining > 0:
+                    if digit_count >= FRAME_MAX_HEADER_DIGITS:
+                        buffer.failed <- true
+                        return buffer
+                    digits[digit_count] <- (remaining % DECIMAL_BASE).u8() + ASCII_ZERO
+                    digit_count <- digit_count + 1
+                    remaining <- remaining / DECIMAL_BASE
+                for index in 0..<digit_count:
+                    frame_buffer_put_byte(buffer, digits[digit_count - index - 1])
+            frame_buffer_put_byte(buffer, ASCII_SPACE)
+            for index in 0..<length:
+                frame_buffer_put_byte(buffer, payload[index])
+            frame_buffer_put_byte(buffer, ASCII_NEWLINE)
+            return buffer
 
         def frame_decoder_accept(decoder: mutable FrameDecoder&, byte: u8) -> bool:
             return false if decoder.state == FrameDecoderState.Failed
@@ -66,7 +114,11 @@ module DebuggerProtocolFraming:
                 return false
             if decoder.state == FrameDecoderState.Trailer:
                 if byte == ASCII_NEWLINE:
+                    decoder.state <- FrameDecoderState.Complete
                     return true
+                decoder.state <- FrameDecoderState.Failed
+                return false
+            if decoder.state == FrameDecoderState.Complete:
                 decoder.state <- FrameDecoderState.Failed
                 return false
             return false
@@ -76,3 +128,9 @@ module DebuggerProtocolFraming:
 
         def frame_decoder_length(decoder: mutable FrameDecoder&) -> usize:
             return decoder.payload_length
+
+        def frame_decoder_is_complete(decoder: FrameDecoder) -> bool:
+            return decoder.state == FrameDecoderState.Complete
+
+        def frame_buffer_is_valid(buffer: FrameBuffer) -> bool:
+            return not buffer.failed and buffer.length <= FRAME_OUTPUT_CAPACITY

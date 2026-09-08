@@ -169,9 +169,28 @@ module DebuggerConcurrencyRuntime:
         def runtime_task_count(runtime: TaskRuntime) -> usize:
             return runtime.task_count
 
+        def runtime_status_is_consistent(runtime: TaskRuntime) -> bool:
+            has_runnable: mutable bool = false
+            has_running: mutable bool = false
+            has_blocked: mutable bool = false
+            has_live: mutable bool = false
+            for index in 0..<runtime.task_count:
+                state: DebuggerConcurrency::TaskState = runtime.tasks[index].state
+                has_runnable <- true if state == DebuggerConcurrency::TaskState.Runnable
+                has_running <- true if state == DebuggerConcurrency::TaskState.Running
+                has_blocked <- true if state == DebuggerConcurrency::TaskState.Blocked
+                has_live <- true if DebuggerConcurrency::task_is_active(runtime.tasks[index])
+            return runtime.status == RuntimeStatus.Running if has_running
+            return runtime.status == RuntimeStatus.Ready if has_runnable
+            return runtime.status == RuntimeStatus.Blocked if has_blocked
+            return runtime.status == RuntimeStatus.Ready if not has_live and runtime.task_count == 0
+            return runtime.status == RuntimeStatus.Completed if not has_live
+            return runtime.status == RuntimeStatus.Diverged
+
         def runtime_is_valid(runtime: mutable TaskRuntime&) -> bool:
             return false if runtime.task_count > TASK_RUNTIME_CAPACITY or runtime.wait_count > WAIT_EDGE_CAPACITY
             return false if runtime.next_id == ROOT_TASK_ID or runtime.status.u16() > RuntimeStatus.Diverged.u16()
+            return false if not runtime_status_is_consistent(runtime)
             if runtime.current.value != ROOT_TASK_ID:
                 current_index: usize = runtime_find_index(runtime, runtime.current)
                 return false if current_index == NO_TASK_INDEX or not DebuggerConcurrency::task_is_active(runtime.tasks[current_index])

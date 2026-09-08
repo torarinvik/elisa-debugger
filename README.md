@@ -109,11 +109,12 @@ invalid frame without attempting to execute target code.
 `build/elisa-debugger-dap-server` is the standard DAP transport entrypoint. It
 accepts `Content-Length` framed messages and dispatches initialize, launch,
 configuration, continue, next, reverse-step, pause, threads, stack, scopes,
-variables, evaluate, breakpoint, and lifecycle commands. It correlates every
-response with the request sequence and applies the shared session state
-machine. Managed capability negotiation advertises reverse execution,
-watchpoints, and hover evaluation; unavailable values remain explicit in the
-response body rather than being fabricated.
+variables, evaluate, breakpoint, `readMemory`, and lifecycle commands. It
+correlates every response with the request sequence and applies the shared
+session state machine. Managed capability negotiation advertises reverse
+execution, watchpoints, hover evaluation, and bounded logical-memory reads;
+unavailable values remain explicit in the response body rather than being
+fabricated.
 
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,

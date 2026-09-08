@@ -17,6 +17,7 @@ module DebuggerWatchpoints:
         const DETAIL_STALE: u32 = 2
         const DETAIL_ENUM: u32 = 3
         const ACCESS_KIND_MAX: u16 = 2
+        const WATCHPOINT_STATE_MAX: u16 = 3
 
     public:
         enum AccessKind:
@@ -72,6 +73,16 @@ module DebuggerWatchpoints:
                 return table.points[index] if table.points[index].id.value == id.value
             return result
 
+        def watchpoints_is_valid(table: WatchpointTable) -> bool:
+            return false if table.count > WATCHPOINT_CAPACITY or table.next_id == WATCHPOINT_NO_VALUE or table.next_id > WATCHPOINT_MAX_ID
+            for index in 0..<table.count:
+                point: DataBreakpoint = table.points[index]
+                return false if point.id.value == WATCHPOINT_NO_VALUE or point.allocation.allocation.value == WATCHPOINT_NO_ALLOCATION or point.allocation.generation == WATCHPOINT_NO_GENERATION or point.access.u16() > ACCESS_KIND_MAX or point.state.u16() > WATCHPOINT_STATE_MAX or point.generation == WATCHPOINT_NO_GENERATION or point.hit_count > WATCHPOINT_MAX_HIT_COUNT
+                return false if point.id.value >= table.next_id
+                for previous in 0..<index:
+                    return false if table.points[previous].id.value == point.id.value
+            return true
+
         def watchpoint_observe(table: mutable WatchpointTable&, id: DebuggerIdentity::DebugId, allocation: DebuggerIdentity::AllocationIdentity, value_hash: u64, generation: u64) -> Observation:
             return watchpoint_observe_access(table, id, allocation, value_hash, generation, AccessKind.Write)
 
@@ -80,6 +91,9 @@ module DebuggerWatchpoints:
             result.failure <- DebuggerErrors::no_error()
             if table.count > WATCHPOINT_CAPACITY:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY)
+                return result
+            if not watchpoints_is_valid(table):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENUM)
                 return result
             if observed.u16() > ACCESS_KIND_MAX:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENUM)

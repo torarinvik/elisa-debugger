@@ -89,6 +89,32 @@ module DebuggerTraceStorage:
                 offset <- offset + written.usize()
             return StorageStatus.Ready
 
+        def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
+            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
+            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
+            return false if event_count == 0 or first_event > TRACE_MAX_EVENT - (event_count - 1).u64()
+            return false if last_event != first_event + (event_count - 1).u64()
+            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
+            recording: mutable u64 = 0
+            for index in 0..<event_count:
+                event_schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
+                ordinal: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                event_recording: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                _ = DebuggerTraceBinary::reader_take_u64(reader)
+                position_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                position_task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                _ = DebuggerTraceBinary::reader_take_u64(reader)
+                _ = DebuggerTraceBinary::reader_take_u64(reader)
+                _ = DebuggerTraceBinary::reader_take_u32(reader)
+                kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+                quality: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+                _ = DebuggerTraceBinary::reader_take_u64(reader)
+                recording <- event_recording if recording == 0
+                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == 0 or event_recording != recording or task != position_task or kind > TRACE_EVENT_KIND_MAX or quality > TRACE_EVENT_QUALITY_MAX
+            return DebuggerTraceBinary::reader_is_valid(reader) and reader.offset == reader.length
+
+
         # Decode one complete canonical chunk. The result is invalid unless
         # the caller supplied exactly one header plus its declared payload.
         # This prevents a transport adapter from accidentally accepting a
@@ -130,6 +156,10 @@ module DebuggerTraceStorage:
                 computed <- (computed ^ result.chunk.payload[index].u64()) * TRACE_HASH_PRIME
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if computed != checksum
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and result.chunk.payload_length == 0
+            # Chunk decoding is also a public validation boundary; do not let a
+            # checksummed payload bypass the event-record invariants enforced by
+            # the full storage scanner.
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and not storage_event_payload_is_valid(bytes, TRACE_HEADER_BYTES, result.chunk.payload_length, schema.u32(), first_event, last_event)
             result.status <- StorageStatus.Ready
             return result
 
@@ -192,31 +222,6 @@ module DebuggerTraceStorage:
             writer: DebuggerTraceBinary::ByteWriter = storage_encode_footer(next_sequence, verified_event)
             return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
             return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
-
-        def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
-            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
-            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
-            return false if event_count == 0 or first_event > TRACE_MAX_EVENT - (event_count - 1).u64()
-            return false if last_event != first_event + (event_count - 1).u64()
-            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
-            recording: mutable u64 = 0
-            for index in 0..<event_count:
-                event_schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
-                ordinal: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                event_recording: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                position_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                position_task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u32(reader)
-                kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
-                quality: u16 = DebuggerTraceBinary::reader_take_u16(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                recording <- event_recording if recording == 0
-                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == 0 or event_recording != recording or task != position_task or kind > TRACE_EVENT_KIND_MAX or quality > TRACE_EVENT_QUALITY_MAX
-            return DebuggerTraceBinary::reader_is_valid(reader) and reader.offset == reader.length
 
         def storage_scan_bytes(bytes: u8&, length: usize) -> StorageScan:
             scan: mutable StorageScan = zeroed

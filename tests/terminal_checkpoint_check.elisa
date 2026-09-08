@@ -1,0 +1,26 @@
+include "../src/protocol/managed_service.elisa"
+
+const PROGRAM_VERSION: u32 = 1
+const INSTRUCTION_COUNT: u64 = 2
+const RECORDING_ID: u64 = 41
+const SESSION_ID: u64 = 42
+const BUILD_ID: u64 = 43
+const TERMINAL_EVENT: u64 = 0
+
+def main() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(BUILD_ID), runtime: DebuggerIdentity::debug_id(BUILD_ID), source: DebuggerIdentity::debug_id(BUILD_ID), target: DebuggerIdentity::debug_id(BUILD_ID), metadata_version: 1}
+    session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    session.state <- DebuggerSession::SessionState.Stopped
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: 0, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: 7, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, image, DebuggerIdentity::debug_id(RECORDING_ID))
+    service.controller.engine.machine.program_counter <- INSTRUCTION_COUNT
+    service.controller.engine.machine.halted <- true
+    service.controller.engine.event_count <- TERMINAL_EVENT.usize()
+    checkpoint_result: DebuggerManagedService::CheckpointResult = DebuggerManagedService::service_full_checkpoint(service)
+    return 1 if not checkpoint_result.accepted or not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint_result.checkpoint)
+    restored: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(service, checkpoint_result.checkpoint)
+    return 2 if not restored.accepted or not service.controller.engine.machine.halted or service.controller.engine.machine.program_counter != INSTRUCTION_COUNT
+    return 0

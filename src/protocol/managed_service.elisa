@@ -29,6 +29,10 @@ module DebuggerManagedService:
         struct Service:
             controller: mutable DebuggerManagedEngine::ManagedController
             last_error: mutable DebuggerErrors::DebuggerError
+            last_checkpoint_event: mutable u64
+            last_checkpoint_hash: mutable u64
+            has_checkpoint: mutable bool
+            last_branch: mutable DebuggerIdentity::DebugId
 
         struct Result:
             accepted: mutable bool
@@ -40,7 +44,7 @@ module DebuggerManagedService:
             failure: mutable DebuggerErrors::DebuggerError
 
         def service_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> Service:
-            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error()}
+            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error(), last_checkpoint_event: 0, last_checkpoint_hash: 0, has_checkpoint: false, last_branch: DebuggerIdentity::debug_id(0)}
 
         def result_error(failure: DebuggerErrors::DebuggerError) -> Result:
             return Result{accepted: false, failure: failure}
@@ -116,14 +120,30 @@ module DebuggerManagedService:
             if request.method == DebuggerProtocolRequest::RequestMethod.Checkpoint:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.checkpoints
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                if DebuggerErrors::error_is_ok(failure):
+                    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+                    failure <- DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
+                    if DebuggerErrors::error_is_ok(failure):
+                        service.last_checkpoint_event <- checkpoint.event
+                        service.last_checkpoint_hash <- checkpoint.state_hash
+                        service.has_checkpoint <- true
             if request.method == DebuggerProtocolRequest::RequestMethod.Branch:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.branches
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                if DebuggerErrors::error_is_ok(failure):
+                    branch: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_create_branch(service.controller)
+                    failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_UNSUPPORTED) if branch.value == 0
+                    service.last_branch <- branch if DebuggerErrors::error_is_ok(failure)
             if request.method == DebuggerProtocolRequest::RequestMethod.Compare or request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify or request.method == DebuggerProtocolRequest::RequestMethod.TraceExport:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.Compare and not service.controller.session.capabilities.provenance
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify and not service.controller.session.capabilities.trace_verification
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.TraceExport and not service.controller.session.capabilities.trace_export
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                # These operations require typed bundle/engine operands that
+                # the compact lifecycle request does not carry. Prevent a
+                # false success; callers use service_compare/trace APIs with
+                # their validated operands.
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_METHOD) if DebuggerErrors::error_is_ok(failure)
             if request.method == DebuggerProtocolRequest::RequestMethod.Detach:
                 service.controller.session <- DebuggerSession::session_detach(service.controller.session)
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
@@ -181,6 +201,18 @@ module DebuggerManagedService:
 
         def service_values(service: mutable Service&) -> DebuggerValueStore::ValueStore:
             return DebuggerManagedEngine::managed_values(service.controller)
+
+        def service_has_checkpoint(service: Service) -> bool:
+            return service.has_checkpoint
+
+        def service_last_checkpoint_event(service: Service) -> u64:
+            return service.last_checkpoint_event
+
+        def service_last_checkpoint_hash(service: Service) -> u64:
+            return service.last_checkpoint_hash
+
+        def service_last_branch(service: Service) -> DebuggerIdentity::DebugId:
+            return service.last_branch
 
         def service_step_over(service: mutable Service&) -> Result:
             failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_over(service.controller)

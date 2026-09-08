@@ -1,0 +1,196 @@
+# Bounded DAP argument decoding shared by the wire adapter.  It extracts only
+# the memory fields needed by readMemory and never treats arbitrary JSON text as
+# an address or a length.
+
+module DebuggerDAPPayload:
+    private:
+        const ASCII_QUOTE: u8 = 34
+        const ASCII_COLON: u8 = 58
+        const ASCII_COMMA: u8 = 44
+        const ASCII_BRACE_CLOSE: u8 = 125
+        const ASCII_BRACKET_CLOSE: u8 = 93
+        const ASCII_BACKSLASH: u8 = 92
+        const ASCII_SPACE: u8 = 32
+        const ASCII_TAB: u8 = 9
+        const ASCII_LINE_FEED: u8 = 10
+        const ASCII_CARRIAGE_RETURN: u8 = 13
+        const ASCII_ZERO: u8 = 48
+        const ASCII_ONE: u8 = 49
+        const ASCII_NINE: u8 = 57
+        const ASCII_A: u8 = 97
+        const ASCII_C: u8 = 99
+        const ASCII_E: u8 = 101
+        const ASCII_F: u8 = 102
+        const ASCII_M: u8 = 109
+        const ASCII_N: u8 = 110
+        const ASCII_O: u8 = 111
+        const ASCII_R: u8 = 114
+        const ASCII_UPPER_R: u8 = 82
+        const ASCII_T: u8 = 116
+        const ASCII_U: u8 = 117
+        const ASCII_Y: u8 = 121
+        const ASCII_UPPER_A: u8 = 65
+        const ASCII_UPPER_F: u8 = 70
+        const ASCII_LOWER_X: u8 = 120
+        const ASCII_UPPER_X: u8 = 88
+        const MEMORY_REFERENCE_FIELD: u8 = 1
+        const COUNT_FIELD: u8 = 2
+        const MEMORY_REFERENCE_LENGTH: usize = 15
+        const COUNT_LENGTH: usize = 5
+        const MEMORY_REFERENCE_MAX_DIGITS: usize = 16
+        const MEMORY_COUNT_MAX: u64 = 64
+        const MAX_INTEGER: u64 = 18446744073709551615
+        const NO_INDEX: usize = 18446744073709551615
+        const HEX_BASE: u64 = 16
+        const DECIMAL_BASE: u64 = 10
+        const HEX_PREFIX_LENGTH: usize = 2
+        const HEX_DIGIT_OFFSET: u64 = 10
+        const FIRST_DIGIT_COUNT: usize = 1
+
+        struct ParsedValue:
+            valid: mutable bool
+            value: mutable u64
+            end: mutable usize
+
+        def invalid_value() -> ParsedValue:
+            return ParsedValue{valid: false, value: 0, end: NO_INDEX}
+
+        def is_whitespace(byte: u8) -> bool:
+            return byte == ASCII_SPACE or byte == ASCII_TAB or byte == ASCII_LINE_FEED or byte == ASCII_CARRIAGE_RETURN
+
+        def field_length(field: u8) -> usize:
+            return MEMORY_REFERENCE_LENGTH if field == MEMORY_REFERENCE_FIELD else COUNT_LENGTH
+
+        def field_byte(field: u8, position: usize) -> u8:
+            if field == MEMORY_REFERENCE_FIELD:
+                return ASCII_M if position == 0
+                return ASCII_E if position == 1
+                return ASCII_M if position == 2
+                return ASCII_O if position == 3
+                return ASCII_R if position == 4
+                return ASCII_Y if position == 5
+                return ASCII_UPPER_R if position == 6
+                return ASCII_E if position == 7
+                return ASCII_F if position == 8
+                return ASCII_E if position == 9
+                return ASCII_R if position == 10
+                return ASCII_E if position == 11
+                return ASCII_N if position == 12
+                return ASCII_C if position == 13
+                return ASCII_E
+            return ASCII_C if position == 0
+            return ASCII_O if position == 1
+            return ASCII_U if position == 2
+            return ASCII_N if position == 3
+            return ASCII_T
+
+        def field_matches(payload: u8&, index: usize, length: usize, field: u8) -> bool:
+            key_length: usize = field_length(field)
+            return false if index >= length or payload[index] != ASCII_QUOTE or length - index < key_length + 2
+            for position in 0..<key_length:
+                return false if payload[index + 1 + position] != field_byte(field, position)
+            return payload[index + key_length + 1] == ASCII_QUOTE
+
+        def field_value_start(payload: u8&, length: usize, field: u8, start: usize) -> usize:
+            return NO_INDEX if start >= length
+            in_string: mutable bool = false
+            escaped: mutable bool = false
+            index: mutable usize = 0
+            while index < length:
+                byte: u8 = payload[index]
+                if in_string:
+                    if escaped:
+                        escaped <- false
+                    else:
+                        escaped <- true if byte == ASCII_BACKSLASH
+                        in_string <- false if byte == ASCII_QUOTE and not escaped
+                    index <- index + 1
+                else:
+                    if byte == ASCII_QUOTE:
+                        key_start: usize = index
+                        key_cursor: mutable usize = index + 1
+                        key_escaped: mutable bool = false
+                        while key_cursor < length:
+                            key_byte: u8 = payload[key_cursor]
+                            if key_escaped:
+                                key_escaped <- false
+                            else:
+                                if key_byte == ASCII_BACKSLASH:
+                                    key_escaped <- true
+                                else:
+                                    break if key_byte == ASCII_QUOTE
+                            key_cursor <- key_cursor + 1
+                        return NO_INDEX if key_cursor >= length or key_escaped
+                        lookahead: mutable usize = key_cursor + 1
+                        while lookahead < length and is_whitespace(payload[lookahead]):
+                            lookahead <- lookahead + 1
+                        if key_start >= start and field_matches(payload, key_start, length, field) and lookahead < length and payload[lookahead] == ASCII_COLON:
+                            lookahead <- lookahead + 1
+                            while lookahead < length and is_whitespace(payload[lookahead]):
+                                lookahead <- lookahead + 1
+                            return lookahead
+                        index <- key_cursor + 1
+                    else:
+                        index <- index + 1
+            return NO_INDEX
+
+        def hex_digit(byte: u8) -> ParsedValue:
+            return ParsedValue{valid: true, value: (byte - ASCII_ZERO).u64(), end: 0} if byte >= ASCII_ZERO and byte <= ASCII_NINE
+            return ParsedValue{valid: true, value: (byte - ASCII_A).u64() + HEX_DIGIT_OFFSET, end: 0} if byte >= ASCII_A and byte <= ASCII_F
+            return ParsedValue{valid: true, value: (byte - ASCII_UPPER_A).u64() + HEX_DIGIT_OFFSET, end: 0} if byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
+            return invalid_value()
+
+        def parse_memory_reference(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start >= length or payload[start] != ASCII_QUOTE
+            index: mutable usize = start + 1
+            return invalid_value() if index >= length
+            if index + HEX_PREFIX_LENGTH - 1 < length and payload[index] == ASCII_ZERO and (payload[index + 1] == ASCII_LOWER_X or payload[index + 1] == ASCII_UPPER_X):
+                index <- index + HEX_PREFIX_LENGTH
+            value: mutable u64 = 0
+            digits: mutable usize = 0
+            while index < length and payload[index] != ASCII_QUOTE:
+                return invalid_value() if payload[index] == ASCII_BACKSLASH
+                digit: ParsedValue = hex_digit(payload[index])
+                return invalid_value() if not digit.valid or digits >= MEMORY_REFERENCE_MAX_DIGITS or value > (MAX_INTEGER - digit.value) / HEX_BASE
+                value <- value * HEX_BASE + digit.value
+                digits <- digits + 1
+                index <- index + 1
+            return invalid_value() if index >= length or digits == 0
+            return ParsedValue{valid: true, value: value, end: index + 1}
+
+        def parse_count(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start >= length or payload[start] < ASCII_ZERO or payload[start] > ASCII_NINE
+            index: mutable usize = start
+            value: mutable u64 = 0
+            digits: mutable usize = 0
+            while index < length and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
+                return invalid_value() if digits == FIRST_DIGIT_COUNT and value == 0
+                digit: u64 = (payload[index] - ASCII_ZERO).u64()
+                return invalid_value() if value > (MEMORY_COUNT_MAX - digit) / DECIMAL_BASE
+                value <- value * DECIMAL_BASE + digit
+                digits <- digits + 1
+                index <- index + 1
+            return invalid_value() if digits == 0
+            if index < length:
+                return invalid_value() if not is_whitespace(payload[index]) and payload[index] != ASCII_COMMA and payload[index] != ASCII_BRACE_CLOSE and payload[index] != ASCII_BRACKET_CLOSE
+            return ParsedValue{valid: true, value: value, end: index}
+
+    public:
+        struct MemoryRequest:
+            valid: mutable bool
+            address: mutable u64
+            count: mutable usize
+
+        def memory_request_parse(payload: u8&, length: usize) -> MemoryRequest:
+            request: mutable MemoryRequest = zeroed
+            first_reference: usize = field_value_start(payload, length, MEMORY_REFERENCE_FIELD, 0)
+            first_count: usize = field_value_start(payload, length, COUNT_FIELD, 0)
+            return request if first_reference == NO_INDEX or first_count == NO_INDEX
+            return request if field_value_start(payload, length, MEMORY_REFERENCE_FIELD, first_reference + 1) != NO_INDEX or field_value_start(payload, length, COUNT_FIELD, first_count + 1) != NO_INDEX
+            reference: ParsedValue = parse_memory_reference(payload, length, first_reference)
+            count: ParsedValue = parse_count(payload, length, first_count)
+            return request if not reference.valid or not count.valid
+            request.valid <- true
+            request.address <- reference.value
+            request.count <- count.value.usize()
+            return request

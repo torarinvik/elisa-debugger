@@ -11,9 +11,11 @@ include "../core/capabilities.elisa"
 include "../core/identity.elisa"
 include "../core/errors.elisa"
 include "../engine/default_image.elisa"
+include "../inspect/memory.elisa"
 include "./request.elisa"
 include "./dispatcher.elisa"
 include "./managed_service.elisa"
+include "./dap_payload.elisa"
 
 module DebuggerDAPServer:
     private:
@@ -29,6 +31,7 @@ module DebuggerDAPServer:
         const DAP_SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
         const DAP_NO_EXPECTED_GENERATION: u64 = 0
         const DAP_FALLBACK_REQUEST_ID: u64 = 1
+        const DAP_MEMORY_DETAIL_ARGUMENT: u32 = 1
         const DAP_MAX_SOURCE_LINE: u64 = 18446744073709551615
         const DECODER_HEADER_STATE: u8 = 0
         const DECODER_PAYLOAD_STATE: u8 = 2
@@ -125,6 +128,7 @@ module DebuggerDAPServer:
         const COMMAND_HASH_SET_BREAKPOINTS: u64 = 12884271682976838880
         const COMMAND_HASH_SET_FUNCTION_BREAKPOINTS: u64 = 11587268750265955304
         const COMMAND_HASH_SET_DATA_BREAKPOINTS: u64 = 11437948931016314838
+        const COMMAND_HASH_READ_MEMORY: u64 = 3103018696112695
         const COMMAND_HASH_STEP_IN: u64 = 3402599697
         const COMMAND_HASH_STEP_OUT: u64 = 105480596706
         const COMMAND_HASH_REVERSE_CONTINUE: u64 = 13868363149491691945
@@ -193,6 +197,17 @@ module DebuggerDAPServer:
         const DAP_SET_DATA_BREAKPOINTS_COMMAND_LENGTH: usize = 18
         const DAP_SET_DATA_BREAKPOINTS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"breakpoints\":[]}}"
         const DAP_SET_DATA_BREAKPOINTS_SUFFIX_LENGTH: usize = 43
+        const DAP_READ_MEMORY_COMMAND: cstr = "readMemory"
+        const DAP_READ_MEMORY_COMMAND_LENGTH: usize = 10
+        const DAP_MEMORY_SUCCESS_BEFORE_ADDRESS: cstr = "\",\"success\":true,\"body\":{\"address\":\"0x"
+        const DAP_MEMORY_SUCCESS_BEFORE_ADDRESS_LENGTH: usize = 38
+        const DAP_MEMORY_SUCCESS_BEFORE_DATA: cstr = "\",\"data\":\""
+        const DAP_MEMORY_SUCCESS_BEFORE_DATA_LENGTH: usize = 10
+        const DAP_MEMORY_SUCCESS_AFTER_DATA: cstr = "\",\"unreadableBytes\":0}}"
+        const DAP_MEMORY_SUCCESS_AFTER_DATA_LENGTH: usize = 23
+        const DAP_MEMORY_HEX_BASE: u64 = 16
+        const DAP_MEMORY_HEX_BYTES: usize = 2
+        const DAP_FIRST_HEX_DIGIT_COUNT: usize = 1
         const DAP_STEP_IN_COMMAND: cstr = "stepIn"
         const DAP_STEP_IN_COMMAND_LENGTH: usize = 6
         const DAP_STEP_OUT_COMMAND: cstr = "stepOut"
@@ -253,6 +268,8 @@ module DebuggerDAPServer:
             json_root_state: mutable u8
             json_closed: mutable bool
             json_structural_invalid: mutable bool
+            payload: mutable u8[MAX_DAP_PAYLOAD]
+            last_payload_length: mutable usize
 
         def decoder_new() -> Decoder:
             decoder: Decoder = zeroed
@@ -792,6 +809,10 @@ module DebuggerDAPServer:
                 decoder_fail(decoder)
                 return false
             if decoder.state == DECODER_PAYLOAD_STATE:
+                if decoder.payload_received >= MAX_DAP_PAYLOAD:
+                    decoder_fail(decoder)
+                    return false
+                decoder.payload[decoder.payload_received] <- byte
                 decoder_accept_payload_byte(decoder, byte)
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
@@ -799,6 +820,7 @@ module DebuggerDAPServer:
                     if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or decoder.json_unicode_digits != 0 or decoder.json_in_primitive or not decoder.json_closed or decoder.json_structural_invalid:
                         decoder_fail(decoder)
                         return false
+                    decoder.last_payload_length <- decoder.content_length
                     decoder.state <- DECODER_HEADER_STATE
                     decoder.header_tail <- HEADER_TAIL_NONE
                     decoder.content_length <- 0
@@ -900,7 +922,17 @@ module DebuggerDAPServer:
             result: DebuggerManagedService::Result = DebuggerManagedService::service_reverse_continue(service)
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.ReverseStep, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
 
-        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64) -> DebuggerProtocolDispatcher::DispatchResult:
+        def dispatch_memory(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult:
+            request: DebuggerDAPPayload::MemoryRequest = DebuggerDAPPayload::memory_request_parse(payload, payload_length)
+            if not request.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Memory, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            dispatch_request_result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request_for(DebuggerProtocolRequest::RequestMethod.Memory, request_id))
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Memory, accepted: false, stop_generation: service.controller.session.stop_generation, failure: dispatch_request_result.failure} if not dispatch_request_result.accepted
+            memory <- DebuggerManagedService::service_memory(service, request.address, request.count)
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Memory, accepted: DebuggerMemory::memory_read_is_available(memory), stop_generation: service.controller.session.stop_generation, failure: memory.failure}
+
+        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult:
             if command_hash == COMMAND_HASH_INITIALIZE:
                 return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request_for(DebuggerProtocolRequest::RequestMethod.Initialize, request_id), DAP_NO_EXPECTED_GENERATION)
             if command_hash == COMMAND_HASH_LAUNCH:
@@ -931,6 +963,8 @@ module DebuggerDAPServer:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.SetBreakpoints, request_id)
             if command_hash == COMMAND_HASH_SET_DATA_BREAKPOINTS:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints, request_id)
+            if command_hash == COMMAND_HASH_READ_MEMORY:
+                return dispatch_memory(service, request_id, payload, payload_length, memory)
             if command_hash == COMMAND_HASH_STEP_IN:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Step, request_id)
             if command_hash == COMMAND_HASH_STEP_OUT:
@@ -991,6 +1025,9 @@ module DebuggerDAPServer:
             if command_hash == COMMAND_HASH_SET_DATA_BREAKPOINTS:
                 write_dynamic_response(response_sequence, request_sequence, DAP_SET_DATA_BREAKPOINTS_COMMAND, DAP_SET_DATA_BREAKPOINTS_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
+            if command_hash == COMMAND_HASH_READ_MEMORY:
+                write_dynamic_response(response_sequence, request_sequence, DAP_READ_MEMORY_COMMAND, DAP_READ_MEMORY_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
             if command_hash == COMMAND_HASH_STEP_IN:
                 write_dynamic_response(response_sequence, request_sequence, DAP_STEP_IN_COMMAND, DAP_STEP_IN_COMMAND_LENGTH, DAP_UNAVAILABLE_SUFFIX, DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
@@ -1008,9 +1045,33 @@ module DebuggerDAPServer:
                 return
             write_dynamic_response(response_sequence, request_sequence, DAP_UNSUPPORTED_COMMAND, DAP_UNSUPPORTED_COMMAND_LENGTH, DAP_UNSUPPORTED_SUFFIX, DAP_UNSUPPORTED_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
 
-        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+        def write_memory_response(memory: DebuggerMemory::MemoryRead, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            address_digits: mutable usize = DAP_FIRST_HEX_DIGIT_COUNT
+            address_remaining: mutable u64 = memory.address
+            while address_remaining >= DAP_MEMORY_HEX_BASE:
+                address_remaining <- address_remaining / DAP_MEMORY_HEX_BASE
+                address_digits <- address_digits + 1
+            body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_READ_MEMORY_COMMAND_LENGTH + DAP_MEMORY_SUCCESS_BEFORE_ADDRESS_LENGTH + address_digits + DAP_MEMORY_SUCCESS_BEFORE_DATA_LENGTH + memory.length * DAP_MEMORY_HEX_BYTES + DAP_MEMORY_SUCCESS_AFTER_DATA_LENGTH).u64()
+            _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
+            _ = printf(DAP_BODY_PREFIX) can Console
+            _ = printf("%llu", response_sequence) can Console
+            _ = printf(DAP_BODY_MIDDLE) can Console
+            _ = printf("%llu", request_sequence) can Console
+            _ = printf(DAP_COMMAND_PREFIX) can Console
+            _ = printf(DAP_READ_MEMORY_COMMAND) can Console
+            _ = printf(DAP_MEMORY_SUCCESS_BEFORE_ADDRESS) can Console
+            _ = printf("%llx", memory.address) can Console
+            _ = printf(DAP_MEMORY_SUCCESS_BEFORE_DATA) can Console
+            for index in 0..<memory.length:
+                _ = printf("%02llx", memory.bytes[index].u64()) can Console
+            _ = printf(DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
+
+        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
                 write_failure_response(command_hash, request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                return
+            if command_hash == COMMAND_HASH_READ_MEMORY:
+                write_memory_response(memory, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_INITIALIZE:
                 write_dynamic_response(response_sequence, request_sequence, DAP_INIT_COMMAND, DAP_INIT_COMMAND_LENGTH, DAP_INIT_SUFFIX, DAP_INIT_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -1085,15 +1146,17 @@ module DebuggerDAPServer:
             response_sequence: mutable u64 = 1
             session: DebuggerSession::Session = initial_session()
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
+            memory: mutable DebuggerMemory::MemoryRead = zeroed
             while true:
                 count: isize = read(STDIN_FD, (&chunk[0]).cast[void&], DAP_READ_CHUNK_SIZE) can Console
                 break if count <= 0
                 for index in 0..<count.usize():
                     completed: bool = decoder_accept(decoder, chunk[index])
                     if completed:
-                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence)
+                        memory <- zeroed
+                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory)
                         service.controller.session <- result.session
-                        write_response(result, decoder.command_hash, decoder.request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                        write_response(result, decoder.command_hash, decoder.request_sequence, response_sequence, memory) can Console, Unsafe.PointerCast
                         return DAP_SERVER_INVALID_FRAME_EXIT_CODE if response_sequence == MAX_DAP_RESPONSE_SEQUENCE
                         response_sequence <- response_sequence + 1
                         decoder.command_hash <- 0

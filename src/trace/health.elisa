@@ -8,6 +8,7 @@ module DebuggerTraceHealth:
     private:
         const TRACE_DETAIL_BOUNDARY: u32 = 1
         const TRACE_DETAIL_REASON: u32 = 2
+        const HEALTH_STATE_MAX: u16 = 4
 
     public:
         enum HealthState:
@@ -28,6 +29,7 @@ module DebuggerTraceHealth:
 
         def health_downgrade(health: Health, state: HealthState, event: u64, failure: DebuggerErrors::DebuggerError) -> Health:
             updated: mutable Health = health
+            return updated if state.u16() > HEALTH_STATE_MAX
             return updated if state == HealthState.Exact or state.u16() < health.state.u16()
             updated.state <- state
             updated.failure_event <- event
@@ -41,9 +43,10 @@ module DebuggerTraceHealth:
             return updated
 
         def health_can_replay(health: Health, event: u64) -> bool:
-            return health.state == HealthState.Exact and event <= health.last_verified_event and DebuggerErrors::error_is_ok(health.failure)
+            return health.state.u16() <= HEALTH_STATE_MAX and health.state == HealthState.Exact and event <= health.last_verified_event and DebuggerErrors::error_is_ok(health.failure)
 
         def health_failure(health: Health) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, TRACE_DETAIL_REASON) if health.state.u16() > HEALTH_STATE_MAX
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, TRACE_DETAIL_BOUNDARY) if health.state == HealthState.Partial or health.state == HealthState.Observational
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, TRACE_DETAIL_REASON) if health.state == HealthState.Diverged
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, TRACE_DETAIL_REASON) if health.state == HealthState.Corrupt

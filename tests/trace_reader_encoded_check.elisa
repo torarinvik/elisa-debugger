@@ -1,0 +1,72 @@
+include "../src/trace/binary.elisa"
+include "../src/trace/storage.elisa"
+include "../src/trace/manifest.elisa"
+include "../src/trace/recorder.elisa"
+include "../src/trace/reader.elisa"
+include "../src/core/events.elisa"
+include "../src/core/identity.elisa"
+include "../src/core/errors.elisa"
+
+const BUILD_COMPILER: u64 = 51
+const BUILD_RUNTIME: u64 = 52
+const BUILD_SOURCE: u64 = 53
+const BUILD_TARGET: u64 = 54
+const RECORDING_ID: u64 = 55
+const EVENT_PAYLOAD_HASH: u64 = 56
+const TRACE_SCHEMA: u32 = 1
+const TRUNCATION: usize = 1
+const CORRUPTION: u8 = 1
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(BUILD_COMPILER),
+        runtime: DebuggerIdentity::debug_id(BUILD_RUNTIME),
+        source: DebuggerIdentity::debug_id(BUILD_SOURCE),
+        target: DebuggerIdentity::debug_id(BUILD_TARGET),
+        metadata_version: 1
+    }
+
+def manifest_encoded(recorder: DebuggerTraceRecorder::TraceRecorder) -> DebuggerTraceBinary::ByteWriter:
+    payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(recorder.manifest)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{
+        schema: TRACE_SCHEMA,
+        kind: DebuggerTrace::ChunkKind.Manifest,
+        sequence: 0,
+        first_event: recorder.manifest.first_event,
+        last_event: recorder.manifest.last_event,
+        payload_length: payload.length.u64(),
+        checksum: DebuggerTraceBinary::writer_checksum(payload)
+    }
+    chunk.payload_length <- payload.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return DebuggerTraceStorage::storage_encode_chunk(chunk)
+
+def main() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(RECORDING_ID))
+    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(RECORDING_ID))
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TRACE_SCHEMA, 0, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, EVENT_PAYLOAD_HASH)
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
+    return 2 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(recorder))
+    manifest: DebuggerTraceBinary::ByteWriter = manifest_encoded(recorder)
+    event_chunk: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(recorder.chunks[0])
+    return 3 if not DebuggerTraceBinary::writer_is_valid(manifest) or not DebuggerTraceBinary::writer_is_valid(event_chunk)
+
+    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    truncated: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest_encoded(reader, manifest.bytes[0], manifest.length - TRUNCATION)
+    return 4 if truncated.code != DebuggerErrors::ErrorCode.Unavailable or not truncated.retryable or reader.state != DebuggerTraceReader::ReaderState.Empty
+    return 5 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest_encoded(reader, manifest.bytes[0], manifest.length))
+    return 6 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest_encoded(reader, event_chunk.bytes[0], event_chunk.length))
+    return 7 if not DebuggerTraceReader::reader_is_exact(reader)
+
+    damaged: mutable u8[8192] = zeroed
+    for index in 0..<event_chunk.length:
+        damaged[index] <- event_chunk.bytes[index]
+    damaged[event_chunk.length - TRUNCATION] <- damaged[event_chunk.length - TRUNCATION] + CORRUPTION
+    corrupt_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 8 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest_encoded(corrupt_reader, manifest.bytes[0], manifest.length))
+    failure: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest_encoded(corrupt_reader, damaged[0], event_chunk.length)
+    return 9 if failure.code != DebuggerErrors::ErrorCode.Corrupt or corrupt_reader.state != DebuggerTraceReader::ReaderState.Corrupt
+    return 0

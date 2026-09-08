@@ -36,6 +36,7 @@ module DebuggerTraceReader:
         const READER_MAX_EVENT: u64 = 18446744073709551615
         const READER_MAX_SEQUENCE: u64 = 18446744073709551615
         const READER_EVENT_INDEX_OFFSET: usize = 1
+        const READER_STORAGE_DETAIL_STATUS: u32 = 7
 
     public:
         enum ReaderState:
@@ -227,6 +228,28 @@ module DebuggerTraceReader:
                 return result
             reader.chunk_count <- reader.chunk_count + 1
             return result
+
+        # Decode and ingest one canonical storage frame at the reader boundary.
+        # Keeping this path beside reader_ingest prevents transports from
+        # manufacturing StoredChunk values that bypass checksum and length
+        # validation.  A truncated frame is retryable; every other malformed
+        # frame permanently poisons the reader so callers cannot inspect a
+        # prefix that was never verified.
+        def reader_ingest_encoded(reader: mutable TraceReader&, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            decoded: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(bytes, length)
+            if decoded.status == DebuggerTraceStorage::StorageStatus.Truncated:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, READER_STORAGE_DETAIL_STATUS)
+            if decoded.status == DebuggerTraceStorage::StorageStatus.Oversized:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, READER_STORAGE_DETAIL_STATUS)
+                reader.state <- ReaderState.Corrupt
+                reader.last_error <- failure
+                return failure
+            if decoded.status != DebuggerTraceStorage::StorageStatus.Ready:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, READER_STORAGE_DETAIL_STATUS)
+                reader.state <- ReaderState.Corrupt
+                reader.last_error <- failure
+                return failure
+            return reader_ingest(reader, decoded.chunk)
 
         def reader_is_exact(reader: TraceReader) -> bool:
             return false if reader.event_count > READER_EVENT_CAPACITY or reader.chunk_count > READER_CHUNK_CAPACITY or reader.state != ReaderState.Ready or not DebuggerErrors::error_is_ok(reader.last_error) or not DebuggerTraceManifest::manifest_is_replayable(reader.manifest)

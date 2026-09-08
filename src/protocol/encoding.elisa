@@ -4,6 +4,7 @@
 
 include "./messages.elisa"
 include "./vocabulary.elisa"
+include "./integration.elisa"
 include "../core/errors.elisa"
 
 module DebuggerProtocolEncoding:
@@ -33,6 +34,13 @@ module DebuggerProtocolEncoding:
         const REQUEST_EXPECTED_PREFIX: cstr = ",\"expectedStopGeneration\":"
         const REQUEST_PAGE_PREFIX: cstr = ",\"pageSize\":"
         const REQUEST_TARGET_PREFIX: cstr = ",\"targetEvent\":"
+        const SESSION_REQUEST_KIND_PREFIX: cstr = "{\"kind\":\"request\",\"method\":"
+        const SESSION_CLIENT_PREFIX: cstr = ",\"client\":{\"name\":"
+        const SESSION_CLIENT_VERSION_PREFIX: cstr = ",\"version\":"
+        const SESSION_CLIENT_INSTANCE_PREFIX: cstr = ",\"instance\":"
+        const SESSION_OWNER_PREFIX: cstr = "},\"ownerToken\":"
+        const SESSION_RESPONSE_PREFIX: cstr = "{\"kind\":\"response\",\"id\":"
+        const SESSION_RESPONSE_SESSION_PREFIX: cstr = ",\"sessionId\":"
 
         def buffer_put_byte(buffer: mutable JsonBuffer&, byte: u8) -> void:
             if buffer.failed or buffer.length >= JSON_BUFFER_CAPACITY:
@@ -114,6 +122,36 @@ module DebuggerProtocolEncoding:
             buffer_put_named_id_string(buffer, REQUEST_TARGET_PREFIX, request.target_event)
             buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
 
+        def session_request_is_encodable(request: DebuggerProtocolIntegration::SessionRequest) -> bool:
+            limits: DebuggerProtocolIntegration::IntegrationLimits = DebuggerProtocolIntegration::integration_limits_default()
+            return false if request.request_id == NO_REQUEST_ID or not DebuggerProtocol::method_is_valid(request.method) or not DebuggerProtocolIntegration::client_identity_is_valid(request.client)
+            return false if DebuggerProtocolIntegration::integration_method_is_mutating(request.method) and request.owner_token == NO_REQUEST_ID
+            return false if request.page_size > limits.max_page_size or request.target_event > limits.max_trace_events
+            return true
+
+        def buffer_put_session_request_fields(buffer: mutable JsonBuffer&, request: DebuggerProtocolIntegration::SessionRequest&) -> void:
+            buffer_put_cstr(buffer, SESSION_REQUEST_KIND_PREFIX)
+            buffer_put_json_string(buffer, DebuggerProtocolVocabulary::method_name(request.method))
+            buffer_put_named_id_string(buffer, REQUEST_ID_PREFIX, request.request_id)
+            buffer_put_named_id_string(buffer, REQUEST_SESSION_PREFIX, request.session_id)
+            buffer_put_cstr(buffer, SESSION_CLIENT_PREFIX)
+            buffer_put_id_string(buffer, request.client.name.value)
+            buffer_put_cstr(buffer, SESSION_CLIENT_VERSION_PREFIX)
+            buffer_put_id_string(buffer, request.client.version.value)
+            buffer_put_cstr(buffer, SESSION_CLIENT_INSTANCE_PREFIX)
+            buffer_put_id_string(buffer, request.client.instance.value)
+            buffer_put_cstr(buffer, SESSION_OWNER_PREFIX)
+            buffer_put_id_string(buffer, request.owner_token)
+            buffer_put_named_id_string(buffer, REQUEST_EXPECTED_PREFIX, request.expected_generation)
+            buffer_put_cstr(buffer, REQUEST_PAGE_PREFIX)
+            buffer_put_u64(buffer, request.page_size)
+            buffer_put_named_id_string(buffer, REQUEST_TARGET_PREFIX, request.target_event)
+            buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
+
+        def session_response_is_encodable(response: DebuggerProtocolIntegration::SessionResponse) -> bool:
+            return false if response.request_id == NO_REQUEST_ID or not DebuggerErrors::error_is_well_formed(response.failure)
+            return response.accepted and DebuggerErrors::error_is_ok(response.failure) or not response.accepted and not DebuggerErrors::error_is_ok(response.failure)
+
         def buffer_put_next_page(buffer: mutable JsonBuffer&, next_page: u64) -> void:
             return if next_page == NO_PAGE
             buffer_put_cstr(buffer, ",\"next\":")
@@ -174,6 +212,38 @@ module DebuggerProtocolEncoding:
                 buffer.failed <- true
                 return buffer
             buffer_put_request_fields(buffer, request)
+            return buffer
+
+        def session_request_encode(request: DebuggerProtocolIntegration::SessionRequest) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if not session_request_is_encodable(request):
+                buffer.failed <- true
+                return buffer
+            buffer_put_session_request_fields(buffer, request)
+            return buffer
+
+        def session_response_encode(response: DebuggerProtocolIntegration::SessionResponse) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if not session_response_is_encodable(response):
+                buffer.failed <- true
+                return buffer
+            buffer_put_cstr(buffer, SESSION_RESPONSE_PREFIX)
+            buffer_put_id_string(buffer, response.request_id)
+            buffer_put_named_id_string(buffer, SESSION_RESPONSE_SESSION_PREFIX, response.session_id)
+            if response.accepted:
+                buffer_put_cstr(buffer, ",\"ok\":true,\"stopGeneration\":")
+                buffer_put_id_string(buffer, response.stop_generation)
+                buffer_put_cstr(buffer, ",\"next\":")
+                buffer_put_id_string(buffer, response.next_page)
+            else:
+                buffer_put_cstr(buffer, ",\"ok\":false,\"error\":{\"code\":")
+                buffer_put_json_string(buffer, DebuggerProtocolVocabulary::error_code_name(response.failure.code))
+                buffer_put_cstr(buffer, ",\"retryable\":")
+                buffer_put_cstr(buffer, "true" if response.failure.retryable else "false")
+                buffer_put_cstr(buffer, ",\"detail\":")
+                buffer_put_u64(buffer, response.failure.detail.u64())
+                buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
+            buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
             return buffer
 
         def discovery_response_encode(request_id: u64) -> JsonBuffer:

@@ -161,7 +161,10 @@ module DebuggerRemote:
             # disconnecting first; create a fresh channel to obtain a new
             # quota budget.
             updated.quota_exceeded <- channel.quota_exceeded
-            updated.auth_attempts <- 0
+            # Preserve a terminal authentication failure across disconnect;
+            # otherwise a client could reset the attempt budget by dropping
+            # the transport and reconnecting the same channel.
+            updated.auth_attempts <- channel.auth_attempts if channel.state == RemoteState.Failed else 0
             updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA) if channel.quota_exceeded
             updated.last_error <- DebuggerErrors::no_error() if not channel.quota_exceeded
             return updated
@@ -169,6 +172,7 @@ module DebuggerRemote:
         def remote_reconnect(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.quota_exceeded
+            return updated if channel.state == RemoteState.Failed and channel.auth_attempts >= REMOTE_MAX_AUTH_ATTEMPTS
             return updated if channel.state != RemoteState.Disconnected and channel.state != RemoteState.Draining and channel.state != RemoteState.Failed
             updated.state <- RemoteState.Authenticating
             updated.handshake.protocol_major <- 0

@@ -43,6 +43,11 @@ module DebuggerNativeElf:
                 value <- value | (bytes[offset + index].u64() << (index.u64() * 8))
             return value
 
+        def table_fits(offset: u64, entry_size: u16, count: u16, length: usize) -> bool:
+            return false if offset > length.u64()
+            return true if count == 0 or entry_size == 0
+            return count.u64() <= (length.u64() - offset) / entry_size.u64()
+
         def elf_parse(bytes: u8&, length: usize) -> ElfHeader:
             result: mutable ElfHeader = zeroed
             return result if length < ELF_HEADER_BYTES
@@ -50,18 +55,25 @@ module DebuggerNativeElf:
             return result if bytes[4] != ELF_CLASS_64 or bytes[5] != ELF_DATA_LITTLE
             kind: u16 = read_u16(bytes, 16)
             machine_code: u16 = read_u16(bytes, 18)
+            program_offset: u64 = read_u64(bytes, 32)
+            section_offset: u64 = read_u64(bytes, 40)
+            program_size: u16 = read_u16(bytes, 54)
+            program_count: u16 = read_u16(bytes, 56)
+            section_size: u16 = read_u16(bytes, 58)
+            section_count: u16 = read_u16(bytes, 60)
             return result if kind != ELF_TYPE_EXECUTABLE and kind != ELF_TYPE_SHARED
             return result if machine_code != ELF_MACHINE_X86_64 and machine_code != ELF_MACHINE_AARCH64
+            return result if not table_fits(program_offset, program_size, program_count, length) or not table_fits(section_offset, section_size, section_count, length)
             result.valid <- true
             result.executable <- kind == ELF_TYPE_EXECUTABLE
             result.machine <- ElfMachine.X86_64 if machine_code == ELF_MACHINE_X86_64 else ElfMachine.AArch64
             result.entry <- read_u64(bytes, 24)
-            result.program_header_offset <- read_u64(bytes, 32)
-            result.section_header_offset <- read_u64(bytes, 40)
-            result.program_header_size <- read_u16(bytes, 54)
-            result.program_header_count <- read_u16(bytes, 56)
-            result.section_header_size <- read_u16(bytes, 58)
-            result.section_header_count <- read_u16(bytes, 60)
+            result.program_header_offset <- program_offset
+            result.section_header_offset <- section_offset
+            result.program_header_size <- program_size
+            result.program_header_count <- program_count
+            result.section_header_size <- section_size
+            result.section_header_count <- section_count
             return result
 
         def elf_machine_is_supported(header: ElfHeader) -> bool:

@@ -1,0 +1,102 @@
+# Bounded artifact transfer primitives for remote sessions.  The protocol
+# accepts chunks only in order and verifies the final content hash before an
+# artifact becomes available to a client.
+
+include "../core/errors.elisa"
+
+module DebuggerRemoteArtifacts:
+    private:
+        const ARTIFACT_CHUNK_CAPACITY: usize = 16
+        const ARTIFACT_CHUNK_BYTES: usize = 512
+        const ARTIFACT_MAX_BYTES: usize = ARTIFACT_CHUNK_CAPACITY * ARTIFACT_CHUNK_BYTES
+        const ARTIFACT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const ARTIFACT_HASH_PRIME: u64 = 1099511628211
+        const ARTIFACT_MAX_SEQUENCE: u64 = 18446744073709551615
+        const DETAIL_STATE: u32 = 1
+        const DETAIL_SEQUENCE: u32 = 2
+        const DETAIL_SIZE: u32 = 3
+        const DETAIL_CHECKSUM: u32 = 4
+
+    public:
+        enum TransferState:
+            Empty
+            Receiving
+            Complete
+            Failed
+
+        struct ArtifactTransfer:
+            state: mutable TransferState
+            expected_size: mutable usize
+            expected_checksum: mutable u64
+            received_size: mutable usize
+            next_sequence: mutable u64
+            checksum: mutable u64
+            chunks: mutable u8[ARTIFACT_MAX_BYTES]
+            last_error: mutable DebuggerErrors::DebuggerError
+
+        def transfer_new() -> ArtifactTransfer:
+            return ArtifactTransfer{state: TransferState.Empty, expected_size: 0, expected_checksum: 0, received_size: 0, next_sequence: 0, checksum: ARTIFACT_HASH_OFFSET_BASIS, chunks: zeroed, last_error: DebuggerErrors::no_error()}
+
+        def transfer_begin(transfer: ArtifactTransfer, size: usize, checksum: u64) -> ArtifactTransfer:
+            updated: mutable ArtifactTransfer = transfer
+            return updated if transfer.state == TransferState.Receiving
+            if size == 0 or size > ARTIFACT_MAX_BYTES:
+                updated.state <- TransferState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SIZE)
+                return updated
+            updated.state <- TransferState.Receiving
+            updated.expected_size <- size
+            updated.expected_checksum <- checksum
+            updated.received_size <- 0
+            updated.next_sequence <- 0
+            updated.checksum <- ARTIFACT_HASH_OFFSET_BASIS
+            updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        def transfer_push(transfer: ArtifactTransfer, sequence: u64, bytes: u8&, length: usize) -> ArtifactTransfer:
+            updated: mutable ArtifactTransfer = transfer
+            return updated if transfer.state != TransferState.Receiving
+            if sequence != transfer.next_sequence:
+                updated.state <- TransferState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE)
+                return updated
+            if length == 0 or length > ARTIFACT_CHUNK_BYTES or length > transfer.expected_size or transfer.received_size > transfer.expected_size - length:
+                updated.state <- TransferState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)
+                return updated
+            for index in 0..<length:
+                updated.chunks[transfer.received_size + index] <- bytes[index]
+                updated.checksum <- (updated.checksum ^ bytes[index].u64()) * ARTIFACT_HASH_PRIME
+            updated.received_size <- transfer.received_size + length
+            if transfer.next_sequence == ARTIFACT_MAX_SEQUENCE:
+                updated.state <- TransferState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SEQUENCE)
+                return updated
+            updated.next_sequence <- transfer.next_sequence + 1
+            return updated
+
+        def transfer_finish(transfer: ArtifactTransfer) -> ArtifactTransfer:
+            updated: mutable ArtifactTransfer = transfer
+            return updated if transfer.state != TransferState.Receiving
+            if transfer.received_size != transfer.expected_size:
+                updated.state <- TransferState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_SIZE)
+                return updated
+            if transfer.checksum != transfer.expected_checksum:
+                updated.state <- TransferState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM)
+                return updated
+            updated.state <- TransferState.Complete
+            updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        def transfer_is_complete(transfer: ArtifactTransfer) -> bool:
+            return transfer.state == TransferState.Complete and transfer.received_size == transfer.expected_size and transfer.checksum == transfer.expected_checksum and DebuggerErrors::error_is_ok(transfer.last_error)
+
+        def transfer_is_valid(transfer: ArtifactTransfer) -> bool:
+            return false if transfer.expected_size == 0 or transfer.expected_size > ARTIFACT_MAX_BYTES or transfer.received_size > transfer.expected_size or transfer.next_sequence > ARTIFACT_MAX_SEQUENCE
+            return false if transfer.state == TransferState.Complete and not transfer_is_complete(transfer)
+            return true
+
+        def transfer_size(transfer: ArtifactTransfer) -> usize:
+            return transfer.received_size

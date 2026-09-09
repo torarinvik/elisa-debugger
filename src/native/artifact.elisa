@@ -1,0 +1,51 @@
+# Native artifact format selection.  Callers use this boundary instead of
+# inspecting private ELF or Mach-O parser details before handing bytes over.
+
+include "./elf.elisa"
+include "./macho.elisa"
+
+module DebuggerNativeArtifact:
+    private:
+        const ARTIFACT_MAGIC_BYTES: usize = 4
+        const ELF_MAGIC_0: u8 = 127
+        const ELF_MAGIC_1: u8 = 69
+        const ELF_MAGIC_2: u8 = 76
+        const ELF_MAGIC_3: u8 = 70
+        const MACHO_MAGIC_0: u8 = 207
+        const MACHO_MAGIC_1: u8 = 250
+        const MACHO_MAGIC_2: u8 = 237
+        const MACHO_MAGIC_3: u8 = 254
+
+    public:
+        enum ArtifactFormat:
+            Unknown
+            Elf64Little
+            MachO64Little
+
+        struct NativeArtifact:
+            format: mutable ArtifactFormat
+            elf: mutable DebuggerNativeElf::ElfHeader
+            macho: mutable DebuggerNativeMachO::MachOHeader
+            valid: mutable bool
+
+        def artifact_format(bytes: u8&, length: usize) -> ArtifactFormat:
+            return ArtifactFormat.Unknown if length < ARTIFACT_MAGIC_BYTES
+            return ArtifactFormat.Elf64Little if bytes[0] == ELF_MAGIC_0 and bytes[1] == ELF_MAGIC_1 and bytes[2] == ELF_MAGIC_2 and bytes[3] == ELF_MAGIC_3
+            return ArtifactFormat.MachO64Little if bytes[0] == MACHO_MAGIC_0 and bytes[1] == MACHO_MAGIC_1 and bytes[2] == MACHO_MAGIC_2 and bytes[3] == MACHO_MAGIC_3
+            return ArtifactFormat.Unknown
+
+        def artifact_parse(bytes: u8&, length: usize) -> NativeArtifact:
+            result: mutable NativeArtifact = zeroed
+            result.format <- artifact_format(bytes, length)
+            if result.format == ArtifactFormat.Elf64Little:
+                result.elf <- DebuggerNativeElf::elf_parse(bytes, length)
+                result.valid <- result.elf.valid
+                return result
+            if result.format == ArtifactFormat.MachO64Little:
+                result.macho <- DebuggerNativeMachO::macho_parse(bytes, length)
+                result.valid <- result.macho.valid
+                return result
+            return result
+
+        def artifact_is_supported(artifact: NativeArtifact) -> bool:
+            return artifact.valid and artifact.format != ArtifactFormat.Unknown

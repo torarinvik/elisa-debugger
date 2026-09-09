@@ -1,6 +1,18 @@
 include "../src/native/elf.elisa"
 
-const ELF_BYTES: usize = 64
+const ELF_BYTES: usize = 120
+const ELF_HEADER_BYTES: usize = 64
+const ELF_PROGRAM_ENTRY_BYTES: usize = 56
+
+def put_u32(bytes: mutable u8&, offset: usize, value: u32) -> void:
+    bytes[offset] <- value.u8()
+    bytes[offset + 1] <- (value >> 8).u8()
+    bytes[offset + 2] <- (value >> 16).u8()
+    bytes[offset + 3] <- (value >> 24).u8()
+
+def put_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+    for index in 0..<8:
+        bytes[offset + index] <- (value >> (index.u64() * 8)).u8()
 
 def main() -> i64:
     image: mutable u8[ELF_BYTES] = zeroed
@@ -14,8 +26,19 @@ def main() -> i64:
     image[52] <- 64
     image[16] <- 2
     image[18] <- 62
+    put_u64(image[0], 32, ELF_HEADER_BYTES.u64())
+    image[54] <- ELF_PROGRAM_ENTRY_BYTES.u8()
+    image[56] <- 1
+    put_u32(image[0], ELF_HEADER_BYTES, 1)
+    put_u32(image[0], ELF_HEADER_BYTES + 4, 5)
+    put_u64(image[0], ELF_HEADER_BYTES + 16, 4096)
+    put_u64(image[0], ELF_HEADER_BYTES + 32, 32)
+    put_u64(image[0], ELF_HEADER_BYTES + 40, 48)
     header: DebuggerNativeElf::ElfHeader = DebuggerNativeElf::elf_parse(image[0], ELF_BYTES)
     return 1 if not header.valid or not header.executable or header.machine != DebuggerNativeElf::ElfMachine.X86_64 or not DebuggerNativeElf::elf_machine_is_supported(header)
+    segment: DebuggerNativeElf::ElfProgramHeader = DebuggerNativeElf::elf_program_header(image[0], ELF_BYTES, header, 0)
+    return 9 if not segment.valid or segment.kind != 1 or segment.flags != 5 or segment.virtual_address != 4096 or segment.file_size != 32 or segment.memory_size != 48
+    return 10 if DebuggerNativeElf::elf_program_header(image[0], ELF_BYTES, header, 1).valid
     image[0] <- 0
     return 2 if DebuggerNativeElf::elf_parse(image[0], ELF_BYTES).valid
     image[0] <- 127

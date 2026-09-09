@@ -26,6 +26,13 @@ module DebuggerNativeElf:
         const ELF_PROGRAM_COUNT_OFFSET: usize = 56
         const ELF_SECTION_SIZE_OFFSET: usize = 58
         const ELF_SECTION_COUNT_OFFSET: usize = 60
+        const ELF_PROGRAM_TYPE_OFFSET: usize = 0
+        const ELF_PROGRAM_FLAGS_OFFSET: usize = 4
+        const ELF_PROGRAM_OFFSET_FIELD: usize = 8
+        const ELF_PROGRAM_VIRTUAL_ADDRESS_OFFSET: usize = 16
+        const ELF_PROGRAM_FILE_SIZE_OFFSET: usize = 32
+        const ELF_PROGRAM_MEMORY_SIZE_OFFSET: usize = 40
+        const ELF_PROGRAM_ALIGN_OFFSET: usize = 48
         const ELF_TYPE_EXECUTABLE: u16 = 2
         const ELF_TYPE_SHARED: u16 = 3
         const ELF_MACHINE_X86_64: u16 = 62
@@ -49,8 +56,21 @@ module DebuggerNativeElf:
             program_header_size: mutable u16
             section_header_size: mutable u16
 
+        struct ElfProgramHeader:
+            valid: mutable bool
+            kind: mutable u32
+            flags: mutable u32
+            offset: mutable u64
+            virtual_address: mutable u64
+            file_size: mutable u64
+            memory_size: mutable u64
+            alignment: mutable u64
+
         def read_u16(bytes: u8&, offset: usize) -> u16:
             return bytes[offset].u16() | (bytes[offset + 1].u16() << ELF_BYTE_BITS)
+
+        def read_u32(bytes: u8&, offset: usize) -> u32:
+            return bytes[offset].u32() | (bytes[offset + 1].u32() << ELF_BYTE_BITS) | (bytes[offset + 2].u32() << (ELF_BYTE_BITS * 2)) | (bytes[offset + 3].u32() << (ELF_BYTE_BITS * 3))
 
         def read_u64(bytes: u8&, offset: usize) -> u64:
             value: mutable u64 = 0
@@ -98,3 +118,21 @@ module DebuggerNativeElf:
 
         def elf_machine_is_supported(header: ElfHeader) -> bool:
             return header.valid and header.machine != ElfMachine.Unknown
+
+        def elf_program_header(bytes: u8&, length: usize, header: ElfHeader, index: usize) -> ElfProgramHeader:
+            result: mutable ElfProgramHeader = zeroed
+            return result if not header.valid or header.program_header_count == 0 or index >= header.program_header_count.usize()
+            return result if header.program_header_size != ELF_PROGRAM_ENTRY_SIZE_64
+            return result if header.program_header_offset > length.u64()
+            table_offset: u64 = header.program_header_offset + index.u64() * header.program_header_size.u64()
+            return result if table_offset < header.program_header_offset or table_offset > length.u64() or length.u64() - table_offset < ELF_PROGRAM_ENTRY_SIZE_64.u64()
+            offset: usize = table_offset.usize()
+            result.kind <- read_u32(bytes, offset + ELF_PROGRAM_TYPE_OFFSET)
+            result.flags <- read_u32(bytes, offset + ELF_PROGRAM_FLAGS_OFFSET)
+            result.offset <- read_u64(bytes, offset + ELF_PROGRAM_OFFSET_FIELD)
+            result.virtual_address <- read_u64(bytes, offset + ELF_PROGRAM_VIRTUAL_ADDRESS_OFFSET)
+            result.file_size <- read_u64(bytes, offset + ELF_PROGRAM_FILE_SIZE_OFFSET)
+            result.memory_size <- read_u64(bytes, offset + ELF_PROGRAM_MEMORY_SIZE_OFFSET)
+            result.alignment <- read_u64(bytes, offset + ELF_PROGRAM_ALIGN_OFFSET)
+            result.valid <- true
+            return result

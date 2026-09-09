@@ -36,6 +36,7 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 
 # Keep the remote artifact transfer regression in the aggregate module gate.
 module-check: $(BUILD)/elisa-debugger-remote-artifacts-check
+module-check: $(BUILD)/elisa-debugger-native-elf-check
 	"$(BUILD)/elisa-debugger-module-core-check"
 	"$(BUILD)/elisa-debugger-module-data-check"
 	"$(BUILD)/elisa-debugger-module-protocol-check"

@@ -8,7 +8,7 @@ human-readable guide, not a substitute for negotiation.
 | --- | --- | --- | --- |
 | Launch | Supported for the bounded managed image | Capability boundary only | Unsupported |
 | Attach | Unsupported | Controller contract present | Process attach model present |
-| Source and function metadata | Bounded source/function tables | Symbol table and source spans | Symbol table and artifact checks |
+| Source and function metadata | Bounded source/function tables | Symbol table and source spans | Symbol table plus bounds-checked ELF/Mach-O artifact headers |
 | Source breakpoints | Resolver and pending statuses | Resolver contract | Metadata dependent |
 | Typed value states | Supported bounded store, including absent and historical states | Capability contract | Availability depends on metadata |
 | Expression arithmetic | Bounded side-effect-free evaluator | Provider dependent | Provider dependent |

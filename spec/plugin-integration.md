@@ -61,3 +61,16 @@ contracts backed by `DebuggerTimeline`, `DebuggerMemory`, and
 `DebuggerProtocolEvents`. They return typed unavailable, stale, corrupt, and
 resource-limit states so clients can degrade gracefully without inspecting
 private module data.
+
+## Remote artifact transfer
+
+Remote clients transfer traces and build artifacts through the authenticated
+session channel. Start a transfer with the byte length and the canonical Elisa
+checksum returned by `DebuggerRemoteArtifacts::transfer_checksum`. Send chunks
+in zero-based sequence order; each chunk is bounded by the advertised transfer
+limit, and a missing, duplicated, or oversized chunk fails the transfer. Finish
+only after all declared bytes have arrived. The artifact becomes readable only
+when the final checksum matches. Transfer failures are surfaced in both the
+artifact state and the channel's public error field, and remote quota usage
+includes every accepted chunk. Clients should discard incomplete transfers on
+disconnect and restart them after reconnecting.

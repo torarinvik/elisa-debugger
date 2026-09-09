@@ -79,3 +79,12 @@ Trace health is monotonic. A later corrupt or unsupported event records the
 last verified prefix and downgrades capabilities at that boundary. Retention
 marks only unpinned, unreferenced chunks for collection so checkpoint and
 branch dependency closures remain recoverable after interrupted cleanup.
+
+## Native artifact formats
+
+Native artifact discovery keeps format readers independent: `DebuggerNativeElf`
+handles bounded ELF64 little-endian headers for Linux targets, while
+`DebuggerNativeMachO` handles bounded Mach-O 64-bit headers and load-command
+records for macOS targets. Each reader validates architecture identity and all
+declared table ranges before exposing metadata. Symbol and segment decoding can
+therefore be added per format without sharing unsafe offset assumptions.

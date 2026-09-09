@@ -4,6 +4,7 @@
 
 include "../core/errors.elisa"
 include "../security/policy.elisa"
+include "./artifacts.elisa"
 
 module DebuggerRemote:
     private:
@@ -49,10 +50,11 @@ module DebuggerRemote:
             policy: mutable DebuggerSecurity::Policy
             bytes_received: mutable u64
             quota_exceeded: mutable bool
+            artifact: mutable DebuggerRemoteArtifacts::ArtifactTransfer
             last_error: mutable DebuggerErrors::DebuggerError
 
         def remote_new(policy: DebuggerSecurity::Policy) -> RemoteChannel:
-            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, disconnect_policy: RemoteDisconnectPolicy.Detach, missed_heartbeats: 0, auth_attempts: 0, policy: policy, bytes_received: 0, quota_exceeded: false, last_error: DebuggerErrors::no_error()}
+            return RemoteChannel{state: RemoteState.Disconnected, handshake: RemoteHandshake{protocol_major: 0, protocol_minor: 0, engine: 0, trace_schema: 0, authenticated: false}, disconnect_policy: RemoteDisconnectPolicy.Detach, missed_heartbeats: 0, auth_attempts: 0, policy: policy, bytes_received: 0, quota_exceeded: false, artifact: DebuggerRemoteArtifacts::transfer_new(), last_error: DebuggerErrors::no_error()}
 
         def remote_new_with_policy(policy: DebuggerSecurity::Policy, disconnect_policy: RemoteDisconnectPolicy) -> RemoteChannel:
             updated: mutable RemoteChannel = remote_new(policy)
@@ -134,6 +136,26 @@ module DebuggerRemote:
             updated.missed_heartbeats <- 0
             return updated
 
+        def remote_begin_artifact(channel: RemoteChannel, size: usize, checksum: u64) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Connected or channel.quota_exceeded
+            updated.artifact <- DebuggerRemoteArtifacts::transfer_begin(channel.artifact, size, checksum)
+            return updated
+
+        def remote_push_artifact(channel: RemoteChannel, sequence: u64, bytes: u8&, length: usize) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Connected or channel.quota_exceeded
+            accounted: RemoteChannel = remote_receive(channel, length.u64())
+            return accounted if accounted.state != RemoteState.Connected
+            accounted.artifact <- DebuggerRemoteArtifacts::transfer_push(channel.artifact, sequence, bytes, length)
+            return accounted
+
+        def remote_finish_artifact(channel: RemoteChannel) -> RemoteChannel:
+            updated: mutable RemoteChannel = channel
+            return updated if channel.state != RemoteState.Connected or channel.quota_exceeded
+            updated.artifact <- DebuggerRemoteArtifacts::transfer_finish(channel.artifact)
+            return updated
+
         def remote_heartbeat_missed(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.state != RemoteState.Connected
@@ -162,6 +184,7 @@ module DebuggerRemote:
             # disconnecting first; create a fresh channel to obtain a new
             # quota budget.
             updated.quota_exceeded <- channel.quota_exceeded
+            updated.artifact <- DebuggerRemoteArtifacts::transfer_new()
             # Preserve a terminal authentication failure across disconnect;
             # otherwise a client could reset the attempt budget by dropping
             # the transport and reconnecting the same channel.
@@ -184,6 +207,7 @@ module DebuggerRemote:
             updated.missed_heartbeats <- 0
             updated.bytes_received <- 0
             updated.quota_exceeded <- false
+            updated.artifact <- DebuggerRemoteArtifacts::transfer_new()
             updated.auth_attempts <- 0
             updated.last_error <- DebuggerErrors::no_error()
             return updated

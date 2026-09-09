@@ -24,6 +24,8 @@ module DebuggerNativeMachO:
         const MACHO_COMMAND_BYTES_OFFSET: usize = 20
         const MACHO_FLAGS_OFFSET: usize = 24
         const MACHO_RESERVED_OFFSET: usize = 28
+        const MACHO_COMMAND_KIND_OFFSET: usize = 0
+        const MACHO_COMMAND_SIZE_OFFSET: usize = 4
 
     public:
         enum MachOMachine:
@@ -38,6 +40,12 @@ module DebuggerNativeMachO:
             command_count: mutable u32
             command_bytes: mutable u32
             flags: mutable u32
+
+        struct MachOCommand:
+            valid: mutable bool
+            kind: mutable u32
+            size: mutable u32
+            offset: mutable usize
 
         def read_u32(bytes: u8&, offset: usize) -> u32:
             return bytes[offset].u32() | (bytes[offset + 1].u32() << MACHO_BYTE_BITS) | (bytes[offset + 2].u32() << (MACHO_BYTE_BITS * 2)) | (bytes[offset + 3].u32() << (MACHO_BYTE_BITS * 3))
@@ -81,3 +89,21 @@ module DebuggerNativeMachO:
                 return false if command_size < MACHO_COMMAND_HEADER_BYTES or command_size > limit - cursor
                 cursor <- cursor + command_size
             return cursor == limit
+
+        def macho_command(header: MachOHeader, bytes: u8&, length: usize, index: usize) -> MachOCommand:
+            result: mutable MachOCommand = zeroed
+            return result if not header.valid or index >= header.command_count.usize() or header.command_bytes.usize() > length - MACHO_HEADER_BYTES
+            cursor: mutable usize = MACHO_HEADER_BYTES
+            limit: usize = MACHO_HEADER_BYTES + header.command_bytes.usize()
+            for command_index in 0..<header.command_count:
+                return result if cursor > limit or limit - cursor < MACHO_COMMAND_HEADER_BYTES
+                command_size: usize = read_u32(bytes, cursor + MACHO_COMMAND_SIZE_OFFSET).usize()
+                return result if command_size < MACHO_COMMAND_HEADER_BYTES or command_size > limit - cursor
+                if command_index.usize() == index:
+                    result.valid <- true
+                    result.kind <- read_u32(bytes, cursor + MACHO_COMMAND_KIND_OFFSET)
+                    result.size <- command_size.u32()
+                    result.offset <- cursor
+                    return result
+                cursor <- cursor + command_size
+            return result

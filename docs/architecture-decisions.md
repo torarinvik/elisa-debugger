@@ -97,4 +97,6 @@ remain explicitly unsupported.
 Mach-O UUID load commands are exposed only when their full 16-byte identity is
 present, allowing build-artifact matching without trusting a path or filename.
 ELF symbol entries are decoded only from complete, entry-size-aligned symbol
-sections; name-string resolution remains a separate bounded operation.
+sections. Name-string resolution follows the section's linked string table and
+returns explicit invalid or truncated state instead of scanning beyond the
+declared table.

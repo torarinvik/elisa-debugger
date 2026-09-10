@@ -52,6 +52,8 @@ module DebuggerNativeElf:
         const ELF_SYMBOL_ENTRY_BYTES: usize = 24
         const ELF_SECTION_KIND_SYMBOLS: u32 = 2
         const ELF_SECTION_KIND_DYNAMIC_SYMBOLS: u32 = 11
+        const ELF_SECTION_KIND_STRING_TABLE: u32 = 3
+        const ELF_SYMBOL_NAME_CAPACITY: usize = 64
         const ELF_TYPE_EXECUTABLE: u16 = 2
         const ELF_TYPE_SHARED: u16 = 3
         const ELF_MACHINE_X86_64: u16 = 62
@@ -106,6 +108,12 @@ module DebuggerNativeElf:
             section_index: mutable u16
             value: mutable u64
             size: mutable u64
+
+        struct ElfSymbolName:
+            valid: mutable bool
+            truncated: mutable bool
+            length: mutable usize
+            bytes: mutable u8[ELF_SYMBOL_NAME_CAPACITY]
 
         def read_u16(bytes: u8&, offset: usize) -> u16:
             return bytes[offset].u16() | (bytes[offset + 1].u16() << ELF_BYTE_BITS)
@@ -215,4 +223,26 @@ module DebuggerNativeElf:
             result.value <- read_u64(bytes, offset + ELF_SYMBOL_VALUE_OFFSET)
             result.size <- read_u64(bytes, offset + ELF_SYMBOL_SIZE_OFFSET)
             result.valid <- true
+            return result
+
+        def elf_symbol_name(bytes: u8&, length: usize, header: ElfHeader, symbol_section_index: usize, symbol_index: usize) -> ElfSymbolName:
+            result: mutable ElfSymbolName = zeroed
+            symbol_section: ElfSectionHeader = elf_section_header(bytes, length, header, symbol_section_index)
+            symbol: ElfSymbol = elf_symbol(bytes, length, header, symbol_section_index, symbol_index)
+            return result if not symbol_section.valid or not symbol.valid or symbol_section.link.u64() >= header.section_header_count.u64()
+            string_section: ElfSectionHeader = elf_section_header(bytes, length, header, symbol_section.link.usize())
+            return result if not string_section.valid or string_section.kind != ELF_SECTION_KIND_STRING_TABLE or symbol.name_offset.u64() >= string_section.size
+            start: u64 = string_section.offset + symbol.name_offset.u64()
+            return result if start < string_section.offset or start >= length.u64()
+            available: u64 = string_section.size - symbol.name_offset.u64()
+            for index in 0..<available.usize():
+                value: u8 = bytes[start.usize() + index]
+                return result if index >= ELF_SYMBOL_NAME_CAPACITY
+                return result if value == 0 and index == 0
+                if value == 0:
+                    result.valid <- true
+                    result.length <- index
+                    return result
+                result.bytes[index] <- value
+            result.truncated <- true
             return result

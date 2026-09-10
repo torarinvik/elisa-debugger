@@ -94,3 +94,5 @@ without sharing unsafe offset assumptions. Callers
 use `DebuggerNativeArtifact` as the single public selector: it checks a bounded
 magic prefix and dispatches to the appropriate reader, while unknown formats
 remain explicitly unsupported.
+Mach-O UUID load commands are exposed only when their full 16-byte identity is
+present, allowing build-artifact matching without trusting a path or filename.

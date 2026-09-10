@@ -1,0 +1,34 @@
+# Convert validated object-file symbols into the provider-neutral symbol table.
+# The loader accepts parsed records only; format readers remain responsible for
+# all byte and table bounds.
+
+include "./symbols.elisa"
+include "./elf.elisa"
+include "./macho.elisa"
+
+module DebuggerNativeSymbolLoader:
+    private:
+        const SYMBOL_HASH_PRIME: u64 = 1099511628211
+        const SYMBOL_ID_NONZERO_MASK: u64 = 1
+
+        def record_id(name: DebuggerNativeElf::ElfSymbolName, address: u64, size: u64) -> DebuggerIdentity::DebugId:
+            hash: mutable u64 = DebuggerNativeSymbols::symbol_name_id(name.bytes[0], name.length).value
+            hash <- (hash ^ address) * SYMBOL_HASH_PRIME
+            hash <- (hash ^ size) * SYMBOL_HASH_PRIME
+            hash <- hash | SYMBOL_ID_NONZERO_MASK
+            return DebuggerIdentity::debug_id(hash)
+
+    public:
+        def add_elf_symbol(table: DebuggerNativeSymbols::SymbolTable, symbol: DebuggerNativeElf::ElfSymbol, name: DebuggerNativeElf::ElfSymbolName, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:
+            return table if not symbol.valid or not name.valid or name.truncated or symbol.size == 0
+            identity: DebuggerIdentity::DebugId = record_id(name, symbol.value, symbol.size)
+            return DebuggerNativeSymbols::symbols_add(table, DebuggerNativeSymbols::Symbol{id: identity, address: symbol.value, size: symbol.size, name: DebuggerNativeSymbols::symbol_name_id(name.bytes[0], name.length), source: source})
+
+        def add_macho_symbol(table: DebuggerNativeSymbols::SymbolTable, symbol: DebuggerNativeMachO::MachOSymbol, name: DebuggerNativeMachO::MachOSymbolName, size: u64, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:
+            return table if not symbol.valid or not name.valid or name.truncated or name.length == 0
+            name_id: DebuggerIdentity::DebugId = DebuggerNativeSymbols::symbol_name_id(name.bytes[0], name.length)
+            hash: mutable u64 = name_id.value
+            hash <- (hash ^ symbol.value) * SYMBOL_HASH_PRIME
+            hash <- (hash ^ size) * SYMBOL_HASH_PRIME
+            identity: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(hash | SYMBOL_ID_NONZERO_MASK)
+            return DebuggerNativeSymbols::symbols_add(table, DebuggerNativeSymbols::Symbol{id: identity, address: symbol.value, size: size, name: name_id, source: source})

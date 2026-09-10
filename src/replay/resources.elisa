@@ -114,8 +114,25 @@ module DebuggerVirtualResources:
             return DebuggerErrors::no_error()
 
         def resources_clone_branch(store: ResourceStore) -> ResourceStore:
-            branch: mutable ResourceStore = store
+            # Do not rely on aggregate assignment for branch isolation. A branch must own an
+            # independent byte snapshot: a write in the child is an intervention, never a
+            # mutation of the parent recording. Copy the bounded representation explicitly so
+            # this remains true even when a backend lowers nested fixed-array assignment as a
+            # shallow aggregate copy. Clamp a corrupted count before indexing so cloning an
+            # invalid store cannot turn validation input into an out-of-bounds read.
+            branch: mutable ResourceStore = zeroed
+            branch.count <- store.count if store.count <= RESOURCE_FILE_CAPACITY else RESOURCE_FILE_CAPACITY
+            branch.next_handle <- store.next_handle
             branch.mode <- ResourceMode.Branch
+            for index in 0..<branch.count:
+                branch.files[index].handle <- store.files[index].handle
+                branch.files[index].path <- store.files[index].path
+                branch.files[index].length <- store.files[index].length
+                branch.files[index].cursor <- store.files[index].cursor
+                branch.files[index].writable <- store.files[index].writable
+                branch.files[index].generation <- store.files[index].generation
+                for byte_index in 0..<RESOURCE_DATA_CAPACITY:
+                    branch.files[index].bytes[byte_index] <- store.files[index].bytes[byte_index]
             return branch
 
         def resources_is_valid(store: mutable ResourceStore&) -> bool:

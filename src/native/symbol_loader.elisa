@@ -10,6 +10,10 @@ module DebuggerNativeSymbolLoader:
     private:
         const SYMBOL_HASH_PRIME: u64 = 1099511628211
         const SYMBOL_ID_NONZERO_MASK: u64 = 1
+        const SYMBOL_SECTION_MAX: usize = 512
+        const ELF_SYMBOL_SECTION_KIND: u32 = 2
+        const ELF_DYNAMIC_SYMBOL_SECTION_KIND: u32 = 11
+        const ELF_SYMBOL_ENTRY_BYTES: u64 = 24
 
         def record_id(name: DebuggerNativeElf::ElfSymbolName, address: u64, size: u64) -> DebuggerIdentity::DebugId:
             hash: mutable u64 = DebuggerNativeSymbols::symbol_name_id(name.bytes[0], name.length).value
@@ -19,6 +23,20 @@ module DebuggerNativeSymbolLoader:
             return DebuggerIdentity::debug_id(hash)
 
     public:
+        def load_elf_section(table: DebuggerNativeSymbols::SymbolTable, bytes: u8&, length: usize, header: DebuggerNativeElf::ElfHeader, section_index: usize, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:
+            original: DebuggerNativeSymbols::SymbolTable = table
+            return original if not header.valid or section_index >= header.section_header_count.usize()
+            section: DebuggerNativeElf::ElfSectionHeader = DebuggerNativeElf::elf_section_header(bytes, length, header, section_index)
+            return original if not section.valid or (section.kind != ELF_SYMBOL_SECTION_KIND and section.kind != ELF_DYNAMIC_SYMBOL_SECTION_KIND) or section.entry_size != ELF_SYMBOL_ENTRY_BYTES or section.size / section.entry_size > SYMBOL_SECTION_MAX
+            symbol_count: usize = (section.size / section.entry_size).usize()
+            updated: mutable DebuggerNativeSymbols::SymbolTable = table
+            for index in 0..<symbol_count:
+                symbol: DebuggerNativeElf::ElfSymbol = DebuggerNativeElf::elf_symbol(bytes, length, header, section_index, index)
+                name: DebuggerNativeElf::ElfSymbolName = DebuggerNativeElf::elf_symbol_name(bytes, length, header, section_index, index)
+                return original if not symbol.valid or not name.valid or name.truncated
+                updated <- add_elf_symbol(updated, symbol, name, source)
+            return updated
+
         def add_elf_symbol(table: DebuggerNativeSymbols::SymbolTable, symbol: DebuggerNativeElf::ElfSymbol, name: DebuggerNativeElf::ElfSymbolName, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:
             return table if not symbol.valid or not name.valid or name.truncated or symbol.size == 0
             identity: DebuggerIdentity::DebugId = record_id(name, symbol.value, symbol.size)

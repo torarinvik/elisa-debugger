@@ -11,6 +11,7 @@ module DebuggerNativeSymbolLoader:
         const SYMBOL_HASH_PRIME: u64 = 1099511628211
         const SYMBOL_ID_NONZERO_MASK: u64 = 1
         const SYMBOL_SECTION_MAX: usize = 512
+        const SYMBOL_TABLE_CAPACITY: usize = 512
         const ELF_SYMBOL_SECTION_KIND: u32 = 2
         const ELF_DYNAMIC_SYMBOL_SECTION_KIND: u32 = 11
         const ELF_SYMBOL_ENTRY_BYTES: u64 = 24
@@ -30,12 +31,15 @@ module DebuggerNativeSymbolLoader:
             section: DebuggerNativeElf::ElfSectionHeader = DebuggerNativeElf::elf_section_header(bytes, length, header, section_index)
             return original if not section.valid or (section.kind != ELF_SYMBOL_SECTION_KIND and section.kind != ELF_DYNAMIC_SYMBOL_SECTION_KIND) or section.entry_size != ELF_SYMBOL_ENTRY_BYTES or section.size / section.entry_size > SYMBOL_SECTION_MAX
             symbol_count: usize = (section.size / section.entry_size).usize()
+            return original if table.count > SYMBOL_TABLE_CAPACITY or symbol_count > SYMBOL_TABLE_CAPACITY - table.count
             updated: mutable DebuggerNativeSymbols::SymbolTable = table
             for index in 0..<symbol_count:
                 symbol: DebuggerNativeElf::ElfSymbol = DebuggerNativeElf::elf_symbol(bytes, length, header, section_index, index)
                 name: DebuggerNativeElf::ElfSymbolName = DebuggerNativeElf::elf_symbol_name(bytes, length, header, section_index, index)
                 return original if not symbol.valid or not name.valid or name.truncated
-                updated <- add_elf_symbol(updated, symbol, name, source)
+                next: DebuggerNativeSymbols::SymbolTable = add_elf_symbol(updated, symbol, name, source)
+                return original if next.count != updated.count + 1
+                updated <- next
             return updated
 
         def add_elf_symbol(table: DebuggerNativeSymbols::SymbolTable, symbol: DebuggerNativeElf::ElfSymbol, name: DebuggerNativeElf::ElfSymbolName, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:
@@ -46,12 +50,15 @@ module DebuggerNativeSymbolLoader:
         def load_macho_symbols(table: DebuggerNativeSymbols::SymbolTable, bytes: u8&, length: usize, header: DebuggerNativeMachO::MachOHeader, symbol_count: usize, sizes: u64&, size_count: usize, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:
             original: DebuggerNativeSymbols::SymbolTable = table
             return original if not header.valid or symbol_count > MACHO_SYMBOL_MAX or size_count < symbol_count
+            return original if table.count > SYMBOL_TABLE_CAPACITY or symbol_count > SYMBOL_TABLE_CAPACITY - table.count
             updated: mutable DebuggerNativeSymbols::SymbolTable = table
             for index in 0..<symbol_count:
                 symbol: DebuggerNativeMachO::MachOSymbol = DebuggerNativeMachO::macho_symbol(header, bytes, length, index)
                 name: DebuggerNativeMachO::MachOSymbolName = DebuggerNativeMachO::macho_symbol_name(header, bytes, length, index)
                 return original if not symbol.valid or not name.valid or name.truncated or sizes[index] == 0
-                updated <- add_macho_symbol(updated, symbol, name, sizes[index], source)
+                next: DebuggerNativeSymbols::SymbolTable = add_macho_symbol(updated, symbol, name, sizes[index], source)
+                return original if next.count != updated.count + 1
+                updated <- next
             return updated
 
         def add_macho_symbol(table: DebuggerNativeSymbols::SymbolTable, symbol: DebuggerNativeMachO::MachOSymbol, name: DebuggerNativeMachO::MachOSymbolName, size: u64, source: DebuggerIdentity::SourceSpan) -> DebuggerNativeSymbols::SymbolTable:

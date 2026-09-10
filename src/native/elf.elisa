@@ -43,6 +43,15 @@ module DebuggerNativeElf:
         const ELF_SECTION_INFO_OFFSET: usize = 44
         const ELF_SECTION_ALIGNMENT_OFFSET: usize = 48
         const ELF_SECTION_ENTRY_SIZE_OFFSET: usize = 56
+        const ELF_SYMBOL_NAME_OFFSET: usize = 0
+        const ELF_SYMBOL_INFO_OFFSET: usize = 4
+        const ELF_SYMBOL_OTHER_OFFSET: usize = 5
+        const ELF_SYMBOL_SECTION_INDEX_OFFSET: usize = 6
+        const ELF_SYMBOL_VALUE_OFFSET: usize = 8
+        const ELF_SYMBOL_SIZE_OFFSET: usize = 16
+        const ELF_SYMBOL_ENTRY_BYTES: usize = 24
+        const ELF_SECTION_KIND_SYMBOLS: u32 = 2
+        const ELF_SECTION_KIND_DYNAMIC_SYMBOLS: u32 = 11
         const ELF_TYPE_EXECUTABLE: u16 = 2
         const ELF_TYPE_SHARED: u16 = 3
         const ELF_MACHINE_X86_64: u16 = 62
@@ -88,6 +97,15 @@ module DebuggerNativeElf:
             info: mutable u32
             alignment: mutable u64
             entry_size: mutable u64
+
+        struct ElfSymbol:
+            valid: mutable bool
+            name_offset: mutable u32
+            info: mutable u8
+            other: mutable u8
+            section_index: mutable u16
+            value: mutable u64
+            size: mutable u64
 
         def read_u16(bytes: u8&, offset: usize) -> u16:
             return bytes[offset].u16() | (bytes[offset + 1].u16() << ELF_BYTE_BITS)
@@ -180,5 +198,21 @@ module DebuggerNativeElf:
             result.alignment <- read_u64(bytes, offset + ELF_SECTION_ALIGNMENT_OFFSET)
             result.entry_size <- read_u64(bytes, offset + ELF_SECTION_ENTRY_SIZE_OFFSET)
             return result if result.offset > length.u64() or result.size > length.u64() - result.offset
+            result.valid <- true
+            return result
+
+        def elf_symbol(bytes: u8&, length: usize, header: ElfHeader, section_index: usize, symbol_index: usize) -> ElfSymbol:
+            result: mutable ElfSymbol = zeroed
+            section: ElfSectionHeader = elf_section_header(bytes, length, header, section_index)
+            return result if not section.valid or (section.kind != ELF_SECTION_KIND_SYMBOLS and section.kind != ELF_SECTION_KIND_DYNAMIC_SYMBOLS) or section.entry_size != ELF_SYMBOL_ENTRY_BYTES.u64() or section.size % section.entry_size != 0 or section.size / section.entry_size <= symbol_index.u64()
+            symbol_offset: u64 = section.offset + symbol_index.u64() * section.entry_size
+            return result if symbol_offset < section.offset or symbol_offset > length.u64() or length.u64() - symbol_offset < ELF_SYMBOL_ENTRY_BYTES.u64()
+            offset: usize = symbol_offset.usize()
+            result.name_offset <- read_u32(bytes, offset + ELF_SYMBOL_NAME_OFFSET)
+            result.info <- bytes[offset + ELF_SYMBOL_INFO_OFFSET]
+            result.other <- bytes[offset + ELF_SYMBOL_OTHER_OFFSET]
+            result.section_index <- read_u16(bytes, offset + ELF_SYMBOL_SECTION_INDEX_OFFSET)
+            result.value <- read_u64(bytes, offset + ELF_SYMBOL_VALUE_OFFSET)
+            result.size <- read_u64(bytes, offset + ELF_SYMBOL_SIZE_OFFSET)
             result.valid <- true
             return result

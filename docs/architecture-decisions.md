@@ -100,3 +100,5 @@ ELF symbol entries are decoded only from complete, entry-size-aligned symbol
 sections. Name-string resolution follows the section's linked string table and
 returns explicit invalid or truncated state instead of scanning beyond the
 declared table.
+Mach-O `nlist_64` entries are likewise read only through a validated
+`LC_SYMTAB` command, with checked symbol and string-table ranges.

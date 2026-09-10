@@ -117,3 +117,4 @@ name/address/size, and leaves malformed or zero-sized symbols out of the table.
 Its ELF section loader validates the complete bounded section before publishing
 any entries, so a malformed symbol or name cannot leave a partially populated
 table behind.
+Capacity exhaustion and identity collisions use the same rollback rule.

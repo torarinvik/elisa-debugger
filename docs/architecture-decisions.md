@@ -71,6 +71,8 @@ carry cancellation and resource-limit outcomes, and never turn an incomplete
 scan into a complete answer.
 Durable managed checkpoints carry both recording and branch identities; either
 identity being absent invalidates the checkpoint before restoration.
+Build manifests likewise require every present artifact to carry a known kind,
+nonzero size, and nonzero content identity before launch or recording is allowed.
 
 Concurrency exploration is bounded by task, event, preemption, branch, and
 work limits. Race reports describe observed concurrent accesses under the

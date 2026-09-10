@@ -187,12 +187,18 @@ module DebuggerManagedEngine:
 
         def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if event.u64() != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             original_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
             original_session: DebuggerSession::Session = controller.session
             DebuggerReplayEngine::replay_engine_seek(controller.engine, event)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
-            managed_sync_position(controller)
+            # Validate the requested coordinate against the session's original
+            # position before copying the speculative engine position into it.
+            # Otherwise a Replayable session could turn an unsupported seek into
+            # an apparent no-op by observing the engine after it had already
+            # replayed to the requested event.
+            controller.session.retained_last <- event.u64() if event.u64() > controller.session.retained_last
             controller.session <- DebuggerSession::session_seek(controller.session, event.u64())
             if controller.session.last_error != DebuggerSession::SessionError.None:
                 session_failure: DebuggerSession::SessionError = controller.session.last_error

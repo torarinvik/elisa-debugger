@@ -1,4 +1,8 @@
 ELISA_COMPILER ?= ../Elisa-compiler/scripts/elisac_stage1.sh
+# The compiler is commonly located under a workspace path containing spaces.
+# Keep it as one shell argument in every recipe, including command-line
+# overrides such as `make ELISA_COMPILER=/path/with\ spaces/elisac-stage1`.
+override ELISA_COMPILER := "$(ELISA_COMPILER)"
 ELISA_RUNTIME ?= $(abspath ../Elisa-compiler/build/runtime/elisacore_runtime.o)
 # Large aggregate fixtures exercise the modules in one executable entry point. Keep their
 # generated stack frames above macOS's default 8 MiB thread stack while leaving other hosts'
@@ -461,7 +465,9 @@ smoke: check server dap-server cli ffi-check
 	printf 'Content-Length: 58\r\n\r\n{"seq":1,"type":"request","command":"initialize","x":"\\q"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 61\r\n\r\n{"seq":1,"type":"request","command":"initialize","x":notjson}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 73\r\n\r\n{"seq":1,"type":"request","arguments":{"x":"\\"command\\":\\"initialize\\""}}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
-	printf 'Content-Length: 55\r\n\r\n{"seq":1,"type":"request","command":"initialize\"junk"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -q '"success":false'; test "$$?" -eq 0
+	# Keep the escaped quote in the JSON payload: POSIX printf consumes one
+	# backslash in its format string, so two are required in this test recipe.
+	printf 'Content-Length: 55\r\n\r\n{"seq":1,"type":"request","command":"initialize\\"junk"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -q '"success":false'; test "$$?" -eq 0
 	printf 'Content-Length: 55\r\n\r\n{"seq":1,"type":"request\"junk","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 50\r\n\r\n{"seq":1,"type":"request","command":"initialize",}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 56\r\n\r\n{"seq":1,"type":"request","command":"initialize",,"x":1}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2

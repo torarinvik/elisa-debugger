@@ -104,3 +104,5 @@ Mach-O `nlist_64` entries are likewise read only through a validated
 `LC_SYMTAB` command, with checked symbol and string-table ranges.
 Mach-O symbol names follow the declared string-table range and use the same
 bounded, explicit invalid/truncated result contract as ELF names.
+An ELF or Mach-O symbol with name offset zero is represented as a valid empty
+name, preserving the object-file convention for unnamed entries.

@@ -109,3 +109,6 @@ name, preserving the object-file convention for unnamed entries.
 Nonempty native names can be converted to deterministic bounded FNV identities
 through `DebuggerNativeSymbols::symbol_name_id`; zero or oversized names return
 the reserved invalid identity.
+`DebuggerNativeSymbolLoader` is the provider-neutral materialization boundary:
+it accepts only validated parsed records, derives stable record identities from
+name/address/size, and leaves malformed or zero-sized symbols out of the table.

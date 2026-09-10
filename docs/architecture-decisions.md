@@ -106,3 +106,6 @@ Mach-O symbol names follow the declared string-table range and use the same
 bounded, explicit invalid/truncated result contract as ELF names.
 An ELF or Mach-O symbol with name offset zero is represented as a valid empty
 name, preserving the object-file convention for unnamed entries.
+Nonempty native names can be converted to deterministic bounded FNV identities
+through `DebuggerNativeSymbols::symbol_name_id`; zero or oversized names return
+the reserved invalid identity.

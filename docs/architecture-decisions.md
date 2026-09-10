@@ -112,3 +112,6 @@ the reserved invalid identity.
 `DebuggerNativeSymbolLoader` is the provider-neutral materialization boundary:
 it accepts only validated parsed records, derives stable record identities from
 name/address/size, and leaves malformed or zero-sized symbols out of the table.
+Its ELF section loader validates the complete bounded section before publishing
+any entries, so a malformed symbol or name cannot leave a partially populated
+table behind.

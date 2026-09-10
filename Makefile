@@ -232,6 +232,13 @@ $(BUILD)/elisa-debugger-breakpoint-resolver-check: tests/breakpoint_resolver_che
 breakpoint-resolver-check: $(BUILD)/elisa-debugger-breakpoint-resolver-check
 	"$(BUILD)/elisa-debugger-breakpoint-resolver-check"
 
+$(BUILD)/elisa-debugger-path-policy-check: tests/path_policy_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+path-policy-check: $(BUILD)/elisa-debugger-path-policy-check
+	"$(BUILD)/elisa-debugger-path-policy-check"
+
 edir-codec-check: $(BUILD)/elisa-debugger-edir-codec-check
 	"$(BUILD)/elisa-debugger-edir-codec-check"
 

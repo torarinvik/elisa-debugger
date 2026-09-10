@@ -22,7 +22,7 @@ ELISA_ALLOW_STALE_STAGE1 ?= 1
 # include cannot leave a silently stale executable behind.
 ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check trace-storage-decode-check trace-reader-encoded-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check timeline-capability-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check trace-storage-decode-check trace-reader-encoded-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check breakpoint-resolver-check timeline-capability-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -224,6 +224,13 @@ $(BUILD)/elisa-debugger-edir-call-check: tests/edir_call_check.elisa $(ELISA_SOU
 $(BUILD)/elisa-debugger-edir-codec-check: tests/edir_codec_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-breakpoint-resolver-check: tests/breakpoint_resolver_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+breakpoint-resolver-check: $(BUILD)/elisa-debugger-breakpoint-resolver-check
+	"$(BUILD)/elisa-debugger-breakpoint-resolver-check"
 
 edir-codec-check: $(BUILD)/elisa-debugger-edir-codec-check
 	"$(BUILD)/elisa-debugger-edir-codec-check"

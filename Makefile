@@ -41,6 +41,7 @@ module-check: $(BUILD)/elisa-debugger-native-macho-check
 module-check: $(BUILD)/elisa-debugger-native-artifact-check
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
+
 	"$(BUILD)/elisa-debugger-module-core-check"
 	"$(BUILD)/elisa-debugger-module-data-check"
 	"$(BUILD)/elisa-debugger-module-protocol-check"

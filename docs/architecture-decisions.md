@@ -96,3 +96,5 @@ magic prefix and dispatches to the appropriate reader, while unknown formats
 remain explicitly unsupported.
 Mach-O UUID load commands are exposed only when their full 16-byte identity is
 present, allowing build-artifact matching without trusting a path or filename.
+ELF symbol entries are decoded only from complete, entry-size-aligned symbol
+sections; name-string resolution remains a separate bounded operation.

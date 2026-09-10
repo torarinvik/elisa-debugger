@@ -102,3 +102,5 @@ returns explicit invalid or truncated state instead of scanning beyond the
 declared table.
 Mach-O `nlist_64` entries are likewise read only through a validated
 `LC_SYMTAB` command, with checked symbol and string-table ranges.
+Mach-O symbol names follow the declared string-table range and use the same
+bounded, explicit invalid/truncated result contract as ELF names.

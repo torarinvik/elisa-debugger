@@ -7,6 +7,23 @@ const COMMAND_SIZE: u32 = 8
 const UUID_IMAGE_BYTES: usize = 56
 const UUID_COMMAND_BYTES: u32 = 24
 const UUID_COMMAND_OFFSET: usize = 32
+const SYMBOL_IMAGE_BYTES: usize = 80
+const SYMBOL_COMMAND_BYTES: u32 = 24
+const SYMBOL_COMMAND_OFFSET: usize = 32
+const SYMBOL_TABLE_OFFSET: u32 = 56
+const SYMBOL_COUNT: u32 = 1
+const SYMBOL_STRING_OFFSET: u32 = 72
+const SYMBOL_STRING_SIZE: u32 = 8
+
+def put_u32(bytes: mutable u8&, offset: usize, value: u32) -> void:
+    bytes[offset] <- value.u8()
+    bytes[offset + 1] <- (value >> 8).u8()
+    bytes[offset + 2] <- (value >> 16).u8()
+    bytes[offset + 3] <- (value >> 24).u8()
+
+def put_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+    for index in 0..<8:
+        bytes[offset + index] <- (value >> (index.u64() * 8)).u8()
 
 def main() -> i64:
     image: mutable u8[MACHO_BYTES] = zeroed
@@ -48,6 +65,30 @@ def main() -> i64:
     uuid_image[UUID_COMMAND_OFFSET + 4] <- 8
     malformed_uuid_header: DebuggerNativeMachO::MachOHeader = DebuggerNativeMachO::macho_parse(uuid_image[0], UUID_IMAGE_BYTES)
     return 15 if DebuggerNativeMachO::macho_uuid(malformed_uuid_header, uuid_image[0], UUID_IMAGE_BYTES).valid
+    symbol_image: mutable u8[SYMBOL_IMAGE_BYTES] = zeroed
+    symbol_image[0] <- 207
+    symbol_image[1] <- 250
+    symbol_image[2] <- 237
+    symbol_image[3] <- 254
+    symbol_image[4] <- 12
+    symbol_image[7] <- 1
+    symbol_image[12] <- 2
+    symbol_image[16] <- 1
+    symbol_image[20] <- SYMBOL_COMMAND_BYTES.u8()
+    symbol_image[SYMBOL_COMMAND_OFFSET] <- 2
+    symbol_image[SYMBOL_COMMAND_OFFSET + 4] <- SYMBOL_COMMAND_BYTES.u8()
+    put_u32(symbol_image[0], SYMBOL_COMMAND_OFFSET + 8, SYMBOL_TABLE_OFFSET)
+    put_u32(symbol_image[0], SYMBOL_COMMAND_OFFSET + 12, SYMBOL_COUNT)
+    put_u32(symbol_image[0], SYMBOL_COMMAND_OFFSET + 16, SYMBOL_STRING_OFFSET)
+    put_u32(symbol_image[0], SYMBOL_COMMAND_OFFSET + 20, SYMBOL_STRING_SIZE)
+    put_u32(symbol_image[0], SYMBOL_TABLE_OFFSET.usize(), 3)
+    symbol_image[SYMBOL_TABLE_OFFSET.usize() + 4] <- 15
+    symbol_image[SYMBOL_TABLE_OFFSET.usize() + 5] <- 1
+    put_u64(symbol_image[0], SYMBOL_TABLE_OFFSET.usize() + 8, 8192)
+    symbol_header: DebuggerNativeMachO::MachOHeader = DebuggerNativeMachO::macho_parse(symbol_image[0], SYMBOL_IMAGE_BYTES)
+    symbol: DebuggerNativeMachO::MachOSymbol = DebuggerNativeMachO::macho_symbol(symbol_header, symbol_image[0], SYMBOL_IMAGE_BYTES, 0)
+    return 16 if not symbol.valid or symbol.name_offset != 3 or symbol.symbol_type != 15 or symbol.section != 1 or symbol.value != 8192
+    return 17 if DebuggerNativeMachO::macho_symbol(symbol_header, symbol_image[0], SYMBOL_IMAGE_BYTES, 1).valid
     image[36] <- 4
     return 9 if DebuggerNativeMachO::macho_commands_are_valid(header, image[0], MACHO_BYTES)
     image[36] <- 8

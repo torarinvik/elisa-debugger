@@ -29,6 +29,18 @@ module DebuggerNativeMachO:
         const MACHO_UUID_COMMAND_KIND: u32 = 27
         const MACHO_UUID_COMMAND_BYTES: usize = 24
         const MACHO_UUID_OFFSET: usize = 8
+        const MACHO_SYMBOL_TABLE_COMMAND_KIND: u32 = 2
+        const MACHO_SYMBOL_TABLE_COMMAND_BYTES: usize = 24
+        const MACHO_SYMBOL_TABLE_OFFSET: usize = 8
+        const MACHO_SYMBOL_COUNT_OFFSET: usize = 12
+        const MACHO_STRING_TABLE_OFFSET: usize = 16
+        const MACHO_STRING_TABLE_SIZE_OFFSET: usize = 20
+        const MACHO_NLIST_BYTES: usize = 16
+        const MACHO_NLIST_NAME_OFFSET: usize = 0
+        const MACHO_NLIST_TYPE_OFFSET: usize = 4
+        const MACHO_NLIST_SECTION_OFFSET: usize = 5
+        const MACHO_NLIST_DESCRIPTION_OFFSET: usize = 6
+        const MACHO_NLIST_VALUE_OFFSET: usize = 8
 
     public:
         enum MachOMachine:
@@ -54,8 +66,25 @@ module DebuggerNativeMachO:
             valid: mutable bool
             bytes: mutable u8[16]
 
+        struct MachOSymbol:
+            valid: mutable bool
+            name_offset: mutable u32
+            symbol_type: mutable u8
+            section: mutable u8
+            description: mutable u16
+            value: mutable u64
+
         def read_u32(bytes: u8&, offset: usize) -> u32:
             return bytes[offset].u32() | (bytes[offset + 1].u32() << MACHO_BYTE_BITS) | (bytes[offset + 2].u32() << (MACHO_BYTE_BITS * 2)) | (bytes[offset + 3].u32() << (MACHO_BYTE_BITS * 3))
+
+        def read_u16(bytes: u8&, offset: usize) -> u16:
+            return bytes[offset].u16() | (bytes[offset + 1].u16() << MACHO_BYTE_BITS)
+
+        def read_u64(bytes: u8&, offset: usize) -> u64:
+            value: mutable u64 = 0
+            for index in 0..<8:
+                value <- value | (bytes[offset + index].u64() << (index.u64() * MACHO_BYTE_BITS.u64()))
+            return value
 
         def macho_parse(bytes: u8&, length: usize) -> MachOHeader:
             result: mutable MachOHeader = zeroed
@@ -127,4 +156,30 @@ module DebuggerNativeMachO:
                         result.bytes[byte_index] <- bytes[command.offset + MACHO_UUID_OFFSET + byte_index]
                     result.valid <- true
                     return result
+            return result
+
+        def macho_symbol(header: MachOHeader, bytes: u8&, length: usize, symbol_index: usize) -> MachOSymbol:
+            result: mutable MachOSymbol = zeroed
+            return result if not header.valid
+            for command_index in 0..<header.command_count.usize():
+                command: MachOCommand = macho_command(header, bytes, length, command_index)
+                return result if not command.valid
+                continue if command.kind != MACHO_SYMBOL_TABLE_COMMAND_KIND
+                return result if command.size.usize() < MACHO_SYMBOL_TABLE_COMMAND_BYTES
+                symbol_offset: u64 = read_u32(bytes, command.offset + MACHO_SYMBOL_TABLE_OFFSET).u64()
+                symbol_count: u64 = read_u32(bytes, command.offset + MACHO_SYMBOL_COUNT_OFFSET).u64()
+                string_offset: u64 = read_u32(bytes, command.offset + MACHO_STRING_TABLE_OFFSET).u64()
+                string_size: u64 = read_u32(bytes, command.offset + MACHO_STRING_TABLE_SIZE_OFFSET).u64()
+                return result if symbol_index.u64() >= symbol_count or symbol_offset > length.u64() or symbol_count > (length.u64() - symbol_offset) / MACHO_NLIST_BYTES.u64()
+                return result if string_offset > length.u64() or string_size > length.u64() - string_offset
+                entry_offset: u64 = symbol_offset + symbol_index.u64() * MACHO_NLIST_BYTES.u64()
+                return result if entry_offset < symbol_offset or entry_offset > length.u64() or length.u64() - entry_offset < MACHO_NLIST_BYTES.u64()
+                offset: usize = entry_offset.usize()
+                result.name_offset <- read_u32(bytes, offset + MACHO_NLIST_NAME_OFFSET)
+                result.symbol_type <- bytes[offset + MACHO_NLIST_TYPE_OFFSET]
+                result.section <- bytes[offset + MACHO_NLIST_SECTION_OFFSET]
+                result.description <- read_u16(bytes, offset + MACHO_NLIST_DESCRIPTION_OFFSET)
+                result.value <- read_u64(bytes, offset + MACHO_NLIST_VALUE_OFFSET)
+                result.valid <- true
+                return result
             return result

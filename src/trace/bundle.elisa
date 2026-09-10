@@ -56,7 +56,15 @@ module DebuggerTraceBundle:
         def bundle_manifest_matches_chunks(bundle: TraceBundle) -> bool:
             return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == 0 if bundle.chunk_count == 0
             return false if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
-            return bundle.manifest.first_event == bundle.chunks[0].header.first_event and bundle.manifest.last_event == bundle.chunks[bundle.chunk_count - 1].header.last_event and bundle.manifest.checkpoint_count == bundle.chunk_count.u64()
+            event_chunks: u64 = bundle_event_chunk_count(bundle)
+            return bundle.manifest.first_event == bundle.chunks[0].header.first_event and bundle.manifest.last_event == bundle.chunks[bundle.chunk_count - 1].header.last_event and bundle.manifest.checkpoint_count == event_chunks
+
+        def bundle_event_chunk_count(bundle: TraceBundle) -> u64:
+            count: mutable u64 = 0
+            return 0 if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
+            for index in 0..<bundle.chunk_count:
+                count <- count + 1 if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events
+            return count
 
         def bundle_append(bundle: mutable TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_SEQUENCE) if bundle.state != BundleState.Open
@@ -71,7 +79,8 @@ module DebuggerTraceBundle:
             updated: mutable DebuggerTraceManifest::BundleManifest = bundle.manifest
             updated.first_event <- chunk.header.first_event if bundle.chunk_count == 1
             updated.last_event <- chunk.header.last_event
-            updated.checkpoint_count <- bundle.chunk_count.u64()
+            count_snapshot: TraceBundle = bundle
+            updated.checkpoint_count <- bundle_event_chunk_count(count_snapshot)
             bundle.manifest <- updated
             return DebuggerErrors::no_error()
 

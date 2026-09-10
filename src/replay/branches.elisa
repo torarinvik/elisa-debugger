@@ -115,3 +115,25 @@ module DebuggerBranches:
             return BRANCH_MAX_ID if left.intervention_count == right.intervention_count
             return left.interventions[limit].event if left.intervention_count > limit
             return right.interventions[limit].event
+
+        # Validate a deserialized branch store before exposing lineage or
+        # interventions to replay.  Branch APIs return values, so callers may
+        # receive stores reconstructed from untrusted trace data.
+        def branches_is_valid(store: BranchStore) -> bool:
+            return false if store.count > BRANCH_CAPACITY or store.next_id == 0
+            for index in 0..<store.count:
+                branch: BranchRecord = store.branches[index]
+                return false if branch.id.value == 0 or branch.id.value >= store.next_id
+                return false if branch.intervention_count > INTERVENTION_CAPACITY
+                return false if not branches_parent_exists(store, branch.parent)
+                return false if not branches_parent_event_is_valid(store, branch.parent, branch.fork_event)
+                return false if not branches_parent_chain_is_valid(store, branch.parent)
+                for previous in 0..<index:
+                    return false if store.branches[previous].id.value == branch.id.value
+                for intervention_index in 0..<branch.intervention_count:
+                    intervention: Intervention = branch.interventions[intervention_index]
+                    return false if not branches_intervention_is_valid(branch, intervention)
+                    if intervention_index > 0:
+                        previous_intervention: Intervention = branch.interventions[intervention_index - 1]
+                        return false if intervention.event < previous_intervention.event
+            return true

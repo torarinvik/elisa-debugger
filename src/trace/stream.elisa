@@ -11,6 +11,7 @@ module DebuggerTraceStream:
         const TRACE_FIRST_SEQUENCE: u64 = 0
         const TRACE_SEQUENCE_INCREMENT: u64 = 1
         const TRACE_MAX_SEQUENCE: u64 = 18446744073709551615
+        const TRACE_MAX_EVENT: u64 = 18446744073709551615
         const TRACE_HASH_OFFSET_BASIS: u64 = 1469598103934665603
         const TRACE_HASH_PRIME: u64 = 1099511628211
 
@@ -101,6 +102,8 @@ module DebuggerTraceStream:
             return stream.status if stream.status == TraceReadStatus.Truncated or stream.status == TraceReadStatus.Corrupt or stream.status == TraceReadStatus.ResourceLimit
             return TraceReadStatus.Empty if stream.chunk_count == 0
             return TraceReadStatus.Corrupt if stream.status == TraceReadStatus.Empty
+            expected_event: mutable u64 = 0
+            event_seen: mutable bool = false
             for index in 0..<stream.chunk_count:
                 chunk: TraceChunk = stream.chunks[index]
                 return TraceReadStatus.ResourceLimit if chunk.header.payload_length > TRACE_MAX_PAYLOAD.u64() or chunk.payload_received > TRACE_MAX_PAYLOAD
@@ -109,6 +112,10 @@ module DebuggerTraceStream:
                 return TraceReadStatus.Truncated if not chunk.complete
                 return TraceReadStatus.Corrupt if chunk.payload_received != chunk.header.payload_length.usize()
                 return TraceReadStatus.Corrupt if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
+                if chunk.header.kind == DebuggerTrace::ChunkKind.Events:
+                    return TraceReadStatus.Corrupt if event_seen and (expected_event == TRACE_MAX_EVENT or chunk.header.first_event != expected_event)
+                    event_seen <- true
+                    expected_event <- chunk.header.last_event if chunk.header.last_event == TRACE_MAX_EVENT else chunk.header.last_event + 1
                 computed: mutable u64 = TRACE_HASH_OFFSET_BASIS
                 for payload_index in 0..<chunk.payload_received:
                     computed <- (computed ^ chunk.payload[payload_index].u64()) * TRACE_HASH_PRIME

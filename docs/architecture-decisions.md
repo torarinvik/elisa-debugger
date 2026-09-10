@@ -88,7 +88,8 @@ handles bounded ELF64 little-endian headers for Linux targets, while
 records for macOS targets. Each reader validates architecture identity and all
 declared table ranges before exposing metadata. ELF program headers and Mach-O
 load-command records are exposed only after their individual record bounds are
-validated. Symbol and segment decoding can therefore be added per format
+validated; ELF segment file ranges also have checked file-size and memory-size
+relationships. Symbol and segment decoding can therefore be added per format
 without sharing unsafe offset assumptions. Callers
 use `DebuggerNativeArtifact` as the single public selector: it checks a bounded
 magic prefix and dispatches to the appropriate reader, while unknown formats

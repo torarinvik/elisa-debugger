@@ -41,6 +41,7 @@ module DebuggerNativeMachO:
         const MACHO_NLIST_SECTION_OFFSET: usize = 5
         const MACHO_NLIST_DESCRIPTION_OFFSET: usize = 6
         const MACHO_NLIST_VALUE_OFFSET: usize = 8
+        const MACHO_SYMBOL_NAME_CAPACITY: usize = 64
 
     public:
         enum MachOMachine:
@@ -73,6 +74,12 @@ module DebuggerNativeMachO:
             section: mutable u8
             description: mutable u16
             value: mutable u64
+
+        struct MachOSymbolName:
+            valid: mutable bool
+            truncated: mutable bool
+            length: mutable usize
+            bytes: mutable u8[MACHO_SYMBOL_NAME_CAPACITY]
 
         def read_u32(bytes: u8&, offset: usize) -> u32:
             return bytes[offset].u32() | (bytes[offset + 1].u32() << MACHO_BYTE_BITS) | (bytes[offset + 2].u32() << (MACHO_BYTE_BITS * 2)) | (bytes[offset + 3].u32() << (MACHO_BYTE_BITS * 3))
@@ -181,5 +188,36 @@ module DebuggerNativeMachO:
                 result.description <- read_u16(bytes, offset + MACHO_NLIST_DESCRIPTION_OFFSET)
                 result.value <- read_u64(bytes, offset + MACHO_NLIST_VALUE_OFFSET)
                 result.valid <- true
+                return result
+            return result
+
+        def macho_symbol_name(header: MachOHeader, bytes: u8&, length: usize, symbol_index: usize) -> MachOSymbolName:
+            result: mutable MachOSymbolName = zeroed
+            return result if not header.valid
+            for command_index in 0..<header.command_count.usize():
+                command: MachOCommand = macho_command(header, bytes, length, command_index)
+                return result if not command.valid
+                continue if command.kind != MACHO_SYMBOL_TABLE_COMMAND_KIND
+                return result if command.size.usize() < MACHO_SYMBOL_TABLE_COMMAND_BYTES
+                symbol_offset: u64 = read_u32(bytes, command.offset + MACHO_SYMBOL_TABLE_OFFSET).u64()
+                symbol_count: u64 = read_u32(bytes, command.offset + MACHO_SYMBOL_COUNT_OFFSET).u64()
+                string_offset: u64 = read_u32(bytes, command.offset + MACHO_STRING_TABLE_OFFSET).u64()
+                string_size: u64 = read_u32(bytes, command.offset + MACHO_STRING_TABLE_SIZE_OFFSET).u64()
+                return result if symbol_index.u64() >= symbol_count or symbol_offset > length.u64() or symbol_count > (length.u64() - symbol_offset) / MACHO_NLIST_BYTES.u64()
+                return result if string_offset > length.u64() or string_size > length.u64() - string_offset
+                symbol_name_offset: u64 = read_u32(bytes, (symbol_offset + symbol_index.u64() * MACHO_NLIST_BYTES.u64()).usize() + MACHO_NLIST_NAME_OFFSET).u64()
+                return result if symbol_name_offset >= string_size or string_offset + symbol_name_offset < string_offset or string_offset + symbol_name_offset >= length.u64()
+                start: u64 = string_offset + symbol_name_offset
+                available: u64 = string_size - symbol_name_offset
+                for index in 0..<available.usize():
+                    value: u8 = bytes[start.usize() + index]
+                    return result if index >= MACHO_SYMBOL_NAME_CAPACITY
+                    return result if value == 0 and index == 0
+                    if value == 0:
+                        result.valid <- true
+                        result.length <- index
+                        return result
+                    result.bytes[index] <- value
+                result.truncated <- true
                 return result
             return result

@@ -57,7 +57,16 @@ module DebuggerTraceBundle:
             return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == 0 if bundle.chunk_count == 0
             return false if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
             event_chunks: u64 = bundle_event_chunk_count(bundle)
-            return bundle.manifest.first_event == bundle.chunks[0].header.first_event and bundle.manifest.last_event == bundle.chunks[bundle.chunk_count - 1].header.last_event and bundle.manifest.checkpoint_count == event_chunks
+            return bundle.manifest.checkpoint_count == event_chunks if event_chunks == 0
+            first_event: mutable u64 = 0
+            last_event: mutable u64 = 0
+            seen_events: mutable bool = false
+            for index in 0..<bundle.chunk_count:
+                if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events:
+                    first_event <- bundle.chunks[index].header.first_event if not seen_events
+                    last_event <- bundle.chunks[index].header.last_event
+                    seen_events <- true
+            return bundle.manifest.first_event == first_event and bundle.manifest.last_event == last_event and bundle.manifest.checkpoint_count == event_chunks
 
         def bundle_event_chunk_count(bundle: TraceBundle) -> u64:
             count: mutable u64 = 0
@@ -77,10 +86,11 @@ module DebuggerTraceBundle:
             bundle.chunks[bundle.chunk_count] <- chunk
             bundle.chunk_count <- bundle.chunk_count + 1
             updated: mutable DebuggerTraceManifest::BundleManifest = bundle.manifest
-            updated.first_event <- chunk.header.first_event if bundle.chunk_count == 1
-            updated.last_event <- chunk.header.last_event
             count_snapshot: TraceBundle = bundle
             updated.checkpoint_count <- bundle_event_chunk_count(count_snapshot)
+            if chunk.header.kind == DebuggerTrace::ChunkKind.Events:
+                updated.first_event <- chunk.header.first_event if updated.checkpoint_count == 1
+                updated.last_event <- chunk.header.last_event
             bundle.manifest <- updated
             return DebuggerErrors::no_error()
 

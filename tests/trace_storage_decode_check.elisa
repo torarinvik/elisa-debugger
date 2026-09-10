@@ -59,6 +59,25 @@ def main() -> i64:
         event_stream[invalid_event_encoded.length + index] <- invalid_footer.bytes[index]
     scanned: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(event_stream[0], invalid_event_encoded.length + STORAGE_FOOTER_LENGTH)
     return 8 if scanned.status != DebuggerTraceStorage::StorageStatus.Invalid
+    inconsistent_recording_payload: mutable u8[EVENT_PAYLOAD_LENGTH] = zeroed
+    inconsistent_recording_writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    inconsistent_recording_writer <- DebuggerTraceBinary::writer_put_u32(inconsistent_recording_writer, 1)
+    inconsistent_recording_writer <- DebuggerTraceBinary::writer_put_u64(inconsistent_recording_writer, FIRST_EVENT.u64())
+    inconsistent_recording_writer <- DebuggerTraceBinary::writer_put_u64(inconsistent_recording_writer, 1)
+    inconsistent_recording_writer <- DebuggerTraceBinary::writer_put_u64(inconsistent_recording_writer, RECORDING_ID)
+    inconsistent_recording_writer <- DebuggerTraceBinary::writer_put_u64(inconsistent_recording_writer, RECORDING_ID + 1)
+    for index in inconsistent_recording_writer.length..<EVENT_PAYLOAD_LENGTH:
+        inconsistent_recording_writer <- DebuggerTraceBinary::writer_put_byte(inconsistent_recording_writer, 0)
+    inconsistent_recording_checksum: u64 = DebuggerTraceBinary::writer_checksum(inconsistent_recording_writer)
+    inconsistent_recording_chunk: mutable DebuggerTraceStorage::StoredChunk = invalid_event_chunk
+    inconsistent_recording_chunk.header <- DebuggerTrace::ChunkHeader{schema: 1, kind: DebuggerTrace::ChunkKind.Events, sequence: CHUNK_SEQUENCE, first_event: FIRST_EVENT, last_event: FIRST_EVENT, payload_length: EVENT_PAYLOAD_LENGTH.u64(), checksum: inconsistent_recording_checksum}
+    inconsistent_recording_chunk.payload_length <- EVENT_PAYLOAD_LENGTH
+    inconsistent_recording_chunk.checksum <- inconsistent_recording_checksum
+    for index in 0..<EVENT_PAYLOAD_LENGTH:
+        inconsistent_recording_chunk.payload[index] <- inconsistent_recording_writer.bytes[index]
+    inconsistent_recording_encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(inconsistent_recording_chunk)
+    inconsistent_recording_decoded: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(inconsistent_recording_encoded.bytes[0], inconsistent_recording_encoded.length)
+    return 10 if inconsistent_recording_decoded.status != DebuggerTraceStorage::StorageStatus.Invalid
     footer_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(CHUNK_SEQUENCE + 1, LAST_EVENT)
     footer: DebuggerTraceStorage::FooterDecode = DebuggerTraceStorage::storage_decode_footer(footer_bytes.bytes[0], footer_bytes.length)
     return 6 if footer.status != DebuggerTraceStorage::StorageStatus.Ready or footer.footer.next_sequence != CHUNK_SEQUENCE + 1 or footer.footer.verified_event != LAST_EVENT

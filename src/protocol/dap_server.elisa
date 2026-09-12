@@ -205,6 +205,9 @@ module DebuggerDAPServer:
         const DAP_STACK_TRACE_SUFFIX_LENGTH: usize = 85
         const DAP_STACK_DYNAMIC_BEFORE_LINE: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"main\",\"line\":"
         const DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH: usize = 69
+        const DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"frame\",\"line\":"
+        const DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE_LENGTH: usize = 70
+        const DAP_MAIN_CALL_DEPTH: usize = 0
         const DAP_STACK_DYNAMIC_BEFORE_COLUMN: cstr = ",\"column\":"
         const DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH: usize = 10
         const DAP_STACK_DYNAMIC_AFTER_COLUMN: cstr = "}]}}"
@@ -1226,7 +1229,12 @@ module DebuggerDAPServer:
 
         def write_stack_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64, coordinates: DebuggerDAPPayload::ClientCoordinates) -> void can[Console, Unsafe.PointerCast]:
             location: DAPSourceLocation = stack_source_location(service, result, coordinates)
-            body_length: mutable u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(location.line) + DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
+            frame_prefix: mutable cstr = DAP_STACK_DYNAMIC_BEFORE_LINE
+            frame_prefix_length: mutable usize = DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH
+            if service.controller.engine.machine.return_stack_pointer > DAP_MAIN_CALL_DEPTH:
+                frame_prefix <- DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE
+                frame_prefix_length <- DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE_LENGTH
+            body_length: mutable u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + frame_prefix_length + decimal_digits(location.line) + DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
             if location.has_source:
                 source_name_length: usize = json_string_encoded_length(location.source_path_bytes[0], location.source_name_start, location.source_name_length)
                 source_path_length: usize = json_string_encoded_length(location.source_path_bytes[0], 0, location.source_path_length)
@@ -1238,7 +1246,7 @@ module DebuggerDAPServer:
             _ = printf("%llu", request_sequence) can Console
             _ = printf(DAP_COMMAND_PREFIX) can Console
             _ = printf(DAP_STACK_TRACE_COMMAND) can Console
-            _ = printf(DAP_STACK_DYNAMIC_BEFORE_LINE) can Console
+            _ = printf(frame_prefix) can Console
             _ = printf("%llu", location.line) can Console
             _ = printf(DAP_STACK_DYNAMIC_BEFORE_COLUMN) can Console
             _ = printf("%llu", location.column) can Console

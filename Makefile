@@ -17,6 +17,7 @@ endif
 # pre-wrapper product binaries. Supplying both makes this Makefile independent of that rollout.
 ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_LINK="$(ELISA_LINK_FLAGS)"
 BUILD ?= build
+IDLESS_LAUNCH_PAYLOAD_LENGTH := 19
 # The sibling compiler checkout may contain unrelated uncommitted source edits.
 # Keep the local debugger build usable by default; CI can set this to 0 for the
 # strict product-freshness gate.
@@ -450,6 +451,7 @@ check: $(BUILD)/elisa-debugger
 smoke: check server dap-server cli ffi-check
 	printf '655360 ' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
 	printf '21 {' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
+	printf '$(IDLESS_LAUNCH_PAYLOAD_LENGTH) {"method":"launch"}\n' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 655360\r\n\r\n' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 49\r\n\r\n{' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf '21 {"method":"discover"}\n' | "$(BUILD)/elisa-debugger-server" | grep -F '"protocolMajor":1' | grep -F '"productVersion":"0.1.0"' | grep -F '"sourceBreakpoints":false' | grep -F '"typedValues":false' | grep -F '"historicalQueries":false' | grep -F '"traceExport":false' | grep -F '"installationHealthy":true'

@@ -79,6 +79,12 @@ module DebuggerDAPServer:
         const ASCII_H: u8 = 104
         const ASCII_HYPHEN: u8 = 45
         const ASCII_PLUS: u8 = 43
+        const ASCII_BACKSPACE: u8 = 8
+        const ASCII_FORM_FEED: u8 = 12
+        const JSON_ASCII_MAX: u8 = 127
+        const JSON_HEX_ALPHA_BASE: u64 = 10
+        const JSON_HEX_BASE: u64 = 16
+        const JSON_UNICODE_ESCAPE_DIGITS: usize = 4
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_L: u8 = 76
         const ASCII_UPPER_A: u8 = 65
@@ -203,6 +209,7 @@ module DebuggerDAPServer:
         const DAP_SET_BREAKPOINTS_SUFFIX_LENGTH: usize = 43
         const DAP_SET_FUNCTION_BREAKPOINTS_COMMAND: cstr = "setFunctionBreakpoints"
         const DAP_SET_FUNCTION_BREAKPOINTS_COMMAND_LENGTH: usize = 22
+        const MAX_KNOWN_DAP_COMMAND_LENGTH: usize = DAP_SET_FUNCTION_BREAKPOINTS_COMMAND_LENGTH
         const DAP_SET_DATA_BREAKPOINTS_COMMAND: cstr = "setDataBreakpoints"
         const DAP_SET_DATA_BREAKPOINTS_COMMAND_LENGTH: usize = 18
         const DAP_SET_DATA_BREAKPOINTS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"breakpoints\":[]}}"
@@ -235,6 +242,12 @@ module DebuggerDAPServer:
         const DAP_UNAVAILABLE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"operation is unavailable\"}"
         const DAP_UNAVAILABLE_SUFFIX_LENGTH: usize = 55
 
+        struct DecodedJSONString:
+            valid: mutable bool
+            ascii_only: mutable bool
+            hash: mutable u64
+            length: mutable usize
+
         struct Decoder:
             state: mutable u8
             header_tail: mutable u8
@@ -252,8 +265,8 @@ module DebuggerDAPServer:
             in_type: mutable bool
             type_escaped: mutable bool
             type_seen: mutable bool
-            type_hash: mutable u64
-            type_length: mutable usize
+            type_value_start: mutable usize
+            type_value_end: mutable usize
             sequence_prefix_position: mutable u8
             in_sequence: mutable bool
             sequence_seen: mutable bool
@@ -328,6 +341,74 @@ module DebuggerDAPServer:
             return true if byte >= ASCII_ZERO and byte <= ASCII_NINE
             return true if byte >= ASCII_A and byte <= ASCII_F
             return byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
+
+        def json_hex_digit_value(byte: u8) -> u64:
+            if byte >= ASCII_ZERO and byte <= ASCII_NINE:
+                return (byte - ASCII_ZERO).u64()
+            if byte >= ASCII_A and byte <= ASCII_F:
+                return (byte - ASCII_A).u64() + JSON_HEX_ALPHA_BASE
+            return (byte - ASCII_UPPER_A).u64() + JSON_HEX_ALPHA_BASE
+
+        def decode_json_string(payload: u8&, start: usize, end: usize) -> DecodedJSONString:
+            decoded: mutable DecodedJSONString = zeroed
+            decoded.valid <- true
+            decoded.ascii_only <- true
+            index: mutable usize = start
+            while index < end:
+                character: mutable u8 = payload[index]
+                if character == ASCII_BACKSLASH:
+                    index <- index + 1
+                    return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0} if index >= end
+                    escape: u8 = payload[index]
+                    if escape == ASCII_U:
+                        return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0} if end - index <= JSON_UNICODE_ESCAPE_DIGITS
+                        codepoint: mutable u64 = 0
+                        hex_index: mutable usize = 0
+                        while hex_index < JSON_UNICODE_ESCAPE_DIGITS:
+                            digit_byte: u8 = payload[index + 1 + hex_index]
+                            return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0} if not is_json_hex_digit(digit_byte)
+                            codepoint <- codepoint * JSON_HEX_BASE + json_hex_digit_value(digit_byte)
+                            hex_index <- hex_index + 1
+                        if codepoint <= JSON_ASCII_MAX.u64():
+                            character <- codepoint.u8()
+                        else:
+                            decoded.ascii_only <- false
+                        index <- index + JSON_UNICODE_ESCAPE_DIGITS + 1
+                    else:
+                        if escape == ASCII_QUOTE:
+                            character <- ASCII_QUOTE
+                        else:
+                            if escape == ASCII_BACKSLASH:
+                                character <- ASCII_BACKSLASH
+                            else:
+                                if escape == ASCII_SLASH:
+                                    character <- ASCII_SLASH
+                                else:
+                                    if escape == ASCII_B:
+                                        character <- ASCII_BACKSPACE
+                                    else:
+                                        if escape == ASCII_F:
+                                            character <- ASCII_FORM_FEED
+                                        else:
+                                            if escape == ASCII_N:
+                                                character <- ASCII_LF
+                                            else:
+                                                if escape == ASCII_R:
+                                                    character <- ASCII_CR
+                                                else:
+                                                    if escape == ASCII_T:
+                                                        character <- ASCII_TAB
+                                                    else:
+                                                        return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0}
+                        index <- index + 1
+                else:
+                    decoded.ascii_only <- false if character > JSON_ASCII_MAX
+                    index <- index + 1
+                if decoded.ascii_only and decoded.length < MAX_KNOWN_DAP_COMMAND_LENGTH:
+                    decoded.hash <- decoded.hash * DAP_HASH_MULTIPLIER + character.u64()
+                decoded.length <- decoded.length + 1
+            decoded.hash <- 0 if not decoded.ascii_only or decoded.length > MAX_KNOWN_DAP_COMMAND_LENGTH
+            return decoded
 
         def json_primitive_literal_length(kind: u8) -> u8:
             return 4 if kind == JSON_PRIMITIVE_TRUE or kind == JSON_PRIMITIVE_NULL
@@ -674,19 +755,20 @@ module DebuggerDAPServer:
                             decoder.command_prefix_position <- 1 if byte == ASCII_QUOTE else 0
                 else:
                     if decoder.command_escaped:
-                        decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
                         decoder.command_escaped <- false
                     else:
                         if byte == ASCII_BACKSLASH:
-                            decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
                             decoder.command_escaped <- true
                         else:
                             if byte == ASCII_QUOTE:
                                 decoder.in_command <- false
                                 decoder.command_seen <- true
                                 decoder.command_value_end <- decoder.payload_received
-                            else:
-                                decoder.command_hash <- decoder.command_hash * DAP_HASH_MULTIPLIER + byte.u64()
+                                decoded_command: DecodedJSONString = decode_json_string(decoder.payload[0], decoder.command_value_start, decoder.command_value_end)
+                                if not decoded_command.valid:
+                                    decoder_fail(decoder)
+                                    return
+                                decoder.command_hash <- decoded_command.hash
             else:
                 decoder.command_prefix_position <- 0 if not decoder.in_command
             type_context: bool = decoder.in_type or decoder_json_top_level_field_context(decoder, decoder.type_prefix_position, TYPE_PREFIX_FINAL_POSITION, byte)
@@ -700,8 +782,7 @@ module DebuggerDAPServer:
                                 return
                             decoder.in_type <- true
                             decoder.type_escaped <- false
-                            decoder.type_hash <- 0
-                            decoder.type_length <- 0
+                            decoder.type_value_start <- decoder.payload_received + 1
                     else:
                         if is_json_whitespace(byte) and (decoder.type_prefix_position == TYPE_PREFIX_LENGTH - 2 or decoder.type_prefix_position == TYPE_PREFIX_LENGTH - 1):
                             decoder.type_prefix_position <- decoder.type_prefix_position
@@ -709,27 +790,19 @@ module DebuggerDAPServer:
                             decoder.type_prefix_position <- 1 if byte == ASCII_QUOTE else 0
                 else:
                     if decoder.type_escaped:
-                        decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
-                        decoder.type_length <- decoder.type_length + 1
                         decoder.type_escaped <- false
                     else:
                         if byte == ASCII_BACKSLASH:
-                            decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
-                            decoder.type_length <- decoder.type_length + 1
                             decoder.type_escaped <- true
                         else:
                             if byte == ASCII_QUOTE:
-                                if decoder.type_length != TYPE_REQUEST_LENGTH or decoder.type_hash != TYPE_REQUEST_HASH:
+                                decoder.type_value_end <- decoder.payload_received
+                                decoded_type: DecodedJSONString = decode_json_string(decoder.payload[0], decoder.type_value_start, decoder.type_value_end)
+                                if not decoded_type.valid or not decoded_type.ascii_only or decoded_type.length != TYPE_REQUEST_LENGTH or decoded_type.hash != TYPE_REQUEST_HASH:
                                     decoder_fail(decoder)
                                     return
                                 decoder.in_type <- false
                                 decoder.type_seen <- true
-                            else:
-                                if decoder.type_length >= TYPE_REQUEST_LENGTH + 1:
-                                    decoder_fail(decoder)
-                                    return
-                                decoder.type_hash <- decoder.type_hash * DAP_HASH_MULTIPLIER + byte.u64()
-                                decoder.type_length <- decoder.type_length + 1
             else:
                 decoder.type_prefix_position <- 0 if not decoder.in_type
             sequence_context: bool = decoder.in_sequence or decoder_json_top_level_field_context(decoder, decoder.sequence_prefix_position, SEQUENCE_PREFIX_FINAL_POSITION, byte)
@@ -849,8 +922,6 @@ module DebuggerDAPServer:
                     decoder.in_type <- false
                     decoder.type_escaped <- false
                     decoder.type_seen <- false
-                    decoder.type_hash <- 0
-                    decoder.type_length <- 0
                     decoder.sequence_prefix_position <- 0
                     decoder.in_sequence <- false
                     decoder.sequence_seen <- false

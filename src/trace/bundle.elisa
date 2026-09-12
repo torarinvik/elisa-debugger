@@ -59,7 +59,8 @@ module DebuggerTraceBundle:
             return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == 0 if bundle.chunk_count == 0
             return false if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
             event_chunks: u64 = bundle_event_chunk_count(bundle)
-            return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == event_chunks if event_chunks == 0
+            checkpoint_chunks: u64 = bundle_checkpoint_chunk_count(bundle)
+            return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == checkpoint_chunks if event_chunks == 0
             first_event: mutable u64 = 0
             last_event: mutable u64 = 0
             seen_events: mutable bool = false
@@ -69,13 +70,20 @@ module DebuggerTraceBundle:
                     return false if seen_events and (last_event == BUNDLE_MAX_EVENT or bundle.chunks[index].header.first_event != last_event + 1)
                     last_event <- bundle.chunks[index].header.last_event
                     seen_events <- true
-            return bundle.manifest.first_event == first_event and bundle.manifest.last_event == last_event and bundle.manifest.checkpoint_count == event_chunks
+            return bundle.manifest.first_event == first_event and bundle.manifest.last_event == last_event and bundle.manifest.checkpoint_count == checkpoint_chunks
 
         def bundle_event_chunk_count(bundle: TraceBundle) -> u64:
             count: mutable u64 = 0
             return 0 if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
             for index in 0..<bundle.chunk_count:
                 count <- count + 1 if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events
+            return count
+
+        def bundle_checkpoint_chunk_count(bundle: TraceBundle) -> u64:
+            count: mutable u64 = 0
+            return 0 if bundle.chunk_count > BUNDLE_CHUNK_CAPACITY
+            for index in 0..<bundle.chunk_count:
+                count <- count + 1 if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Checkpoint
             return count
 
         def bundle_append(bundle: mutable TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
@@ -90,9 +98,9 @@ module DebuggerTraceBundle:
             bundle.chunk_count <- bundle.chunk_count + 1
             updated: mutable DebuggerTraceManifest::BundleManifest = bundle.manifest
             count_snapshot: TraceBundle = bundle
-            updated.checkpoint_count <- bundle_event_chunk_count(count_snapshot)
+            updated.checkpoint_count <- bundle_checkpoint_chunk_count(count_snapshot)
             if chunk.header.kind == DebuggerTrace::ChunkKind.Events:
-                updated.first_event <- chunk.header.first_event if updated.checkpoint_count == 1
+                updated.first_event <- chunk.header.first_event if bundle_event_chunk_count(count_snapshot) == 1
                 updated.last_event <- chunk.header.last_event
             bundle.manifest <- updated
             return DebuggerErrors::no_error()

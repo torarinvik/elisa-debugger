@@ -19,6 +19,11 @@ capacity. Event payloads use the recorder's versioned fixed-width envelope;
 manifest payloads use the manifest codec. All fields are encoded explicitly by
 `DebuggerTraceBinary`.
 
+The manifest `checkpoint_count` is the number of `Checkpoint` kind chunks in
+the bundle. Event chunk count is tracked independently by the reader. A trace
+with no serialized checkpoint chunks records zero; event chunks must never be
+used as a substitute for this count.
+
 Chunk sequences start at zero and increase without gaps. The manifest is the
 first chunk. Event chunks cannot be empty and their event ranges are contiguous.
 Other chunk kinds are accepted only after the manifest and must still match the

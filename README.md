@@ -101,10 +101,11 @@ or adapter regressions.
 
 `build/elisa-debugger-server` is a headless Elisa process endpoint. It accepts
 the framed request shape in [spec/session-protocol.md](spec/session-protocol.md)
-and emits the first protocol discovery response. Its standard output is
-protocol-only, which makes it safe for an editor, test runner, or another
-process to launch and supervise. The request parser is bounded and rejects an
-invalid frame without attempting to execute target code.
+and can launch a verified EDIR artifact through `arguments.program`, control the
+managed execution, and return stack, scope, and paged local snapshots. Its
+standard output is protocol-only, which makes it safe for an editor, test
+runner, or another process to launch and supervise. The request parser and EDIR
+file loader are bounded, and an invalid artifact is rejected before execution.
 
 `build/elisa-debugger-dap-server` is the standard DAP transport entrypoint. It
 accepts `Content-Length` framed messages and dispatches initialize, launch,
@@ -124,12 +125,12 @@ the session server. Commands that require a request payload remain available
 through the framed session service, while the line mode keeps one stable,
 argument-free operation vocabulary.
 
-The server remains intentionally bounded: launch, pause, continue, terminate,
-detach, generation checks, and sequence correlation are live session
-operations. Target argument decoding, full source-file payloads, and provider
-selection are explicit protocol extensions; clients must use capability
-negotiation and standard DAP failure responses instead of assuming an
-unconfigured target exists.
+The headless process currently owns one managed session per process. Its
+inspection results are tied to the returned stop generation; local pages use
+bounded `pageSize` and `pageStart` operands. Threads, expression evaluation,
+memory reads, source breakpoint payloads, trace artifact transfer, and provider
+selection are not wired on this endpoint yet. Clients should use discovery and
+the explicit error response instead of assuming those operations exist.
 
 ## Integration boundary
 

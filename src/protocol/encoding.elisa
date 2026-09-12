@@ -7,6 +7,7 @@ include "./vocabulary.elisa"
 include "./integration.elisa"
 include "../core/capabilities.elisa"
 include "../core/errors.elisa"
+include "../inspect/managed.elisa"
 
 module DebuggerProtocolEncoding:
     private:
@@ -16,6 +17,8 @@ module DebuggerProtocolEncoding:
         const ASCII_QUOTE: u8 = 34
         const ASCII_BACKSLASH: u8 = 92
         const ASCII_BRACE_CLOSE: u8 = 125
+        const ASCII_COMMA: u8 = 44
+        const ASCII_MINUS: u8 = 45
         const ASCII_LINE_FEED: u8 = 10
         const ASCII_CARRIAGE_RETURN: u8 = 13
         const ASCII_TAB: u8 = 9
@@ -46,6 +49,15 @@ module DebuggerProtocolEncoding:
         const SESSION_OWNER_PREFIX: cstr = "},\"ownerToken\":"
         const SESSION_RESPONSE_PREFIX: cstr = "{\"kind\":\"response\",\"id\":"
         const SESSION_RESPONSE_SESSION_PREFIX: cstr = ",\"sessionId\":"
+        const MANAGED_RESPONSE_PREFIX: cstr = "{\"kind\":\"response\",\"id\":"
+        const MANAGED_RESPONSE_SUCCESS: cstr = ",\"ok\":true,\"result\":{\"accepted\":true,\"stopGeneration\":"
+        const JSON_NULL: cstr = "null"
+        const JSON_TYPE_I64: cstr = "i64"
+        const JSON_AVAILABILITY_AVAILABLE: cstr = "available"
+        const JSON_AVAILABILITY_UNINITIALIZED: cstr = "uninitialized"
+        const JSON_SCOPE_LOCALS: cstr = "Locals"
+        const JSON_FRAME_NAME: cstr = "frame"
+        const JSON_LOCAL_PREFIX: cstr = "local"
 
         def buffer_put_byte(buffer: mutable JsonBuffer&, byte: u8) -> void:
             if buffer.failed or buffer.length >= JSON_BUFFER_CAPACITY:
@@ -75,6 +87,15 @@ module DebuggerProtocolEncoding:
                 remaining <- remaining / DECIMAL_BASE
             for index in 0..<count:
                 buffer_put_byte(buffer, digits[count - index - 1])
+
+        def buffer_put_i64_string(buffer: mutable JsonBuffer&, value: i64) -> void:
+            magnitude: mutable u64 = value.u64()
+            buffer_put_byte(buffer, ASCII_QUOTE)
+            if value < 0:
+                buffer_put_byte(buffer, ASCII_MINUS)
+                magnitude <- (-(value + 1)).u64() + 1
+            buffer_put_u64(buffer, magnitude)
+            buffer_put_byte(buffer, ASCII_QUOTE)
 
         def buffer_put_bool(buffer: mutable JsonBuffer&, value: bool) -> void:
             buffer_put_cstr(buffer, JSON_TRUE if value else JSON_FALSE)
@@ -279,4 +300,84 @@ module DebuggerProtocolEncoding:
             buffer_put_id_string(buffer, request_id)
             buffer_put_discovery_result(buffer, capabilities)
             buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
+            return buffer
+
+        def managed_result_prefix(buffer: mutable JsonBuffer&, request_id: u64, generation: u64) -> void:
+            buffer_put_cstr(buffer, MANAGED_RESPONSE_PREFIX)
+            buffer_put_id_string(buffer, request_id)
+            buffer_put_cstr(buffer, MANAGED_RESPONSE_SUCCESS)
+            buffer_put_id_string(buffer, generation)
+
+        def managed_frame_response_encode(request_id: u64, generation: u64, frame: DebuggerManagedInspection::FrameSnapshot) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID:
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, ",\"position\":{\"event\":")
+            buffer_put_id_string(buffer, frame.event)
+            buffer_put_cstr(buffer, "},\"frame\":{\"name\":")
+            buffer_put_json_string(buffer, JSON_FRAME_NAME)
+            buffer_put_cstr(buffer, ",\"id\":")
+            buffer_put_id_string(buffer, frame.id.value)
+            buffer_put_cstr(buffer, ",\"instruction\":")
+            buffer_put_id_string(buffer, frame.instruction.value)
+            buffer_put_cstr(buffer, ",\"event\":")
+            buffer_put_id_string(buffer, frame.event)
+            buffer_put_cstr(buffer, ",\"accumulator\":")
+            buffer_put_i64_string(buffer, frame.accumulator)
+            buffer_put_cstr(buffer, ",\"result\":")
+            buffer_put_i64_string(buffer, frame.result)
+            buffer_put_cstr(buffer, ",\"returnDepth\":")
+            buffer_put_u64(buffer, frame.return_depth.u64())
+            buffer_put_cstr(buffer, "}}}")
+            return buffer
+
+        def managed_scopes_response_encode(request_id: u64, generation: u64, local_count: u64) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID:
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, ",\"scopes\":[{\"name\":")
+            buffer_put_json_string(buffer, JSON_SCOPE_LOCALS)
+            buffer_put_cstr(buffer, ",\"variablesReference\":")
+            buffer_put_id_string(buffer, generation)
+            buffer_put_cstr(buffer, ",\"namedVariables\":")
+            buffer_put_u64(buffer, local_count)
+            buffer_put_cstr(buffer, ",\"expensive\":false}]}}")
+            return buffer
+
+        def managed_locals_response_encode(request_id: u64, generation: u64, event: u64, page: DebuggerManagedInspection::LocalPage) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID or page.count > DebuggerManagedInspection::local_page_capacity():
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, ",\"position\":{\"event\":")
+            buffer_put_id_string(buffer, event)
+            buffer_put_cstr(buffer, "},\"values\":[")
+            for index in 0..<page.count:
+                entry: DebuggerManagedInspection::LocalSnapshot = page.entries[index]
+                if index > 0:
+                    buffer_put_byte(buffer, ASCII_COMMA)
+                buffer_put_cstr(buffer, "{\"index\":")
+                buffer_put_u64(buffer, entry.index.u64())
+                buffer_put_cstr(buffer, ",\"name\":\"")
+                buffer_put_cstr(buffer, JSON_LOCAL_PREFIX)
+                buffer_put_u64(buffer, entry.index.u64())
+                buffer_put_cstr(buffer, "\",\"type\":\"")
+                buffer_put_cstr(buffer, JSON_TYPE_I64)
+                buffer_put_cstr(buffer, "\",\"availability\":\"")
+                buffer_put_cstr(buffer, JSON_AVAILABILITY_AVAILABLE if entry.available else JSON_AVAILABILITY_UNINITIALIZED)
+                buffer_put_cstr(buffer, "\",\"value\":")
+                buffer_put_i64_string(buffer, entry.value) if entry.available
+                buffer_put_cstr(buffer, JSON_NULL) if not entry.available
+                buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
+            buffer_put_cstr(buffer, "],\"complete\":")
+            buffer_put_bool(buffer, page.complete)
+            buffer_put_cstr(buffer, ",\"next\":")
+            buffer_put_id_string(buffer, page.next.u64()) if page.next > 0
+            buffer_put_cstr(buffer, JSON_NULL) if page.next == 0
+            buffer_put_cstr(buffer, "}}")
             return buffer

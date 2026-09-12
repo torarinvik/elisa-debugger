@@ -26,11 +26,43 @@ IDs and event ordinals are strings so clients cannot lose precision in a
 JavaScript number. Clients must preserve unknown optional fields and must not
 parse human-readable messages to determine behavior.
 
-The current bounded bootstrap server accepts the same method vocabulary in a
-compact request such as `{ "method": "launch", "id": 7,
-"expectedStopGeneration": 1 }`; it correlates the numeric request ID as a
-decimal string in the response. Full envelopes and parameter decoding are
-added behind this stable framing without changing session-generation rules.
+The executable currently accepts a compact root-object request such as
+`{ "method": "launch", "id": 7,
+"arguments": { "program": "build/app.edir" } }`. Request IDs may be unsigned
+decimal JSON numbers or decimal strings; responses encode them as decimal
+strings. The process currently owns one managed session per invocation.
+
+## Current headless process surface
+
+The current standalone Elisa server supports managed EDIR launch, session
+control, and basic inspection over the compact framing. `launch` requires
+`arguments.program`, a NUL-free UTF-8 filesystem path to a bounded EDIR file.
+The server reads and verifies that artifact before replacing its initial image
+or transitioning the session to running. `pause`, `continue`, `step`,
+`reverseStep`, and `seek` operate through the same managed replay engine as the
+in-process service. Mutating and inspection requests may include
+`expectedStopGeneration`; a stale value fails without applying the request.
+
+After the session is stopped, `stack` returns the current managed frame,
+`scopes` returns the locals scope and its generation-bound
+`variablesReference`, and `variables` returns typed local values. A variables
+request places that reference inside `arguments`. Integer values are decimal
+strings so JavaScript and other clients do not lose signed
+64-bit precision. Uninitialized locals have `availability: "uninitialized"`
+and `value: null`. A `variables` request must return the reference from the
+current `scopes` response. Top-level `pageSize` and `pageStart` operands page
+the local list; `pageSize` is bounded to 256 (zero selects the local default),
+and the response's decimal-string `next` offset can be sent back as
+`pageStart`. Local pages are additionally bounded by the managed inspection
+capacity.
+
+`discover` reports the features this endpoint can provide. Threads, expression
+evaluation, memory reads, source-breakpoint operands, and trace artifact
+transfer are not wired to this process transport yet. Their method names remain
+reserved for compatible future protocol versions and return an explicit
+unsupported or unavailable result. The typed in-process service exposes a
+broader surface than this process endpoint; clients should not infer wire
+support from an in-process module or from the method vocabulary alone.
 
 ## Lifecycle
 
@@ -69,9 +101,11 @@ return `UNSUPPORTED` with a capability explanation.
 selected position; a successful seek returns a new stop generation. The
 request is safe to retry only with the same request ID and target ordinal.
 
-Large results are paginated with an opaque `next` token. Requests that may run
-longer than a client timeout emit `progress` events and honor `cancel` by
-request ID. Mutation requests declare whether retrying the same ID is safe.
+The typed service paginates large results with opaque `next` tokens. The
+current compact headless local-inspection response instead uses the decimal
+offset described above. Typed operations that may run longer than a client
+timeout emit `progress` events and honor `cancel` by request ID. Mutation
+requests declare whether retrying the same ID is safe.
 
 ## Timeline, history, and branch extensions
 

@@ -28,6 +28,19 @@ const JSON_KEY_REVERSE_EXECUTION: cstr = "\"reverseExecution\""
 const JSON_KEY_TYPED_VALUES: cstr = "\"typedValues\""
 const JSON_KEY_HISTORICAL_QUERIES: cstr = "\"historicalQueries\""
 const JSON_KEY_TRACE_EXPORT: cstr = "\"traceExport\""
+const FRAME_ACCUMULATOR_VALUE: cstr = "\"accumulator\":\"-42\""
+const LOCAL_UNAVAILABLE_VALUE: cstr = "\"availability\":\"uninitialized\",\"value\":null"
+const TEST_FRAME_ID: u64 = 1
+const TEST_FRAME_INSTRUCTION: u64 = 2
+const TEST_FRAME_EVENT: u64 = 3
+const TEST_FRAME_ACCUMULATOR: i64 = -42
+const TEST_FRAME_RESULT: i64 = 12
+const TEST_FRAME_RETURN_DEPTH: usize = 2
+const TEST_LOCAL_COUNT: usize = 2
+const TEST_FIRST_LOCAL_INDEX: usize = 0
+const TEST_SECOND_LOCAL_INDEX: usize = 1
+const TEST_FIRST_LOCAL_VALUE: i64 = 40
+const TEST_FAILURE_OVERSIZED_LOCAL_PAGE: i64 = 28
 
 def discovery_flag_matches(buffer: DebuggerProtocolEncoding::JsonBuffer, key: cstr, expected: bool) -> bool:
     key_length: mutable usize = 0
@@ -47,6 +60,18 @@ def discovery_flag_matches(buffer: DebuggerProtocolEncoding::JsonBuffer, key: cs
             if expected:
                 return buffer.bytes[value_start] == ASCII_TRUE_T and buffer.bytes[value_start + 1] == ASCII_TRUE_R and buffer.bytes[value_start + 2] == ASCII_TRUE_U and buffer.bytes[value_start + 3] == ASCII_TRUE_E
             return buffer.bytes[value_start] == ASCII_FALSE_F and buffer.bytes[value_start + 1] == ASCII_FALSE_A and buffer.bytes[value_start + 2] == ASCII_FALSE_L and buffer.bytes[value_start + 3] == ASCII_FALSE_S and buffer.bytes[value_start + 4] == ASCII_FALSE_E
+    return false
+
+def encoded_response_contains(buffer: DebuggerProtocolEncoding::JsonBuffer, expected: cstr) -> bool:
+    expected_length: mutable usize = 0
+    while expected[expected_length] != 0:
+        expected_length <- expected_length + 1
+    return false if expected_length > buffer.length
+    for start in 0..<(buffer.length - expected_length + 1):
+        matches: mutable bool = true
+        for offset in 0..<expected_length:
+            matches <- false if buffer.bytes[start + offset] != expected[offset].u8()
+        return true if matches
     return false
 
 def main() -> i64:
@@ -96,6 +121,22 @@ def main() -> i64:
     return 20 if discovery_flag_matches(discovery_response, JSON_KEY_TYPED_VALUES, managed_capabilities.typed_values) == false
     return 21 if discovery_flag_matches(discovery_response, JSON_KEY_HISTORICAL_QUERIES, managed_capabilities.historical_queries) == false
     return 22 if discovery_flag_matches(discovery_response, JSON_KEY_TRACE_EXPORT, managed_capabilities.trace_export) == false
+
+    frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedInspection::FrameSnapshot{id: DebuggerIdentity::debug_id(TEST_FRAME_ID), instruction: DebuggerIdentity::debug_id(TEST_FRAME_INSTRUCTION), event: TEST_FRAME_EVENT, accumulator: TEST_FRAME_ACCUMULATOR, result: TEST_FRAME_RESULT, return_depth: TEST_FRAME_RETURN_DEPTH}
+    frame_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_frame_response_encode(SUCCESS_ID, SUCCESS_GENERATION, frame)
+    return 25 if not DebuggerProtocolEncoding::json_buffer_is_valid(frame_response) or not encoded_response_contains(frame_response, FRAME_ACCUMULATOR_VALUE)
+    locals_page: mutable DebuggerManagedInspection::LocalPage = zeroed
+    locals_page.count <- TEST_LOCAL_COUNT
+    locals_page.complete <- true
+    locals_page.entries[TEST_FIRST_LOCAL_INDEX] <- DebuggerManagedInspection::LocalSnapshot{index: TEST_FIRST_LOCAL_INDEX, value: TEST_FIRST_LOCAL_VALUE, available: true}
+    locals_page.entries[TEST_SECOND_LOCAL_INDEX] <- DebuggerManagedInspection::LocalSnapshot{index: TEST_SECOND_LOCAL_INDEX, value: 0, available: false}
+    locals_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_locals_response_encode(SUCCESS_ID, SUCCESS_GENERATION, TARGET_EVENT, locals_page)
+    return 26 if not DebuggerProtocolEncoding::json_buffer_is_valid(locals_response) or not encoded_response_contains(locals_response, LOCAL_UNAVAILABLE_VALUE)
+    oversized_locals_page: mutable DebuggerManagedInspection::LocalPage = zeroed
+    oversized_locals_page.count <- DebuggerManagedInspection::local_page_capacity() + 1
+    return TEST_FAILURE_OVERSIZED_LOCAL_PAGE if DebuggerProtocolEncoding::json_buffer_is_valid(DebuggerProtocolEncoding::managed_locals_response_encode(SUCCESS_ID, SUCCESS_GENERATION, TARGET_EVENT, oversized_locals_page))
+    scopes_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_scopes_response_encode(SUCCESS_ID, SUCCESS_GENERATION, 2)
+    return 27 if not DebuggerProtocolEncoding::json_buffer_is_valid(scopes_response) or scopes_response.bytes[scopes_response.length - 1] != 125
     restricted_capabilities: mutable DebuggerCapabilities::CapabilitySet = managed_capabilities
     restricted_capabilities.source_breakpoints <- false
     restricted_capabilities.reverse_execution <- false

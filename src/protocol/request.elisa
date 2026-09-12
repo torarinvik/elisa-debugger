@@ -61,6 +61,52 @@ module DebuggerProtocolRequest:
         const REQUEST_KEY_ID_HASH: u64 = 3355
         const REQUEST_KEY_EXPECTED_HASH: u64 = 6143712305181352850
         const REQUEST_KEY_TARGET_HASH: u64 = 97741681043071881
+        const REQUEST_PROGRAM_PATH_CAPACITY: usize = 1024
+        const REQUEST_PAGE_SIZE_MAX: u64 = 256
+        const REQUEST_PAGE_START_MAX: u64 = MAX_REQUEST_INTEGER
+        const REQUEST_JSON_HEX_BASE: u64 = 16
+        const REQUEST_JSON_HEX_LETTER_OFFSET: u64 = 10
+        const REQUEST_UNICODE_MAX_CODEPOINT: u64 = 1114111
+        const REQUEST_UNICODE_CONTROL_MAX: u64 = 31
+        const REQUEST_UNICODE_TWO_BYTE_MAX_EXCLUSIVE: u64 = 2048
+        const REQUEST_UNICODE_THREE_BYTE_MAX_EXCLUSIVE: u64 = 65536
+        const REQUEST_UNICODE_SURROGATE_HIGH_START: u64 = 55296
+        const REQUEST_UNICODE_SURROGATE_HIGH_END: u64 = 56319
+        const REQUEST_UNICODE_SURROGATE_LOW_START: u64 = 56320
+        const REQUEST_UNICODE_SURROGATE_LOW_END: u64 = 57343
+        const REQUEST_UNICODE_SURROGATE_BASE: u64 = 65536
+        const REQUEST_UNICODE_HIGH_SURROGATE_OFFSET: u64 = 55296
+        const REQUEST_UNICODE_LOW_SURROGATE_OFFSET: u64 = 56320
+        const REQUEST_UNICODE_SURROGATE_SHIFT: u64 = 10
+        const REQUEST_UTF8_CONTINUATION_BASE: u64 = 128
+        const REQUEST_UTF8_CONTINUATION_MASK: u64 = 63
+        const REQUEST_UTF8_SHIFT: u64 = 6
+        const REQUEST_UTF8_TWO_BYTE_BASE: u64 = 192
+        const REQUEST_UTF8_THREE_BYTE_BASE: u64 = 224
+        const REQUEST_UTF8_FOUR_BYTE_BASE: u64 = 240
+        const REQUEST_UTF8_TWO_BYTE_START: u64 = 194
+        const REQUEST_UTF8_TWO_BYTE_END: u64 = 223
+        const REQUEST_UTF8_THREE_BYTE_START: u64 = 224
+        const REQUEST_UTF8_THREE_BYTE_END: u64 = 239
+        const REQUEST_UTF8_FOUR_BYTE_START: u64 = 240
+        const REQUEST_UTF8_FOUR_BYTE_END: u64 = 244
+        const REQUEST_UTF8_CONTINUATION_MIN: u64 = 128
+        const REQUEST_UTF8_CONTINUATION_MAX: u64 = 191
+        const REQUEST_UTF8_TWO_BYTE_MIN_CODEPOINT: u64 = 128
+        const REQUEST_UTF8_THREE_BYTE_MIN_CODEPOINT: u64 = 2048
+        const REQUEST_UTF8_FOUR_BYTE_MIN_CODEPOINT: u64 = 65536
+        const REQUEST_UTF8_FIRST_TWO_MASK: u64 = 31
+        const REQUEST_UTF8_FIRST_THREE_MASK: u64 = 15
+        const REQUEST_UTF8_FIRST_FOUR_MASK: u64 = 7
+        const REQUEST_UTF8_TWO_BYTE_LENGTH: usize = 2
+        const REQUEST_UTF8_THREE_BYTE_LENGTH: usize = 3
+        const REQUEST_UTF8_FOUR_BYTE_LENGTH: usize = 4
+        const REQUEST_ASCII_DELETE: u64 = 127
+
+        struct ParsedOperandNumber:
+            valid: mutable bool
+            value: mutable u64
+            end: mutable usize
 
         const JSON_STATE_VALUE: u8 = 0
         const JSON_STATE_KEY_OR_END: u8 = 1
@@ -155,6 +201,22 @@ module DebuggerProtocolRequest:
             expected_generation: mutable u64
             target_event: mutable u64
             valid: mutable bool
+
+        struct ProgramPath:
+            bytes: mutable u8[REQUEST_PROGRAM_PATH_CAPACITY]
+            length: mutable usize
+            valid: mutable bool
+
+        struct RequestOperands:
+            valid: mutable bool
+            program: mutable ProgramPath
+            has_program: mutable bool
+            variables_reference: mutable u64
+            has_variables_reference: mutable bool
+            page_size: mutable u64
+            has_page_size: mutable bool
+            page_start: mutable u64
+            has_page_start: mutable bool
 
         def invalid_request() -> Request:
             return zeroed
@@ -490,6 +552,299 @@ module DebuggerProtocolRequest:
             return JSON_NO_INDEX if end == JSON_NO_INDEX or not json_primitive_is_valid(payload, start, end)
             return end
 
+    private:
+        # Decode only printable ASCII JSON key escapes. All supported request
+        # operand names are ASCII; non-ASCII keys cannot match them.
+        def request_json_key_matches(payload: u8&, start: usize, end: usize, expected: cstr) -> bool:
+            cursor: mutable usize = start
+            expected_index: mutable usize = 0
+            expected_length: usize = request_cstr_length(expected)
+            while cursor < end:
+                character: mutable u64 = payload[cursor].u64()
+                if payload[cursor] == ASCII_BACKSLASH:
+                    cursor <- cursor + 1
+                    return false if cursor >= end
+                    escaped: u8 = payload[cursor]
+                    if escaped == ASCII_U:
+                        return false if end - cursor <= REQUEST_UNICODE_ESCAPE_DIGITS
+                        character <- 0
+                        for offset in REQUEST_FIRST_UNICODE_HEX_DIGIT_OFFSET..<(REQUEST_UNICODE_ESCAPE_DIGITS + REQUEST_UNICODE_ESCAPE_MARKER_BYTES):
+                            digit: u8 = payload[cursor + offset]
+                            hex_value: mutable u64 = 0
+                            if digit >= ASCII_ZERO and digit <= ASCII_NINE:
+                                hex_value <- (digit - ASCII_ZERO).u64()
+                            else:
+                                if digit >= ASCII_A and digit <= ASCII_F:
+                                    hex_value <- (digit - ASCII_A).u64() + REQUEST_HEX_LETTER_OFFSET
+                                else:
+                                    if digit >= ASCII_UPPER_A and digit <= ASCII_UPPER_F:
+                                        hex_value <- (digit - ASCII_UPPER_A).u64() + REQUEST_HEX_LETTER_OFFSET
+                                    else:
+                                        return false
+                            character <- character * REQUEST_HEX_BASE + hex_value
+                        cursor <- cursor + REQUEST_UNICODE_ESCAPE_DIGITS + REQUEST_UNICODE_ESCAPE_MARKER_BYTES
+                    else:
+                        return false if escaped != ASCII_QUOTE and escaped != ASCII_BACKSLASH and escaped != ASCII_SLASH
+                        character <- escaped.u64()
+                        cursor <- cursor + 1
+                else:
+                    cursor <- cursor + 1
+                return false if character > REQUEST_ASCII_MAX or expected_index >= expected_length
+                return false if expected[expected_index].u8().u64() != character
+                expected_index <- expected_index + 1
+            return expected_index == expected_length
+
+        def request_operand_json_value_end(payload: u8&, length: usize, start: usize) -> usize:
+            return JSON_NO_INDEX if start >= length
+            return json_string_end(payload, length, start) if payload[start] == ASCII_QUOTE
+            if payload[start] == ASCII_BRACE_OPEN or payload[start] == ASCII_BRACKET_OPEN:
+                depth: mutable usize = 0
+                in_string: mutable bool = false
+                escaped: mutable bool = false
+                index: mutable usize = start
+                while index < length:
+                    byte: u8 = payload[index]
+                    if in_string:
+                        if escaped:
+                            escaped <- false
+                        else:
+                            if byte == ASCII_BACKSLASH:
+                                escaped <- true
+                            else:
+                                in_string <- false if byte == ASCII_QUOTE
+                    else:
+                        if byte == ASCII_QUOTE:
+                            in_string <- true
+                        else:
+                            if byte == ASCII_BRACE_OPEN or byte == ASCII_BRACKET_OPEN:
+                                depth <- depth + 1
+                            else:
+                                if byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE:
+                                    return index + 1 if depth == 1
+                                    depth <- depth - 1
+                    index <- index + 1
+                return JSON_NO_INDEX
+            end: usize = json_primitive_end(payload, length, start)
+            return JSON_NO_INDEX if end == JSON_NO_INDEX or not json_primitive_is_valid(payload, start, end)
+            return end
+
+        # Scan direct members of one object, skipping complete values so a
+        # nested arguments/program decoy cannot satisfy a launch request.
+        def request_object_field_value_start(payload: u8&, length: usize, object_start: usize, expected: cstr, occurrence: usize) -> usize:
+            return JSON_NO_INDEX if object_start >= length or payload[object_start] != ASCII_BRACE_OPEN
+            property_index: mutable usize = object_start + 1
+            matched: mutable usize = 0
+            while property_index < length:
+                while property_index < length and (is_json_whitespace(payload[property_index]) or payload[property_index] == ASCII_COMMA):
+                    property_index <- property_index + 1
+                return JSON_NO_INDEX if property_index >= length or payload[property_index] == ASCII_BRACE_CLOSE
+                key_start: usize = property_index
+                key_end: usize = json_string_end(payload, length, key_start)
+                return JSON_NO_INDEX if key_end == JSON_NO_INDEX
+                property_index <- key_end
+                while property_index < length and is_json_whitespace(payload[property_index]):
+                    property_index <- property_index + 1
+                return JSON_NO_INDEX if property_index >= length or payload[property_index] != ASCII_COLON
+                property_index <- property_index + 1
+                while property_index < length and is_json_whitespace(payload[property_index]):
+                    property_index <- property_index + 1
+                value_start: usize = property_index
+                value_end: usize = request_operand_json_value_end(payload, length, value_start)
+                return JSON_NO_INDEX if value_end == JSON_NO_INDEX
+                if request_json_key_matches(payload, key_start + 1, key_end - 1, expected):
+                    if matched == occurrence:
+                        return value_start
+                    matched <- matched + 1
+                property_index <- value_end
+            return JSON_NO_INDEX
+
+        def invalid_operand_number() -> ParsedOperandNumber:
+            return ParsedOperandNumber{valid: false, value: 0, end: JSON_NO_INDEX}
+
+        def request_parse_bounded_unsigned(payload: u8&, length: usize, start: usize, maximum: u64, allow_decimal_string: bool) -> ParsedOperandNumber:
+            return invalid_operand_number() if start >= length
+            quoted: bool = payload[start] == ASCII_QUOTE
+            return invalid_operand_number() if quoted and not allow_decimal_string
+            return invalid_operand_number() if not quoted and (payload[start] < ASCII_ZERO or payload[start] > ASCII_NINE)
+            index: mutable usize = start + 1 if quoted else start
+            value: mutable u64 = 0
+            digits: mutable usize = 0
+            while index < length and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
+                digit: u64 = (payload[index] - ASCII_ZERO).u64()
+                return invalid_operand_number() if digits > 0 and value == 0
+                return invalid_operand_number() if value > (maximum - digit) / DECIMAL_BASE
+                value <- value * DECIMAL_BASE + digit
+                digits <- digits + 1
+                index <- index + 1
+            return invalid_operand_number() if digits == 0
+            if quoted:
+                return invalid_operand_number() if index >= length or payload[index] != ASCII_QUOTE
+                index <- index + 1
+            if index < length:
+                byte: u8 = payload[index]
+                return invalid_operand_number() if not is_json_whitespace(byte) and byte != ASCII_COMMA and byte != ASCII_BRACE_CLOSE
+            return ParsedOperandNumber{valid: true, value: value, end: index}
+
+        def invalid_program_path() -> ProgramPath:
+            return ProgramPath{bytes: zeroed, length: 0, valid: false}
+
+        def request_program_path_append(path: mutable ProgramPath&, byte: u8) -> bool:
+            return false if path.length >= REQUEST_PROGRAM_PATH_CAPACITY
+            path.bytes[path.length] <- byte
+            path.length <- path.length + 1
+            return true
+
+        def request_program_path_append_codepoint(path: mutable ProgramPath&, value: u64) -> bool:
+            return false if value == 0 or value <= REQUEST_UNICODE_CONTROL_MAX or value == REQUEST_ASCII_DELETE
+            return false if value > REQUEST_UNICODE_MAX_CODEPOINT
+            if value < REQUEST_UTF8_CONTINUATION_BASE:
+                return request_program_path_append(path, value.u8())
+            if value < REQUEST_UNICODE_TWO_BYTE_MAX_EXCLUSIVE:
+                first: u8 = (REQUEST_UTF8_TWO_BYTE_BASE | (value >> REQUEST_UTF8_SHIFT)).u8()
+                second: u8 = (REQUEST_UTF8_CONTINUATION_BASE | (value & REQUEST_UTF8_CONTINUATION_MASK)).u8()
+                return false if not request_program_path_append(path, first)
+                return request_program_path_append(path, second)
+            if value < REQUEST_UNICODE_THREE_BYTE_MAX_EXCLUSIVE:
+                first: u8 = (REQUEST_UTF8_THREE_BYTE_BASE | (value >> (REQUEST_UTF8_SHIFT * 2))).u8()
+                second: u8 = (REQUEST_UTF8_CONTINUATION_BASE | ((value >> REQUEST_UTF8_SHIFT) & REQUEST_UTF8_CONTINUATION_MASK)).u8()
+                third: u8 = (REQUEST_UTF8_CONTINUATION_BASE | (value & REQUEST_UTF8_CONTINUATION_MASK)).u8()
+                return false if not request_program_path_append(path, first)
+                return false if not request_program_path_append(path, second)
+                return request_program_path_append(path, third)
+            first: u8 = (REQUEST_UTF8_FOUR_BYTE_BASE | (value >> (REQUEST_UTF8_SHIFT * 3))).u8()
+            second: u8 = (REQUEST_UTF8_CONTINUATION_BASE | ((value >> (REQUEST_UTF8_SHIFT * 2)) & REQUEST_UTF8_CONTINUATION_MASK)).u8()
+            third: u8 = (REQUEST_UTF8_CONTINUATION_BASE | ((value >> REQUEST_UTF8_SHIFT) & REQUEST_UTF8_CONTINUATION_MASK)).u8()
+            fourth: u8 = (REQUEST_UTF8_CONTINUATION_BASE | (value & REQUEST_UTF8_CONTINUATION_MASK)).u8()
+            return false if not request_program_path_append(path, first)
+            return false if not request_program_path_append(path, second)
+            return false if not request_program_path_append(path, third)
+            return request_program_path_append(path, fourth)
+
+        def request_program_path_utf8_is_valid(path: ProgramPath) -> bool:
+            index: mutable usize = 0
+            while index < path.length:
+                first: u64 = path.bytes[index].u64()
+                sequence_length: mutable usize = 1
+                minimum_codepoint: mutable u64 = 0
+                codepoint: mutable u64 = first
+                if first >= REQUEST_UTF8_TWO_BYTE_START and first <= REQUEST_UTF8_TWO_BYTE_END:
+                    sequence_length <- REQUEST_UTF8_TWO_BYTE_LENGTH
+                    minimum_codepoint <- REQUEST_UTF8_TWO_BYTE_MIN_CODEPOINT
+                    codepoint <- first & REQUEST_UTF8_FIRST_TWO_MASK
+                if first >= REQUEST_UTF8_THREE_BYTE_START and first <= REQUEST_UTF8_THREE_BYTE_END:
+                    sequence_length <- REQUEST_UTF8_THREE_BYTE_LENGTH
+                    minimum_codepoint <- REQUEST_UTF8_THREE_BYTE_MIN_CODEPOINT
+                    codepoint <- first & REQUEST_UTF8_FIRST_THREE_MASK
+                if first >= REQUEST_UTF8_FOUR_BYTE_START and first <= REQUEST_UTF8_FOUR_BYTE_END:
+                    sequence_length <- REQUEST_UTF8_FOUR_BYTE_LENGTH
+                    minimum_codepoint <- REQUEST_UTF8_FOUR_BYTE_MIN_CODEPOINT
+                    codepoint <- first & REQUEST_UTF8_FIRST_FOUR_MASK
+                if first >= REQUEST_UTF8_CONTINUATION_MIN and sequence_length == 1:
+                    return false
+                return false if sequence_length > path.length - index
+                for offset in 1..<sequence_length:
+                    continuation: u64 = path.bytes[index + offset].u64()
+                    return false if continuation < REQUEST_UTF8_CONTINUATION_MIN or continuation > REQUEST_UTF8_CONTINUATION_MAX
+                    codepoint <- (codepoint << REQUEST_UTF8_SHIFT) | (continuation & REQUEST_UTF8_CONTINUATION_MASK)
+                return false if codepoint < minimum_codepoint or codepoint > REQUEST_UNICODE_MAX_CODEPOINT
+                return false if codepoint >= REQUEST_UNICODE_SURROGATE_LOW_START and codepoint <= REQUEST_UNICODE_SURROGATE_LOW_END
+                index <- index + sequence_length
+            return true
+
+        def request_hex_digit(byte: u8) -> ParsedOperandNumber:
+            return ParsedOperandNumber{valid: true, value: (byte - ASCII_ZERO).u64(), end: 0} if byte >= ASCII_ZERO and byte <= ASCII_NINE
+            return ParsedOperandNumber{valid: true, value: (byte - ASCII_A).u64() + REQUEST_JSON_HEX_LETTER_OFFSET, end: 0} if byte >= ASCII_A and byte <= ASCII_F
+            return ParsedOperandNumber{valid: true, value: (byte - ASCII_UPPER_A).u64() + REQUEST_JSON_HEX_LETTER_OFFSET, end: 0} if byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
+            return invalid_operand_number()
+
+        def request_parse_unicode_quad(payload: u8&, length: usize, start: usize) -> ParsedOperandNumber:
+            return invalid_operand_number() if start > length or length - start < REQUEST_UNICODE_ESCAPE_DIGITS
+            value: mutable u64 = 0
+            for offset in 0..<REQUEST_UNICODE_ESCAPE_DIGITS:
+                digit: ParsedOperandNumber = request_hex_digit(payload[start + offset])
+                return invalid_operand_number() if not digit.valid
+                value <- value * REQUEST_JSON_HEX_BASE + digit.value
+            return ParsedOperandNumber{valid: true, value: value, end: start + REQUEST_UNICODE_ESCAPE_DIGITS}
+
+        def request_program_path_string_parse(payload: u8&, length: usize, start: usize) -> ProgramPath:
+            path: mutable ProgramPath = zeroed
+            path.valid <- true
+            return invalid_program_path() if start >= length or payload[start] != ASCII_QUOTE
+            index: mutable usize = start + 1
+            while index < length:
+                byte: u8 = payload[index]
+                if byte == ASCII_QUOTE:
+                    return invalid_program_path() if path.length == 0 or not request_program_path_utf8_is_valid(path)
+                    return path
+                if byte == ASCII_BACKSLASH:
+                    return invalid_program_path() if index + 1 >= length
+                    escaped: u8 = payload[index + 1]
+                    if escaped == ASCII_QUOTE or escaped == ASCII_BACKSLASH or escaped == ASCII_SLASH:
+                        path.valid <- request_program_path_append(path, escaped)
+                        return invalid_program_path() if not path.valid
+                        index <- index + 2
+                        continue
+                    if escaped == ASCII_U:
+                        high: ParsedOperandNumber = request_parse_unicode_quad(payload, length, index + 2)
+                        return invalid_program_path() if not high.valid
+                        codepoint: mutable u64 = high.value
+                        index <- high.end
+                        if high.value >= REQUEST_UNICODE_SURROGATE_HIGH_START and high.value <= REQUEST_UNICODE_SURROGATE_HIGH_END:
+                            return invalid_program_path() if index + 1 >= length or payload[index] != ASCII_BACKSLASH or payload[index + 1] != ASCII_U
+                            low: ParsedOperandNumber = request_parse_unicode_quad(payload, length, index + 2)
+                            return invalid_program_path() if not low.valid or low.value < REQUEST_UNICODE_SURROGATE_LOW_START or low.value > REQUEST_UNICODE_SURROGATE_LOW_END
+                            codepoint <- REQUEST_UNICODE_SURROGATE_BASE + ((high.value - REQUEST_UNICODE_HIGH_SURROGATE_OFFSET) << REQUEST_UNICODE_SURROGATE_SHIFT) + (low.value - REQUEST_UNICODE_LOW_SURROGATE_OFFSET)
+                            index <- low.end
+                        else:
+                            return invalid_program_path() if high.value >= REQUEST_UNICODE_SURROGATE_LOW_START and high.value <= REQUEST_UNICODE_SURROGATE_LOW_END
+                        path.valid <- request_program_path_append_codepoint(path, codepoint)
+                        return invalid_program_path() if not path.valid
+                        continue
+                    return invalid_program_path() if escaped == ASCII_B or escaped == ASCII_F or escaped == ASCII_N or escaped == ASCII_R or escaped == ASCII_T
+                    return invalid_program_path()
+                return invalid_program_path() if byte < ASCII_SPACE or byte.u64() == REQUEST_ASCII_DELETE
+                path.valid <- request_program_path_append(path, byte)
+                return invalid_program_path() if not path.valid
+                index <- index + 1
+            return invalid_program_path()
+
+        def request_arguments_operands_parse(payload: u8&, length: usize, arguments: usize, method: RequestMethod, operands: mutable RequestOperands&) -> bool:
+            return false if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
+            program: usize = request_object_field_value_start(payload, length, arguments, "program", 0)
+            return false if request_object_field_value_start(payload, length, arguments, "program", 1) != JSON_NO_INDEX
+            if program != JSON_NO_INDEX:
+                parsed: ProgramPath = request_program_path_string_parse(payload, length, program)
+                return false if not parsed.valid
+                operands.program <- parsed
+                operands.has_program <- true
+            variables_reference_start: usize = request_object_field_value_start(payload, length, arguments, "variablesReference", 0)
+            return false if request_object_field_value_start(payload, length, arguments, "variablesReference", 1) != JSON_NO_INDEX
+            if variables_reference_start != JSON_NO_INDEX:
+                variables_reference: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, variables_reference_start, MAX_REQUEST_INTEGER, true)
+                return false if not variables_reference.valid
+                operands.variables_reference <- variables_reference.value
+                operands.has_variables_reference <- true
+            return false if method == RequestMethod.Variables and not operands.has_variables_reference
+            return true
+
+        def request_pagination_operands_parse(payload: u8&, length: usize, root_start: usize, operands: mutable RequestOperands&) -> bool:
+            page_size_start: usize = request_object_field_value_start(payload, length, root_start, "pageSize", 0)
+            return false if request_object_field_value_start(payload, length, root_start, "pageSize", 1) != JSON_NO_INDEX
+            if page_size_start != JSON_NO_INDEX:
+                page_size: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, page_size_start, REQUEST_PAGE_SIZE_MAX, false)
+                return false if not page_size.valid
+                operands.page_size <- page_size.value
+                operands.has_page_size <- true
+            page_start_start: usize = request_object_field_value_start(payload, length, root_start, "pageStart", 0)
+            return false if request_object_field_value_start(payload, length, root_start, "pageStart", 1) != JSON_NO_INDEX
+            if page_start_start != JSON_NO_INDEX:
+                page_start: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, page_start_start, REQUEST_PAGE_START_MAX, true)
+                return false if not page_start.valid
+                operands.page_start <- page_start.value
+                operands.has_page_start <- true
+            return true
+
+    public:
         def request_has_object_shape(payload: u8&, length: usize) -> bool:
             return false if length < 2
             first: mutable usize = 0
@@ -791,3 +1146,24 @@ module DebuggerProtocolRequest:
             return invalid_request() if expected_field_seen and not expected_has_digits
             return invalid_request() if target_field_seen and not target_has_digits
             return request
+
+        # Parse the ordinary protocol envelope's launch and pagination
+        # operands. Launch requires one arguments.program path; other methods
+        # may omit it. Paths are decoded as bounded UTF-8 filesystem paths.
+        def request_operands_parse(payload: u8&, length: usize) -> RequestOperands:
+            operands: mutable RequestOperands = zeroed
+            operands.program <- invalid_program_path()
+            request: Request = request_parse(payload, length)
+            return operands if not request.valid
+            root_start: mutable usize = 0
+            while root_start < length and is_json_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = request_object_field_value_start(payload, length, root_start, "arguments", 0)
+            return operands if request_object_field_value_start(payload, length, root_start, "arguments", 1) != JSON_NO_INDEX
+            if arguments != JSON_NO_INDEX:
+                return operands if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
+            return operands if request.method == RequestMethod.Launch and not operands.has_program
+            return operands if request.method == RequestMethod.Variables and not operands.has_variables_reference
+            return operands if not request_pagination_operands_parse(payload, length, root_start, operands)
+            operands.valid <- true
+            return operands

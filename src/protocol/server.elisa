@@ -7,6 +7,8 @@ include "./dispatcher.elisa"
 include "./encoding.elisa"
 include "../engine/default_image.elisa"
 include "./managed_service.elisa"
+include "../vm/edir_file.elisa"
+include "../inspect/managed.elisa"
 
 extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
 extern printf(format: cstr, ...) -> int can[Console]
@@ -21,7 +23,14 @@ module DebuggerProtocolServer:
         const SERVER_SUCCESS_EXIT_CODE: i64 = 0
         const SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
         const DECIMAL_BASE: u64 = 10
+        const NO_EXPECTED_GENERATION: u64 = 0
+        const DEFAULT_PAGE_SIZE: u64 = 0
+        const DEFAULT_PAGE_START: u64 = 0
         const RESPONSE_BODY_PREFIX_LENGTH: usize = 25
+        const DETAIL_INVALID_LAUNCH_CONFIGURATION: u32 = 4
+        const DETAIL_STALE_VARIABLE_REFERENCE: u32 = 5
+        const DETAIL_INVALID_LAUNCH_STATE: u32 = 6
+        const DETAIL_STALE_LAUNCH_GENERATION: u32 = 7
         const RESPONSE_ID_PREFIX: cstr = "{\"kind\":\"response\",\"id\":\""
         const RESPONSE_UNSUPPORTED_SUFFIX: cstr = "\",\"ok\":false,\"error\":{\"code\":\"UNSUPPORTED\",\"message\":\"method is not implemented\"}}"
         const RESPONSE_UNSUPPORTED_SUFFIX_LENGTH: usize = 82
@@ -79,10 +88,10 @@ module DebuggerProtocolServer:
         def server_capabilities(engine_capabilities: DebuggerCapabilities::CapabilitySet) -> DebuggerCapabilities::CapabilitySet:
             wire: mutable DebuggerCapabilities::CapabilitySet = engine_capabilities
             # This compact endpoint does not carry source breakpoint operands
-            # or inspection/trace result payloads, so do not expose those
-            # engine-level features as usable over this wire surface.
+            # or trace result payloads, so keep those engine-level features
+            # hidden while exposing the managed stack and local snapshots
+            # that this endpoint can serialize.
             wire.source_breakpoints <- false
-            wire.typed_values <- false
             wire.historical_queries <- false
             wire.trace_export <- false
             return wire
@@ -101,18 +110,34 @@ module DebuggerProtocolServer:
             write_dynamic_response(id, RESPONSE_INVALID_STATE_SUFFIX, RESPONSE_INVALID_STATE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
 
         def response_requires_missing_payload(method: DebuggerProtocolRequest::RequestMethod) -> bool:
-            return true if method == DebuggerProtocolRequest::RequestMethod.Threads or method == DebuggerProtocolRequest::RequestMethod.Stack or method == DebuggerProtocolRequest::RequestMethod.Scopes or method == DebuggerProtocolRequest::RequestMethod.Variables or method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
+            return true if method == DebuggerProtocolRequest::RequestMethod.Threads or method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
             return false
 
-        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64) -> void can[Console, Unsafe.PointerCast]:
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Discover:
                 write_discovery_response(id, capabilities) can Console
+                return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Stack:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_frame_response_encode(id, result.stop_generation, DebuggerManagedService::service_frame(service))
+                write_json_buffer_response(encoded) can Console
+                return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Scopes:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_scopes_response_encode(id, result.stop_generation, service.controller.engine.image.program.local_count)
+                write_json_buffer_response(encoded) can Console
+                return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Variables:
+                local_count: u64 = service.controller.engine.image.program.local_count
+                safe_page_start: usize = local_count.usize() if page_start > local_count else page_start.usize()
+                locals: DebuggerManagedInspection::LocalPage = DebuggerManagedService::service_locals(service, safe_page_start, page_size.usize())
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_locals_response_encode(id, result.stop_generation, result.session.position.event, locals)
+                write_json_buffer_response(encoded) can Console
                 return
             if result.accepted and response_requires_missing_payload(result.method):
                 write_dynamic_response(id, RESPONSE_RESULT_UNAVAILABLE_SUFFIX, RESPONSE_RESULT_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if result.accepted:
-                write_success_response(id) can Console, Unsafe.PointerCast
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::response_encode(DebuggerProtocol::response_ok(id, result.stop_generation))
+                write_json_buffer_response(encoded) can Console
                 return
             if result.failure.code == DebuggerErrors::ErrorCode.Unsupported:
                 write_unsupported_response(id) can Console, Unsafe.PointerCast
@@ -158,6 +183,29 @@ module DebuggerProtocolServer:
             service.controller.session <- result.session
             return result
 
+        def dispatch_launch(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+            if not operands.valid or not operands.has_program:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_LAUNCH_CONFIGURATION)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            session: DebuggerSession::Session = service.controller.session
+            if request.expected_generation != NO_EXPECTED_GENERATION and request.expected_generation != session.stop_generation:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_LAUNCH_GENERATION)
+                return DebuggerProtocolDispatcher::dispatch_error(session, request.method, failure)
+            launchable: bool = session.state == DebuggerSession::SessionState.Created or session.state == DebuggerSession::SessionState.Configuring or session.state == DebuggerSession::SessionState.Launching
+            if not launchable:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_INVALID_LAUNCH_STATE)
+                return DebuggerProtocolDispatcher::dispatch_error(session, request.method, failure)
+            loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(operands.program.bytes[0], operands.program.length) can Blocking.IO, Unsafe.PointerCast
+            if not loaded.valid:
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
+            recording: DebuggerIdentity::DebugId = service.controller.engine.recording
+            candidate: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, loaded.image, recording)
+            result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(candidate, request)
+            if not result.accepted:
+                return DebuggerProtocolDispatcher::dispatch_error(session, request.method, result.failure)
+            service <- candidate
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
+
     public:
         def run_protocol_server() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             decoder: mutable DebuggerProtocolFraming::FrameDecoder = DebuggerProtocolFraming::frame_decoder_new()
@@ -179,10 +227,25 @@ module DebuggerProtocolServer:
                     if completed:
                         request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(decoder.payload[0], DebuggerProtocolFraming::frame_decoder_length(decoder))
                         return SERVER_INVALID_FRAME_EXIT_CODE if not request.valid and not request.has_id
-                        result: mutable DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
+                        operands: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(decoder.payload[0], DebuggerProtocolFraming::frame_decoder_length(decoder))
+                        result: mutable DebuggerProtocolDispatcher::DispatchResult = zeroed
+                        if not operands.valid:
+                            failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_LAUNCH_CONFIGURATION)
+                            result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
+                        else:
+                            if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Launch:
+                                result <- dispatch_launch(service, request, operands) can Blocking.IO, Unsafe.PointerCast
+                            else:
+                                if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
+                                    stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_VARIABLE_REFERENCE)
+                                    result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                else:
+                                    result <- dispatch_request(service, request)
                         session <- result.session
                         response_id: u64 = request.id if request.has_id else FALLBACK_RESPONSE_ID
-                        write_response(result, response_id, server_capabilities(service.controller.session.capabilities)) can Console, Unsafe.PointerCast
+                        page_size: u64 = operands.page_size if operands.has_page_size else DEFAULT_PAGE_SIZE
+                        page_start: u64 = operands.page_start if operands.has_page_start else DEFAULT_PAGE_START
+                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start) can Console, Unsafe.PointerCast
                         _ = fflush(null) can Console
                         DebuggerProtocolFraming::frame_decoder_reset(decoder)
                     return SERVER_INVALID_FRAME_EXIT_CODE if DebuggerProtocolFraming::frame_decoder_is_failed(decoder)

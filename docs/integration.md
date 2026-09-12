@@ -1,20 +1,27 @@
 # Editor and tool integration
 
 The debugger has two integration boundaries. Use the DAP executable when an
-editor already has a DAP client. Use the versioned headless service when a
-plugin or test runner wants debugger-specific history, trace, or branch
-operations.
+editor already has a DAP client. Use the versioned headless service for
+editor-neutral managed lifecycle and inspection requests. Plugins that need
+trace bytes, branch, or history operations can use the typed in-process
+service until those payloads are available on the process transport.
 
 For in-process Elisa integrations, `DebuggerManagedService` is the shared
 managed provider facade. Construct it with a verified `ProgramImage`, dispatch
 typed requests through `service_dispatch`, and read bounded frames or locals
 with `service_frame` and `service_locals`. This path executes the same replay
 engine directly, including reverse-step and validated `targetEvent` seek.
-The DAP executable and CLI use this facade for managed launch, pause, resume,
-step, reverse-step, and seek operations. The standalone headless server keeps
-the provider-neutral lifecycle dispatcher for now; in-process clients that
-need managed execution can call `DebuggerSessionService::managed_new` and
-`service_handle_managed` with the same envelope model.
+The DAP executable, CLI, and headless server use this facade for managed
+launch, pause, resume, step, reverse-step, and seek operations. The headless
+process loads and verifies the EDIR artifact named by `arguments.program`
+before replacing its initial image. It also encodes the current frame, local
+scope, and bounded local pages as protocol responses. A variables request puts
+the current `variablesReference` in `arguments` and carries a decimal-string
+page cursor in top-level `pageStart`; the server rejects references from older
+stop generations. In-process clients can still call
+`DebuggerSessionService::managed_new` and `service_handle_managed` with the
+typed envelope model when they need operations that the process transport does
+not yet carry.
 
 The managed service captures each committed EDIR execution-boundary event in
 its bounded event journal. Once the session is stopped, in-process Elisa

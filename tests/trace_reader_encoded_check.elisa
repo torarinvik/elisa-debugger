@@ -20,6 +20,11 @@ const MAX_EVENT_MANIFEST_SEQUENCE: u64 = 0
 const MAX_EVENT_ORDINAL: u64 = 18446744073709551615
 const MAX_EVENT_CHUNK_SEQUENCE: u64 = 1
 const MAX_EVENT_NEXT_CHUNK_SEQUENCE: u64 = 2
+const TEST_ROOT_BRANCH: u64 = 0
+const TEST_NON_ROOT_BRANCH: u64 = 1
+const NON_ROOT_BRANCH_READER_RESULT: i64 = 16
+const NON_ROOT_BRANCH_STORAGE_RESULT: i64 = 17
+const NON_ROOT_BRANCH_STATE_RESULT: i64 = 18
 const TEST_LEGACY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
 const TEST_HASH_PRIME: u64 = 1099511628211
 
@@ -69,8 +74,9 @@ def max_event_manifest_chunk() -> DebuggerTraceStorage::StoredChunk:
         chunk.payload[index] <- payload.bytes[index]
     return chunk
 
-def max_event_chunk(sequence: u64) -> DebuggerTraceStorage::StoredChunk:
+def max_event_chunk(sequence: u64, branch_id: u64) -> DebuggerTraceStorage::StoredChunk:
     position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(RECORDING_ID))
+    position.branch <- DebuggerIdentity::debug_id(branch_id)
     position.event <- MAX_EVENT_ORDINAL
     event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TRACE_SCHEMA, MAX_EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, EVENT_PAYLOAD_HASH)
     payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
@@ -123,20 +129,32 @@ def main() -> i64:
 
     max_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
     return 10 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(max_reader, max_event_manifest_chunk()))
-    max_chunk: DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_CHUNK_SEQUENCE)
+    max_chunk: DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_CHUNK_SEQUENCE, TEST_ROOT_BRANCH)
     return 11 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(max_reader, max_chunk))
     return 12 if not max_reader.event_exhausted or not DebuggerTraceReader::reader_is_exact(max_reader)
+    modified_branch_reader: mutable DebuggerTraceReader::TraceReader = max_reader
+    modified_branch_reader.events[0].position.branch <- DebuggerIdentity::debug_id(TEST_NON_ROOT_BRANCH)
+    return NON_ROOT_BRANCH_STATE_RESULT if DebuggerTraceReader::reader_is_exact(modified_branch_reader)
+    non_root_chunk: DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_CHUNK_SEQUENCE, TEST_NON_ROOT_BRANCH)
+    encoded_non_root_chunk: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(non_root_chunk)
+    decoded_non_root_chunk: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(encoded_non_root_chunk.bytes[0], encoded_non_root_chunk.length)
+    return NON_ROOT_BRANCH_STORAGE_RESULT if not DebuggerTraceBinary::writer_is_valid(encoded_non_root_chunk) or decoded_non_root_chunk.status != DebuggerTraceStorage::StorageStatus.Ready
+    non_root_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return NON_ROOT_BRANCH_READER_RESULT if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(non_root_reader, max_event_manifest_chunk()))
+    non_root_result: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(non_root_reader, non_root_chunk)
+    return NON_ROOT_BRANCH_READER_RESULT if not DebuggerErrors::error_is_ok(non_root_result) or non_root_reader.state != DebuggerTraceReader::ReaderState.Ready
+    return NON_ROOT_BRANCH_STATE_RESULT if DebuggerTraceReader::reader_is_exact(non_root_reader)
     legacy_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
     legacy_manifest: mutable DebuggerTraceStorage::StoredChunk = max_event_manifest_chunk()
     legacy_manifest.checksum <- test_legacy_checksum(legacy_manifest.payload[0], legacy_manifest.payload_length)
     legacy_manifest.header.checksum <- legacy_manifest.checksum
     return 14 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(legacy_reader, legacy_manifest))
-    legacy_chunk: mutable DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_CHUNK_SEQUENCE)
+    legacy_chunk: mutable DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_CHUNK_SEQUENCE, TEST_ROOT_BRANCH)
     legacy_chunk.checksum <- test_legacy_checksum(legacy_chunk.payload[0], legacy_chunk.payload_length)
     legacy_chunk.header.checksum <- legacy_chunk.checksum
     return 15 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(legacy_reader, legacy_chunk)) or not DebuggerTraceReader::reader_is_exact(legacy_reader)
     exhausted_reader: mutable DebuggerTraceReader::TraceReader = max_reader
-    repeated_max_chunk: mutable DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_NEXT_CHUNK_SEQUENCE)
+    repeated_max_chunk: mutable DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_NEXT_CHUNK_SEQUENCE, TEST_ROOT_BRANCH)
     repeated_max_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(exhausted_reader, repeated_max_chunk)
     return 13 if DebuggerErrors::error_is_ok(repeated_max_error)
     return 0

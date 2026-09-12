@@ -49,6 +49,8 @@ module DebuggerTraceStorage:
         const TRACE_EVENT_CORRUPT_QUALITY: u16 = 4
         const TRACE_MAX_EVENT: u64 = 18446744073709551615
         const TRACE_NO_RECORDING_ID: u64 = 0
+        const TRACE_STORAGE_ROOT_BRANCH: u64 = 0
+        const TRACE_EVENT_BRANCH_OFFSET: usize = TRACE_EVENT_SCHEMA_BYTES + TRACE_EVENT_ORDINAL_BYTES + TRACE_EVENT_ID_BYTES * 2
 
     public:
         const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY
@@ -76,6 +78,8 @@ module DebuggerTraceStorage:
             manifest_exact: mutable bool
             event_chunk_seen: mutable bool
             event_qualities_exact: mutable bool
+            event_branches_root: mutable bool
+            checkpoint_branches_root: mutable bool
 
         struct ChunkDecode:
             chunk: mutable StoredChunk
@@ -124,7 +128,7 @@ module DebuggerTraceStorage:
                 ordinal: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 event_recording: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
+                branch: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 position_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 position_task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 _ = DebuggerTraceBinary::reader_take_u64(reader)
@@ -159,6 +163,18 @@ module DebuggerTraceStorage:
                 return false if quality != TRACE_EVENT_QUALITY_EXACT_CODE
             return true
 
+        def storage_event_payload_has_root_branches(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
+            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
+            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
+            for index in 0..<event_count:
+                event_offset: usize = payload_offset + index * TRACE_EVENT_ENCODED_BYTES
+                branch_offset: usize = event_offset + TRACE_EVENT_BRANCH_OFFSET
+                branch: mutable u64 = 0
+                for byte_index in 0..<TRACE_EVENT_ID_BYTES:
+                    branch <- branch | (bytes[branch_offset + byte_index].u64() << (byte_index.u64() * TRACE_BYTE_BITS))
+                return false if branch != TRACE_STORAGE_ROOT_BRANCH
+            return true
+
         def storage_checkpoint_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, first_event: u64, last_event: u64) -> bool:
             return false if first_event != last_event
             if payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES:
@@ -169,6 +185,11 @@ module DebuggerTraceStorage:
                 return snapshot.event == first_event
             full_checkpoint: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(bytes[payload_offset], payload_length)
             return full_checkpoint.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and full_checkpoint.checkpoint.event == first_event
+
+        def storage_checkpoint_payload_has_root_branch(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
+            return true if payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+            full_checkpoint: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(bytes[payload_offset], payload_length)
+            return full_checkpoint.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and full_checkpoint.checkpoint.branch.value == TRACE_STORAGE_ROOT_BRANCH
 
         def storage_checkpoint_chunk_is_valid(chunk: StoredChunk) -> bool:
             return false if chunk.header.kind != DebuggerTrace::ChunkKind.Checkpoint
@@ -314,6 +335,8 @@ module DebuggerTraceStorage:
             scan.status <- StorageStatus.Ready
             scan.next_sequence <- 0
             scan.event_qualities_exact <- true
+            scan.event_branches_root <- true
+            scan.checkpoint_branches_root <- true
             manifest_first_event: mutable u64 = 0
             manifest_last_event: mutable u64 = 0
             expected_event: mutable u64 = 0
@@ -322,8 +345,8 @@ module DebuggerTraceStorage:
             event_seen: mutable bool = false
             checkpoint_chunk_count: mutable u64 = 0
             manifest_checkpoint_count: mutable u64 = 0
-            return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if length > TRACE_STORAGE_MAX_BYTES
-            return StorageScan{status: StorageStatus.Invalid, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if length == 0
+            return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if length > TRACE_STORAGE_MAX_BYTES
+            return StorageScan{status: StorageStatus.Invalid, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if length == 0
             offset: mutable usize = 0
             while offset < length:
                 remaining: usize = length - offset
@@ -346,7 +369,7 @@ module DebuggerTraceStorage:
                     scan.status <- StorageStatus.Truncated
                     return scan
                 reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_HEADER_BYTES)
-                return StorageScan{status: StorageStatus.Truncated, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if not DebuggerTraceBinary::reader_is_valid(reader)
+                return StorageScan{status: StorageStatus.Truncated, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if not DebuggerTraceBinary::reader_is_valid(reader)
                 magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
@@ -390,6 +413,7 @@ module DebuggerTraceStorage:
                         scan.status <- StorageStatus.Invalid
                         return scan
                     scan.event_qualities_exact <- false if not storage_event_payload_is_exact(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize())
+                    scan.event_branches_root <- false if not storage_event_payload_has_root_branches(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize())
                     event_seen <- true
                     scan.event_chunk_seen <- true
                     scan.verified_event <- last_event
@@ -398,6 +422,8 @@ module DebuggerTraceStorage:
                 if kind == TRACE_CHECKPOINT_KIND and not storage_checkpoint_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), first_event, last_event):
                     scan.status <- StorageStatus.Invalid
                     return scan
+                if kind == TRACE_CHECKPOINT_KIND and not storage_checkpoint_payload_has_root_branch(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize()):
+                    scan.checkpoint_branches_root <- false
                 if kind == TRACE_CHECKPOINT_KIND and scan.manifest_seen and not storage_checkpoint_event_is_within_trace(first_event, manifest_first_event, manifest_last_event):
                     scan.status <- StorageStatus.Invalid
                     return scan

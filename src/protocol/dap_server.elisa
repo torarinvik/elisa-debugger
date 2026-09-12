@@ -1342,6 +1342,12 @@ module DebuggerDAPServer:
             return count + DAP_DIGIT_COUNT_INCREMENT if value < 0
             return count
 
+        def source_breakpoint_response_line(line: u32, coordinates: DebuggerDAPPayload::ClientCoordinates) -> u64:
+            response_line: u64 = line.u64()
+            return 0 if not coordinates.lines_start_at_one and response_line == 0
+            return response_line - DAP_SOURCE_BREAKPOINT_LINE_INCREMENT if not coordinates.lines_start_at_one
+            return response_line
+
         def write_variables_response(page: DebuggerManagedInspection::LocalPage, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
             entries_length: mutable usize = 0
             for index in 0..<page.count:
@@ -1377,8 +1383,9 @@ module DebuggerDAPServer:
             body_length: mutable u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_SET_BREAKPOINTS_COMMAND_LENGTH + DAP_SOURCE_BREAKPOINT_RESPONSE_PREFIX_LENGTH + DAP_SOURCE_BREAKPOINT_RESPONSE_SUFFIX_LENGTH).u64()
             for index in 0..<page.count:
                 entry: DebuggerManagedService::SourceBreakpointEntry = page.points[index]
+                response_line: u64 = source_breakpoint_response_line(entry.line, coordinates)
                 verified_length: usize = DAP_JSON_TRUE_LENGTH if entry.verified else DAP_JSON_FALSE_LENGTH
-                body_length <- body_length + (DAP_SOURCE_BREAKPOINT_ITEM_PREFIX_LENGTH + decimal_digits(entry.id.value) + DAP_SOURCE_BREAKPOINT_VERIFIED_PREFIX_LENGTH + verified_length + DAP_SOURCE_BREAKPOINT_LINE_PREFIX_LENGTH + decimal_digits(entry.line.u64()) + DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX_LENGTH).u64()
+                body_length <- body_length + (DAP_SOURCE_BREAKPOINT_ITEM_PREFIX_LENGTH + decimal_digits(entry.id.value) + DAP_SOURCE_BREAKPOINT_VERIFIED_PREFIX_LENGTH + verified_length + DAP_SOURCE_BREAKPOINT_LINE_PREFIX_LENGTH + decimal_digits(response_line) + DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX_LENGTH).u64()
                 body_length <- body_length + DAP_SOURCE_BREAKPOINT_SEPARATOR_LENGTH.u64() if index > 0
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(DAP_BODY_PREFIX) can Console
@@ -1400,8 +1407,7 @@ module DebuggerDAPServer:
                 else:
                     _ = printf("false") can Console
                 _ = printf(DAP_SOURCE_BREAKPOINT_LINE_PREFIX) can Console
-                response_line: mutable u64 = entry.line.u64()
-                response_line <- response_line - DAP_SOURCE_BREAKPOINT_LINE_INCREMENT if not coordinates.lines_start_at_one
+                response_line: u64 = source_breakpoint_response_line(entry.line, coordinates)
                 _ = printf("%llu", response_line) can Console
                 _ = printf(DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX) can Console
             _ = printf(DAP_SOURCE_BREAKPOINT_RESPONSE_SUFFIX) can Console

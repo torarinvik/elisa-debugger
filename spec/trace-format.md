@@ -52,3 +52,9 @@ Exact replay additionally requires a replayable exact manifest, complete event
 chunks, a verified footer, and all required source/build artifacts. Removing a
 replay-required blob produces a partial/non-replayable export rather than an
 exact claim.
+
+Trace format v1 has no branch-lineage manifest. Exact v1 recordings therefore
+accept only root-branch events and root-branch full checkpoints. Structurally
+valid non-root or mixed-branch records can still be decoded, but verification
+reports them as partial and non-replayable until a later format version stores
+and validates the branch's parent, fork event, and required dependency range.

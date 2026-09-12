@@ -26,8 +26,10 @@ module DebuggerTraceRecorder:
         const RECORDER_DETAIL_RECORDING: u32 = 5
         const RECORDER_DETAIL_TASK: u32 = 6
         const RECORDER_DETAIL_ENUM: u32 = 7
+        const RECORDER_DETAIL_BRANCH: u32 = 8
         const RECORDER_NO_EVENT: u64 = 0
         const RECORDER_NO_RECORDING: u64 = 0
+        const RECORDER_ROOT_BRANCH: u64 = 0
         const RECORDER_MAX_ORDINAL: u64 = 18446744073709551615
         const RECORDER_EVENT_SCHEMA_BYTES: usize = 4
         const RECORDER_EVENT_ORDINAL_BYTES: usize = 8
@@ -87,7 +89,7 @@ module DebuggerTraceRecorder:
             return writer
 
         def recorder_event_is_valid(recorder: TraceRecorder, event: DebuggerEvents::EventEnvelope) -> bool:
-            return event.schema == RECORDER_SCHEMA_VERSION and recorder.recording.value != RECORDER_NO_RECORDING and event.position.recording.value == recorder.recording.value and event.task.value == event.position.task.value and event.position.event == event.ordinal and DebuggerEvents::event_kind_is_valid(event.kind) and DebuggerEvents::event_quality_is_valid(event.quality) and event.quality != DebuggerEvents::EventQuality.Corrupt
+            return event.schema == RECORDER_SCHEMA_VERSION and recorder.recording.value != RECORDER_NO_RECORDING and event.position.recording.value == recorder.recording.value and event.position.branch.value == RECORDER_ROOT_BRANCH and event.task.value == event.position.task.value and event.position.event == event.ordinal and DebuggerEvents::event_kind_is_valid(event.kind) and DebuggerEvents::event_quality_is_valid(event.quality) and event.quality != DebuggerEvents::EventQuality.Corrupt
 
         def recorder_flush(recorder: mutable TraceRecorder&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::no_error() if recorder.pending_count == 0
@@ -175,7 +177,7 @@ module DebuggerTraceRecorder:
                 manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
                 manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
                 recorder.manifest <- manifest
-                detail: u32 = RECORDER_DETAIL_RECORDING if recorder.recording.value == RECORDER_NO_RECORDING else RECORDER_DETAIL_SCHEMA if event.schema != RECORDER_SCHEMA_VERSION else RECORDER_DETAIL_RECORDING if event.position.recording.value != recorder.recording.value else RECORDER_DETAIL_TASK if event.task.value != event.position.task.value else RECORDER_DETAIL_NON_MONOTONIC if event.position.event != event.ordinal else RECORDER_DETAIL_ENUM
+                detail: u32 = RECORDER_DETAIL_RECORDING if recorder.recording.value == RECORDER_NO_RECORDING else RECORDER_DETAIL_SCHEMA if event.schema != RECORDER_SCHEMA_VERSION else RECORDER_DETAIL_RECORDING if event.position.recording.value != recorder.recording.value else RECORDER_DETAIL_BRANCH if event.position.branch.value != RECORDER_ROOT_BRANCH else RECORDER_DETAIL_TASK if event.task.value != event.position.task.value else RECORDER_DETAIL_NON_MONOTONIC if event.position.event != event.ordinal else RECORDER_DETAIL_ENUM
                 recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, detail)
                 return recorder.last_error
             if event.ordinal != recorder.next_ordinal:
@@ -219,12 +221,13 @@ module DebuggerTraceRecorder:
 
         def recorder_append_checkpoint(recorder: mutable TraceRecorder&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
             return recorder_inactive_error(recorder) if recorder.status != RecorderStatus.Recording
-            if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint) or checkpoint.recording.value != recorder.recording.value or checkpoint.event > recorder.next_ordinal:
+            if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint) or checkpoint.recording.value != recorder.recording.value or checkpoint.branch.value != RECORDER_ROOT_BRANCH or checkpoint.event > recorder.next_ordinal:
                 recorder.status <- RecorderStatus.Corrupt
                 manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
                 manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
                 recorder.manifest <- manifest
-                recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_RECORDING)
+                detail: u32 = RECORDER_DETAIL_BRANCH if checkpoint.branch.value != RECORDER_ROOT_BRANCH else RECORDER_DETAIL_RECORDING
+                recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, detail)
                 return recorder.last_error
             flushed: DebuggerErrors::DebuggerError = recorder_flush(recorder)
             if not DebuggerErrors::error_is_ok(flushed):
@@ -268,7 +271,7 @@ module DebuggerTraceRecorder:
                 ordinal: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
                 task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
                 event_recording: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                _ = DebuggerTraceBinary::reader_take_u64(event_reader)
+                branch: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
                 position_event: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
                 position_task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
                 _ = DebuggerTraceBinary::reader_take_u64(event_reader)
@@ -277,14 +280,14 @@ module DebuggerTraceRecorder:
                 kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
                 quality: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
                 _ = DebuggerTraceBinary::reader_take_u64(event_reader)
-                return false if schema != RECORDER_SCHEMA_VERSION or ordinal != expected_first + index.u64() or position_event != ordinal or event_recording.value != recording.value or task.value != position_task.value or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality != DebuggerEvents::EventQuality.Exact.u16()
+                return false if schema != RECORDER_SCHEMA_VERSION or ordinal != expected_first + index.u64() or position_event != ordinal or event_recording.value != recording.value or branch.value != RECORDER_ROOT_BRANCH or task.value != position_task.value or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality != DebuggerEvents::EventQuality.Exact.u16()
             return DebuggerTraceBinary::reader_is_valid(event_reader) and event_reader.offset == event_reader.length
 
         def recorder_checkpoint_chunk_is_exact(chunk: DebuggerTraceStorage::StoredChunk, recording: DebuggerIdentity::DebugId, first_event: u64, last_event: u64) -> bool:
             return false if not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(chunk)
             return false if not DebuggerTraceStorage::storage_checkpoint_event_is_within_trace(chunk.header.first_event, first_event, last_event)
             decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerTraceStorage::storage_checkpoint_chunk_decode(chunk)
-            return decoded.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and decoded.checkpoint.recording.value == recording.value
+            return decoded.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and decoded.checkpoint.recording.value == recording.value and decoded.checkpoint.branch.value == RECORDER_ROOT_BRANCH
 
     public:
         def recorder_write(fd: int, recorder: mutable TraceRecorder&) -> DebuggerTraceStorage::StorageStatus can[Blocking.IO]:

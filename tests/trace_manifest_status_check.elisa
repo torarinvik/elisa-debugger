@@ -13,9 +13,12 @@ const TEST_EVENT_SEQUENCE: u64 = 1
 const TEST_NEXT_SEQUENCE: u64 = 2
 const TEST_EVENT_QUALITY_OFFSET: usize = 74
 const TEST_EVENT_QUALITY_HIGH_BYTE_OFFSET: usize = 75
+const TEST_EVENT_BRANCH_OFFSET: usize = 28
 const TEST_PARTIAL_QUALITY_LOW_BYTE: u8 = 1
 const TEST_PARTIAL_QUALITY_HIGH_BYTE: u8 = 0
+const TEST_NON_ROOT_BRANCH_LOW_BYTE: u8 = 1
 const NONEXACT_EVENT_RESULT: i64 = 5
+const NON_ROOT_BRANCH_RESULT: i64 = 6
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_ID), runtime: DebuggerIdentity::debug_id(TEST_ID + 1), source: DebuggerIdentity::debug_id(TEST_ID + 2), target: DebuggerIdentity::debug_id(TEST_ID + 3), metadata_version: 1}
@@ -98,4 +101,26 @@ def main() -> i64:
     return NONEXACT_EVENT_RESULT if exact_claim_scan.status != DebuggerTraceStorage::StorageStatus.Ready or exact_claim_scan.event_qualities_exact
     exact_claim_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exact_claim_bytes.bytes[0], exact_claim_bytes.length)
     return NONEXACT_EVENT_RESULT if exact_claim_report.state != DebuggerTraceVerify::VerificationState.Partial or exact_claim_report.replayable
+
+    non_root_event_payload: mutable DebuggerTraceBinary::ByteWriter = event_payload
+    non_root_event_payload.bytes[TEST_EVENT_BRANCH_OFFSET] <- TEST_NON_ROOT_BRANCH_LOW_BYTE
+    non_root_event_chunk: mutable DebuggerTraceStorage::StoredChunk = event_chunk
+    non_root_event_chunk.header.sequence <- TEST_EVENT_SEQUENCE
+    non_root_event_chunk.header.checksum <- DebuggerTraceBinary::writer_checksum(non_root_event_payload)
+    non_root_event_chunk.checksum <- DebuggerTraceBinary::writer_checksum(non_root_event_payload)
+    for index in 0..<non_root_event_payload.length:
+        non_root_event_chunk.payload[index] <- non_root_event_payload.bytes[index]
+    encoded_non_root_event: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(non_root_event_chunk)
+    non_root_branch_bytes: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    for index in 0..<encoded_exact_manifest.length:
+        non_root_branch_bytes <- DebuggerTraceBinary::writer_put_byte(non_root_branch_bytes, encoded_exact_manifest.bytes[index])
+    for index in 0..<encoded_non_root_event.length:
+        non_root_branch_bytes <- DebuggerTraceBinary::writer_put_byte(non_root_branch_bytes, encoded_non_root_event.bytes[index])
+    non_root_branch_footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(TEST_NEXT_SEQUENCE, manifest.last_event)
+    for index in 0..<non_root_branch_footer.length:
+        non_root_branch_bytes <- DebuggerTraceBinary::writer_put_byte(non_root_branch_bytes, non_root_branch_footer.bytes[index])
+    non_root_branch_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(non_root_branch_bytes.bytes[0], non_root_branch_bytes.length)
+    return NON_ROOT_BRANCH_RESULT if non_root_branch_scan.status != DebuggerTraceStorage::StorageStatus.Ready or not non_root_branch_scan.footer_verified or non_root_branch_scan.event_branches_root
+    non_root_branch_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(non_root_branch_bytes.bytes[0], non_root_branch_bytes.length)
+    return NON_ROOT_BRANCH_RESULT if non_root_branch_report.state != DebuggerTraceVerify::VerificationState.Partial or non_root_branch_report.replayable
     return 0

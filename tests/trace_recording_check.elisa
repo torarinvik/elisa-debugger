@@ -13,7 +13,8 @@ const TEST_EVENT_HASH: u64 = 23
 const TEST_EVENT_COUNT: u64 = 1
 const TEST_BAD_SCHEMA: u32 = 2
 const TEST_EVENT_OFFSET: usize = 36
-const TEST_CHECKPOINT_BRANCH: u64 = 1
+const TEST_CHECKPOINT_BRANCH: u64 = 0
+const TEST_NON_ROOT_BRANCH: u64 = 1
 const TEST_CHECKPOINT_STATE_HASH_SEED: u64 = 0
 const TEST_CHECKPOINT_EVENT: u64 = 1
 const TEST_CHECKPOINT_ID_OFFSET: u64 = 1
@@ -52,6 +53,8 @@ const RESULT_TORN_NEXT_HEADER_PREFIX_COUNT: i64 = 30
 const RESULT_TORN_NEXT_HEADER_EVENT: i64 = 31
 const RESULT_TORN_NEXT_HEADER_SEQUENCE: i64 = 32
 const RESULT_TORN_NEXT_HEADER_FOOTER: i64 = 33
+const RESULT_NON_ROOT_EVENT_ACCEPTED: i64 = 34
+const RESULT_NON_ROOT_CHECKPOINT_ACCEPTED: i64 = 35
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
@@ -196,6 +199,25 @@ def check_rejects_malformed_pending_position() -> i64:
     return 10 if DebuggerTraceRecorder::recorder_is_exact(recorder)
     return 0
 
+def check_rejects_non_root_event() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
+    event: mutable DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, TEST_FIRST_EVENT)
+    event.position.branch <- DebuggerIdentity::debug_id(TEST_NON_ROOT_BRANCH)
+    failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, event)
+    return RESULT_NON_ROOT_EVENT_ACCEPTED if DebuggerErrors::error_is_ok(failure) or recorder.status != DebuggerTraceRecorder::RecorderStatus.Corrupt or DebuggerTraceRecorder::recorder_is_exact(recorder)
+    return 0
+
+def check_rejects_non_root_checkpoint() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
+    event: DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, TEST_FIRST_EVENT)
+    return RESULT_NON_ROOT_CHECKPOINT_ACCEPTED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
+    checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint(TEST_RECORDING, TEST_CHECKPOINT_EVENT)
+    checkpoint.branch <- DebuggerIdentity::debug_id(TEST_NON_ROOT_BRANCH)
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(checkpoint)
+    failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
+    return RESULT_NON_ROOT_CHECKPOINT_ACCEPTED if DebuggerErrors::error_is_ok(failure) or recorder.status != DebuggerTraceRecorder::RecorderStatus.Corrupt or DebuggerTraceRecorder::recorder_is_exact(recorder)
+    return 0
+
 def check_rejects_malformed_manifest() -> i64:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
     malformed: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
@@ -218,5 +240,7 @@ def main() -> i64:
     return check_rejects_bad_event() if check_rejects_bad_event() != 0
     return check_rejects_corrupt_quality() if check_rejects_corrupt_quality() != 0
     return check_rejects_malformed_pending_position() if check_rejects_malformed_pending_position() != 0
+    return check_rejects_non_root_event() if check_rejects_non_root_event() != 0
+    return check_rejects_non_root_checkpoint() if check_rejects_non_root_checkpoint() != 0
     return check_rejects_malformed_manifest() if check_rejects_malformed_manifest() != 0
     return 0

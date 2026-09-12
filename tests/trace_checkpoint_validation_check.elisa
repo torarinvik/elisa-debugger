@@ -14,16 +14,25 @@ const BUILD_RUNTIME: u64 = 2
 const BUILD_SOURCE: u64 = 3
 const BUILD_TARGET: u64 = 4
 const RECORDING_ID: u64 = 5
+const RECORDING_ID_INCREMENT: u64 = 1
+const MIXED_RECORDING_ID: u64 = RECORDING_ID + RECORDING_ID_INCREMENT
 const CHECKPOINT_ID: u64 = 6
 const EVENT_PAYLOAD_HASH: u64 = 7
 const CHUNK_KIND_OFFSET: usize = 6
 const CHECKPOINT_KIND_CODE: u8 = 3
 const FIRST_EVENT: u64 = 0
 const LAST_EVENT: u64 = 0
+const EVENT_ORDINAL_INCREMENT: u64 = 1
+const MIXED_RECORDING_LAST_EVENT: u64 = LAST_EVENT + EVENT_ORDINAL_INCREMENT
 const MANIFEST_SEQUENCE: u64 = 0
 const CHECKPOINT_SEQUENCE: u64 = 1
 const EVENT_SEQUENCE: u64 = 2
 const FOOTER_SEQUENCE: u64 = 3
+const SEQUENCE_INCREMENT: u64 = 1
+const NO_CHECKPOINT_CHUNKS: u64 = 0
+const MIXED_RECORDING_FIRST_SEQUENCE: u64 = MANIFEST_SEQUENCE + SEQUENCE_INCREMENT
+const MIXED_RECORDING_SECOND_SEQUENCE: u64 = MIXED_RECORDING_FIRST_SEQUENCE + SEQUENCE_INCREMENT
+const MIXED_RECORDING_FOOTER_SEQUENCE: u64 = MIXED_RECORDING_SECOND_SEQUENCE + SEQUENCE_INCREMENT
 const OUTSIDE_MANIFEST_EVENT: u64 = 100
 const STORAGE_VARIANT_EMPTY: usize = 0
 const STORAGE_VARIANT_BAD_CODEC: usize = 1
@@ -95,17 +104,19 @@ def checkpoint_as_metadata(payload: DebuggerTraceBinary::ByteWriter, sequence: u
     encoded.bytes[CHUNK_KIND_OFFSET] <- CHECKPOINT_KIND_CODE
     return encoded
 
-def manifest_chunk(checkpoints: u64) -> DebuggerTraceStorage::StoredChunk:
+def manifest_chunk_for_range(checkpoints: u64, first_event: u64, last_event: u64) -> DebuggerTraceStorage::StoredChunk:
     manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build_identity(), DebuggerTraceManifest::ManifestStatus.Exact)
     manifest.checkpoint_count <- checkpoints
+    manifest.first_event <- first_event
+    manifest.last_event <- last_event
     payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
     chunk.header <- DebuggerTrace::ChunkHeader{
         schema: TRACE_SCHEMA,
         kind: DebuggerTrace::ChunkKind.Manifest,
         sequence: MANIFEST_SEQUENCE,
-        first_event: FIRST_EVENT,
-        last_event: LAST_EVENT,
+        first_event: first_event,
+        last_event: last_event,
         payload_length: payload.length.u64(),
         checksum: DebuggerTraceBinary::writer_checksum(payload)
     }
@@ -115,15 +126,23 @@ def manifest_chunk(checkpoints: u64) -> DebuggerTraceStorage::StoredChunk:
         chunk.payload[index] <- payload.bytes[index]
     return chunk
 
-def event_chunk() -> DebuggerTraceStorage::StoredChunk:
-    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(RECORDING_ID))
-    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(RECORDING_ID))
-    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TRACE_SCHEMA, FIRST_EVENT, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, EVENT_PAYLOAD_HASH)
+def manifest_chunk(checkpoints: u64) -> DebuggerTraceStorage::StoredChunk:
+    return manifest_chunk_for_range(checkpoints, FIRST_EVENT, LAST_EVENT)
+
+def event_chunk_for_recording(recording_id: u64, event_ordinal: u64, sequence: u64) -> DebuggerTraceStorage::StoredChunk:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(recording_id))
+    recorder.next_ordinal <- event_ordinal
+    position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(recording_id))
+    position.event <- event_ordinal
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TRACE_SCHEMA, event_ordinal, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, EVENT_PAYLOAD_HASH)
     _ = DebuggerTraceRecorder::recorder_append(recorder, event)
     _ = DebuggerTraceRecorder::recorder_finalize(recorder)
     result: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
-    result.header.sequence <- EVENT_SEQUENCE
+    result.header.sequence <- sequence
     return result
+
+def event_chunk() -> DebuggerTraceStorage::StoredChunk:
+    return event_chunk_for_recording(RECORDING_ID, FIRST_EVENT, EVENT_SEQUENCE)
 
 def append_chunk_bytes(output: mutable DebuggerTraceBinary::ByteWriter&, chunk: DebuggerTraceStorage::StoredChunk) -> void:
     encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
@@ -143,6 +162,15 @@ def trace_bytes_with_raw_checkpoint(raw_checkpoint: DebuggerTraceBinary::ByteWri
     append_writer_bytes(bytes, raw_checkpoint)
     append_chunk_bytes(bytes, event_chunk())
     footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(FOOTER_SEQUENCE, LAST_EVENT)
+    append_writer_bytes(bytes, footer)
+    return bytes
+
+def trace_bytes_with_mixed_recordings() -> DebuggerTraceBinary::ByteWriter:
+    bytes: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_chunk_bytes(bytes, manifest_chunk_for_range(NO_CHECKPOINT_CHUNKS, FIRST_EVENT, MIXED_RECORDING_LAST_EVENT))
+    append_chunk_bytes(bytes, event_chunk_for_recording(RECORDING_ID, FIRST_EVENT, MIXED_RECORDING_FIRST_SEQUENCE))
+    append_chunk_bytes(bytes, event_chunk_for_recording(MIXED_RECORDING_ID, MIXED_RECORDING_LAST_EVENT, MIXED_RECORDING_SECOND_SEQUENCE))
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(MIXED_RECORDING_FOOTER_SEQUENCE, MIXED_RECORDING_LAST_EVENT)
     append_writer_bytes(bytes, footer)
     return bytes
 
@@ -235,8 +263,18 @@ def check_checkpoint_outside_manifest() -> i64:
     return 25 if scan.status != DebuggerTraceStorage::StorageStatus.Invalid
     return 0
 
+def check_mixed_recordings_across_chunks() -> i64:
+    bytes: DebuggerTraceBinary::ByteWriter = trace_bytes_with_mixed_recordings()
+    return 33 if not DebuggerTraceBinary::writer_is_valid(bytes)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(bytes.bytes[0], bytes.length)
+    return 34 if scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(bytes.bytes[0], bytes.length)
+    return 35 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
+    return 0
+
 def main() -> i64:
     return check_full_checkpoint_round_trip() if check_full_checkpoint_round_trip() != 0
     return check_invalid_checkpoint_surfaces() if check_invalid_checkpoint_surfaces() != 0
     return check_checkpoint_outside_manifest() if check_checkpoint_outside_manifest() != 0
+    return check_mixed_recordings_across_chunks() if check_mixed_recordings_across_chunks() != 0
     return 0

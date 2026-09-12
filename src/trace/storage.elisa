@@ -48,6 +48,7 @@ module DebuggerTraceStorage:
         const TRACE_EVENT_QUALITY_MAX: u16 = 4
         const TRACE_EVENT_CORRUPT_QUALITY: u16 = 4
         const TRACE_MAX_EVENT: u64 = 18446744073709551615
+        const TRACE_NO_RECORDING_ID: u64 = 0
 
     public:
         const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
@@ -97,13 +98,13 @@ module DebuggerTraceStorage:
                 offset <- offset + written.usize()
             return StorageStatus.Ready
 
-        def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
+    private:
+        def storage_event_payload_is_valid_with_recording(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64, recording_id: mutable u64&) -> bool:
             return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
             event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
             return false if event_count == 0 or first_event > TRACE_MAX_EVENT - (event_count - 1).u64()
             return false if last_event != first_event + (event_count - 1).u64()
             reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
-            recording: mutable u64 = 0
             for index in 0..<event_count:
                 event_schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
                 ordinal: u64 = DebuggerTraceBinary::reader_take_u64(reader)
@@ -118,10 +119,14 @@ module DebuggerTraceStorage:
                 kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
                 quality: u16 = DebuggerTraceBinary::reader_take_u16(reader)
                 _ = DebuggerTraceBinary::reader_take_u64(reader)
-                recording <- event_recording if recording == 0
-                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == 0 or event_recording != recording or task != position_task or kind > TRACE_EVENT_KIND_MAX or quality > TRACE_EVENT_QUALITY_MAX or quality == TRACE_EVENT_CORRUPT_QUALITY
+                recording_id <- event_recording if recording_id == TRACE_NO_RECORDING_ID
+                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == TRACE_NO_RECORDING_ID or event_recording != recording_id or task != position_task or kind > TRACE_EVENT_KIND_MAX or quality > TRACE_EVENT_QUALITY_MAX or quality == TRACE_EVENT_CORRUPT_QUALITY
             return DebuggerTraceBinary::reader_is_valid(reader) and reader.offset == reader.length
 
+    public:
+        def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
+            recording_id: mutable u64 = TRACE_NO_RECORDING_ID
+            return storage_event_payload_is_valid_with_recording(bytes, payload_offset, payload_length, schema, first_event, last_event, recording_id)
 
         # Decode one complete canonical chunk. The result is invalid unless
         # the caller supplied exactly one header plus its declared payload.
@@ -283,6 +288,7 @@ module DebuggerTraceStorage:
             manifest_first_event: mutable u64 = 0
             manifest_last_event: mutable u64 = 0
             expected_event: mutable u64 = 0
+            recording_id: mutable u64 = TRACE_NO_RECORDING_ID
             event_exhausted: mutable bool = false
             event_seen: mutable bool = false
             checkpoint_chunk_count: mutable u64 = 0
@@ -348,7 +354,7 @@ module DebuggerTraceStorage:
                     scan.manifest_exact <- manifest.status == DebuggerTraceManifest::ManifestStatus.Exact
                     manifest_checkpoint_count <- manifest.checkpoint_count
                 if kind == TRACE_EVENTS_KIND:
-                    if event_exhausted or (scan.manifest_seen and not event_seen and first_event != manifest_first_event) or (event_seen and first_event != expected_event) or not storage_event_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), version.u32(), first_event, last_event):
+                    if event_exhausted or (scan.manifest_seen and not event_seen and first_event != manifest_first_event) or (event_seen and first_event != expected_event) or not storage_event_payload_is_valid_with_recording(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), version.u32(), first_event, last_event, recording_id):
                         scan.status <- StorageStatus.Invalid
                         return scan
                     scan.event_qualities_exact <- false if not storage_event_payload_is_exact(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize())

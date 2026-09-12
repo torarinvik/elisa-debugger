@@ -25,6 +25,9 @@ COMPILER_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_arithmetic_native
 COMPILER_EDIR_INTEGRATION_CHECK := $(BUILD)/elisa-debugger-compiler-edir-integration-check
 COMPILER_EDIR_EXPECTED_EXIT := 42
 COMPILER_EDIR_DAP_LOCAL_REFERENCE := 5
+PROCESS_SPAWN_CHECK_PARENT_MODE := --process-check-parent
+PROCESS_SPAWN_CHECK_RESERVED_FIRST := reserved-first
+PROCESS_SPAWN_CHECK_RESERVED_SECOND := reserved-second
 IDLESS_LAUNCH_PAYLOAD_LENGTH := 19
 DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH := 45
 EDIR_FILE_TOO_LARGE_BYTES := 7962
@@ -105,7 +108,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-capabilities-check"
 	"$(BUILD)/elisa-debugger-dap-payload-check"
 	"$(BUILD)/elisa-debugger-path-policy-check"
-	"$(BUILD)/elisa-debugger-process-spawn-check"
+	"$(BUILD)/elisa-debugger-process-spawn-check" $(PROCESS_SPAWN_CHECK_PARENT_MODE) $(PROCESS_SPAWN_CHECK_RESERVED_FIRST) $(PROCESS_SPAWN_CHECK_RESERVED_SECOND)
 	test "$$(printf 'ELI' | "$(BUILD)/elisa-debugger-ffi-probe")" = 'ELI'
 
 managed-inspection-check: $(BUILD)/elisa-debugger-managed-inspection-check
@@ -233,7 +236,7 @@ $(BUILD)/elisa-debugger-process-spawn-check: tests/process_spawn_check.elisa $(E
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 process-spawn-check: $(BUILD)/elisa-debugger-process-spawn-check
-	"$(BUILD)/elisa-debugger-process-spawn-check" --process-check-parent reserved-first reserved-second
+	"$(BUILD)/elisa-debugger-process-spawn-check" $(PROCESS_SPAWN_CHECK_PARENT_MODE) $(PROCESS_SPAWN_CHECK_RESERVED_FIRST) $(PROCESS_SPAWN_CHECK_RESERVED_SECOND)
 
 $(BUILD)/elisa-debugger: $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

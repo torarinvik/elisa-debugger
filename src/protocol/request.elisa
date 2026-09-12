@@ -338,11 +338,18 @@ module DebuggerProtocolRequest:
                 slash_count <- slash_count + 1
             return slash_count % 2 == 1
 
-        def request_key_kind(hash: u64, length: usize) -> u8:
-            return REQUEST_KEY_METHOD if length == REQUEST_KEY_METHOD_LENGTH and hash == REQUEST_KEY_METHOD_HASH
-            return REQUEST_KEY_ID if length == REQUEST_KEY_ID_LENGTH and hash == REQUEST_KEY_ID_HASH
-            return REQUEST_KEY_EXPECTED if length == REQUEST_KEY_EXPECTED_LENGTH and hash == REQUEST_KEY_EXPECTED_HASH
-            return REQUEST_KEY_TARGET if length == REQUEST_KEY_TARGET_LENGTH and hash == REQUEST_KEY_TARGET_HASH
+        def request_raw_json_key_matches(payload: u8&, start: usize, end: usize, expected: cstr) -> bool:
+            expected_length: usize = request_cstr_length(expected)
+            return false if end - start != expected_length
+            for offset in 0..<expected_length:
+                return false if payload[start + offset] != expected[offset].u8()
+            return true
+
+        def request_key_kind(payload: u8&, start: usize, end: usize, hash: u64, length: usize) -> u8:
+            return REQUEST_KEY_METHOD if length == REQUEST_KEY_METHOD_LENGTH and hash == REQUEST_KEY_METHOD_HASH and request_raw_json_key_matches(payload, start, end, "method")
+            return REQUEST_KEY_ID if length == REQUEST_KEY_ID_LENGTH and hash == REQUEST_KEY_ID_HASH and request_raw_json_key_matches(payload, start, end, "id")
+            return REQUEST_KEY_EXPECTED if length == REQUEST_KEY_EXPECTED_LENGTH and hash == REQUEST_KEY_EXPECTED_HASH and request_raw_json_key_matches(payload, start, end, "expectedStopGeneration")
+            return REQUEST_KEY_TARGET if length == REQUEST_KEY_TARGET_LENGTH and hash == REQUEST_KEY_TARGET_HASH and request_raw_json_key_matches(payload, start, end, "targetEvent")
             return REQUEST_KEY_NONE
 
         def request_top_level_fields_are_valid(payload: u8&, length: usize) -> bool:
@@ -352,6 +359,7 @@ module DebuggerProtocolRequest:
             escaped: mutable bool = false
             string_hash: mutable u64 = 0
             string_length: mutable usize = 0
+            string_start: mutable usize = 0
             top_level_method_seen: mutable bool = false
             index: mutable usize = 0
             while index < length:
@@ -373,7 +381,7 @@ module DebuggerProtocolRequest:
                                 while lookahead < length and is_json_whitespace(payload[lookahead]):
                                     lookahead <- lookahead + 1
                                 if lookahead < length and payload[lookahead] == ASCII_COLON:
-                                    key_kind: u8 = request_key_kind(string_hash, string_length)
+                                    key_kind: u8 = request_key_kind(payload, string_start, index, string_hash, string_length)
                                     if key_kind != REQUEST_KEY_NONE:
                                         return false if object_depth != 1 or array_depth != 0
                                         top_level_method_seen <- true if key_kind == REQUEST_KEY_METHOD
@@ -386,6 +394,7 @@ module DebuggerProtocolRequest:
                         escaped <- false
                         string_hash <- 0
                         string_length <- 0
+                        string_start <- index + 1
                     else:
                         if byte == ASCII_BRACE_OPEN:
                             object_depth <- object_depth + 1

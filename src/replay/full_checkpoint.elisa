@@ -17,6 +17,16 @@ module DebuggerFullCheckpoint:
         const FULL_CHECKPOINT_MAX_EVENT: u64 = 18446744073709551615
         const FULL_CHECKPOINT_MAX_BRANCH: u64 = 18446744073709551615
         const FULL_CHECKPOINT_ID_OFFSET: u64 = 1
+        const FULL_CHECKPOINT_HASH_OFFSET_BASIS: u64 = 14695981039346656037
+        const FULL_CHECKPOINT_HASH_PRIME: u64 = 1099511628211
+        const FULL_CHECKPOINT_HASH_BYTE_BITS: u64 = 8
+        const FULL_CHECKPOINT_HASH_BYTE_MASK: u64 = 255
+        const FULL_CHECKPOINT_HASH_U16_BYTES: usize = 2
+        const FULL_CHECKPOINT_HASH_U32_BYTES: usize = 4
+        const FULL_CHECKPOINT_HASH_U64_BYTES: usize = 8
+        const FULL_CHECKPOINT_HASH_FALSE: u8 = 0
+        const FULL_CHECKPOINT_HASH_TRUE: u8 = 1
+        const FULL_CHECKPOINT_INVALID_HASH: u64 = 0
         const DETAIL_SCHEMA: u32 = 1
         const DETAIL_RECORDING: u32 = 2
         const DETAIL_BRANCH: u32 = 3
@@ -24,6 +34,107 @@ module DebuggerFullCheckpoint:
         const DETAIL_TASKS: u32 = 5
         const DETAIL_EFFECTS: u32 = 6
         const DETAIL_RESOURCES: u32 = 7
+        const DETAIL_INTEGRITY: u32 = 8
+
+        def checkpoint_hash_byte(hash: u64, byte: u8) -> u64:
+            return (hash ^ byte.u64()) * FULL_CHECKPOINT_HASH_PRIME
+
+        def checkpoint_hash_u16(hash: u64, value: u16) -> u64:
+            updated: mutable u64 = hash
+            for index in 0..<FULL_CHECKPOINT_HASH_U16_BYTES:
+                updated <- checkpoint_hash_byte(updated, ((value.u64() >> (FULL_CHECKPOINT_HASH_BYTE_BITS * index.u64())) & FULL_CHECKPOINT_HASH_BYTE_MASK).u8())
+            return updated
+
+        def checkpoint_hash_u32(hash: u64, value: u32) -> u64:
+            updated: mutable u64 = hash
+            for index in 0..<FULL_CHECKPOINT_HASH_U32_BYTES:
+                updated <- checkpoint_hash_byte(updated, ((value.u64() >> (FULL_CHECKPOINT_HASH_BYTE_BITS * index.u64())) & FULL_CHECKPOINT_HASH_BYTE_MASK).u8())
+            return updated
+
+        def checkpoint_hash_u64(hash: u64, value: u64) -> u64:
+            updated: mutable u64 = hash
+            for index in 0..<FULL_CHECKPOINT_HASH_U64_BYTES:
+                updated <- checkpoint_hash_byte(updated, ((value >> (FULL_CHECKPOINT_HASH_BYTE_BITS * index.u64())) & FULL_CHECKPOINT_HASH_BYTE_MASK).u8())
+            return updated
+
+        def checkpoint_hash_bool(hash: u64, value: bool) -> u64:
+            return checkpoint_hash_byte(hash, FULL_CHECKPOINT_HASH_TRUE if value else FULL_CHECKPOINT_HASH_FALSE)
+
+        def checkpoint_hash_task(hash: u64, task: DebuggerConcurrency::TaskInfo) -> u64:
+            updated: mutable u64 = checkpoint_hash_u64(hash, task.id.value)
+            updated <- checkpoint_hash_u64(updated, task.parent.value)
+            updated <- checkpoint_hash_u16(updated, task.state.u16())
+            updated <- checkpoint_hash_u64(updated, task.logical_time)
+            return checkpoint_hash_u64(updated, task.os_thread)
+
+        def checkpoint_hash_side_state(checkpoint: ManagedCheckpoint) -> u64:
+            return FULL_CHECKPOINT_INVALID_HASH if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks) or not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+            hash: mutable u64 = FULL_CHECKPOINT_HASH_OFFSET_BASIS
+            hash <- checkpoint_hash_u32(hash, checkpoint.schema)
+            hash <- checkpoint_hash_u64(hash, checkpoint.recording.value)
+            hash <- checkpoint_hash_u64(hash, checkpoint.branch.value)
+            hash <- checkpoint_hash_u64(hash, checkpoint.event)
+
+            tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = checkpoint.tasks
+            hash <- checkpoint_hash_u64(hash, tasks.task_count.u64())
+            hash <- checkpoint_hash_u64(hash, tasks.next_id)
+            hash <- checkpoint_hash_u16(hash, tasks.status.u16())
+            hash <- checkpoint_hash_u64(hash, tasks.current.value)
+            hash <- checkpoint_hash_u64(hash, tasks.wait_count.u64())
+            hash <- checkpoint_hash_u64(hash, tasks.scheduler_cursor.u64())
+            hash <- checkpoint_hash_u64(hash, tasks.scheduler_count.u64())
+            hash <- checkpoint_hash_bool(hash, tasks.scheduler_replaying)
+            hash <- checkpoint_hash_bool(hash, tasks.scheduler_diverged)
+            hash <- checkpoint_hash_bool(hash, tasks.scheduler_overflowed)
+            for index in 0..<tasks.task_count:
+                hash <- checkpoint_hash_task(hash, tasks.tasks[index])
+            for index in 0..<tasks.wait_count:
+                edge: DebuggerConcurrency::WaitEdge = tasks.waits[index]
+                hash <- checkpoint_hash_u64(hash, edge.waiter.value)
+                hash <- checkpoint_hash_u64(hash, edge.owner.value)
+                hash <- checkpoint_hash_u64(hash, edge.resource.value)
+                hash <- checkpoint_hash_u16(hash, edge.kind.u16())
+            for index in 0..<tasks.scheduler_count:
+                decision: DebuggerScheduler::ScheduleDecision = tasks.scheduler_decisions[index]
+                hash <- checkpoint_hash_u64(hash, decision.ordinal)
+                hash <- checkpoint_hash_task(hash, decision.task)
+                hash <- checkpoint_hash_u16(hash, decision.kind.u16())
+                hash <- checkpoint_hash_u64(hash, decision.synchronization)
+
+            effects: DebuggerEffects::EffectOracle = checkpoint.effects
+            hash <- checkpoint_hash_u64(hash, effects.count.u64())
+            hash <- checkpoint_hash_u64(hash, effects.cursor.u64())
+            hash <- checkpoint_hash_u16(hash, effects.mode.u16())
+            hash <- checkpoint_hash_u16(hash, effects.exactness.u16())
+            hash <- checkpoint_hash_bool(hash, effects.overflowed)
+            hash <- checkpoint_hash_u16(hash, effects.last_error.code.u16())
+            hash <- checkpoint_hash_u16(hash, effects.last_error.severity.u16())
+            hash <- checkpoint_hash_bool(hash, effects.last_error.retryable)
+            hash <- checkpoint_hash_u32(hash, effects.last_error.detail)
+            for index in 0..<effects.count:
+                record: DebuggerEffects::EffectRecord = effects.records[index]
+                hash <- checkpoint_hash_u64(hash, record.sequence)
+                hash <- checkpoint_hash_u16(hash, record.kind.u16())
+                hash <- checkpoint_hash_u64(hash, record.request_hash)
+                hash <- checkpoint_hash_u64(hash, record.result_hash)
+                hash <- checkpoint_hash_u64(hash, record.result_value.u64())
+                hash <- checkpoint_hash_bool(hash, record.suppress_external_write)
+
+            resources: DebuggerVirtualResources::ResourceStore = checkpoint.resources
+            hash <- checkpoint_hash_u64(hash, resources.count.u64())
+            hash <- checkpoint_hash_u64(hash, resources.next_handle)
+            hash <- checkpoint_hash_u16(hash, resources.mode.u16())
+            for index in 0..<resources.count:
+                file: DebuggerVirtualResources::VirtualFile = resources.files[index]
+                hash <- checkpoint_hash_u64(hash, file.handle.value)
+                hash <- checkpoint_hash_u64(hash, file.path.value)
+                hash <- checkpoint_hash_u64(hash, file.length.u64())
+                hash <- checkpoint_hash_u64(hash, file.cursor.u64())
+                hash <- checkpoint_hash_bool(hash, file.writable)
+                hash <- checkpoint_hash_u64(hash, file.generation)
+                for byte_index in 0..<file.length:
+                    hash <- checkpoint_hash_byte(hash, file.bytes[byte_index])
+            return hash
 
     public:
         struct ManagedCheckpoint:
@@ -32,6 +143,8 @@ module DebuggerFullCheckpoint:
             branch: mutable DebuggerIdentity::DebugId
             event: mutable u64
             state_hash: mutable u64
+            # Derived fingerprint catches edits to mutable side state after capture.
+            side_state_hash: mutable u64
             machine: mutable DebuggerCheckpoint::MachineSnapshot
             tasks: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot
             effects: mutable DebuggerEffects::EffectOracle
@@ -49,20 +162,28 @@ module DebuggerFullCheckpoint:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_EFFECTS) if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RESOURCES) if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_INTEGRITY) if checkpoint.side_state_hash != checkpoint_hash_side_state(checkpoint)
             return DebuggerErrors::no_error()
 
         def full_checkpoint_capture(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> ManagedCheckpoint:
-            return ManagedCheckpoint{
+            checkpoint: mutable ManagedCheckpoint = ManagedCheckpoint{
                 schema: FULL_CHECKPOINT_SCHEMA,
                 recording: recording,
                 branch: branch,
                 event: event,
                 state_hash: state_hash,
+                side_state_hash: FULL_CHECKPOINT_INVALID_HASH,
                 machine: DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(FULL_CHECKPOINT_MAX_EVENT if event == FULL_CHECKPOINT_MAX_EVENT else event + FULL_CHECKPOINT_ID_OFFSET), event, state_hash),
                 tasks: tasks,
                 effects: effects,
                 resources: resources
             }
+            checkpoint.side_state_hash <- checkpoint_hash_side_state(checkpoint)
+            return checkpoint
+
+        def full_checkpoint_seal_side_state(checkpoint: mutable ManagedCheckpoint&) -> void:
+            snapshot: DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+            checkpoint.side_state_hash <- checkpoint_hash_side_state(snapshot)
 
         def full_checkpoint_is_valid(checkpoint: ManagedCheckpoint) -> bool:
             return DebuggerErrors::error_is_ok(full_checkpoint_validate(checkpoint))

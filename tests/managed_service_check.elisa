@@ -54,6 +54,12 @@ const MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS: u64 = 8
 const MANAGED_SOURCE_STEP_CHECK_RESULT: i64 = 50
 const MANAGED_COMPOUND_BREAKPOINT_CHECK_RESULT: i64 = 51
 const MANAGED_PARENT_BREAKPOINT_CHECK_RESULT: i64 = 52
+const MANAGED_CHECKPOINT_SIDE_STATE_CHECK_RESULT: i64 = 53
+const MANAGED_CHECKPOINT_RESOURCE_PATH_ID: u64 = 808
+const MANAGED_CHECKPOINT_RESOURCE_GENERATION: u64 = 1
+const MANAGED_CHECKPOINT_RESOURCE_LENGTH: usize = 1
+const MANAGED_CHECKPOINT_RESOURCE_BYTE: u8 = 41
+const MANAGED_CHECKPOINT_MUTATED_RESOURCE_BYTE: u8 = 42
 const TRACE_LIFECYCLE_UNSUPPORTED_RESULT: i64 = 38
 
 def managed_regression_source_span(line: u32, start_byte: u64) -> DebuggerIdentity::SourceSpan:
@@ -135,6 +141,25 @@ def check_managed_parent_breakpoint_after_rewind() -> i64:
     return 6 if not DebuggerErrors::error_is_ok(continue_failure) or controller.engine.event_count != 0 or controller.state.breakpoints.points[0].hit_count != 1
     return 0
 
+def check_full_checkpoint_side_state_integrity() -> i64:
+    controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(managed_source_step_image())
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    return 2 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller)) or controller.engine.event_count != TARGET_EVENT.usize()
+    resource: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(controller.state.resources, DebuggerIdentity::debug_id(MANAGED_CHECKPOINT_RESOURCE_PATH_ID), true, MANAGED_CHECKPOINT_RESOURCE_GENERATION)
+    return 3 if resource.value == 0
+    resource_byte: mutable u8[MANAGED_CHECKPOINT_RESOURCE_LENGTH] = zeroed
+    resource_byte[0] <- MANAGED_CHECKPOINT_RESOURCE_BYTE
+    seeded: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(controller.state.resources, resource, resource_byte[0], MANAGED_CHECKPOINT_RESOURCE_LENGTH)
+    return 4 if not DebuggerErrors::error_is_ok(seeded)
+    checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(controller)
+    return 5 if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+    checkpoint.resources.files[0].bytes[0] <- MANAGED_CHECKPOINT_MUTATED_RESOURCE_BYTE
+    failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_restore_full_checkpoint(controller, checkpoint)
+    return 6 if DebuggerErrors::error_is_ok(failure) or failure.code != DebuggerErrors::ErrorCode.Corrupt
+    return 7 if controller.engine.event_count != TARGET_EVENT.usize() or controller.engine.machine.accumulator != EXPECTED_RESULT
+    return 8 if controller.state.resources.count != 1 or controller.state.resources.files[0].bytes[0] != MANAGED_CHECKPOINT_RESOURCE_BYTE
+    return 0
+
 def main() -> i64:
     source_step_over_status: i64 = check_managed_source_step_over()
     return MANAGED_SOURCE_STEP_CHECK_RESULT if source_step_over_status != 0
@@ -142,6 +167,8 @@ def main() -> i64:
     return MANAGED_COMPOUND_BREAKPOINT_CHECK_RESULT if compound_step_breakpoint_status != 0
     parent_breakpoint_status: i64 = check_managed_parent_breakpoint_after_rewind()
     return MANAGED_PARENT_BREAKPOINT_CHECK_RESULT if parent_breakpoint_status != 0
+    checkpoint_side_state_status: i64 = check_full_checkpoint_side_state_integrity()
+    return MANAGED_CHECKPOINT_SIDE_STATE_CHECK_RESULT if checkpoint_side_state_status != 0
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
     session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
     image: mutable DebuggerEDIR::ProgramImage = zeroed

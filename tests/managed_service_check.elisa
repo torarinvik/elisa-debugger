@@ -16,6 +16,8 @@ const FULL_CHECKPOINT_ROLLBACK_RESULT: i64 = 25
 const BRANCH_RESULT_FAILURE: i64 = 20
 const NON_INSPECT_TRACE_RESULT: i64 = 23
 const INSPECTION_CAPABILITY_RESULT: i64 = 24
+const FORGED_CHECKPOINT_RESULT: i64 = 37
+const FORGED_CHECKPOINT_DELTA: i64 = 10
 const BREAKPOINT_FILE_ID: u64 = 44
 const BREAKPOINT_LINE: u32 = 2
 const BOOKMARK_LABEL_ID: u64 = 700
@@ -106,9 +108,16 @@ def main() -> i64:
     return FULL_CHECKPOINT_RESULT_FAILURE if not full_checkpoint_result.accepted or not DebuggerFullCheckpoint::full_checkpoint_is_valid(full_checkpoint_result.checkpoint)
     advanced_after_checkpoint: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return FULL_CHECKPOINT_ROLLBACK_RESULT if not advanced_after_checkpoint.accepted or service.controller.engine.event_count != INSTRUCTION_COUNT.usize()
+    forged_checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = full_checkpoint_result.checkpoint
+    forged_checkpoint.machine.accumulator <- EXPECTED_RESULT + FORGED_CHECKPOINT_DELTA
+    forged_checkpoint.state_hash <- DebuggerCheckpoint::snapshot_state_hash(forged_checkpoint.machine)
+    forged_checkpoint.machine.state_hash <- forged_checkpoint.state_hash
+    forged_restore: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(service, forged_checkpoint)
+    return FORGED_CHECKPOINT_RESULT if forged_restore.accepted or forged_restore.failure.code != DebuggerErrors::ErrorCode.Diverged or service.controller.engine.event_count != INSTRUCTION_COUNT.usize() or not service.controller.engine.machine.halted or service.controller.engine.machine.result != EXPECTED_RESULT
     restored_earlier: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(service, full_checkpoint_result.checkpoint)
     return FULL_CHECKPOINT_ROLLBACK_RESULT if not restored_earlier.accepted or service.controller.engine.event_count != TARGET_EVENT.usize() or DebuggerManagedService::service_frame(service).accumulator != EXPECTED_RESULT or DebuggerManagedService::service_timeline(service).bounds.current != TARGET_EVENT
-    service.controller.engine.machine.accumulator <- EXPECTED_RESULT + 10
+    forged_current_restore: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(service, forged_checkpoint)
+    return FORGED_CHECKPOINT_RESULT if forged_current_restore.accepted or forged_current_restore.failure.code != DebuggerErrors::ErrorCode.Diverged or service.controller.engine.event_count != TARGET_EVENT.usize() or service.controller.engine.machine.accumulator != EXPECTED_RESULT
     restored_full: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(service, full_checkpoint_result.checkpoint)
     return FULL_CHECKPOINT_RESULT_FAILURE if not restored_full.accepted or service.controller.engine.machine.accumulator != EXPECTED_RESULT
     tampered_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = full_checkpoint_result.checkpoint

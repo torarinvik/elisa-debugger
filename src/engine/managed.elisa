@@ -17,6 +17,8 @@ module DebuggerManagedEngine:
         const DETAIL_ENGINE_FAULT: u32 = 1
         const DETAIL_HISTORY: u32 = 2
         const DETAIL_UNSUPPORTED: u32 = 3
+        const INITIAL_EVENT_INDEX: usize = 0
+        const PREVIOUS_EVENT_OFFSET: usize = 1
         const CHECKPOINT_ID_OFFSET: u64 = 1
         const MAX_CHECKPOINT_ID: u64 = 18446744073709551615
         const VALUE_NAME_OFFSET: u64 = 1
@@ -254,6 +256,32 @@ module DebuggerManagedEngine:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ENGINE_FAULT) if checkpoint.machine.program_counter == controller.engine.image.program.instruction_count and not checkpoint.machine.halted
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if checkpoint.event > controller.engine.event_count.u64()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if checkpoint.event != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
+            expected_machine: mutable DebuggerEDIR::Machine = zeroed
+            if checkpoint.event < controller.engine.event_count.u64():
+                historical_index: usize = checkpoint.event.usize()
+                historical_snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[historical_index]
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_HISTORY) if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(controller.engine, historical_index, historical_snapshot)
+                expected_machine <- DebuggerCheckpoint::snapshot_restore(historical_snapshot)
+            else:
+                if controller.engine.event_count == INITIAL_EVENT_INDEX:
+                    expected_machine <- DebuggerEDIR::machine_new()
+                    if not DebuggerEDIR::verify_image(controller.engine.image).valid:
+                        expected_machine.faulted <- true
+                        expected_machine.halted <- true
+                else:
+                    previous_index: usize = controller.engine.event_count - PREVIOUS_EVENT_OFFSET
+                    previous_snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[previous_index]
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_HISTORY) if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(controller.engine, previous_index, previous_snapshot)
+                    expected_machine <- DebuggerCheckpoint::snapshot_restore(previous_snapshot)
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_HISTORY) if expected_machine.program_counter >= controller.engine.image.program.instruction_count
+                    DebuggerEDIR::machine_step_in_place(expected_machine, controller.engine.image.instructions[expected_machine.program_counter.usize()])
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_HISTORY) if not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, expected_machine)
+            restored_session: DebuggerSession::Session = DebuggerSession::session_seek(controller.session, checkpoint.event)
+            if restored_session.last_error == DebuggerSession::SessionError.HistoryUnavailable:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY)
+            if restored_session.last_error == DebuggerSession::SessionError.Unsupported:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_HISTORY) if restored_session.last_error != DebuggerSession::SessionError.None
             failure <- DebuggerManagedState::state_restore(controller.state, checkpoint)
             return failure if not DebuggerErrors::error_is_ok(failure)
             restored: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(checkpoint)
@@ -261,10 +289,7 @@ module DebuggerManagedEngine:
             controller.engine.event_count <- checkpoint.event.usize()
             controller.engine.branch <- checkpoint.branch
             controller.engine.engine_error <- DebuggerReplayEngine::EngineError.None
-            managed_sync_position(controller)
-            controller.session <- DebuggerSession::session_seek(controller.session, checkpoint.event)
-            if controller.session.last_error != DebuggerSession::SessionError.None:
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_HISTORY)
+            controller.session <- restored_session
             managed_sync_position(controller)
             managed_refresh_values(controller)
             return DebuggerErrors::no_error()

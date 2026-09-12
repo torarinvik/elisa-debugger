@@ -1,8 +1,12 @@
-# Elisa debugger session protocol v1
+# Elisa debugger session protocol v1 (target contract)
 
-This is the editor-neutral integration boundary for the debugger. The server is
-implemented in Elisa and is usable by VS Code, JetBrains integrations, test
-runners, CI systems, and custom clients without importing debugger internals.
+This document describes the editor-neutral target contract for the debugger.
+The Elisa source includes typed protocol models and encoders, while the
+standalone process currently implements only the compact wire subset described
+in “Current headless process surface.” The other sections specify the intended
+v1 contract; they are not a claim that every method, event, or transport is
+already available end to end. Clients must use `discover` and the current
+support documentation to determine what the running endpoint can do.
 
 ## Transport
 
@@ -12,10 +16,13 @@ single space, and exactly that many UTF-8 bytes followed by `\n`. Standard
 output contains protocol frames only. Diagnostics and target output use
 standard error or explicit protocol events.
 
-The same messages may be carried over a local socket or an authenticated remote
-transport. The transport does not change message semantics.
+The framing is designed to be transport-independent. Local-socket and
+authenticated remote adapters are not currently shipped.
 
-## Envelope
+## Target v1 envelope
+
+This envelope is the target typed-service schema. The standalone process uses
+the compact root-object schema documented below instead.
 
 Requests have `{ "kind": "request", "id": "...", "method": "...", "params": {} }`.
 Responses have `{ "kind": "response", "id": "...", "ok": true, "result": {} }` or
@@ -64,18 +71,18 @@ unsupported or unavailable result. The typed in-process service exposes a
 broader surface than this process endpoint; clients should not infer wire
 support from an in-process module or from the method vocabulary alone.
 
-## Lifecycle
+## Target lifecycle
 
 The client sends `initialize` with `protocolMajor`, `protocolMinor`, `client`,
 and requested extensions. The server returns its versions, `server`, supported
 engines, target/platform support, and feature capabilities. An incompatible
 major version is an explicit error. Minor versions are additive only.
 
-The Elisa implementation also exposes a typed discovery document containing
-product version, trace schema, installation health, resource limits, and the
-complete capability set. Mutating clients retain the ownership token returned
-by session creation; requests without that token are rejected before target
-state is touched.
+The Elisa source defines a typed discovery document containing product
+version, trace schema, installation health, resource limits, and capabilities.
+It also defines ownership-token validation for typed session requests. The
+standalone process does not currently implement the `createSession` token
+exchange or enforce that token on its compact requests.
 
 The client then sends `createSession` or `openTrace`, followed by `launch`,
 `attach`, or `replay`. State-changing requests carry `session`, `requestId`,
@@ -87,7 +94,7 @@ Every stop event includes `stopGeneration`, `position`, `reason`, `engine`,
 `history`, and the complete current capability set. A seek/restore event is
 not observable as a ready stop until state validation succeeds.
 
-## Initial method families
+## Target method families
 
 `discover`, `createSession`, `launch`, `attach`, `openTrace`, `pause`,
 `continue`, `step`, `reverseStep`, `seek`, `threads`, `stack`, `scopes`,
@@ -101,17 +108,20 @@ return `UNSUPPORTED` with a capability explanation.
 selected position; a successful seek returns a new stop generation. The
 request is safe to retry only with the same request ID and target ordinal.
 
-The typed service paginates large results with opaque `next` tokens. The
-current compact headless local-inspection response instead uses the decimal
-offset described above. Typed operations that may run longer than a client
-timeout emit `progress` events and honor `cancel` by request ID. Mutation
-requests declare whether retrying the same ID is safe.
+The target typed service contract paginates large results with opaque `next`
+tokens. The current compact headless local-inspection response instead uses the
+decimal offset described above. The Elisa source defines progress and
+cancellation models, but the standalone endpoint does not currently emit
+progress events or route cancellation by request ID. Mutation retry rules in
+this contract are not yet enforced by the compact endpoint.
 
-## Timeline, history, and branch extensions
+## Target timeline, history, and branch extensions
 
-The managed session service uses the reserved `checkpoint`, `branch`,
-`compare`, `trace.verify`, and `trace.export` methods for advanced clients.
-Requests carry structured fields only:
+These method shapes describe the intended advanced client contract. The
+standalone process does not currently serialize their result payloads or expose
+them as supported wire methods. Where in-process Elisa modules implement these
+operations, they remain subject to the capability set reported by the active
+provider. Requests carry structured fields only:
 
 - `seek` uses `targetEvent` and `expectedStopGeneration`.
 - `checkpoint` returns a checkpoint identity and its state digest.
@@ -141,6 +151,7 @@ start-inclusive/end-exclusive. Source and build artifacts are identified by
 content IDs, not local paths. Paths are metadata used only after explicit
 mapping.
 
-The DAP adapter maps this contract to ordinary editor debugging. Timeline,
-history, provenance, and branch features use namespaced extensions while
-retaining the same session IDs, stop generations, values, and errors.
+The DAP adapter maps supported operations to ordinary editor debugging.
+Timeline, history, provenance, and branch features are intended to use
+namespaced extensions while retaining the same session IDs, stop generations,
+values, and errors once their wire support is implemented.

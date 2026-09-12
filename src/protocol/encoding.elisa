@@ -5,6 +5,7 @@
 include "./messages.elisa"
 include "./vocabulary.elisa"
 include "./integration.elisa"
+include "../core/capabilities.elisa"
 include "../core/errors.elisa"
 
 module DebuggerProtocolEncoding:
@@ -20,6 +21,8 @@ module DebuggerProtocolEncoding:
         const ASCII_TAB: u8 = 9
         const ASCII_ZERO: u8 = 48
         const ASCII_SPACE: u8 = 32
+        const JSON_TRUE: cstr = "true"
+        const JSON_FALSE: cstr = "false"
         const PROTOCOL_MAJOR: u64 = 1
         const PROTOCOL_MINOR: u64 = 0
         const MAX_PAGE_SIZE: u64 = 256
@@ -72,6 +75,9 @@ module DebuggerProtocolEncoding:
                 remaining <- remaining / DECIMAL_BASE
             for index in 0..<count:
                 buffer_put_byte(buffer, digits[count - index - 1])
+
+        def buffer_put_bool(buffer: mutable JsonBuffer&, value: bool) -> void:
+            buffer_put_cstr(buffer, JSON_TRUE if value else JSON_FALSE)
 
         def buffer_put_json_string(buffer: mutable JsonBuffer&, text: cstr) -> void:
             buffer_put_byte(buffer, ASCII_QUOTE)
@@ -160,7 +166,7 @@ module DebuggerProtocolEncoding:
             buffer_put_cstr(buffer, ",\"next\":")
             buffer_put_id_string(buffer, next_page)
 
-        def buffer_put_discovery_result(buffer: mutable JsonBuffer&) -> void:
+        def buffer_put_discovery_result(buffer: mutable JsonBuffer&, capabilities: DebuggerCapabilities::CapabilitySet) -> void:
             buffer_put_cstr(buffer, ",\"ok\":true,\"result\":{\"protocolMajor\":")
             buffer_put_u64(buffer, PROTOCOL_MAJOR)
             buffer_put_cstr(buffer, ",\"protocolMinor\":")
@@ -173,7 +179,17 @@ module DebuggerProtocolEncoding:
             buffer_put_json_string(buffer, MANAGED_ENGINE_NAME)
             buffer_put_cstr(buffer, "],\"traceSchema\":")
             buffer_put_u64(buffer, TRACE_SCHEMA)
-            buffer_put_cstr(buffer, ",\"features\":{\"sourceBreakpoints\":true,\"reverseExecution\":true,\"typedValues\":true,\"historicalQueries\":true,\"traceExport\":true},\"installationHealthy\":true}")
+            buffer_put_cstr(buffer, ",\"features\":{\"sourceBreakpoints\":")
+            buffer_put_bool(buffer, capabilities.source_breakpoints)
+            buffer_put_cstr(buffer, ",\"reverseExecution\":")
+            buffer_put_bool(buffer, capabilities.reverse_execution)
+            buffer_put_cstr(buffer, ",\"typedValues\":")
+            buffer_put_bool(buffer, capabilities.typed_values)
+            buffer_put_cstr(buffer, ",\"historicalQueries\":")
+            buffer_put_bool(buffer, capabilities.historical_queries)
+            buffer_put_cstr(buffer, ",\"traceExport\":")
+            buffer_put_bool(buffer, capabilities.trace_export)
+            buffer_put_cstr(buffer, "},\"installationHealthy\":true}")
 
         def response_is_encodable(response: DebuggerProtocol::ResponseEnvelope) -> bool:
             return false if response.request_id == NO_REQUEST_ID or not DebuggerErrors::error_is_well_formed(response.failure)
@@ -257,10 +273,10 @@ module DebuggerProtocolEncoding:
             buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
             return buffer
 
-        def discovery_response_encode(request_id: u64) -> JsonBuffer:
+        def discovery_response_encode(request_id: u64, capabilities: DebuggerCapabilities::CapabilitySet) -> JsonBuffer:
             buffer: mutable JsonBuffer = json_buffer_new()
             buffer_put_cstr(buffer, "{\"kind\":\"response\",\"id\":")
             buffer_put_id_string(buffer, request_id)
-            buffer_put_discovery_result(buffer)
+            buffer_put_discovery_result(buffer, capabilities)
             buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
             return buffer

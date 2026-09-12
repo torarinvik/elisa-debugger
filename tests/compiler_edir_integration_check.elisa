@@ -1,0 +1,28 @@
+include "../src/vm/edir_file.elisa"
+
+const ARTIFACT_PATH_LENGTH: usize = 35
+const ARTIFACT_PATH: u8[ARTIFACT_PATH_LENGTH] = [98, 117, 105, 108, 100, 47, 99, 111, 109, 112, 105, 108, 101, 114, 95, 101, 100, 105, 114, 95, 97, 114, 105, 116, 104, 109, 101, 116, 105, 99, 46, 101, 100, 105, 114]
+const EXPECTED_RESULT: i64 = 42
+const EXPECTED_SOURCE_FILE_ID: u64 = 1
+const EXPECTED_SOURCE_LINE: u32 = 2
+const EXPECTED_LEFT_OPERAND: i64 = 40
+const EXPECTED_RIGHT_OPERAND: i64 = 2
+const EXPECTED_INSTRUCTION_COUNT: u64 = 3
+const RUN_STEP_BUDGET: u64 = EXPECTED_INSTRUCTION_COUNT
+
+const RESULT_ARTIFACT_LOAD: i64 = 1
+const RESULT_IMAGE_VERIFICATION: i64 = 2
+const RESULT_INSTRUCTION_SHAPE: i64 = 3
+const RESULT_SOURCE_SPAN: i64 = 4
+const RESULT_EXECUTION: i64 = 5
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(ARTIFACT_PATH[0], ARTIFACT_PATH_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return RESULT_ARTIFACT_LOAD if not loaded.valid or loaded.status != DebuggerEDIRFile::LoadStatus.Ready
+    return RESULT_IMAGE_VERIFICATION if not DebuggerEDIR::verify_image(loaded.image).valid
+    return RESULT_INSTRUCTION_SHAPE if loaded.image.program.instruction_count != EXPECTED_INSTRUCTION_COUNT or loaded.image.program.local_count != 0 or not loaded.image.program.has_return or loaded.image.instructions[0].opcode != DebuggerEDIR::Opcode.Constant or loaded.image.instructions[0].a != EXPECTED_LEFT_OPERAND or loaded.image.instructions[1].opcode != DebuggerEDIR::Opcode.Add or loaded.image.instructions[1].a != EXPECTED_RIGHT_OPERAND or loaded.image.instructions[2].opcode != DebuggerEDIR::Opcode.Return
+    source: DebuggerIdentity::SourceSpan = loaded.image.instructions[0].source
+    return RESULT_SOURCE_SPAN if source.file.value != EXPECTED_SOURCE_FILE_ID or source.start_line != EXPECTED_SOURCE_LINE or source.start_byte >= source.end_byte or source.start_column == 0
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(loaded.image, DebuggerEDIR::machine_new(), RUN_STEP_BUDGET)
+    return RESULT_EXECUTION if machine.faulted or not machine.halted or machine.result != EXPECTED_RESULT
+    return 0

@@ -17,6 +17,13 @@ endif
 # pre-wrapper product binaries. Supplying both makes this Makefile independent of that rollout.
 ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_LINK="$(ELISA_LINK_FLAGS)"
 BUILD ?= build
+ELISA_EDIR_COMPILER ?= ../Elisa-compiler/scripts/elisac_stage1.sh
+ELISA_EDIR_ALLOW_STALE_STAGE1 ?= 0
+COMPILER_EDIR_FIXTURE := tests/compiler_edir_arithmetic_fixture.elisa
+COMPILER_EDIR_ARTIFACT := $(BUILD)/compiler_edir_arithmetic.edir
+COMPILER_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_arithmetic_native
+COMPILER_EDIR_INTEGRATION_CHECK := $(BUILD)/elisa-debugger-compiler-edir-integration-check
+COMPILER_EDIR_EXPECTED_EXIT := 42
 IDLESS_LAUNCH_PAYLOAD_LENGTH := 19
 DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH := 45
 EDIR_FILE_TOO_LARGE_BYTES := 7962
@@ -35,7 +42,7 @@ ELISA_ALLOW_STALE_STAGE1 ?= 1
 # include cannot leave a silently stale executable behind.
 ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check trace-checkpoint-validation-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check edir-file-loader-check breakpoint-resolver-check timeline-capability-check path-policy-check process-spawn-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check trace-checkpoint-validation-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check edir-file-loader-check compiler-edir-check breakpoint-resolver-check timeline-capability-check path-policy-check process-spawn-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -192,6 +199,22 @@ edir-file-loader-check: $(BUILD)/elisa-debugger-edir-fixture-writer $(BUILD)/eli
 	dd if=/dev/zero of="$(BUILD)/edir-corrupt.edir" bs=$(EDIR_FILE_CORRUPT_PREFIX_BYTES) count=$(EDIR_FILE_CORRUPT_PREFIX_BYTES) conv=notrunc 2>/dev/null
 	dd if=/dev/zero of="$(BUILD)/edir-oversized.edir" bs=$(EDIR_FILE_TOO_LARGE_BYTES) count=1 2>/dev/null
 	"$(BUILD)/elisa-debugger-edir-file-loader-check"
+
+$(COMPILER_EDIR_INTEGRATION_CHECK): tests/compiler_edir_integration_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+# Run this separately from `smoke`: it requires an Elisa compiler checkout that
+# implements `-emit edir`. Set ELISA_EDIR_COMPILER to that isolated checkout's
+# stage1 wrapper; stale compiler products are rejected unless explicitly
+# allowed with ELISA_EDIR_ALLOW_STALE_STAGE1=1. No non-Elisa fixture compiler
+# or test runner is involved.
+compiler-edir-check: $(COMPILER_EDIR_INTEGRATION_CHECK)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
+	"$(COMPILER_EDIR_INTEGRATION_CHECK)"
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
+	native_status=0; "$(COMPILER_NATIVE_ARTIFACT)" || native_status=$$?; test "$$native_status" -eq "$(COMPILER_EDIR_EXPECTED_EXIT)"
 
 $(BUILD)/elisa-debugger-timeline-capability-check: tests/timeline_capability_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

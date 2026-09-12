@@ -62,25 +62,40 @@ module DebuggerManagedService:
             service.trace_partial <- true
             service.trace_failure <- failure
 
+        def service_recorded_event_matches(left: DebuggerEvents::EventEnvelope, right: DebuggerEvents::EventEnvelope) -> bool:
+            return false if left.schema != right.schema or left.ordinal != right.ordinal or left.task.value != right.task.value or left.kind != right.kind or left.quality != right.quality or left.payload_hash != right.payload_hash
+            return false if left.position.recording.value != right.position.recording.value or left.position.branch.value != right.position.branch.value or left.position.event != right.position.event
+            return false if left.position.task.value != right.position.task.value or left.position.invocation.value != right.position.invocation.value or left.position.statement.value != right.position.statement.value or left.position.microstep != right.position.microstep
+            return true
+
         def service_capture_recording(service: mutable Service&) -> void:
             return if service.trace_partial
             current_event_count: usize = service.controller.engine.event_count
-            if current_event_count < service.recorded_event_count:
-                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
-                service_recording_mark_partial(service, failure)
-                return
+            # Moving the inspection cursor backward does not change the
+            # immutable events already captured for the root execution. If
+            # execution resumes through that prefix, compare it with the
+            # capture and downgrade only when the new execution differs.
+            return if current_event_count < service.recorded_event_count
             if current_event_count > SERVICE_EVENT_CAPTURE_CAPACITY:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_RECORDING_DIVERGED)
                 service_recording_mark_partial(service, failure)
                 return
-            while service.recorded_event_count < current_event_count:
-                event: DebuggerEvents::EventEnvelope = service.controller.engine.events[service.recorded_event_count]
-                if event.position.branch.value != ROOT_RECORDING_BRANCH or event.ordinal != service.recorded_event_count.u64():
+            index: mutable usize = 0
+            while index < current_event_count:
+                event: DebuggerEvents::EventEnvelope = service.controller.engine.events[index]
+                if event.position.branch.value != ROOT_RECORDING_BRANCH or event.ordinal != index.u64():
                     failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
                     service_recording_mark_partial(service, failure)
                     return
-                service.recorded_events[service.recorded_event_count] <- event
-                service.recorded_event_count <- service.recorded_event_count + 1
+                if index < service.recorded_event_count:
+                    if not service_recorded_event_matches(service.recorded_events[index], event):
+                        failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
+                        service_recording_mark_partial(service, failure)
+                        return
+                else:
+                    service.recorded_events[index] <- event
+                    service.recorded_event_count <- service.recorded_event_count + 1
+                index <- index + 1
 
     public:
 

@@ -21,6 +21,9 @@ const TEST_FAILURE_STORAGE_VERIFY: i64 = 6
 const TEST_FAILURE_REVERSE: i64 = 7
 const TEST_FAILURE_PARTIAL: i64 = 8
 const TEST_FAILURE_UNAVAILABLE: i64 = 9
+const TEST_FAILURE_REWIND_INVALIDATED: i64 = 10
+const TEST_FAILURE_REEXECUTION_MISMATCH: i64 = 11
+const TEST_FAILURE_BRANCH_NOT_PARTIAL: i64 = 12
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_COMPILER_ID), runtime: DebuggerIdentity::debug_id(TEST_RUNTIME_ID), source: DebuggerIdentity::debug_id(TEST_SOURCE_ID), target: DebuggerIdentity::debug_id(TEST_TARGET_ID), metadata_version: TEST_PROGRAM_VERSION}
@@ -49,6 +52,24 @@ def main() -> i64:
     reverse_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.ReverseStep, id: TEST_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     reversed: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, reverse_request)
     return TEST_FAILURE_REVERSE if not reversed.accepted or service.controller.engine.event_count != TEST_EVENT_COUNT - 1
+    rewound_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TEST_FAILURE_REWIND_INVALIDATED if rewound_report.state != DebuggerTraceVerify::VerificationState.Exact or not rewound_report.replayable or service.trace_partial
+    step_request: DebuggerProtocolRequest::Request = reverse_request
+    step_request.method <- DebuggerProtocolRequest::RequestMethod.Step
+    repeated: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, step_request)
+    return TEST_FAILURE_REEXECUTION_MISMATCH if not repeated.accepted or service.trace_partial or service.recorded_event_count != TEST_EVENT_COUNT
+    repeated_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TEST_FAILURE_REEXECUTION_MISMATCH if repeated_report.state != DebuggerTraceVerify::VerificationState.Exact or not repeated_report.replayable
+    reversed_again: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, reverse_request)
+    return TEST_FAILURE_REVERSE if not reversed_again.accepted
+    branch_request: DebuggerProtocolRequest::Request = reverse_request
+    branch_request.method <- DebuggerProtocolRequest::RequestMethod.Branch
+    branched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, branch_request)
+    return TEST_FAILURE_BRANCH_NOT_PARTIAL if not branched.accepted
+    branch_continue: DebuggerProtocolRequest::Request = reverse_request
+    branch_continue.method <- DebuggerProtocolRequest::RequestMethod.Continue
+    branch_advanced: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, branch_continue)
+    return TEST_FAILURE_BRANCH_NOT_PARTIAL if not branch_advanced.accepted or not service.trace_partial
     partial_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
     return TEST_FAILURE_PARTIAL if partial_report.state != DebuggerTraceVerify::VerificationState.Partial or partial_report.replayable or DebuggerErrors::error_is_ok(partial_report.failure)
     service.controller.session.capabilities.trace_export <- false

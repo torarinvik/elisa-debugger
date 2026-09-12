@@ -4,6 +4,7 @@
 include "./binary.elisa"
 include "./format.elisa"
 include "./manifest.elisa"
+include "../replay/checkpoint_codec.elisa"
 
 extern write(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
 
@@ -17,7 +18,6 @@ module DebuggerTraceStorage:
         const TRACE_FOOTER_MAGIC: u32 = 1380270920
         const TRACE_HEADER_BYTES: usize = 48
         const TRACE_FOOTER_BYTES: usize = 20
-        const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = 4048
         # Recorder chunks exclude the manifest; storage counts both.
         const TRACE_EVENT_CHUNK_CAPACITY: u64 = 8
         const TRACE_MANIFEST_CHUNK_COUNT: u64 = 1
@@ -50,6 +50,8 @@ module DebuggerTraceStorage:
         const TRACE_MAX_EVENT: u64 = 18446744073709551615
 
     public:
+        const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+
         enum StorageStatus:
             Ready
             Oversized
@@ -138,6 +140,29 @@ module DebuggerTraceStorage:
                 return false if quality != TRACE_EVENT_QUALITY_EXACT_CODE
             return true
 
+        def storage_checkpoint_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, first_event: u64, last_event: u64) -> bool:
+            return false if first_event != last_event or payload_length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+            checkpoint_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
+            return false if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(checkpoint_reader)
+            decoded_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
+            snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpointCodec::checkpoint_decode(decoded_reader)
+            return snapshot.event == first_event
+
+        def storage_checkpoint_chunk_is_valid(chunk: StoredChunk) -> bool:
+            return false if chunk.header.kind != DebuggerTrace::ChunkKind.Checkpoint
+            return false if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
+            return false if chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY or chunk.payload_length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+            payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+            for index in 0..<chunk.payload_length:
+                payload <- DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
+            return false if not DebuggerTraceBinary::writer_is_valid(payload) or DebuggerTraceBinary::writer_checksum(payload) != chunk.checksum
+            return storage_checkpoint_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.first_event, chunk.header.last_event)
+
+        def storage_checkpoint_event_is_within_trace(event: u64, first_event: u64, last_event: u64) -> bool:
+            return false if event < first_event
+            return true if event <= last_event
+            return last_event != TRACE_MAX_EVENT and event == last_event + 1
+
         def storage_decode_chunk(bytes: u8&, length: usize) -> ChunkDecode:
             result: mutable ChunkDecode = zeroed
             result.status <- StorageStatus.Truncated if length < TRACE_HEADER_BYTES
@@ -178,6 +203,7 @@ module DebuggerTraceStorage:
             # checksummed payload bypass the event-record invariants enforced by
             # the full storage scanner.
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and not storage_event_payload_is_valid(bytes, TRACE_HEADER_BYTES, result.chunk.payload_length, schema.u32(), first_event, last_event)
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not storage_checkpoint_payload_is_valid(bytes, TRACE_HEADER_BYTES, result.chunk.payload_length, first_event, last_event)
             result.status <- StorageStatus.Ready
             return result
 
@@ -206,6 +232,9 @@ module DebuggerTraceStorage:
             for payload_index in 0..<chunk.payload_length:
                 computed <- (computed ^ chunk.payload[payload_index].u64()) * TRACE_HASH_PRIME
             if computed != chunk.checksum:
+                writer.failed <- true
+                return writer
+            if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not storage_checkpoint_chunk_is_valid(chunk):
                 writer.failed <- true
                 return writer
             writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_0)
@@ -328,6 +357,12 @@ module DebuggerTraceStorage:
                     scan.verified_event <- last_event
                     event_exhausted <- last_event == TRACE_MAX_EVENT
                     expected_event <- 0 if event_exhausted else last_event + 1
+                if kind == TRACE_CHECKPOINT_KIND and not storage_checkpoint_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), first_event, last_event):
+                    scan.status <- StorageStatus.Invalid
+                    return scan
+                if kind == TRACE_CHECKPOINT_KIND and scan.manifest_seen and not storage_checkpoint_event_is_within_trace(first_event, manifest_first_event, manifest_last_event):
+                    scan.status <- StorageStatus.Invalid
+                    return scan
                 checkpoint_chunk_count <- checkpoint_chunk_count + 1 if kind == TRACE_CHECKPOINT_KIND
                 if kind == TRACE_MANIFEST_KIND:
                     manifest_first_event <- first_event

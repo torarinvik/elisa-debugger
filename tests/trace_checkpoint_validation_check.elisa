@@ -1,0 +1,242 @@
+include "../src/trace/binary.elisa"
+include "../src/trace/storage.elisa"
+include "../src/trace/manifest.elisa"
+include "../src/trace/recorder.elisa"
+include "../src/trace/reader.elisa"
+include "../src/trace/bundle.elisa"
+include "../src/trace/verify.elisa"
+include "../src/replay/checkpoint.elisa"
+include "../src/replay/checkpoint_codec.elisa"
+
+const TRACE_SCHEMA: u32 = 1
+const BUILD_COMPILER: u64 = 1
+const BUILD_RUNTIME: u64 = 2
+const BUILD_SOURCE: u64 = 3
+const BUILD_TARGET: u64 = 4
+const RECORDING_ID: u64 = 5
+const CHECKPOINT_ID: u64 = 6
+const EVENT_PAYLOAD_HASH: u64 = 7
+const CHUNK_KIND_OFFSET: usize = 6
+const CHECKPOINT_KIND_CODE: u8 = 3
+const FIRST_EVENT: u64 = 0
+const LAST_EVENT: u64 = 0
+const MANIFEST_SEQUENCE: u64 = 0
+const CHECKPOINT_SEQUENCE: u64 = 1
+const EVENT_SEQUENCE: u64 = 2
+const FOOTER_SEQUENCE: u64 = 3
+const OUTSIDE_MANIFEST_EVENT: u64 = 100
+const STORAGE_VARIANT_EMPTY: usize = 0
+const STORAGE_VARIANT_BAD_CODEC: usize = 1
+const STORAGE_VARIANT_BAD_RANGE: usize = 2
+const STORAGE_VARIANT_EVENT_MISMATCH: usize = 3
+const STORAGE_VARIANT_COUNT: usize = 4
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(BUILD_COMPILER),
+        runtime: DebuggerIdentity::debug_id(BUILD_RUNTIME),
+        source: DebuggerIdentity::debug_id(BUILD_SOURCE),
+        target: DebuggerIdentity::debug_id(BUILD_TARGET),
+        metadata_version: 1
+    }
+
+def checkpoint_payload_for_event(event: u64) -> DebuggerTraceBinary::ByteWriter:
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    snapshot: mutable DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(CHECKPOINT_ID), event, 0)
+    snapshot.state_hash <- DebuggerCheckpoint::snapshot_state_hash(snapshot)
+    return DebuggerCheckpointCodec::checkpoint_encode(snapshot)
+
+def checkpoint_payload() -> DebuggerTraceBinary::ByteWriter:
+    return checkpoint_payload_for_event(FIRST_EVENT)
+
+def payload_for_variant(variant: usize, valid_payload: DebuggerTraceBinary::ByteWriter) -> DebuggerTraceBinary::ByteWriter:
+    payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    if variant == STORAGE_VARIANT_BAD_CODEC:
+        payload <- DebuggerTraceBinary::writer_put_byte(payload, 0)
+    if variant == STORAGE_VARIANT_BAD_RANGE:
+        payload <- valid_payload
+    if variant == STORAGE_VARIANT_EVENT_MISMATCH:
+        payload <- checkpoint_payload_for_event(FIRST_EVENT + 1)
+    return payload
+
+def checkpoint_chunk(payload: DebuggerTraceBinary::ByteWriter, sequence: u64, first_event: u64, last_event: u64) -> DebuggerTraceStorage::StoredChunk:
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{
+        schema: TRACE_SCHEMA,
+        kind: DebuggerTrace::ChunkKind.Checkpoint,
+        sequence: sequence,
+        first_event: first_event,
+        last_event: last_event,
+        payload_length: payload.length.u64(),
+        checksum: DebuggerTraceBinary::writer_checksum(payload)
+    }
+    chunk.payload_length <- payload.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
+def checkpoint_as_metadata(payload: DebuggerTraceBinary::ByteWriter, sequence: u64, first_event: u64, last_event: u64) -> DebuggerTraceBinary::ByteWriter:
+    metadata: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    metadata.header <- DebuggerTrace::ChunkHeader{
+        schema: TRACE_SCHEMA,
+        kind: DebuggerTrace::ChunkKind.Metadata,
+        sequence: sequence,
+        first_event: first_event,
+        last_event: last_event,
+        payload_length: payload.length.u64(),
+        checksum: DebuggerTraceBinary::writer_checksum(payload)
+    }
+    metadata.payload_length <- payload.length
+    metadata.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        metadata.payload[index] <- payload.bytes[index]
+    encoded: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(metadata)
+    encoded.bytes[CHUNK_KIND_OFFSET] <- CHECKPOINT_KIND_CODE
+    return encoded
+
+def manifest_chunk(checkpoints: u64) -> DebuggerTraceStorage::StoredChunk:
+    manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build_identity(), DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest.checkpoint_count <- checkpoints
+    payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{
+        schema: TRACE_SCHEMA,
+        kind: DebuggerTrace::ChunkKind.Manifest,
+        sequence: MANIFEST_SEQUENCE,
+        first_event: FIRST_EVENT,
+        last_event: LAST_EVENT,
+        payload_length: payload.length.u64(),
+        checksum: DebuggerTraceBinary::writer_checksum(payload)
+    }
+    chunk.payload_length <- payload.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
+def event_chunk() -> DebuggerTraceStorage::StoredChunk:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(RECORDING_ID))
+    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(RECORDING_ID))
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TRACE_SCHEMA, FIRST_EVENT, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, EVENT_PAYLOAD_HASH)
+    _ = DebuggerTraceRecorder::recorder_append(recorder, event)
+    _ = DebuggerTraceRecorder::recorder_finalize(recorder)
+    result: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
+    result.header.sequence <- EVENT_SEQUENCE
+    return result
+
+def append_chunk_bytes(output: mutable DebuggerTraceBinary::ByteWriter&, chunk: DebuggerTraceStorage::StoredChunk) -> void:
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    if not DebuggerTraceBinary::writer_is_valid(encoded):
+        output.failed <- true
+        return
+    for index in 0..<encoded.length:
+        output <- DebuggerTraceBinary::writer_put_byte(output, encoded.bytes[index])
+
+def append_writer_bytes(output: mutable DebuggerTraceBinary::ByteWriter&, source: DebuggerTraceBinary::ByteWriter) -> void:
+    for index in 0..<source.length:
+        output <- DebuggerTraceBinary::writer_put_byte(output, source.bytes[index])
+
+def trace_bytes_with_raw_checkpoint(raw_checkpoint: DebuggerTraceBinary::ByteWriter) -> DebuggerTraceBinary::ByteWriter:
+    bytes: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_chunk_bytes(bytes, manifest_chunk(1))
+    append_writer_bytes(bytes, raw_checkpoint)
+    append_chunk_bytes(bytes, event_chunk())
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(FOOTER_SEQUENCE, LAST_EVENT)
+    append_writer_bytes(bytes, footer)
+    return bytes
+
+def check_full_checkpoint_round_trip() -> i64:
+    payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload()
+    return 1 if not DebuggerTraceBinary::writer_is_valid(payload) or payload.length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+    return 2 if payload.length > DebuggerTraceStorage::TRACE_STORAGE_PAYLOAD_CAPACITY
+    chunk: DebuggerTraceStorage::StoredChunk = checkpoint_chunk(payload, CHECKPOINT_SEQUENCE, FIRST_EVENT, LAST_EVENT)
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    return 3 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    decoded: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(encoded.bytes[0], encoded.length)
+    return 4 if decoded.status != DebuggerTraceStorage::StorageStatus.Ready or decoded.chunk.payload_length != payload.length
+    payload_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(decoded.chunk.payload[0], decoded.chunk.payload_length)
+    return 5 if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(payload_reader)
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    bundle_chunk: mutable DebuggerTraceStorage::StoredChunk = chunk
+    bundle_chunk.header.sequence <- 0
+    return 6 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, bundle_chunk))
+    return 7 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_scan(bundle))
+    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 8 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk(1)))
+    return 9 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
+    valid_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(encoded)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(valid_storage.bytes[0], valid_storage.length)
+    return 10 if scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified
+    boundary_payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload_for_event(LAST_EVENT + 1)
+    boundary_chunk: DebuggerTraceStorage::StoredChunk = checkpoint_chunk(boundary_payload, CHECKPOINT_SEQUENCE, LAST_EVENT + 1, LAST_EVENT + 1)
+    boundary_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 27 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(boundary_reader, manifest_chunk(1)))
+    return 28 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(boundary_reader, boundary_chunk))
+    boundary_bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    boundary_event: mutable DebuggerTraceStorage::StoredChunk = event_chunk()
+    boundary_event.header.sequence <- 0
+    return 29 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(boundary_bundle, boundary_event))
+    return 30 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(boundary_bundle, boundary_chunk))
+    return 31 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_scan(boundary_bundle))
+    boundary_wire: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(boundary_chunk)
+    boundary_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(boundary_wire)
+    boundary_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(boundary_storage.bytes[0], boundary_storage.length)
+    return 32 if boundary_scan.status != DebuggerTraceStorage::StorageStatus.Ready or not boundary_scan.footer_verified
+    return 0
+
+def check_invalid_checkpoint_surfaces() -> i64:
+    valid_payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload()
+    for variant in 0..<STORAGE_VARIANT_COUNT:
+        payload: DebuggerTraceBinary::ByteWriter = payload_for_variant(variant, valid_payload)
+        first_event: u64 = FIRST_EVENT
+        last_event: mutable u64 = LAST_EVENT
+        last_event <- FIRST_EVENT + 1 if variant == STORAGE_VARIANT_BAD_RANGE
+        invalid: DebuggerTraceStorage::StoredChunk = checkpoint_chunk(payload, CHECKPOINT_SEQUENCE, first_event, last_event)
+        encoded_invalid: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(invalid)
+        return 11 if DebuggerTraceBinary::writer_is_valid(encoded_invalid)
+        bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+        bundle_input: mutable DebuggerTraceStorage::StoredChunk = invalid
+        bundle_input.header.sequence <- 0
+        return 12 if DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, bundle_input))
+        return 13 if DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_verify_chunk_at(bundle, bundle_input, 0))
+        reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+        return 14 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk(1)))
+        reader_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(reader, invalid)
+        return 15 if DebuggerErrors::error_is_ok(reader_error) or reader.state != DebuggerTraceReader::ReaderState.Corrupt
+        malformed_wire: DebuggerTraceBinary::ByteWriter = checkpoint_as_metadata(payload, CHECKPOINT_SEQUENCE, first_event, last_event)
+        return 16 if not DebuggerTraceBinary::writer_is_valid(malformed_wire)
+        wire_decoded: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(malformed_wire.bytes[0], malformed_wire.length)
+        return 17 if wire_decoded.status != DebuggerTraceStorage::StorageStatus.Invalid
+        invalid_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(malformed_wire)
+        scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(invalid_storage.bytes[0], invalid_storage.length)
+        return 18 if scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    return 0
+
+def check_checkpoint_outside_manifest() -> i64:
+    payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload_for_event(OUTSIDE_MANIFEST_EVENT)
+    chunk: DebuggerTraceStorage::StoredChunk = checkpoint_chunk(payload, CHECKPOINT_SEQUENCE, OUTSIDE_MANIFEST_EVENT, OUTSIDE_MANIFEST_EVENT)
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    return 19 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 20 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk(1)))
+    return 21 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
+    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    event: mutable DebuggerTraceStorage::StoredChunk = event_chunk()
+    event.header.sequence <- 0
+    return 22 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, event))
+    chunk.header.sequence <- 1
+    return 23 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, chunk))
+    return 24 if DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_scan(bundle))
+    report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
+    return 26 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
+    invalid_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(encoded)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(invalid_storage.bytes[0], invalid_storage.length)
+    return 25 if scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    return 0
+
+def main() -> i64:
+    return check_full_checkpoint_round_trip() if check_full_checkpoint_round_trip() != 0
+    return check_invalid_checkpoint_surfaces() if check_invalid_checkpoint_surfaces() != 0
+    return check_checkpoint_outside_manifest() if check_checkpoint_outside_manifest() != 0
+    return 0

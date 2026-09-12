@@ -16,6 +16,7 @@ module DebuggerConcurrencyRuntime:
         const MAX_LOGICAL_TIME: u64 = 18446744073709551615
         const ROOT_TASK_ID: u64 = 0
         const NO_TASK_INDEX: usize = TASK_RUNTIME_CAPACITY
+        const NO_WAIT_EDGE_INDEX: usize = WAIT_EDGE_CAPACITY
         const SYNCHRONIZATION_KIND_MAX: u16 = 4
         const TASK_STATE_MAX: u16 = 5
 
@@ -94,13 +95,23 @@ module DebuggerConcurrencyRuntime:
             index: usize = runtime_find_index(runtime, id)
             return false if index == NO_TASK_INDEX
             return false if not transition_allowed(runtime.tasks[index].state, state)
+            waiter_edge_index: mutable usize = NO_WAIT_EDGE_INDEX
+            if runtime.tasks[index].state == DebuggerConcurrency::TaskState.Blocked and (state == DebuggerConcurrency::TaskState.Runnable or state == DebuggerConcurrency::TaskState.Cancelled):
+                for edge_index in 0..<runtime.wait_count:
+                    if runtime.waits[edge_index].waiter.value == id.value:
+                        waiter_edge_index <- edge_index
+                        break
             if state == DebuggerConcurrency::TaskState.Completed or state == DebuggerConcurrency::TaskState.Cancelled:
                 # Do not leave blocked waiters referring to a terminal owner.
-                # The caller must release or wake those edges first.
+                # The caller must release or wake other waiters first. A
+                # blocked task's own edge is removed as part of this transition.
                 for edge_index in 0..<runtime.wait_count:
-                    return false if runtime.waits[edge_index].owner.value == id.value
+                    return false if runtime.waits[edge_index].owner.value == id.value and edge_index != waiter_edge_index
             runtime.tasks[index].state <- state
             runtime.tasks[index].logical_time <- next_logical_time(runtime.tasks[index].logical_time)
+            if waiter_edge_index != NO_WAIT_EDGE_INDEX:
+                runtime.waits[waiter_edge_index] <- runtime.waits[runtime.wait_count - 1]
+                runtime.wait_count <- runtime.wait_count - 1
             if runtime.current.value == id.value and (state == DebuggerConcurrency::TaskState.Completed or state == DebuggerConcurrency::TaskState.Cancelled):
                 runtime.current <- DebuggerIdentity::debug_id(ROOT_TASK_ID)
                 for candidate_index in 0..<runtime.task_count:
@@ -164,15 +175,13 @@ module DebuggerConcurrencyRuntime:
             index: usize = runtime_find_index(runtime, waiter)
             return false if index == NO_TASK_INDEX
             return false if runtime.tasks[index].state != DebuggerConcurrency::TaskState.Blocked
-            edge_index: mutable usize = WAIT_EDGE_CAPACITY
+            edge_index: mutable usize = NO_WAIT_EDGE_INDEX
             for candidate in 0..<runtime.wait_count:
                 if runtime.waits[candidate].waiter.value == waiter.value:
                     edge_index <- candidate
                     break
-            return false if edge_index == WAIT_EDGE_CAPACITY
+            return false if edge_index == NO_WAIT_EDGE_INDEX
             return false if not runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Runnable)
-            runtime.waits[edge_index] <- runtime.waits[runtime.wait_count - 1]
-            runtime.wait_count <- runtime.wait_count - 1
             return true
 
         def runtime_has_deadlock(runtime: mutable TaskRuntime&) -> bool:

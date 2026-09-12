@@ -9,6 +9,19 @@ const INVALID_PARENT_CYCLE_RESULT: i64 = 18
 const OWNER_TERMINAL_RESULT: i64 = 21
 const INVALID_WAIT_COUNT: usize = 129
 const INVALID_WAIT_COUNT_RESULT: i64 = 23
+const WAIT_RESOURCE_ID: u64 = 99
+const SECOND_WAIT_RESOURCE_ID: u64 = 100
+const BLOCKED_TRANSITION_RESULT: i64 = 24
+const WAKE_EDGE_COUNT_RESULT: i64 = 25
+
+def runtime_with_blocked_waiter() -> DebuggerConcurrencyRuntime::TaskRuntime:
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    owner: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(0))
+    waiter: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(0))
+    _ = DebuggerConcurrencyRuntime::runtime_transition(runtime, owner, DebuggerConcurrency::TaskState.Running)
+    _ = DebuggerConcurrencyRuntime::runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Running)
+    _ = DebuggerConcurrencyRuntime::runtime_wait(runtime, waiter, owner, DebuggerIdentity::debug_id(WAIT_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex)
+    return runtime
 
 def main() -> i64:
     runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
@@ -75,4 +88,16 @@ def main() -> i64:
     malformed_cycle.tasks[0].parent <- second
     malformed_cycle.tasks[1].parent <- first
     return INVALID_PARENT_CYCLE_RESULT if DebuggerConcurrencyRuntime::runtime_is_valid(malformed_cycle)
+    cancelled_waiter_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_blocked_waiter()
+    return BLOCKED_TRANSITION_RESULT if cancelled_waiter_runtime.wait_count != 1 or not DebuggerConcurrencyRuntime::runtime_transition(cancelled_waiter_runtime, DebuggerIdentity::debug_id(SECOND_TASK), DebuggerConcurrency::TaskState.Cancelled)
+    return BLOCKED_TRANSITION_RESULT if cancelled_waiter_runtime.wait_count != 0 or not DebuggerConcurrencyRuntime::runtime_is_valid(cancelled_waiter_runtime)
+    resumed_waiter_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_blocked_waiter()
+    return BLOCKED_TRANSITION_RESULT if resumed_waiter_runtime.wait_count != 1 or not DebuggerConcurrencyRuntime::runtime_transition(resumed_waiter_runtime, DebuggerIdentity::debug_id(SECOND_TASK), DebuggerConcurrency::TaskState.Runnable)
+    return BLOCKED_TRANSITION_RESULT if resumed_waiter_runtime.wait_count != 0 or not DebuggerConcurrencyRuntime::runtime_is_valid(resumed_waiter_runtime)
+    wake_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_blocked_waiter()
+    other_waiter: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(wake_runtime, DebuggerIdentity::debug_id(0))
+    return WAKE_EDGE_COUNT_RESULT if other_waiter.value == 0 or not DebuggerConcurrencyRuntime::runtime_transition(wake_runtime, other_waiter, DebuggerConcurrency::TaskState.Running)
+    return WAKE_EDGE_COUNT_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(wake_runtime, other_waiter, DebuggerIdentity::debug_id(FIRST_TASK), DebuggerIdentity::debug_id(SECOND_WAIT_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex)
+    return WAKE_EDGE_COUNT_RESULT if wake_runtime.wait_count != 2 or not DebuggerConcurrencyRuntime::runtime_wake(wake_runtime, DebuggerIdentity::debug_id(SECOND_TASK))
+    return WAKE_EDGE_COUNT_RESULT if wake_runtime.wait_count != 1 or wake_runtime.waits[0].waiter.value != other_waiter.value or not DebuggerConcurrencyRuntime::runtime_is_valid(wake_runtime)
     return 0

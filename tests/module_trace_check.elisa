@@ -27,8 +27,9 @@ const TEST_BUILD_SOURCE: u64 = 3
 const TEST_BUILD_TARGET: u64 = 4
 const TEST_RECORDING_ID: u64 = 40
 const TEST_EXPECTED_LAST_EVENT: u64 = 4
-const TEST_EXPECTED_CHUNK_BYTES: usize = 49
-const TEST_TRUNCATED_CHUNK_BYTES: usize = 48
+const TEST_EVENT_ENCODED_BYTES: usize = 84
+const TEST_EXPECTED_CHUNK_BYTES: usize = 132
+const TEST_TRUNCATED_CHUNK_BYTES: usize = 131
 const TEST_CHECKPOINT_ID: u64 = 70
 const TEST_CHECKPOINT_FRAME_VALUE: i64 = 42
 const TEST_CHECKPOINT_RETURN_PC: u64 = 9
@@ -233,13 +234,18 @@ def main() -> i64:
     return 3 if DebuggerTraceBinary::reader_take_u32(reader) != TEST_U32_VALUE
     return 4 if DebuggerTraceBinary::reader_take_u64(reader) != TEST_U64_VALUE
     return 5 if not DebuggerTraceBinary::reader_is_valid(reader)
+    storage_position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING_ID))
+    storage_event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_EVENT_SCHEMA, TEST_EVENT_ORDINAL, storage_position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_EVENT_PAYLOAD)
+    storage_event_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceRecorder::encode_event(storage_event)
+    return 54 if not DebuggerTraceBinary::writer_is_valid(storage_event_bytes) or storage_event_bytes.length != TEST_EVENT_ENCODED_BYTES
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
-    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: TEST_CHUNK_CHECKSUM}
-    chunk.payload[0] <- TEST_PAYLOAD_BYTE
-    chunk.payload_length <- 1
-    chunk.checksum <- TEST_CHUNK_CHECKSUM
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: TEST_EVENT_ORDINAL, last_event: TEST_EVENT_ORDINAL, payload_length: storage_event_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(storage_event_bytes)}
+    chunk.payload_length <- storage_event_bytes.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(storage_event_bytes)
+    for event_byte_index in 0..<storage_event_bytes.length:
+        chunk.payload[event_byte_index] <- storage_event_bytes.bytes[event_byte_index]
     corrupt_storage_chunk: mutable DebuggerTraceStorage::StoredChunk = chunk
-    corrupt_storage_chunk.payload[0] <- TEST_PAYLOAD_BYTE + 1
+    corrupt_storage_chunk.payload[0] <- corrupt_storage_chunk.payload[0] + 1
     corrupt_storage_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(corrupt_storage_chunk)
     return 48 if DebuggerTraceBinary::writer_is_valid(corrupt_storage_bytes)
     invalid_storage_range: mutable DebuggerTraceStorage::StoredChunk = chunk
@@ -268,9 +274,9 @@ def main() -> i64:
     for footer_index in 0..<footer.length:
         combined <- DebuggerTraceBinary::writer_put_byte(combined, footer.bytes[footer_index])
     scan_with_footer: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(combined.bytes[0], combined.length)
-    return 10 if scan_with_footer.status != DebuggerTraceStorage::StorageStatus.Ready or not scan_with_footer.footer_verified or scan_with_footer.manifest_seen or not scan_with_footer.event_chunk_seen
+    return 10 if scan_with_footer.status != DebuggerTraceStorage::StorageStatus.Invalid or scan_with_footer.footer_verified or scan_with_footer.manifest_seen or not scan_with_footer.event_chunk_seen
     footer_only_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(combined.bytes[0], combined.length)
-    return MISSING_MANIFEST_RESULT if footer_only_report.state != DebuggerTraceVerify::VerificationState.Partial or footer_only_report.replayable
+    return MISSING_MANIFEST_RESULT if footer_only_report.state != DebuggerTraceVerify::VerificationState.Corrupt or footer_only_report.replayable
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(TEST_BUILD_RUNTIME), source: DebuggerIdentity::debug_id(TEST_BUILD_SOURCE), target: DebuggerIdentity::debug_id(TEST_BUILD_TARGET), metadata_version: 1}
     manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
     manifest.last_event <- TEST_EXPECTED_LAST_EVENT

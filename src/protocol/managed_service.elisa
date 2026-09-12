@@ -13,6 +13,10 @@ include "../replay/branches.elisa"
 include "../metadata/source.elisa"
 include "../inspect/store.elisa"
 include "../query/timeline.elisa"
+include "../query/edir_provenance.elisa"
+include "../query/engine.elisa"
+include "../query/history.elisa"
+include "../core/cancellation.elisa"
 
 module DebuggerManagedService:
     private:
@@ -23,8 +27,17 @@ module DebuggerManagedService:
         const NO_REQUEST_ID: u64 = 0
         const DETAIL_REQUEST_ID: u32 = 4
         const DETAIL_METHOD: u32 = 5
+        const DETAIL_MEMORY_HISTORY_UNAVAILABLE: u32 = 6
+        const DETAIL_MEMORY_HISTORY_RANGE: u32 = 7
+        const DETAIL_MEMORY_HISTORY_SLOT: u32 = 8
+        const DETAIL_MEMORY_HISTORY_CORRUPT: u32 = 9
         const REQUEST_METHOD_MAX: u16 = 29
         const MAX_SEEK_EVENT: u64 = 64
+
+        def memory_history_error(window: DebuggerHistory::QueryWindow, failure: DebuggerErrors::DebuggerError) -> DebuggerQueryEngine::QueryExecution:
+            result: mutable DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_execution_new(window)
+            result.failure <- failure
+            return result
 
     public:
         struct Service:
@@ -324,3 +337,26 @@ module DebuggerManagedService:
         def service_memory(service: mutable Service&, address: u64, length: usize) -> DebuggerMemory::MemoryRead:
             return DebuggerMemory::memory_read_managed(service.controller.engine.machine, address, length) if DebuggerSession::session_can_inspect(service.controller.session)
             return DebuggerMemory::memory_read_invalid(address, DebuggerMemory::MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED))
+
+        # Typed local-service API. The compact JSON request and editor discovery
+        # surfaces do not carry query operands, so their provenance and
+        # historical-query capability flags remain false until a transport
+        # exposes this complete typed contract.
+        def service_memory_write_history(service: mutable Service&, slot: u64, window: DebuggerHistory::QueryWindow, token: DebuggerCancellation::CancellationToken) -> DebuggerQueryEngine::QueryExecution:
+            empty_index: DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+            empty_binding: DebuggerIdentity::BindingIdentity = zeroed
+            if not DebuggerHistory::query_window_is_valid(window):
+                return DebuggerQueryEngine::query_find_writes(empty_index, empty_binding, window, token)
+            if not DebuggerSession::session_can_inspect(service.controller.session):
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_MEMORY_HISTORY_UNAVAILABLE))
+            if service.controller.session.capabilities.engine != DebuggerCapabilities::EngineKind.Managed or service.controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact:
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_MEMORY_HISTORY_UNAVAILABLE))
+            if not DebuggerEDIRProvenance::edir_provenance_memory_slot_is_valid(slot):
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MEMORY_HISTORY_SLOT))
+            if window.last_event >= service.controller.engine.event_count.u64():
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MEMORY_HISTORY_RANGE))
+            index: DebuggerProvenance::ProvenanceIndex = DebuggerEDIRProvenance::edir_provenance_from_engine(service.controller.engine)
+            if not DebuggerProvenance::provenance_is_complete(index):
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_MEMORY_HISTORY_CORRUPT))
+            binding: DebuggerIdentity::BindingIdentity = DebuggerEDIRProvenance::edir_provenance_memory_binding(service.controller.engine, slot)
+            return DebuggerQueryEngine::query_find_writes(index, binding, window, token)

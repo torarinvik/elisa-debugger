@@ -13,6 +13,39 @@ const TEST_EVENT_HASH: u64 = 23
 const TEST_EVENT_COUNT: u64 = 1
 const TEST_BAD_SCHEMA: u32 = 2
 const TEST_EVENT_OFFSET: usize = 36
+const TEST_CHECKPOINT_BRANCH: u64 = 1
+const TEST_CHECKPOINT_STATE_HASH_SEED: u64 = 0
+const TEST_CHECKPOINT_EVENT: u64 = 1
+const TEST_CHECKPOINT_ID_OFFSET: u64 = 1
+const TEST_CHECKPOINT_COUNT: u64 = 1
+const TEST_MANIFEST_SEQUENCE: u64 = 0
+const TEST_FIRST_EVENT: u64 = 0
+const TEST_RECORDED_EVENT_COUNT: usize = 2
+const TEST_RECORDED_CHUNK_COUNT: usize = 3
+const TEST_RECORDED_CHECKPOINT_COUNT: usize = 1
+const TEST_FOOTER_SEQUENCE_OFFSET: u64 = 1
+const TEST_FIRST_CHECKPOINT_INDEX: usize = 0
+const TEST_RESOURCE_LIMIT_EVENT_COUNT: u64 = 128
+const TEST_RESOURCE_LIMIT_LAST_EVENT: u64 = 127
+const TEST_RESOURCE_LIMIT_CHUNK_COUNT: usize = 8
+const TEST_FIRST_EVENT_CHUNK_INDEX: usize = 0
+const TEST_CHECKPOINT_CHUNK_INDEX: usize = 1
+const TEST_SECOND_EVENT_CHUNK_INDEX: usize = 2
+const RESULT_FIRST_CHECKPOINT_EVENT_APPEND_FAILED: i64 = 12
+const RESULT_CHECKPOINT_APPEND_FAILED: i64 = 13
+const RESULT_SECOND_CHECKPOINT_EVENT_APPEND_FAILED: i64 = 14
+const RESULT_CHECKPOINT_RECORDER_FINALIZE_FAILED: i64 = 15
+const RESULT_CHECKPOINT_RECORDER_NOT_EXACT: i64 = 16
+const RESULT_CHECKPOINT_CHUNK_ORDER_MISMATCH: i64 = 17
+const RESULT_CHECKPOINT_MANIFEST_INGEST_FAILED: i64 = 18
+const RESULT_CHECKPOINT_CHUNK_INGEST_FAILED: i64 = 19
+const RESULT_CHECKPOINT_READER_NOT_EXACT: i64 = 20
+const RESULT_CHECKPOINT_LOOKUP_MISMATCH: i64 = 21
+const RESULT_CHECKPOINT_STORAGE_SCAN_FAILED: i64 = 22
+const RESULT_LIMIT_EVENT_APPEND_FAILED: i64 = 23
+const RESULT_LIMIT_NOT_REPORTED: i64 = 24
+const RESULT_LIMIT_PREFIX_MISMATCH: i64 = 25
+const RESULT_LIMIT_PREFIX_SCAN_FAILED: i64 = 26
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
@@ -21,6 +54,86 @@ def make_event(recording: u64, schema: u32, ordinal: u64) -> DebuggerEvents::Eve
     position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(recording))
     position.event <- ordinal
     return DebuggerEvents::event_envelope(schema, ordinal, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_EVENT_HASH)
+
+def make_checkpoint(recording: u64, event: u64) -> DebuggerFullCheckpoint::ManagedCheckpoint:
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    machine.steps <- event
+    snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(event + TEST_CHECKPOINT_ID_OFFSET), event, TEST_CHECKPOINT_STATE_HASH_SEED)
+    state_hash: u64 = DebuggerCheckpoint::snapshot_state_hash(snapshot)
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
+    effects: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
+    resources: DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording)
+    return DebuggerFullCheckpoint::full_checkpoint_capture(machine, tasks, effects, resources, DebuggerIdentity::debug_id(recording), DebuggerIdentity::debug_id(TEST_CHECKPOINT_BRANCH), event, state_hash)
+
+def make_manifest_chunk(manifest: DebuggerTraceManifest::BundleManifest) -> DebuggerTraceStorage::StoredChunk:
+    payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: manifest.schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest, sequence: TEST_MANIFEST_SEQUENCE, first_event: manifest.first_event, last_event: manifest.last_event, payload_length: payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(payload)}
+    chunk.payload_length <- payload.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
+def append_trace_chunk(output: mutable DebuggerTraceBinary::ByteWriter&, chunk: DebuggerTraceStorage::StoredChunk) -> void:
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
+    if not DebuggerTraceBinary::writer_is_valid(encoded):
+        output.failed <- true
+        return
+    for index in 0..<encoded.length:
+        output <- DebuggerTraceBinary::writer_put_byte(output, encoded.bytes[index])
+
+def append_trace_bytes(output: mutable DebuggerTraceBinary::ByteWriter&, encoded: DebuggerTraceBinary::ByteWriter) -> void:
+    for index in 0..<encoded.length:
+        output <- DebuggerTraceBinary::writer_put_byte(output, encoded.bytes[index])
+
+def check_record_and_read_full_checkpoint() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
+    first: DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, TEST_FIRST_EVENT)
+    second: DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, TEST_CHECKPOINT_EVENT)
+    return RESULT_FIRST_CHECKPOINT_EVENT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, first))
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint(TEST_RECORDING, TEST_CHECKPOINT_EVENT)
+    return RESULT_CHECKPOINT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint))
+    return RESULT_SECOND_CHECKPOINT_EVENT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, second))
+    return RESULT_CHECKPOINT_RECORDER_FINALIZE_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(recorder))
+    return RESULT_CHECKPOINT_RECORDER_NOT_EXACT if recorder.chunk_count != TEST_RECORDED_CHUNK_COUNT or recorder.manifest.checkpoint_count != TEST_CHECKPOINT_COUNT or not DebuggerTraceRecorder::recorder_is_exact(recorder)
+    return RESULT_CHECKPOINT_CHUNK_ORDER_MISMATCH if recorder.chunks[TEST_FIRST_EVENT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Events or recorder.chunks[TEST_CHECKPOINT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Checkpoint or recorder.chunks[TEST_SECOND_EVENT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Events
+    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return RESULT_CHECKPOINT_MANIFEST_INGEST_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, make_manifest_chunk(recorder.manifest)))
+    for index in 0..<recorder.chunk_count:
+        return RESULT_CHECKPOINT_CHUNK_INGEST_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, recorder.chunks[index]))
+    return RESULT_CHECKPOINT_READER_NOT_EXACT if DebuggerTraceReader::reader_event_count(reader) != TEST_RECORDED_EVENT_COUNT or DebuggerTraceReader::reader_full_checkpoint_count(reader) != TEST_RECORDED_CHECKPOINT_COUNT or not DebuggerTraceReader::reader_is_exact(reader)
+    found: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_full_checkpoint_at(reader, TEST_FIRST_CHECKPOINT_INDEX)
+    return RESULT_CHECKPOINT_LOOKUP_MISMATCH if not found.found or found.checkpoint.event != TEST_CHECKPOINT_EVENT or found.checkpoint.recording.value != TEST_RECORDING
+    trace: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_trace_chunk(trace, make_manifest_chunk(recorder.manifest))
+    for index in 0..<recorder.chunk_count:
+        append_trace_chunk(trace, recorder.chunks[index])
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(recorder.chunk_count.u64() + TEST_FOOTER_SEQUENCE_OFFSET, recorder.manifest.last_event)
+    append_trace_bytes(trace, footer)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(trace.bytes[0], trace.length)
+    return RESULT_CHECKPOINT_STORAGE_SCAN_FAILED if not DebuggerTraceBinary::writer_is_valid(trace) or scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or scan.verified_chunks != recorder.chunk_count.u64() + TEST_FOOTER_SEQUENCE_OFFSET
+    return 0
+
+def check_resource_limit_keeps_verified_prefix() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
+    for ordinal in 0..<TEST_RESOURCE_LIMIT_EVENT_COUNT:
+        event: DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, ordinal)
+        return RESULT_LIMIT_EVENT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint(TEST_RECORDING, TEST_RESOURCE_LIMIT_EVENT_COUNT)
+    failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
+    return RESULT_LIMIT_NOT_REPORTED if failure.code != DebuggerErrors::ErrorCode.ResourceLimit or recorder.status != DebuggerTraceRecorder::RecorderStatus.ResourceLimit
+    return RESULT_LIMIT_PREFIX_MISMATCH if recorder.pending_count != 0 or recorder.chunk_count != TEST_RESOURCE_LIMIT_CHUNK_COUNT or recorder.manifest.last_event != TEST_RESOURCE_LIMIT_LAST_EVENT or recorder.manifest.status != DebuggerTraceManifest::ManifestStatus.Partial
+    trace: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_trace_chunk(trace, make_manifest_chunk(recorder.manifest))
+    for index in 0..<recorder.chunk_count:
+        append_trace_chunk(trace, recorder.chunks[index])
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(recorder.chunk_count.u64() + TEST_FOOTER_SEQUENCE_OFFSET, recorder.manifest.last_event)
+    append_trace_bytes(trace, footer)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(trace.bytes[0], trace.length)
+    return RESULT_LIMIT_PREFIX_SCAN_FAILED if not DebuggerTraceBinary::writer_is_valid(trace) or scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or scan.manifest_exact or scan.verified_event != TEST_RESOURCE_LIMIT_LAST_EVENT
+    return 0
 
 def check_record_and_read() -> i64:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
@@ -81,6 +194,8 @@ def check_rejects_malformed_manifest() -> i64:
 
 def main() -> i64:
     return check_record_and_read() if check_record_and_read() != 0
+    return check_record_and_read_full_checkpoint() if check_record_and_read_full_checkpoint() != 0
+    return check_resource_limit_keeps_verified_prefix() if check_resource_limit_keeps_verified_prefix() != 0
     return check_rejects_bad_event() if check_rejects_bad_event() != 0
     return check_rejects_corrupt_quality() if check_rejects_corrupt_quality() != 0
     return check_rejects_malformed_pending_position() if check_rejects_malformed_pending_position() != 0

@@ -18,6 +18,7 @@ module DebuggerTraceRecorder:
         const RECORDER_SCHEMA_VERSION: u32 = 1
         const RECORDER_MANIFEST_SEQUENCE: u64 = 0
         const RECORDER_EVENT_SEQUENCE_OFFSET: u64 = 1
+        const RECORDER_CHECKPOINT_COUNT_OFFSET: u64 = 1
         const RECORDER_DETAIL_NON_MONOTONIC: u32 = 1
         const RECORDER_DETAIL_RESOURCE_LIMIT: u32 = 2
         const RECORDER_DETAIL_ENCODING: u32 = 3
@@ -67,6 +68,7 @@ module DebuggerTraceRecorder:
             recorder.exact <- true
             return recorder
 
+    private:
         def encode_event(event: DebuggerEvents::EventEnvelope) -> DebuggerTraceBinary::ByteWriter:
             writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
             writer <- DebuggerTraceBinary::writer_put_u32(writer, event.schema)
@@ -117,8 +119,57 @@ module DebuggerTraceRecorder:
             recorder.manifest <- manifest
             return DebuggerErrors::no_error()
 
+        def recorder_verified_next_event(recorder: mutable TraceRecorder&) -> u64:
+            next_event: mutable u64 = RECORDER_NO_EVENT
+            for index in 0..<recorder.chunk_count:
+                chunk: DebuggerTraceStorage::StoredChunk = recorder.chunks[index]
+                continue if chunk.header.kind != DebuggerTrace::ChunkKind.Events
+                return RECORDER_MAX_ORDINAL if chunk.header.last_event == RECORDER_MAX_ORDINAL
+                verified_next: u64 = chunk.header.last_event + RECORDER_EVENT_SEQUENCE_OFFSET
+                next_event <- verified_next if verified_next > next_event
+            return next_event
+
+        def recorder_mark_resource_limit(recorder: mutable TraceRecorder&, failure: DebuggerErrors::DebuggerError) -> DebuggerErrors::DebuggerError:
+            verified_next: u64 = recorder_verified_next_event(recorder)
+            recorder.pending_count <- 0
+            recorder.status <- RecorderStatus.ResourceLimit
+            recorder.exact <- false
+            manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+            manifest.status <- DebuggerTraceManifest::ManifestStatus.Partial
+            manifest.last_event <- verified_next - RECORDER_EVENT_SEQUENCE_OFFSET if verified_next > RECORDER_NO_EVENT
+            manifest.last_event <- RECORDER_NO_EVENT if verified_next == RECORDER_NO_EVENT
+            recorder.manifest <- manifest
+            recorder.last_error <- failure
+            return failure
+
+        def recorder_mark_corrupt(recorder: mutable TraceRecorder&, failure: DebuggerErrors::DebuggerError) -> DebuggerErrors::DebuggerError:
+            recorder.status <- RecorderStatus.Corrupt
+            recorder.exact <- false
+            manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+            manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
+            recorder.manifest <- manifest
+            recorder.last_error <- failure
+            return failure
+
+        def recorder_mark_flush_failure(recorder: mutable TraceRecorder&, failure: DebuggerErrors::DebuggerError) -> DebuggerErrors::DebuggerError:
+            return recorder_mark_resource_limit(recorder, failure) if failure.code == DebuggerErrors::ErrorCode.ResourceLimit
+            return recorder_mark_corrupt(recorder, failure)
+
+        def recorder_mark_io_failure(recorder: mutable TraceRecorder&) -> void:
+            recorder.status <- RecorderStatus.Partial
+            recorder.exact <- false
+            manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+            manifest.status <- DebuggerTraceManifest::ManifestStatus.Partial
+            recorder.manifest <- manifest
+            recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, RECORDER_DETAIL_RECORDING)
+
+        def recorder_inactive_error(recorder: mutable TraceRecorder&) -> DebuggerErrors::DebuggerError:
+            return recorder.last_error if not DebuggerErrors::error_is_ok(recorder.last_error)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, RECORDER_DETAIL_RECORDING)
+
+    public:
         def recorder_append(recorder: mutable TraceRecorder&, event: DebuggerEvents::EventEnvelope) -> DebuggerErrors::DebuggerError:
-            return recorder.last_error if recorder.status != RecorderStatus.Recording
+            return recorder_inactive_error(recorder) if recorder.status != RecorderStatus.Recording
             if not recorder_event_is_valid(recorder, event):
                 recorder.status <- RecorderStatus.Corrupt
                 manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
@@ -148,12 +199,7 @@ module DebuggerTraceRecorder:
             if recorder.pending_count >= RECORDER_EVENT_CAPACITY:
                 flushed: DebuggerErrors::DebuggerError = recorder_flush(recorder)
                 if not DebuggerErrors::error_is_ok(flushed):
-                    recorder.status <- RecorderStatus.ResourceLimit
-                    manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
-                    manifest.status <- DebuggerTraceManifest::ManifestStatus.Partial
-                    recorder.manifest <- manifest
-                    recorder.last_error <- flushed
-                    return flushed
+                    return recorder_mark_flush_failure(recorder, flushed)
             recorder.pending[recorder.pending_count] <- event
             recorder.pending_count <- recorder.pending_count + 1
             recorder.next_ordinal <- recorder.next_ordinal + 1
@@ -166,13 +212,51 @@ module DebuggerTraceRecorder:
             return recorder.last_error if recorder.status == RecorderStatus.Corrupt or recorder.status == RecorderStatus.ResourceLimit or recorder.status == RecorderStatus.Partial
             flushed: DebuggerErrors::DebuggerError = recorder_flush(recorder)
             if not DebuggerErrors::error_is_ok(flushed):
-                recorder.status <- RecorderStatus.Partial
-                recorder.last_error <- flushed
-                return flushed
+                return recorder_mark_flush_failure(recorder, flushed)
             recorder.status <- RecorderStatus.Complete
             recorder.last_error <- DebuggerErrors::no_error()
             return DebuggerErrors::no_error()
 
+        def recorder_append_checkpoint(recorder: mutable TraceRecorder&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+            return recorder_inactive_error(recorder) if recorder.status != RecorderStatus.Recording
+            if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint) or checkpoint.recording.value != recorder.recording.value or checkpoint.event > recorder.next_ordinal:
+                recorder.status <- RecorderStatus.Corrupt
+                manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+                manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
+                recorder.manifest <- manifest
+                recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_RECORDING)
+                return recorder.last_error
+            flushed: DebuggerErrors::DebuggerError = recorder_flush(recorder)
+            if not DebuggerErrors::error_is_ok(flushed):
+                return recorder_mark_flush_failure(recorder, flushed)
+            if recorder.chunk_count >= RECORDER_CHUNK_CAPACITY:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, RECORDER_DETAIL_RESOURCE_LIMIT)
+                return recorder_mark_resource_limit(recorder, failure)
+            if not DebuggerTraceStorage::storage_checkpoint_event_is_within_trace(checkpoint.event, recorder.manifest.first_event, recorder.manifest.last_event):
+                recorder.status <- RecorderStatus.Corrupt
+                manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+                manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
+                recorder.manifest <- manifest
+                recorder.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_NON_MONOTONIC)
+                return recorder.last_error
+            encoded: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(checkpoint, recorder.chunk_count.u64() + RECORDER_EVENT_SEQUENCE_OFFSET)
+            if encoded.status != DebuggerTraceStorage::StorageStatus.Ready:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, RECORDER_DETAIL_ENCODING) if encoded.status == DebuggerTraceStorage::StorageStatus.Oversized else DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, RECORDER_DETAIL_ENCODING)
+                return recorder_mark_resource_limit(recorder, failure) if encoded.status == DebuggerTraceStorage::StorageStatus.Oversized
+                recorder.status <- RecorderStatus.Corrupt
+                manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+                manifest.status <- DebuggerTraceManifest::ManifestStatus.Corrupt
+                recorder.manifest <- manifest
+                recorder.last_error <- failure
+                return failure
+            recorder.chunks[recorder.chunk_count] <- encoded.chunk
+            recorder.chunk_count <- recorder.chunk_count + 1
+            manifest: mutable DebuggerTraceManifest::BundleManifest = recorder.manifest
+            manifest.checkpoint_count <- manifest.checkpoint_count + RECORDER_CHECKPOINT_COUNT_OFFSET
+            recorder.manifest <- manifest
+            return DebuggerErrors::no_error()
+
+    private:
         def recorder_chunk_is_exact(chunk: DebuggerTraceStorage::StoredChunk, expected_first: u64, recording: DebuggerIdentity::DebugId) -> bool:
             return false if chunk.header.kind != DebuggerTrace::ChunkKind.Events or chunk.payload_length == 0 or chunk.payload_length % RECORDER_EVENT_ENCODED_BYTES != 0
             event_count: usize = chunk.payload_length / RECORDER_EVENT_ENCODED_BYTES
@@ -196,11 +280,24 @@ module DebuggerTraceRecorder:
                 return false if schema != RECORDER_SCHEMA_VERSION or ordinal != expected_first + index.u64() or position_event != ordinal or event_recording.value != recording.value or task.value != position_task.value or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality != DebuggerEvents::EventQuality.Exact.u16()
             return DebuggerTraceBinary::reader_is_valid(event_reader) and event_reader.offset == event_reader.length
 
+        def recorder_checkpoint_chunk_is_exact(chunk: DebuggerTraceStorage::StoredChunk, recording: DebuggerIdentity::DebugId, first_event: u64, last_event: u64) -> bool:
+            return false if not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(chunk)
+            return false if not DebuggerTraceStorage::storage_checkpoint_event_is_within_trace(chunk.header.first_event, first_event, last_event)
+            decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerTraceStorage::storage_checkpoint_chunk_decode(chunk)
+            return decoded.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and decoded.checkpoint.recording.value == recording.value
+
+    public:
         def recorder_write(fd: int, recorder: mutable TraceRecorder&) -> DebuggerTraceStorage::StorageStatus can[Blocking.IO]:
             return DebuggerTraceStorage::StorageStatus.Invalid if recorder.status == RecorderStatus.Corrupt or recorder.recording.value == RECORDER_NO_RECORDING
             return DebuggerTraceStorage::StorageStatus.Oversized if recorder.chunk_count > RECORDER_CHUNK_CAPACITY or recorder.pending_count > RECORDER_EVENT_CAPACITY
-            finalized: DebuggerErrors::DebuggerError = recorder_finalize(recorder)
-            return DebuggerTraceStorage::StorageStatus.Invalid if not DebuggerErrors::error_is_ok(finalized)
+            return DebuggerTraceStorage::StorageStatus.Invalid if recorder.status == RecorderStatus.Partial
+            if recorder.status != RecorderStatus.ResourceLimit:
+                finalized: DebuggerErrors::DebuggerError = recorder_finalize(recorder)
+                return DebuggerTraceStorage::StorageStatus.Invalid if not DebuggerErrors::error_is_ok(finalized) and recorder.status != RecorderStatus.ResourceLimit
+            has_event_chunk: mutable bool = false
+            for index in 0..<recorder.chunk_count:
+                has_event_chunk <- true if recorder.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events
+            return DebuggerTraceStorage::StorageStatus.Invalid if not has_event_chunk
             manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(recorder.manifest)
             return DebuggerTraceStorage::StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(manifest_bytes)
             manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
@@ -211,20 +308,17 @@ module DebuggerTraceRecorder:
                 manifest_chunk.payload[index] <- manifest_bytes.bytes[index]
             manifest_result: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_chunk(fd, manifest_chunk) can Blocking.IO
             if manifest_result != DebuggerTraceStorage::StorageStatus.Ready:
-                recorder.status <- RecorderStatus.Partial
-                recorder.exact <- false
+                recorder_mark_io_failure(recorder)
                 return manifest_result
             for index in 0..<recorder.chunk_count:
                 result: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_chunk(fd, recorder.chunks[index]) can Blocking.IO
                 if result != DebuggerTraceStorage::StorageStatus.Ready:
-                    recorder.status <- RecorderStatus.Partial
-                    recorder.exact <- false
+                    recorder_mark_io_failure(recorder)
                     return result
             manifest: DebuggerTraceManifest::BundleManifest = recorder.manifest
             footer_result: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_footer(fd, recorder.chunk_count.u64() + RECORDER_EVENT_SEQUENCE_OFFSET, manifest.last_event) can Blocking.IO
             if footer_result != DebuggerTraceStorage::StorageStatus.Ready:
-                recorder.status <- RecorderStatus.Partial
-                recorder.exact <- false
+                recorder_mark_io_failure(recorder)
             return footer_result
 
         def recorder_is_exact(recorder: TraceRecorder) -> bool:
@@ -233,17 +327,25 @@ module DebuggerTraceRecorder:
             return false if recorder.next_ordinal == RECORDER_NO_EVENT
             return false if not DebuggerErrors::error_is_ok(recorder.last_error)
             return false if not DebuggerTraceManifest::manifest_is_replayable(recorder.manifest)
-            return false if recorder.manifest.first_event != RECORDER_NO_EVENT or recorder.manifest.last_event != recorder.next_ordinal - RECORDER_EVENT_SEQUENCE_OFFSET or recorder.manifest.checkpoint_count != 0
+            return false if recorder.manifest.first_event != RECORDER_NO_EVENT or recorder.manifest.last_event != recorder.next_ordinal - RECORDER_EVENT_SEQUENCE_OFFSET
             return false if recorder.status == RecorderStatus.Complete and recorder.pending_count != 0
             expected_event: mutable u64 = RECORDER_NO_EVENT
+            checkpoint_count: mutable u64 = 0
             for index in 0..<recorder.chunk_count:
                 return false if recorder.chunks[index].header.sequence != index.u64() + RECORDER_EVENT_SEQUENCE_OFFSET
                 encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(recorder.chunks[index])
                 return false if not DebuggerTraceBinary::writer_is_valid(encoded)
-                return false if not recorder_chunk_is_exact(recorder.chunks[index], expected_event, recorder.recording)
-                event_count: u64 = (recorder.chunks[index].payload_length / RECORDER_EVENT_ENCODED_BYTES).u64()
-                return false if event_count == 0 or expected_event > RECORDER_MAX_ORDINAL - event_count
-                expected_event <- expected_event + event_count
+                if recorder.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events:
+                    return false if not recorder_chunk_is_exact(recorder.chunks[index], expected_event, recorder.recording)
+                    event_count: u64 = (recorder.chunks[index].payload_length / RECORDER_EVENT_ENCODED_BYTES).u64()
+                    return false if event_count == 0 or expected_event > RECORDER_MAX_ORDINAL - event_count
+                    expected_event <- expected_event + event_count
+                elif recorder.chunks[index].header.kind == DebuggerTrace::ChunkKind.Checkpoint:
+                    return false if not recorder_checkpoint_chunk_is_exact(recorder.chunks[index], recorder.recording, recorder.manifest.first_event, recorder.manifest.last_event)
+                    checkpoint_count <- checkpoint_count + RECORDER_CHECKPOINT_COUNT_OFFSET
+                else:
+                    return false
+            return false if recorder.manifest.checkpoint_count != checkpoint_count
             return false if recorder.next_ordinal < recorder.pending_count.u64()
             pending_first: u64 = recorder.next_ordinal - recorder.pending_count.u64()
             return false if pending_first != expected_event

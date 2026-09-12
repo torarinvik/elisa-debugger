@@ -4,6 +4,7 @@ include "../core/session.elisa"
 include "../core/capabilities.elisa"
 include "../core/identity.elisa"
 include "./dispatcher.elisa"
+include "./encoding.elisa"
 include "../engine/default_image.elisa"
 include "./managed_service.elisa"
 
@@ -21,8 +22,6 @@ module DebuggerProtocolServer:
         const DECIMAL_BASE: u64 = 10
         const RESPONSE_BODY_PREFIX_LENGTH: usize = 25
         const RESPONSE_ID_PREFIX: cstr = "{\"kind\":\"response\",\"id\":\""
-        const RESPONSE_DISCOVERY_SUFFIX: cstr = "\",\"ok\":true,\"result\":{\"protocolMajor\":1,\"protocolMinor\":0,\"server\":\"elisa-debugger\",\"productVersion\":\"0.1.0\",\"engines\":[\"managed\"],\"traceSchema\":1,\"features\":{\"sourceBreakpoints\":false,\"reverseExecution\":true,\"typedValues\":false,\"historicalQueries\":false,\"traceExport\":false},\"installationHealthy\":true}}"
-        const RESPONSE_DISCOVERY_SUFFIX_LENGTH: usize = 304
         const RESPONSE_UNSUPPORTED_SUFFIX: cstr = "\",\"ok\":false,\"error\":{\"code\":\"UNSUPPORTED\",\"message\":\"method is not implemented\"}}"
         const RESPONSE_UNSUPPORTED_SUFFIX_LENGTH: usize = 82
         const RESPONSE_SUCCESS_SUFFIX: cstr = "\",\"ok\":true,\"result\":{\"accepted\":true}}"
@@ -68,8 +67,28 @@ module DebuggerProtocolServer:
             _ = printf(suffix) can Console
             _ = printf("\n") can Console
 
-        def write_discovery_response(id: u64) -> void can[Console, Unsafe.PointerCast]:
-            write_dynamic_response(id, RESPONSE_DISCOVERY_SUFFIX, RESPONSE_DISCOVERY_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+        def write_json_buffer_response(buffer: DebuggerProtocolEncoding::JsonBuffer) -> void can[Console]:
+            return if not DebuggerProtocolEncoding::json_buffer_is_valid(buffer)
+            _ = printf("%llu", buffer.length.u64()) can Console
+            _ = printf(" ") can Console
+            for index in 0..<buffer.length:
+                _ = printf("%c", buffer.bytes[index].i32()) can Console
+            _ = printf("\n") can Console
+
+        def server_capabilities(engine_capabilities: DebuggerCapabilities::CapabilitySet) -> DebuggerCapabilities::CapabilitySet:
+            wire: mutable DebuggerCapabilities::CapabilitySet = engine_capabilities
+            # This compact endpoint does not carry source breakpoint operands
+            # or inspection/trace result payloads, so do not expose those
+            # engine-level features as usable over this wire surface.
+            wire.source_breakpoints <- false
+            wire.typed_values <- false
+            wire.historical_queries <- false
+            wire.trace_export <- false
+            return wire
+
+        def write_discovery_response(id: u64, capabilities: DebuggerCapabilities::CapabilitySet) -> void can[Console]:
+            encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::discovery_response_encode(id, capabilities)
+            write_json_buffer_response(encoded) can Console
 
         def write_unsupported_response(id: u64) -> void can[Console, Unsafe.PointerCast]:
             write_dynamic_response(id, RESPONSE_UNSUPPORTED_SUFFIX, RESPONSE_UNSUPPORTED_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -84,9 +103,9 @@ module DebuggerProtocolServer:
             return true if method == DebuggerProtocolRequest::RequestMethod.Threads or method == DebuggerProtocolRequest::RequestMethod.Stack or method == DebuggerProtocolRequest::RequestMethod.Scopes or method == DebuggerProtocolRequest::RequestMethod.Variables or method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
             return false
 
-        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, id: u64) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet) -> void can[Console, Unsafe.PointerCast]:
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Discover:
-                write_discovery_response(id) can Console, Unsafe.PointerCast
+                write_discovery_response(id, capabilities) can Console
                 return
             if result.accepted and response_requires_missing_payload(result.method):
                 write_dynamic_response(id, RESPONSE_RESULT_UNAVAILABLE_SUFFIX, RESPONSE_RESULT_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -162,7 +181,7 @@ module DebuggerProtocolServer:
                         result: mutable DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
                         session <- result.session
                         response_id: u64 = request.id if request.has_id else FALLBACK_RESPONSE_ID
-                        write_response(result, response_id) can Console, Unsafe.PointerCast
+                        write_response(result, response_id, server_capabilities(service.controller.session.capabilities)) can Console, Unsafe.PointerCast
                         DebuggerProtocolFraming::frame_decoder_reset(decoder)
                     return SERVER_INVALID_FRAME_EXIT_CODE if DebuggerProtocolFraming::frame_decoder_is_failed(decoder)
             return SERVER_INVALID_FRAME_EXIT_CODE if decoder.state != DebuggerProtocolFraming::FrameDecoderState.Header or decoder.header_digits != 0

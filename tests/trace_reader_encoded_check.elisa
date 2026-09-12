@@ -16,6 +16,10 @@ const EVENT_PAYLOAD_HASH: u64 = 56
 const TRACE_SCHEMA: u32 = 1
 const TRUNCATION: usize = 1
 const CORRUPTION: u8 = 1
+const MAX_EVENT_MANIFEST_SEQUENCE: u64 = 0
+const MAX_EVENT_ORDINAL: u64 = 18446744073709551615
+const MAX_EVENT_CHUNK_SEQUENCE: u64 = 1
+const MAX_EVENT_NEXT_CHUNK_SEQUENCE: u64 = 2
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{
@@ -44,6 +48,45 @@ def manifest_encoded(recorder: DebuggerTraceRecorder::TraceRecorder) -> Debugger
         chunk.payload[index] <- payload.bytes[index]
     return DebuggerTraceStorage::storage_encode_chunk(chunk)
 
+def max_event_manifest_chunk() -> DebuggerTraceStorage::StoredChunk:
+    manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build_identity(), DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest.first_event <- MAX_EVENT_ORDINAL
+    manifest.last_event <- MAX_EVENT_ORDINAL
+    payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TRACE_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: MAX_EVENT_MANIFEST_SEQUENCE, first_event: MAX_EVENT_ORDINAL, last_event: MAX_EVENT_ORDINAL, payload_length: payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(payload)}
+    chunk.payload_length <- payload.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
+def max_event_chunk(sequence: u64) -> DebuggerTraceStorage::StoredChunk:
+    position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(RECORDING_ID))
+    position.event <- MAX_EVENT_ORDINAL
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TRACE_SCHEMA, MAX_EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, EVENT_PAYLOAD_HASH)
+    payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    payload <- DebuggerTraceBinary::writer_put_u32(payload, event.schema)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.ordinal)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.task.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.recording.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.branch.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.event)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.task.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.invocation.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.statement.value)
+    payload <- DebuggerTraceBinary::writer_put_u32(payload, event.position.microstep)
+    payload <- DebuggerTraceBinary::writer_put_u16(payload, event.kind.u16())
+    payload <- DebuggerTraceBinary::writer_put_u16(payload, event.quality.u16())
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.payload_hash)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TRACE_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: sequence, first_event: MAX_EVENT_ORDINAL, last_event: MAX_EVENT_ORDINAL, payload_length: payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(payload)}
+    chunk.payload_length <- payload.length
+    chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
 def main() -> i64:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(RECORDING_ID))
     position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(RECORDING_ID))
@@ -69,4 +112,14 @@ def main() -> i64:
     return 8 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest_encoded(corrupt_reader, manifest.bytes[0], manifest.length))
     failure: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest_encoded(corrupt_reader, damaged[0], event_chunk.length)
     return 9 if failure.code != DebuggerErrors::ErrorCode.Corrupt or corrupt_reader.state != DebuggerTraceReader::ReaderState.Corrupt
+
+    max_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return 10 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(max_reader, max_event_manifest_chunk()))
+    max_chunk: DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_CHUNK_SEQUENCE)
+    return 11 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(max_reader, max_chunk))
+    return 12 if not max_reader.event_exhausted or not DebuggerTraceReader::reader_is_exact(max_reader)
+    exhausted_reader: mutable DebuggerTraceReader::TraceReader = max_reader
+    repeated_max_chunk: mutable DebuggerTraceStorage::StoredChunk = max_event_chunk(MAX_EVENT_NEXT_CHUNK_SEQUENCE)
+    repeated_max_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(exhausted_reader, repeated_max_chunk)
+    return 13 if DebuggerErrors::error_is_ok(repeated_max_error)
     return 0

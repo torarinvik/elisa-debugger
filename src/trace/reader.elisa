@@ -54,6 +54,7 @@ module DebuggerTraceReader:
             full_checkpoint_count: mutable usize
             next_sequence: mutable u64
             next_event: mutable u64
+            event_exhausted: mutable bool
             recording: mutable DebuggerIdentity::DebugId
             recording_seen: mutable bool
             manifest_seen: mutable bool
@@ -67,6 +68,7 @@ module DebuggerTraceReader:
             reader: mutable TraceReader = zeroed
             reader.next_sequence <- READER_FIRST_SEQUENCE
             reader.next_event <- 0
+            reader.event_exhausted <- false
             reader.full_checkpoint_count <- 0
             reader.recording <- DebuggerIdentity::debug_id(0)
             reader.recording_seen <- false
@@ -126,6 +128,7 @@ module DebuggerTraceReader:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if not DebuggerTraceManifest::manifest_is_well_formed(reader.manifest)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32() or chunk.header.first_event != reader.manifest.first_event or chunk.header.last_event != reader.manifest.last_event
             reader.next_event <- reader.manifest.first_event
+            reader.event_exhausted <- false
             reader.manifest_seen <- true
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if reader.next_sequence == READER_MAX_SEQUENCE
             reader.next_sequence <- reader.next_sequence + 1
@@ -147,9 +150,15 @@ module DebuggerTraceReader:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM) if DebuggerTraceBinary::writer_checksum(payload) != chunk.checksum
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if reader.event_count >= READER_EVENT_CAPACITY
             event_count_in_chunk: u64 = (chunk.payload_length / EVENT_ENCODED_BYTES).u64()
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if event_count_in_chunk > READER_MAX_EVENT - reader.next_event
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if reader.event_exhausted
+            # Check the last ordinal so one event at u64::MAX remains valid without increment overflow.
+            event_offset_in_chunk: u64 = event_count_in_chunk - 1
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if event_offset_in_chunk > READER_MAX_EVENT - reader.next_event
+            expected_last_event: u64 = reader.next_event + event_offset_in_chunk
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.first_event != reader.next_event or chunk.header.last_event != expected_last_event
             event_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(chunk.payload[0], chunk.payload_length)
             while event_reader.offset + EVENT_ENCODED_BYTES <= event_reader.length:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if reader.event_exhausted
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if reader.event_count >= READER_EVENT_CAPACITY
                 event: mutable DebuggerEvents::EventEnvelope = zeroed
                 schema: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
@@ -186,10 +195,12 @@ module DebuggerTraceReader:
                 event.payload_hash <- payload_hash
                 reader.events[reader.event_count] <- event
                 reader.event_count <- reader.event_count + 1
-                reader.next_event <- reader.next_event + 1
+                if ordinal == READER_MAX_EVENT:
+                    reader.event_exhausted <- true
+                else:
+                    reader.next_event <- reader.next_event + 1
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING + 10) if not DebuggerTraceBinary::reader_is_valid(event_reader)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING + 20) if event_reader.offset != event_reader.length
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.payload_length > 0 and (chunk.header.first_event != reader.next_event - (chunk.payload_length / EVENT_ENCODED_BYTES).u64() or chunk.header.last_event != reader.next_event - 1)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if reader.next_sequence == READER_MAX_SEQUENCE
             reader.next_sequence <- reader.next_sequence + 1
             reader.event_chunk_count <- reader.event_chunk_count + 1

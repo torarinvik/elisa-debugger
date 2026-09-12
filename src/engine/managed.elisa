@@ -85,10 +85,25 @@ module DebuggerManagedEngine:
                 else:
                     DebuggerValueStore::value_store_add_uninitialized(controller.state.values, global_name, global_type_id)
 
+        def managed_source_position_matches(left: DebuggerIdentity::SourceSpan, right: DebuggerIdentity::SourceSpan) -> bool:
+            # A missing span cannot define a source-level step boundary.
+            return false if not DebuggerMetadata::source_span_is_valid(left) or not DebuggerMetadata::source_span_is_valid(right)
+            return left.file.value == right.file.value and left.start_byte == right.start_byte and left.end_byte == right.end_byte and left.start_line == right.start_line and left.start_column == right.start_column and left.end_line == right.end_line and left.end_column == right.end_column and left.discriminator == right.discriminator
+
+        def managed_current_source(controller: mutable ManagedController&) -> DebuggerIdentity::SourceSpan:
+            return zeroed if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
+            return controller.engine.image.instructions[controller.engine.machine.program_counter.usize()].source
+
+        def managed_compound_breakpoint_should_stop(controller: mutable ManagedController&, initial_source: DebuggerIdentity::SourceSpan) -> bool:
+            current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+            return false if managed_source_position_matches(initial_source, current_source)
+            return managed_breakpoint_should_stop(controller)
+
         def managed_breakpoint_should_stop(controller: mutable ManagedController&) -> bool:
             return false if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
             instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
-            return DebuggerBreakpointManager::breakpoint_table_should_stop(controller.state.breakpoints, controller.engine.branch, instruction.source)
+            event_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
+            return DebuggerBreakpointManager::breakpoint_table_should_stop(controller.state.breakpoints, event_branch, instruction.source)
 
         def managed_launch(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
@@ -163,27 +178,45 @@ module DebuggerManagedEngine:
 
         def managed_step_over(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
-            return managed_step(controller) if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count or controller.engine.image.instructions[controller.engine.machine.program_counter.usize()].opcode != DebuggerEDIR::Opcode.Call
+            return managed_step(controller) if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
+            initial_instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
+            initial_source: DebuggerIdentity::SourceSpan = initial_instruction.source
             initial_depth: usize = controller.engine.machine.return_stack_pointer
             initial_event: usize = controller.engine.event_count
+            hit_breakpoint: mutable bool = false
             failure: mutable DebuggerErrors::DebuggerError = managed_step(controller)
             return failure if not DebuggerErrors::error_is_ok(failure)
-            while controller.engine.machine.return_stack_pointer > initial_depth and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
+                current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+                call_is_active: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
+                same_source_position: bool = managed_source_position_matches(initial_source, current_source)
+                # Stay in the original source span, or in a called frame, until a boundary or breakpoint.
+                break if not call_is_active and not same_source_position
+                if managed_compound_breakpoint_should_stop(controller, initial_source):
+                    hit_breakpoint <- true
+                    break
                 failure <- managed_step(controller)
                 return failure if not DebuggerErrors::error_is_ok(failure)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.machine.return_stack_pointer > initial_depth
+            call_is_active_after_limit: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
+            source_position_unchanged_after_limit: bool = managed_source_position_matches(initial_source, managed_current_source(controller))
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event >= COMPOUND_STEP_LIMIT and (call_is_active_after_limit or source_position_unchanged_after_limit)
             return DebuggerErrors::no_error()
 
         def managed_step_out(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             initial_depth: usize = controller.engine.machine.return_stack_pointer
             initial_event: usize = controller.engine.event_count
+            initial_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+            hit_breakpoint: mutable bool = false
             failure: mutable DebuggerErrors::DebuggerError = managed_step(controller)
             return failure if not DebuggerErrors::error_is_ok(failure)
             while initial_depth > 0 and controller.engine.machine.return_stack_pointer >= initial_depth and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
+                if managed_compound_breakpoint_should_stop(controller, initial_source):
+                    hit_breakpoint <- true
+                    break
                 failure <- managed_step(controller)
                 return failure if not DebuggerErrors::error_is_ok(failure)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if initial_depth > 0 and controller.engine.machine.return_stack_pointer >= initial_depth
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if not hit_breakpoint and initial_depth > 0 and controller.engine.machine.return_stack_pointer >= initial_depth
             return DebuggerErrors::no_error()
 
         def managed_reverse_continue(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
@@ -195,7 +228,8 @@ module DebuggerManagedEngine:
                 steps <- steps + 1
                 if controller.engine.machine.program_counter < controller.engine.image.program.instruction_count:
                     instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
-                    return DebuggerErrors::no_error() if DebuggerBreakpointManager::breakpoint_table_would_stop(controller.state.breakpoints, controller.engine.branch, instruction.source)
+                    event_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
+                    return DebuggerErrors::no_error() if DebuggerBreakpointManager::breakpoint_table_would_stop(controller.state.breakpoints, event_branch, instruction.source)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count > 0
             return DebuggerErrors::no_error()
 

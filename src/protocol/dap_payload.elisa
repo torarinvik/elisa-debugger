@@ -32,6 +32,9 @@ module DebuggerDAPPayload:
         const ASCII_U: u8 = 117
         const ASCII_Y: u8 = 121
         const ASCII_S: u8 = 115
+        const ASCII_I: u8 = 105
+        const ASCII_L: u8 = 108
+        const ASCII_UPPER_S: u8 = 83
         const ASCII_UPPER_A: u8 = 65
         const ASCII_UPPER_F: u8 = 70
         const ASCII_LOWER_X: u8 = 120
@@ -51,9 +54,15 @@ module DebuggerDAPPayload:
         const FIRST_DIGIT_COUNT: usize = 1
         const PROGRAM_FIELD: u8 = 3
         const ARGUMENTS_FIELD: u8 = 4
+        const LINES_START_AT_ONE_FIELD: u8 = 5
+        const COLUMNS_START_AT_ONE_FIELD: u8 = 6
         const PROGRAM_PATH_CAPACITY: usize = 1024
         const PROGRAM_FIELD_LENGTH: usize = 7
         const ARGUMENTS_FIELD_LENGTH: usize = 9
+        const LINES_START_AT_ONE_FIELD_LENGTH: usize = 13
+        const COLUMNS_START_AT_ONE_FIELD_LENGTH: usize = 15
+        const JSON_TRUE_LENGTH: usize = 4
+        const JSON_FALSE_LENGTH: usize = 5
         const ASCII_P: u8 = 112
         const ASCII_G: u8 = 103
         const ASCII_SLASH: u8 = 47
@@ -115,11 +124,43 @@ module DebuggerDAPPayload:
             return byte == ASCII_SPACE or byte == ASCII_TAB or byte == ASCII_LINE_FEED or byte == ASCII_CARRIAGE_RETURN
 
         def field_length(field: u8) -> usize:
+            return LINES_START_AT_ONE_FIELD_LENGTH if field == LINES_START_AT_ONE_FIELD
+            return COLUMNS_START_AT_ONE_FIELD_LENGTH if field == COLUMNS_START_AT_ONE_FIELD
             return ARGUMENTS_FIELD_LENGTH if field == ARGUMENTS_FIELD
             return PROGRAM_FIELD_LENGTH if field == PROGRAM_FIELD
             return MEMORY_REFERENCE_LENGTH if field == MEMORY_REFERENCE_FIELD else COUNT_LENGTH
 
         def field_byte(field: u8, position: usize) -> u8:
+            if field == LINES_START_AT_ONE_FIELD:
+                return ASCII_L if position == 0
+                return ASCII_I if position == 1
+                return ASCII_N if position == 2
+                return ASCII_E if position == 3
+                return ASCII_S if position == 4
+                return ASCII_UPPER_S if position == 5
+                return ASCII_T if position == 6
+                return ASCII_A if position == 7
+                return ASCII_R if position == 8
+                return ASCII_T if position == 9
+                return ASCII_UPPER_A if position == 10
+                return ASCII_T if position == 11
+                return ASCII_ONE
+            if field == COLUMNS_START_AT_ONE_FIELD:
+                return ASCII_C if position == 0
+                return ASCII_O if position == 1
+                return ASCII_L if position == 2
+                return ASCII_U if position == 3
+                return ASCII_M if position == 4
+                return ASCII_N if position == 5
+                return ASCII_S if position == 6
+                return ASCII_UPPER_S if position == 7
+                return ASCII_T if position == 8
+                return ASCII_A if position == 9
+                return ASCII_R if position == 10
+                return ASCII_T if position == 11
+                return ASCII_UPPER_A if position == 12
+                return ASCII_T if position == 13
+                return ASCII_ONE
             if field == ARGUMENTS_FIELD:
                 return ASCII_A if position == 0
                 return ASCII_R if position == 1
@@ -162,10 +203,33 @@ module DebuggerDAPPayload:
 
         def field_matches(payload: u8&, index: usize, length: usize, field: u8) -> bool:
             key_length: usize = field_length(field)
-            return false if index >= length or payload[index] != ASCII_QUOTE or length - index < key_length + 2
-            for position in 0..<key_length:
-                return false if payload[index + 1 + position] != field_byte(field, position)
-            return payload[index + key_length + 1] == ASCII_QUOTE
+            return false if index >= length or payload[index] != ASCII_QUOTE
+            decoded_length: mutable usize = 0
+            cursor: mutable usize = index + 1
+            while cursor < length:
+                byte: u8 = payload[cursor]
+                return decoded_length == key_length if byte == ASCII_QUOTE
+                decoded: mutable u64 = byte.u64()
+                if byte == ASCII_BACKSLASH:
+                    return false if cursor + 1 >= length
+                    escaped: u8 = payload[cursor + 1]
+                    if escaped == ASCII_LOWER_U:
+                        unicode_value: ParsedValue = parse_unicode_quad(payload, length, cursor + 2)
+                        return false if not unicode_value.valid or unicode_value.value >= UTF8_CONTINUATION_BASE
+                        decoded <- unicode_value.value
+                        cursor <- unicode_value.end
+                    else:
+                        # Escaped controls cannot equal any supported field
+                        # character. Decode the printable JSON escapes exactly.
+                        decoded <- escaped.u64() if escaped == ASCII_QUOTE or escaped == ASCII_BACKSLASH or escaped == ASCII_SLASH
+                        decoded <- ASCII_SPACE.u64() if escaped == ASCII_BACKSPACE or escaped == ASCII_FORM_FEED or escaped == ASCII_NEWLINE or escaped == ASCII_CARRIAGE_RETURN_ESCAPE or escaped == ASCII_ESCAPE_TAB
+                        return false if escaped != ASCII_QUOTE and escaped != ASCII_BACKSLASH and escaped != ASCII_SLASH and escaped != ASCII_BACKSPACE and escaped != ASCII_FORM_FEED and escaped != ASCII_NEWLINE and escaped != ASCII_CARRIAGE_RETURN_ESCAPE and escaped != ASCII_ESCAPE_TAB
+                        cursor <- cursor + 2
+                else:
+                    cursor <- cursor + 1
+                return false if decoded_length >= key_length or decoded != field_byte(field, decoded_length).u64()
+                decoded_length <- decoded_length + 1
+            return false
 
         def field_value_start(payload: u8&, length: usize, field: u8, start: usize) -> usize:
             return NO_INDEX if start >= length
@@ -262,6 +326,18 @@ module DebuggerDAPPayload:
                 break if is_whitespace(byte) or byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE
                 index <- index + 1
             return NO_INDEX if index == start else index
+
+        def parse_json_boolean(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start >= length
+            if payload[start] == ASCII_T:
+                return invalid_value() if length - start < JSON_TRUE_LENGTH
+                return invalid_value() if payload[start + 1] != ASCII_R or payload[start + 2] != ASCII_U or payload[start + 3] != ASCII_E
+                return ParsedValue{valid: true, value: 1, end: start + JSON_TRUE_LENGTH}
+            if payload[start] == ASCII_F:
+                return invalid_value() if length - start < JSON_FALSE_LENGTH
+                return invalid_value() if payload[start + 1] != ASCII_A or payload[start + 2] != ASCII_L or payload[start + 3] != ASCII_S or payload[start + 4] != ASCII_E
+                return ParsedValue{valid: true, value: 0, end: start + JSON_FALSE_LENGTH}
+            return invalid_value()
 
         # Reads only direct properties from one object and skips complete
         # nested values, so launch path lookup cannot accept nested decoys.
@@ -461,6 +537,11 @@ module DebuggerDAPPayload:
             length: mutable usize
             valid: mutable bool
 
+        struct ClientCoordinates:
+            valid: mutable bool
+            lines_start_at_one: mutable bool
+            columns_start_at_one: mutable bool
+
         struct MemoryRequest:
             valid: mutable bool
             address: mutable u64
@@ -491,3 +572,29 @@ module DebuggerDAPPayload:
             program: usize = object_field_value_start(payload, length, arguments, PROGRAM_FIELD, 0)
             return result if program == NO_INDEX or object_field_value_start(payload, length, arguments, PROGRAM_FIELD, 1) != NO_INDEX
             return parse_program_path_string(payload, length, program)
+
+        def client_coordinates_default() -> ClientCoordinates:
+            return ClientCoordinates{valid: true, lines_start_at_one: true, columns_start_at_one: true}
+
+        def client_coordinates_parse(payload: u8&, length: usize) -> ClientCoordinates:
+            coordinates: mutable ClientCoordinates = client_coordinates_default()
+            root_start: mutable usize = 0
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 0)
+            return coordinates if arguments == NO_INDEX
+            return ClientCoordinates{valid: false, lines_start_at_one: true, columns_start_at_one: true} if object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 1) != NO_INDEX
+            return ClientCoordinates{valid: false, lines_start_at_one: true, columns_start_at_one: true} if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
+            lines: usize = object_field_value_start(payload, length, arguments, LINES_START_AT_ONE_FIELD, 0)
+            return ClientCoordinates{valid: false, lines_start_at_one: true, columns_start_at_one: true} if object_field_value_start(payload, length, arguments, LINES_START_AT_ONE_FIELD, 1) != NO_INDEX
+            if lines != NO_INDEX:
+                line_value: ParsedValue = parse_json_boolean(payload, length, lines)
+                return ClientCoordinates{valid: false, lines_start_at_one: true, columns_start_at_one: true} if not line_value.valid
+                coordinates.lines_start_at_one <- line_value.value != 0
+            columns: usize = object_field_value_start(payload, length, arguments, COLUMNS_START_AT_ONE_FIELD, 0)
+            return ClientCoordinates{valid: false, lines_start_at_one: true, columns_start_at_one: true} if object_field_value_start(payload, length, arguments, COLUMNS_START_AT_ONE_FIELD, 1) != NO_INDEX
+            if columns != NO_INDEX:
+                column_value: ParsedValue = parse_json_boolean(payload, length, columns)
+                return ClientCoordinates{valid: false, lines_start_at_one: true, columns_start_at_one: true} if not column_value.valid
+                coordinates.columns_start_at_one <- column_value.value != 0
+            return coordinates

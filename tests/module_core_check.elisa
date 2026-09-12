@@ -42,6 +42,10 @@ const CHECKPOINT_MEMORY_FLAG_BYTES: usize = 1
 const CHECKPOINT_HEAP_BYTE_OFFSET: usize = CHECKPOINT_SCHEMA_BYTES + CHECKPOINT_INTEGER_BYTES * (CHECKPOINT_SCALARS_BEFORE_MEMORY + CHECKPOINT_LOCAL_CAPACITY + CHECKPOINT_GLOBAL_CAPACITY + CHECKPOINT_MEMORY_CAPACITY) + CHECKPOINT_MEMORY_CAPACITY * CHECKPOINT_MEMORY_FLAG_BYTES + CHECKPOINT_GLOBAL_CAPACITY
 const CHECKPOINT_EMPTY_HEAP_NEXT: usize = 0
 const INVALID_MEMORY_SHAPE_RESULT: i64 = 123
+const INVALID_IMAGE_RETURN_ADDRESS_RESULT: i64 = 156
+const FIRST_RETURN_STACK_SLOT: usize = 0
+const ACTIVE_RETURN_STACK_POINTER: usize = 1
+const RETURN_INSTRUCTION_EVENT_INDEX: usize = 1
 const HOST_POINTER_BITS: u32 = 64
 const HOST_PAGE_SIZE: u64 = 4096
 const PARTIAL_SEEK_EVENT: usize = 1
@@ -188,6 +192,14 @@ def main() -> i64:
     return 135 if invalid_parent_branch.engine_error != DebuggerReplayEngine::EngineError.HistoryUnavailable
     managed_branch: mutable DebuggerReplayEngine::ReplayEngine = DebuggerManagedEngine::managed_fork(managed, DebuggerIdentity::debug_id(44))
     return 18 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_intervene_accumulator(managed_branch, 99)) or managed_branch.machine.accumulator != 99
+    invalid_return_address_engine: mutable DebuggerReplayEngine::ReplayEngine = managed.engine
+    invalid_return_snapshot: mutable DebuggerCheckpoint::MachineSnapshot = invalid_return_address_engine.history[RETURN_INSTRUCTION_EVENT_INDEX]
+    invalid_return_snapshot.return_stack_pointer <- ACTIVE_RETURN_STACK_POINTER
+    invalid_return_snapshot.return_stack[FIRST_RETURN_STACK_SLOT] <- invalid_return_address_engine.image.program.instruction_count
+    invalid_return_snapshot.state_hash <- DebuggerCheckpoint::snapshot_state_hash(invalid_return_snapshot)
+    return INVALID_IMAGE_RETURN_ADDRESS_RESULT if not DebuggerCheckpoint::snapshot_shape_is_valid(invalid_return_snapshot)
+    invalid_return_address_engine.history[RETURN_INSTRUCTION_EVENT_INDEX] <- invalid_return_snapshot
+    return INVALID_IMAGE_RETURN_ADDRESS_RESULT if DebuggerReplayEngine::replay_engine_snapshot_is_valid(invalid_return_address_engine, RETURN_INSTRUCTION_EVENT_INDEX, invalid_return_snapshot)
     hash_before: u64 = DebuggerReplayEngine::replay_engine_state_hash(managed.engine)
     machine_for_hash: mutable DebuggerEDIR::Machine = managed.engine.machine
     machine_for_hash.locals[0] <- machine_for_hash.locals[0] + 1
@@ -332,8 +344,12 @@ def main() -> i64:
     fault_session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(62), build, DebuggerCapabilities::managed_capabilities())
     fault_session.state <- DebuggerSession::SessionState.Stopped
     fault_controller: mutable DebuggerManagedEngine::ManagedController = DebuggerManagedEngine::managed_new(fault_session, fault_image, DebuggerIdentity::debug_id(63))
+    fault_event_before: usize = fault_controller.engine.event_count
+    fault_state_hash_before: u64 = DebuggerReplayEngine::replay_engine_state_hash(fault_controller.engine)
     fault_seek_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(fault_controller, 1)
-    return FAULTING_SEEK_RESULT if fault_seek_failure.code != DebuggerErrors::ErrorCode.Diverged or fault_controller.session.position.event != 0
+    return FAULTING_SEEK_RESULT if fault_seek_failure.code != DebuggerErrors::ErrorCode.Diverged or fault_controller.session.position.event != 0 or fault_controller.engine.event_count != fault_event_before
+    return FAULTING_SEEK_RESULT if fault_controller.engine.machine.faulted or fault_controller.engine.machine.halted or fault_controller.engine.machine.program_counter != 0 or fault_controller.engine.engine_error != DebuggerReplayEngine::EngineError.None
+    return FAULTING_SEEK_RESULT if DebuggerReplayEngine::replay_engine_state_hash(fault_controller.engine) != fault_state_hash_before
     fault_step_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(66), build, DebuggerCapabilities::managed_capabilities())
     fault_step_session.state <- DebuggerSession::SessionState.Stopped
     fault_step_controller: mutable DebuggerManagedEngine::ManagedController = DebuggerManagedEngine::managed_new(fault_step_session, fault_image, DebuggerIdentity::debug_id(67))

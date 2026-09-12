@@ -898,16 +898,20 @@ module DebuggerDAPServer:
             line: mutable u64
             column: mutable u64
 
-        def stack_source_location(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult) -> DAPSourceLocation:
+        def stack_source_location(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, coordinates: DebuggerDAPPayload::ClientCoordinates) -> DAPSourceLocation:
             instruction_index: u64 = result.session.position.statement.value
             if instruction_index < service.controller.engine.image.program.instruction_count:
                 source: DebuggerIdentity::SourceSpan = service.controller.engine.image.instructions[instruction_index.usize()].source
                 if source.file.value != 0 and source.start_line != 0:
-                    return DAPSourceLocation{line: source.start_line.u64(), column: source.start_column.u64()}
+                    line: mutable u64 = source.start_line.u64()
+                    column: mutable u64 = source.start_column.u64()
+                    line <- line - 1 if not coordinates.lines_start_at_one
+                    column <- column + 1 if coordinates.columns_start_at_one
+                    return DAPSourceLocation{line: line, column: column}
             return DAPSourceLocation{line: DAP_UNKNOWN_SOURCE_LINE, column: DAP_UNKNOWN_SOURCE_LINE}
 
-        def write_stack_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
-            location: DAPSourceLocation = stack_source_location(service, result)
+        def write_stack_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64, coordinates: DebuggerDAPPayload::ClientCoordinates) -> void can[Console, Unsafe.PointerCast]:
+            location: DAPSourceLocation = stack_source_location(service, result, coordinates)
             body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(location.line) + DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(DAP_BODY_PREFIX) can Console
@@ -972,8 +976,13 @@ module DebuggerDAPServer:
             service <- DebuggerManagedService::service_new(session, loaded.image, recording)
             return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
 
-        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if command_hash == COMMAND_HASH_INITIALIZE:
+                coordinates: DebuggerDAPPayload::ClientCoordinates = DebuggerDAPPayload::client_coordinates_parse(payload, payload_length)
+                if not coordinates.valid:
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
+                    return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Initialize, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                client_coordinates <- coordinates
                 return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request_for(DebuggerProtocolRequest::RequestMethod.Initialize, request_id), DAP_NO_EXPECTED_GENERATION)
             if command_hash == COMMAND_HASH_LAUNCH:
                 return dispatch_launch(service, request_id, payload, payload_length) can Blocking.IO, Unsafe.PointerCast
@@ -1118,7 +1127,7 @@ module DebuggerDAPServer:
                 _ = printf("%02llx", memory.bytes[index].u64()) can Console
             _ = printf(DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead, client_coordinates: DebuggerDAPPayload::ClientCoordinates) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
                 if command_hash == COMMAND_HASH_READ_MEMORY and result.failure.code == DebuggerErrors::ErrorCode.InvalidArgument:
                     write_dynamic_response(response_sequence, request_sequence, DAP_READ_MEMORY_COMMAND, DAP_READ_MEMORY_COMMAND_LENGTH, DAP_MEMORY_INVALID_SUFFIX, DAP_MEMORY_INVALID_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -1156,7 +1165,7 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, DAP_THREADS_COMMAND, DAP_THREADS_COMMAND_LENGTH, DAP_THREADS_SUFFIX, DAP_THREADS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_STACK_TRACE:
-                write_stack_response(service, result, request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                write_stack_response(service, result, request_sequence, response_sequence, client_coordinates) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_SCOPES:
                 write_dynamic_response(response_sequence, request_sequence, DAP_SCOPES_COMMAND, DAP_SCOPES_COMMAND_LENGTH, DAP_SCOPES_SUFFIX, DAP_SCOPES_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -1202,6 +1211,7 @@ module DebuggerDAPServer:
             decoder: mutable Decoder = decoder_new()
             chunk: mutable u8[DAP_READ_CHUNK_SIZE] = zeroed
             response_sequence: mutable u64 = 1
+            client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates = DebuggerDAPPayload::client_coordinates_default()
             session: DebuggerSession::Session = initial_session()
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
             memory: mutable DebuggerMemory::MemoryRead = zeroed
@@ -1212,9 +1222,9 @@ module DebuggerDAPServer:
                     completed: bool = decoder_accept(decoder, chunk[index])
                     if completed:
                         memory <- zeroed
-                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory)
+                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, client_coordinates)
                         service.controller.session <- result.session
-                        write_response(service, result, decoder.command_hash, decoder.request_sequence, response_sequence, memory) can Console, Unsafe.PointerCast
+                        write_response(service, result, decoder.command_hash, decoder.request_sequence, response_sequence, memory, client_coordinates) can Console, Unsafe.PointerCast
                         return DAP_SERVER_INVALID_FRAME_EXIT_CODE if response_sequence == MAX_DAP_RESPONSE_SEQUENCE
                         response_sequence <- response_sequence + 1
                         decoder.command_hash <- 0

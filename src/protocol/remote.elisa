@@ -71,7 +71,6 @@ module DebuggerRemote:
             updated.handshake.engine <- 0
             updated.handshake.trace_schema <- 0
             updated.handshake.authenticated <- false
-            updated.auth_attempts <- 0
             updated.last_error <- DebuggerErrors::no_error()
             return updated
 
@@ -196,10 +195,10 @@ module DebuggerRemote:
             # quota budget.
             updated.quota_exceeded <- channel.quota_exceeded
             updated.artifact <- DebuggerRemoteArtifacts::transfer_new()
-            # Preserve a terminal authentication failure across disconnect;
-            # otherwise a client could reset the attempt budget by dropping
-            # the transport and reconnecting the same channel.
-            updated.auth_attempts <- channel.auth_attempts if channel.state == RemoteState.Failed else 0
+            # Failed attempts remain charged to this channel across every
+            # disconnect. A successful authentication clears the counter;
+            # creating a new channel starts a fresh attempt budget.
+            updated.auth_attempts <- channel.auth_attempts
             updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA) if channel.quota_exceeded
             updated.last_error <- DebuggerErrors::no_error() if not channel.quota_exceeded
             return updated
@@ -207,7 +206,7 @@ module DebuggerRemote:
         def remote_reconnect(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.quota_exceeded
-            return updated if channel.state == RemoteState.Failed and channel.auth_attempts >= REMOTE_MAX_AUTH_ATTEMPTS
+            return updated if channel.auth_attempts >= REMOTE_MAX_AUTH_ATTEMPTS
             return updated if channel.state != RemoteState.Disconnected and channel.state != RemoteState.Draining and channel.state != RemoteState.Failed
             updated.state <- RemoteState.Authenticating
             updated.handshake.protocol_major <- 0
@@ -219,7 +218,6 @@ module DebuggerRemote:
             updated.bytes_received <- 0
             updated.quota_exceeded <- false
             updated.artifact <- DebuggerRemoteArtifacts::transfer_new()
-            updated.auth_attempts <- 0
             updated.last_error <- DebuggerErrors::no_error()
             return updated
 

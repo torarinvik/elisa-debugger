@@ -156,13 +156,15 @@ module DebuggerProtocolIntegration:
         def integration_capabilities_match(left: DebuggerCapabilities::CapabilitySet, right: DebuggerCapabilities::CapabilitySet) -> bool:
             return left.engine == right.engine and left.history == right.history and left.source_breakpoints == right.source_breakpoints and left.function_breakpoints == right.function_breakpoints and left.data_breakpoints == right.data_breakpoints and left.typed_values == right.typed_values and left.expression_evaluation == right.expression_evaluation and left.reverse_execution == right.reverse_execution and left.checkpoints == right.checkpoints and left.branches == right.branches and left.concurrency_graph == right.concurrency_graph and left.provenance == right.provenance and left.remote_transport == right.remote_transport and left.trace_verification == right.trace_verification and left.trace_export == right.trace_export and left.historical_queries == right.historical_queries and left.schedule_exploration == right.schedule_exploration and left.memory_read == right.memory_read and left.native_attach == right.native_attach and left.postmortem_inspection == right.postmortem_inspection
 
-        def session_request_validate(request: SessionRequest, session: DebuggerSession::Session, document: DiscoveryDocument) -> DebuggerErrors::DebuggerError:
+        # The transport supplies the token it issued to the current session
+        # owner. A non-zero token in the request alone is not authorization.
+        def session_request_validate(request: SessionRequest, session: DebuggerSession::Session, document: DiscoveryDocument, expected_owner_token: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PRODUCT) if not discovery_document_is_valid(document)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CLIENT) if not client_identity_is_valid(request.client)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if document.session.value != session.id.value
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CAPABILITY) if not integration_capabilities_match(document.capabilities, session.capabilities)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if request.request_id == NO_ID or request.session_id != NO_ID and request.session_id != session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if integration_method_is_mutating(request.method) and request.owner_token == NO_ID
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if integration_method_is_mutating(request.method) and (expected_owner_token == NO_ID or request.owner_token != expected_owner_token)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_METHOD) if not DebuggerProtocol::method_is_valid(request.method)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if not integration_method_supported(request.method, session.capabilities)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_GENERATION) if request.expected_generation != NO_ID and request.expected_generation != session.stop_generation
@@ -172,12 +174,12 @@ module DebuggerProtocolIntegration:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceVerify and not session.capabilities.trace_verification
             return DebuggerErrors::no_error()
 
-        def cancel_request_validate(request: CancelRequest, session: DebuggerSession::Session, document: DiscoveryDocument) -> DebuggerErrors::DebuggerError:
+        def cancel_request_validate(request: CancelRequest, session: DebuggerSession::Session, document: DiscoveryDocument, expected_owner_token: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PRODUCT) if not discovery_document_is_valid(document)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CLIENT) if not client_identity_is_valid(request.client)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if document.session.value != session.id.value
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if request.request_id == NO_ID or request.target_request_id == NO_ID or request.target_request_id == request.request_id or request.session_id != NO_ID and request.session_id != session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if request.owner_token == NO_ID
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if expected_owner_token == NO_ID or request.owner_token != expected_owner_token
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_GENERATION) if request.expected_generation != NO_ID and request.expected_generation != session.stop_generation
             return DebuggerErrors::no_error()
 

@@ -29,8 +29,11 @@ full discovery and session handshake. Its discovery document includes product
 version, trace schema, installation health, per-session capabilities, and
 bounded page/query/payload limits. Requests carry a client identity, session
 ownership token, expected stop generation, page size, and target event. The
-validator rejects stale generations, missing ownership for mutations, oversized
-targets, and unsupported trace operations before the provider is touched.
+validator rejects stale generations, missing or mismatched session-owner tokens
+for mutations and cancellation, oversized targets, and unsupported trace
+operations before the provider is touched. The transport passes the expected
+owner token it issued for the session; a non-zero token supplied by a client is
+not sufficient by itself.
 Retry classification is explicit: discovery and read-only inspection operations
 are safe to repeat, launch/attach/branch/terminate are forbidden to repeat after
 an uncertain result, and other mutations are same-request-only so a client can
@@ -46,10 +49,12 @@ as a child process. Send ordinary DAP `initialize`, `launch`,
 returns one JSON message per frame. Read the advertised capability fields on
 `initialize`; do not infer support from the executable name.
 
-The adapter reports source coordinates using DAP's one-based line and
-zero-based column convention. Keep the response `request_seq` and the adapter
-sequence separate. A client may send multiple frames in one write and may
-fragment a frame across reads.
+The adapter follows the `linesStartAt1` and `columnsStartAt1` options from the
+`initialize` request. Both default to `true`; the adapter converts Elisa's
+one-based source lines and zero-based UTF-16 columns to the requested bases.
+Unknown source locations use `0` for both coordinates. Keep the response
+`request_seq` and the adapter sequence separate. A client may send multiple
+frames in one write and may fragment a frame across reads.
 
 For the current managed provider, set `arguments.program` to a verified `.edir`
 artifact path. The adapter loads and verifies the file before starting the

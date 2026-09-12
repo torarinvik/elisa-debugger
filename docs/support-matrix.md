@@ -38,3 +38,8 @@ self-hosted compiler and runtime object. Native platform support is a contract
 and test surface rather than a claim that the current host has completed native
 attach or native replay qualification. Additional targets must add their FFI,
 process, signal, symbol, and cleanup tests before being listed as qualified.
+
+Until a native provider is wired to a real target, instrumented-native,
+attached-native, and postmortem capability sets identify the requested engine
+kind but advertise no native operations. The DAP adapter only advertises
+termination for the managed engine and does not advertise native disassembly.

@@ -68,18 +68,43 @@ module DebuggerQueryEvaluator:
             return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: 0} if left.count > QUERY_INDEX_CAPACITY or right.count > QUERY_INDEX_CAPACITY or left.overflowed or right.overflowed
             return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: 0} if DebuggerCancellation::cancellation_is_requested(token, 0)
             limit: u64 = QUERY_DEFAULT_BUDGET if budget == 0 else budget
-            count: usize = left.count if left.count < right.count else right.count
-            for position in 0..<count:
-                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: position.u64()} if DebuggerCancellation::cancellation_is_requested(token, position.u64())
-                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: position.u64()} if position.u64() >= limit
-                if left.entries[position].state_hash != right.entries[position].state_hash or left.entries[position].statement.value != right.entries[position].statement.value or left.entries[position].task.value != right.entries[position].task.value or left.entries[position].event != right.entries[position].event:
-                    return QueryResult{status: QueryStatus.Match, event: left.entries[position].event, scanned: position.u64() + 1}
-            if left.count != right.count:
-                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: count.u64()} if DebuggerCancellation::cancellation_is_requested(token, count.u64())
-                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: count.u64()} if count.u64() >= limit
-                differing: u64 = left.entries[count].event if left.count > count else right.entries[count].event
-                return QueryResult{status: QueryStatus.Match, event: differing, scanned: count.u64()}
-            return QueryResult{status: QueryStatus.NoMatch, event: 0, scanned: count.u64()}
+            scanned: mutable u64 = 0
+            found_difference: mutable bool = false
+            first_difference: mutable u64 = 0
+            # Event indexes may be appended out of order. Progress counts logical
+            # entries inspected while event IDs locate their counterparts.
+            for left_position in 0..<left.count:
+                left_entry: DebuggerQueryIndex::EventIndexEntry = left.entries[left_position]
+                found_event: mutable bool = false
+                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: scanned} if DebuggerCancellation::cancellation_is_requested(token, scanned)
+                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: scanned} if scanned >= limit
+                scanned <- scanned + 1
+                for right_position in 0..<right.count:
+                    if right.entries[right_position].event == left_entry.event:
+                        found_event <- true
+                        if left_entry.state_hash != right.entries[right_position].state_hash or left_entry.statement.value != right.entries[right_position].statement.value or left_entry.task.value != right.entries[right_position].task.value:
+                            if not found_difference or left_entry.event < first_difference:
+                                first_difference <- left_entry.event
+                                found_difference <- true
+                        break
+                if not found_event and (not found_difference or left_entry.event < first_difference):
+                    first_difference <- left_entry.event
+                    found_difference <- true
+            for right_position in 0..<right.count:
+                right_entry: DebuggerQueryIndex::EventIndexEntry = right.entries[right_position]
+                found_event: mutable bool = false
+                return QueryResult{status: QueryStatus.Cancelled, event: 0, scanned: scanned} if DebuggerCancellation::cancellation_is_requested(token, scanned)
+                return QueryResult{status: QueryStatus.ResourceLimit, event: 0, scanned: scanned} if scanned >= limit
+                scanned <- scanned + 1
+                for left_position in 0..<left.count:
+                    if left.entries[left_position].event == right_entry.event:
+                        found_event <- true
+                        break
+                if not found_event and (not found_difference or right_entry.event < first_difference):
+                    first_difference <- right_entry.event
+                    found_difference <- true
+            return QueryResult{status: QueryStatus.Match, event: first_difference, scanned: scanned} if found_difference
+            return QueryResult{status: QueryStatus.NoMatch, event: 0, scanned: scanned}
 
         def query_compare(left: DebuggerQueryIndex::EventIndex, right: DebuggerQueryIndex::EventIndex, budget: u64) -> QueryResult:
             token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)

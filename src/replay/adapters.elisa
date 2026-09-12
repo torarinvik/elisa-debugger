@@ -73,7 +73,9 @@ module DebuggerReplayAdapters:
             sequence: mutable u64
             channel: mutable ConsoleChannel
             kind: mutable ConsoleRecordKind
+            requested: mutable usize
             length: mutable usize
+            eof: mutable bool
             bytes: mutable u8[CONSOLE_CHUNK_CAPACITY]
 
         struct Console:
@@ -268,7 +270,7 @@ module DebuggerReplayAdapters:
                 console.exact <- false
                 console.last_error <- failure
                 return failure
-            console.records[console.count] <- ConsoleRecord{sequence: console.count.u64(), channel: channel, kind: kind, length: length, bytes: zeroed}
+            console.records[console.count] <- ConsoleRecord{sequence: console.count.u64(), channel: channel, kind: kind, requested: length, length: length, eof: false, bytes: zeroed}
             for index in 0..<length:
                 console.records[console.count].bytes[index] <- bytes[index]
             console.count <- console.count + 1
@@ -298,21 +300,37 @@ module DebuggerReplayAdapters:
                 console.last_error <- updated.failure
                 return updated
             record: ConsoleRecord = console.records[console.cursor]
-            if record.sequence != console.cursor.u64() or record.kind != ConsoleRecordKind.Input or record.channel != channel or record.length != requested:
+            if record.sequence != console.cursor.u64() or record.kind != ConsoleRecordKind.Input or record.channel != channel or record.requested != requested or record.length > requested:
                 updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_REQUEST, false)
                 console.exact <- false
                 console.last_error <- updated.failure
                 return updated
-            for index in 0..<requested:
+            for index in 0..<record.length:
                 output[index] <- record.bytes[index]
-            updated.transferred <- requested
-            updated.eof <- false
+            updated.transferred <- record.length
+            updated.eof <- record.eof
             updated.accepted <- true
             console.cursor <- console.cursor + 1
             return updated
 
         def console_record_input(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
             return console_record(console, ConsoleRecordKind.Input, channel, bytes, length)
+
+        # Record both sides of the read contract. The requested byte count is
+        # part of the call shape, while length is the actual number received;
+        # EOF and short reads are observable outcomes that replay must retain.
+        def console_record_input_outcome(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, requested: usize, transferred: usize, eof: bool) -> DebuggerErrors::DebuggerError:
+            if requested > CONSOLE_CHUNK_CAPACITY or transferred > requested:
+                failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_INPUT, false)
+                console.exact <- false
+                console.last_error <- failure
+                return failure
+            failure: DebuggerErrors::DebuggerError = console_record(console, ConsoleRecordKind.Input, channel, bytes, transferred)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            record_index: usize = console.count - 1
+            console.records[record_index].requested <- requested
+            console.records[record_index].eof <- eof
+            return DebuggerErrors::no_error()
 
         def console_write(console: mutable Console&, channel: ConsoleChannel, bytes: u8&, length: usize) -> ConsoleWrite:
             result: mutable ConsoleWrite = zeroed
@@ -341,7 +359,7 @@ module DebuggerReplayAdapters:
                 console.last_error <- updated.failure
                 return updated
             record: ConsoleRecord = console.records[console.cursor]
-            if record.sequence != console.cursor.u64() or record.kind != ConsoleRecordKind.Output or record.channel != channel or record.length != length:
+            if record.sequence != console.cursor.u64() or record.kind != ConsoleRecordKind.Output or record.channel != channel or record.requested != length or record.length != length or record.eof:
                 updated.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, DETAIL_REQUEST, false)
                 console.exact <- false
                 console.last_error <- updated.failure
@@ -363,6 +381,8 @@ module DebuggerReplayAdapters:
             for index in 0..<console.count:
                 record: ConsoleRecord = console.records[index]
                 return false if record.sequence != index.u64() or not console_channel_is_valid(record.channel) or not console_record_kind_is_valid(record.kind) or record.length > CONSOLE_CHUNK_CAPACITY
+                return false if record.kind == ConsoleRecordKind.Input and (record.requested > CONSOLE_CHUNK_CAPACITY or record.length > record.requested)
+                return false if record.kind == ConsoleRecordKind.Output and (record.requested != record.length or record.eof)
             return true
 
         def console_replay_complete(console: Console) -> bool:

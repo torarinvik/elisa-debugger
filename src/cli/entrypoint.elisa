@@ -79,6 +79,24 @@ module DebuggerCLIEntrypoint:
                 return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
             return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, 0)
 
+        def process_line(service: mutable DebuggerManagedService::Service&, session: mutable DebuggerSession::Session&, line: u8&, length: usize, request_id: u64) -> void can[Console]:
+            parsed: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(line, length, 0)
+            method: DebuggerProtocolRequest::RequestMethod = method_from_command(parsed.command)
+            request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: request_id, has_id: true, expected_generation: parsed.expected_generation, target_event: 0, valid: parsed.valid and method != DebuggerProtocolRequest::RequestMethod.Unknown}
+            request.target_event <- parsed.argument if parsed.command == DebuggerCLI::Command.Seek and parsed.argument_present
+            if not parsed.valid:
+                _ = printf("error code=%d detail=%u\n", parsed.failure.code, parsed.failure.detail) can Console
+            else:
+                result: DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
+                session <- result.session
+                service.controller.session <- result.session
+                if result.accepted:
+                    _ = printf("ok generation=%llu\n", session.stop_generation) can Console
+                    write_frame(DebuggerManagedService::service_frame(service)) can Console if parsed.command == DebuggerCLI::Command.Stack
+                    write_locals(service) can Console if parsed.command == DebuggerCLI::Command.Locals or parsed.command == DebuggerCLI::Command.Inspect
+                else:
+                    _ = printf("error code=%d detail=%u\n", result.failure.code, result.failure.detail) can Console
+
     public:
         def run_cli() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             session: mutable DebuggerSession::Session = initial_session()
@@ -88,25 +106,12 @@ module DebuggerCLIEntrypoint:
             request_id: mutable u64 = FIRST_REQUEST_ID
             while true:
                 count: isize = read(STDIN_FD, (&line[length]).cast[void&], 1) can Console
-                break if count <= 0
+                if count <= 0:
+                    process_line(service, session, line[0], length, request_id) can Console if length > 0
+                    break
                 byte: u8 = line[length]
                 if byte == ASCII_NEWLINE:
-                    parsed: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(line[0], length, 0)
-                    method: DebuggerProtocolRequest::RequestMethod = method_from_command(parsed.command)
-                    request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: request_id, has_id: true, expected_generation: parsed.expected_generation, target_event: 0, valid: parsed.valid and method != DebuggerProtocolRequest::RequestMethod.Unknown}
-                    request.target_event <- parsed.argument if parsed.command == DebuggerCLI::Command.Seek and parsed.argument_present
-                    if not parsed.valid:
-                        _ = printf("error code=%d detail=%u\n", parsed.failure.code, parsed.failure.detail) can Console
-                    else:
-                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
-                        session <- result.session
-                        service.controller.session <- result.session
-                        if result.accepted:
-                            _ = printf("ok generation=%llu\n", session.stop_generation) can Console
-                            write_frame(DebuggerManagedService::service_frame(service)) can Console if parsed.command == DebuggerCLI::Command.Stack
-                            write_locals(service) can Console if parsed.command == DebuggerCLI::Command.Locals or parsed.command == DebuggerCLI::Command.Inspect
-                        else:
-                            _ = printf("error code=%d detail=%u\n", result.failure.code, result.failure.detail) can Console
+                    process_line(service, session, line[0], length, request_id) can Console
                     length <- 0
                     request_id <- request_id if request_id == MAX_REQUEST_ID else request_id + FIRST_REQUEST_ID
                 else:

@@ -97,6 +97,8 @@ const ADAPTER_CLOCK_VALUE: u64 = 123
 const ADAPTER_RANDOM_VALUE: u64 = 987
 const ADAPTER_INPUT_LENGTH: usize = 2
 const ADAPTER_OUTPUT_LENGTH: usize = 3
+const ADAPTER_SHORT_READ_TRANSFERRED: usize = 2
+const ADAPTER_READ_EOF: bool = true
 const ADAPTER_INPUT_FIRST: u8 = 65
 const ADAPTER_INPUT_SECOND: u8 = 66
 const ADAPTER_OUTPUT_FIRST: u8 = 88
@@ -216,6 +218,22 @@ def check_managed_adapters() -> i64:
     branch_input: mutable u8[ADAPTER_INPUT_LENGTH] = zeroed
     branch_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(branch_console, DebuggerReplayAdapters::ConsoleChannel.Stdout, branch_input[0], ADAPTER_INPUT_LENGTH)
     return ADAPTER_REPLAY_RESULT_FAILURE if not branch_read.accepted or branch_input[0] != ADAPTER_INPUT_FIRST or branch_input[1] != ADAPTER_INPUT_SECOND or not DebuggerReplayAdapters::console_is_exact(branch_console)
+
+    short_recording: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::console_record_input_outcome(short_recording, DebuggerReplayAdapters::ConsoleChannel.Stdout, input_bytes[0], ADAPTER_OUTPUT_LENGTH, ADAPTER_SHORT_READ_TRANSFERRED, false))
+    short_replay: mutable DebuggerReplayAdapters::Console = short_recording
+    short_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    short_output: mutable u8[ADAPTER_OUTPUT_LENGTH] = zeroed
+    short_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(short_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, short_output[0], ADAPTER_OUTPUT_LENGTH)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not short_read.accepted or short_read.transferred != ADAPTER_SHORT_READ_TRANSFERRED or short_read.eof or short_output[0] != ADAPTER_INPUT_FIRST or short_output[1] != ADAPTER_INPUT_SECOND
+
+    eof_recording: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::console_record_input_outcome(eof_recording, DebuggerReplayAdapters::ConsoleChannel.Stdout, output_bytes[0], ADAPTER_OUTPUT_LENGTH, 0, ADAPTER_READ_EOF))
+    eof_replay: mutable DebuggerReplayAdapters::Console = eof_recording
+    eof_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    eof_output: mutable u8[ADAPTER_OUTPUT_LENGTH] = zeroed
+    eof_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(eof_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, eof_output[0], ADAPTER_OUTPUT_LENGTH)
+    return ADAPTER_REPLAY_RESULT_FAILURE if not eof_read.accepted or eof_read.transferred != 0 or not eof_read.eof or not DebuggerReplayAdapters::console_replay_complete(eof_replay)
     return 0
 
 def check_full_checkpoint() -> i64:
@@ -440,9 +458,16 @@ def main() -> i64:
     metadata <- DebuggerTypeMetadata::metadata_add_binding(metadata, DebuggerTypeMetadata::BindingInfo{id: binding_identity, name: DebuggerIdentity::debug_id(15), type_id: DebuggerIdentity::debug_id(10), scope: scope_id, lifetime_start: 2, lifetime_end: 8})
     invalid_binding: DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_binding(metadata, DebuggerTypeMetadata::BindingInfo{id: DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(99), incarnation: 1}, name: DebuggerIdentity::debug_id(15), type_id: DebuggerIdentity::debug_id(10), scope: scope_id, lifetime_start: 8, lifetime_end: 2})
     return 106 if invalid_binding.binding_count != metadata.binding_count
+    escaped_scope_binding: DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_binding(metadata, DebuggerTypeMetadata::BindingInfo{id: DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(100), incarnation: 1}, name: DebuggerIdentity::debug_id(15), type_id: DebuggerIdentity::debug_id(10), scope: scope_id, lifetime_start: 2, lifetime_end: 0})
+    return 158 if escaped_scope_binding.binding_count != metadata.binding_count
+    early_scope_binding: DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_binding(metadata, DebuggerTypeMetadata::BindingInfo{id: DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(102), incarnation: 1}, name: DebuggerIdentity::debug_id(15), type_id: DebuggerIdentity::debug_id(10), scope: scope_id, lifetime_start: 1, lifetime_end: 7})
+    return 161 if early_scope_binding.binding_count != metadata.binding_count
+    unnamed_binding: DebuggerTypeMetadata::MetadataStore = DebuggerTypeMetadata::metadata_add_binding(metadata, DebuggerTypeMetadata::BindingInfo{id: DebuggerIdentity::BindingIdentity{declaration: DebuggerIdentity::debug_id(101), incarnation: 1}, name: DebuggerIdentity::debug_id(0), type_id: DebuggerIdentity::debug_id(10), scope: scope_id, lifetime_start: 2, lifetime_end: 8})
+    return 159 if unnamed_binding.binding_count != metadata.binding_count
     return 22 if DebuggerTypeMetadata::metadata_find_scope(metadata, scope_id).function.value != 13 or not DebuggerTypeMetadata::metadata_scope_is_active(DebuggerTypeMetadata::metadata_find_scope(metadata, scope_id), 4)
     found_binding: DebuggerTypeMetadata::BindingInfo = DebuggerTypeMetadata::metadata_find_binding(metadata, binding_identity)
     return 23 if found_binding.name.value != 15
+    return 160 if not DebuggerTypeMetadata::metadata_binding_is_live(found_binding, 7) or DebuggerTypeMetadata::metadata_binding_is_live(found_binding, 8)
     values: mutable DebuggerValueStore::ValueStore = DebuggerValueStore::value_store_new(VALUE_STORE_GENERATION)
     root: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_aggregate(values, DebuggerIdentity::debug_id(VALUE_NAME_ID), DebuggerIdentity::debug_id(VALUE_TYPE_ID))
     child: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_scalar(values, DebuggerIdentity::debug_id(VALUE_NAME_ID + 1), DebuggerIdentity::debug_id(VALUE_TYPE_ID), VALUE_CHILD_VALUE)

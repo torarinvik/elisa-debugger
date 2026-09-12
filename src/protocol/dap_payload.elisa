@@ -19,6 +19,7 @@ module DebuggerDAPPayload:
         const ASCII_ZERO: u8 = 48
         const ASCII_ONE: u8 = 49
         const ASCII_NINE: u8 = 57
+        const ASCII_MINUS: u8 = 45
         const ASCII_A: u8 = 97
         const ASCII_C: u8 = 99
         const ASCII_E: u8 = 101
@@ -41,11 +42,15 @@ module DebuggerDAPPayload:
         const ASCII_UPPER_X: u8 = 88
         const MEMORY_REFERENCE_FIELD: u8 = 1
         const COUNT_FIELD: u8 = 2
+        const OFFSET_FIELD: u8 = 7
         const MEMORY_REFERENCE_LENGTH: usize = 15
         const COUNT_LENGTH: usize = 5
+        const OFFSET_LENGTH: usize = 6
         const MEMORY_REFERENCE_MAX_DIGITS: usize = 16
         const MEMORY_COUNT_MAX: u64 = 64
         const MAX_INTEGER: u64 = 18446744073709551615
+        const MAX_SIGNED_INTEGER: u64 = 9223372036854775807
+        const MIN_SIGNED_INTEGER_MAGNITUDE: u64 = 9223372036854775808
         const NO_INDEX: usize = 18446744073709551615
         const HEX_BASE: u64 = 16
         const DECIMAL_BASE: u64 = 10
@@ -128,7 +133,8 @@ module DebuggerDAPPayload:
             return COLUMNS_START_AT_ONE_FIELD_LENGTH if field == COLUMNS_START_AT_ONE_FIELD
             return ARGUMENTS_FIELD_LENGTH if field == ARGUMENTS_FIELD
             return PROGRAM_FIELD_LENGTH if field == PROGRAM_FIELD
-            return MEMORY_REFERENCE_LENGTH if field == MEMORY_REFERENCE_FIELD else COUNT_LENGTH
+            return MEMORY_REFERENCE_LENGTH if field == MEMORY_REFERENCE_FIELD
+            return OFFSET_LENGTH if field == OFFSET_FIELD else COUNT_LENGTH
 
         def field_byte(field: u8, position: usize) -> u8:
             if field == LINES_START_AT_ONE_FIELD:
@@ -195,6 +201,13 @@ module DebuggerDAPPayload:
                 return ASCII_N if position == 12
                 return ASCII_C if position == 13
                 return ASCII_E
+            if field == OFFSET_FIELD:
+                return ASCII_O if position == 0
+                return ASCII_F if position == 1
+                return ASCII_F if position == 2
+                return ASCII_S if position == 3
+                return ASCII_E if position == 4
+                return ASCII_T
             return ASCII_C if position == 0
             return ASCII_O if position == 1
             return ASCII_U if position == 2
@@ -531,6 +544,26 @@ module DebuggerDAPPayload:
                 return invalid_value() if not is_whitespace(payload[index]) and payload[index] != ASCII_COMMA and payload[index] != ASCII_BRACE_CLOSE and payload[index] != ASCII_BRACKET_CLOSE
             return ParsedValue{valid: true, value: value, end: index}
 
+        def parse_signed_offset(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start >= length
+            negative: bool = payload[start] == ASCII_MINUS
+            index: mutable usize = start + 1 if negative else start
+            return invalid_value() if index >= length or payload[index] < ASCII_ZERO or payload[index] > ASCII_NINE
+            maximum: u64 = MIN_SIGNED_INTEGER_MAGNITUDE if negative else MAX_SIGNED_INTEGER
+            value: mutable u64 = 0
+            digits: mutable usize = 0
+            while index < length and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
+                return invalid_value() if digits == FIRST_DIGIT_COUNT and value == 0
+                digit: u64 = (payload[index] - ASCII_ZERO).u64()
+                return invalid_value() if value > (maximum - digit) / DECIMAL_BASE
+                value <- value * DECIMAL_BASE + digit
+                digits <- digits + 1
+                index <- index + 1
+            return invalid_value() if digits == 0
+            if index < length:
+                return invalid_value() if not is_whitespace(payload[index]) and payload[index] != ASCII_COMMA and payload[index] != ASCII_BRACE_CLOSE and payload[index] != ASCII_BRACKET_CLOSE
+            return ParsedValue{valid: true, value: value, end: index}
+
     public:
         struct ProgramPath:
             bytes: mutable u8[PROGRAM_PATH_CAPACITY]
@@ -549,15 +582,32 @@ module DebuggerDAPPayload:
 
         def memory_request_parse(payload: u8&, length: usize) -> MemoryRequest:
             request: mutable MemoryRequest = zeroed
-            first_reference: usize = field_value_start(payload, length, MEMORY_REFERENCE_FIELD, 0)
-            first_count: usize = field_value_start(payload, length, COUNT_FIELD, 0)
+            root_start: mutable usize = 0
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 0)
+            return request if arguments == NO_INDEX or object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 1) != NO_INDEX
+            return request if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
+            first_reference: usize = object_field_value_start(payload, length, arguments, MEMORY_REFERENCE_FIELD, 0)
+            first_count: usize = object_field_value_start(payload, length, arguments, COUNT_FIELD, 0)
+            first_offset: usize = object_field_value_start(payload, length, arguments, OFFSET_FIELD, 0)
             return request if first_reference == NO_INDEX or first_count == NO_INDEX
-            return request if field_value_start(payload, length, MEMORY_REFERENCE_FIELD, first_reference + 1) != NO_INDEX or field_value_start(payload, length, COUNT_FIELD, first_count + 1) != NO_INDEX
+            return request if object_field_value_start(payload, length, arguments, MEMORY_REFERENCE_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, arguments, COUNT_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, arguments, OFFSET_FIELD, 1) != NO_INDEX
             reference: ParsedValue = parse_memory_reference(payload, length, first_reference)
             count: ParsedValue = parse_count(payload, length, first_count)
             return request if not reference.valid or not count.valid
+            address: mutable u64 = reference.value
+            if first_offset != NO_INDEX:
+                offset: ParsedValue = parse_signed_offset(payload, length, first_offset)
+                return request if not offset.valid
+                if payload[first_offset] == ASCII_MINUS:
+                    return request if offset.value > address
+                    address <- address - offset.value
+                else:
+                    return request if offset.value > MAX_INTEGER - address
+                    address <- address + offset.value
             request.valid <- true
-            request.address <- reference.value
+            request.address <- address
             request.count <- count.value.usize()
             return request
 

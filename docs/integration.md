@@ -51,6 +51,14 @@ zero-based column convention. Keep the response `request_seq` and the adapter
 sequence separate. A client may send multiple frames in one write and may
 fragment a frame across reads.
 
+For the current managed provider, set `arguments.program` to a verified `.edir`
+artifact path. The adapter loads and verifies the file before starting the
+session, then reports instruction source lines from that artifact. Missing or
+invalid artifacts fail the launch. The Elisa compiler does not emit EDIR yet,
+so this path is for artifacts produced by a fixture or a compatible external
+producer; ordinary source compilation and native-program launch are not
+available through this provider today.
+
 ## JetBrains
 
 Implement the JetBrains debugger-process bridge against the same DAP endpoint,

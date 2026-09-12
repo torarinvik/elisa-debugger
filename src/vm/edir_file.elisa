@@ -1,0 +1,97 @@
+# Bounded POSIX loader for portable EDIR files. File I/O stays at this
+# infrastructure boundary; the artifact is decoded and verified in Elisa.
+
+extern open(path: cstr, flags: int) -> int can[Blocking.IO]
+extern close(fd: int) -> int can[Blocking.IO]
+extern read(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
+
+include "./edir_codec.elisa"
+include "../core/errors.elisa"
+
+module DebuggerEDIRFile:
+    private:
+        const EDIR_FILE_READ_ONLY: int = 0
+        const EDIR_FILE_MAX_PATH_BYTES: usize = 1024
+        const EDIR_FILE_MAX_ARTIFACT_BYTES: usize = 7961
+        const EDIR_FILE_READ_CAPACITY: usize = EDIR_FILE_MAX_ARTIFACT_BYTES + 1
+        const EDIR_FILE_EMPTY: usize = 0
+        const EDIR_FILE_INVALID_PATH_DETAIL: u32 = 1
+        const EDIR_FILE_OPEN_DETAIL: u32 = 2
+        const EDIR_FILE_READ_DETAIL: u32 = 3
+        const EDIR_FILE_CLOSE_DETAIL: u32 = 4
+        const EDIR_FILE_TOO_LARGE_DETAIL: u32 = 5
+        const EDIR_FILE_INVALID_ARTIFACT_DETAIL: u32 = 6
+        const EDIR_FILE_CODEC_BOUND_DETAIL: u32 = 7
+
+        def artifact_failure(status: LoadStatus, detail: u32) -> LoadResult:
+            code: mutable DebuggerErrors::ErrorCode = DebuggerErrors::ErrorCode.InvalidArgument
+            code <- DebuggerErrors::ErrorCode.Unavailable if status == LoadStatus.OpenFailure or status == LoadStatus.ReadFailure or status == LoadStatus.CloseFailure
+            code <- DebuggerErrors::ErrorCode.ResourceLimit if status == LoadStatus.TooLarge
+            code <- DebuggerErrors::ErrorCode.Corrupt if status == LoadStatus.InvalidArtifact
+            code <- DebuggerErrors::ErrorCode.InvalidState if status == LoadStatus.CodecBoundsChanged
+            return LoadResult{image: zeroed, status: status, failure: DebuggerErrors::make_error(code, code == DebuggerErrors::ErrorCode.Unavailable, detail), valid: false}
+
+    public:
+        enum LoadStatus:
+            Ready
+            InvalidPath
+            OpenFailure
+            ReadFailure
+            CloseFailure
+            TooLarge
+            InvalidArtifact
+            CodecBoundsChanged
+
+        struct LoadResult:
+            image: mutable DebuggerEDIR::ProgramImage
+            status: mutable LoadStatus
+            failure: mutable DebuggerErrors::DebuggerError
+            valid: mutable bool
+
+        def artifact_max_path_bytes() -> usize:
+            return EDIR_FILE_MAX_PATH_BYTES
+
+        def artifact_max_file_bytes() -> usize:
+            return EDIR_FILE_MAX_ARTIFACT_BYTES
+
+        def artifact_load(path: u8&, path_length: usize) -> LoadResult can[Blocking.IO, Unsafe.PointerCast]:
+            if path_length == EDIR_FILE_EMPTY or path_length > EDIR_FILE_MAX_PATH_BYTES:
+                return artifact_failure(LoadStatus.InvalidPath, EDIR_FILE_INVALID_PATH_DETAIL)
+            if DebuggerEDIRCodec::artifact_max_bytes() != EDIR_FILE_MAX_ARTIFACT_BYTES:
+                return artifact_failure(LoadStatus.CodecBoundsChanged, EDIR_FILE_CODEC_BOUND_DETAIL)
+
+            terminated_path: mutable u8[EDIR_FILE_MAX_PATH_BYTES + 1] = zeroed
+            for index in 0..<path_length:
+                return artifact_failure(LoadStatus.InvalidPath, EDIR_FILE_INVALID_PATH_DETAIL) if path[index] == 0
+                terminated_path[index] <- path[index]
+            terminated_path[path_length] <- 0
+
+            descriptor: int = open((&terminated_path[0]).cast[cstr], EDIR_FILE_READ_ONLY) can Blocking.IO, Unsafe.PointerCast
+            if descriptor < 0:
+                return artifact_failure(LoadStatus.OpenFailure, EDIR_FILE_OPEN_DETAIL)
+
+            bytes: mutable u8[EDIR_FILE_READ_CAPACITY] = zeroed
+            byte_count: mutable usize = EDIR_FILE_EMPTY
+            read_failed: mutable bool = false
+            while byte_count < EDIR_FILE_READ_CAPACITY:
+                received: isize = read(descriptor, (&bytes[byte_count]).cast[void&], EDIR_FILE_READ_CAPACITY - byte_count) can Blocking.IO, Unsafe.PointerCast
+                if received < 0:
+                    read_failed <- true
+                    break
+                break if received == 0
+                return_value: usize = received.usize()
+                if return_value > EDIR_FILE_READ_CAPACITY - byte_count:
+                    read_failed <- true
+                    break
+                byte_count <- byte_count + return_value
+
+            close_result: int = close(descriptor) can Blocking.IO
+            return artifact_failure(LoadStatus.ReadFailure, EDIR_FILE_READ_DETAIL) if read_failed
+            return artifact_failure(LoadStatus.CloseFailure, EDIR_FILE_CLOSE_DETAIL) if close_result < 0
+            return artifact_failure(LoadStatus.TooLarge, EDIR_FILE_TOO_LARGE_DETAIL) if byte_count > EDIR_FILE_MAX_ARTIFACT_BYTES
+            return artifact_failure(LoadStatus.InvalidArtifact, EDIR_FILE_INVALID_ARTIFACT_DETAIL) if byte_count == EDIR_FILE_EMPTY
+
+            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], byte_count)
+            decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(reader)
+            return artifact_failure(LoadStatus.InvalidArtifact, EDIR_FILE_INVALID_ARTIFACT_DETAIL) if not decoded.valid
+            return LoadResult{image: decoded.image, status: LoadStatus.Ready, failure: DebuggerErrors::no_error(), valid: true}

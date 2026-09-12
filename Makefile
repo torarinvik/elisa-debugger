@@ -19,6 +19,11 @@ ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OB
 BUILD ?= build
 IDLESS_LAUNCH_PAYLOAD_LENGTH := 19
 DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH := 45
+EDIR_FILE_TOO_LARGE_BYTES := 7962
+EDIR_FILE_TRUNCATED_BYTES := 5
+EDIR_FILE_CORRUPT_PREFIX_BYTES := 1
+DAP_UNKNOWN_SOURCE_LINE := 0
+DAP_EXPECTED_MAPPED_COLUMN := 3
 # The sibling compiler checkout may contain unrelated uncommitted source edits.
 # Keep the local debugger build usable by default; CI can set this to 0 for the
 # strict product-freshness gate.
@@ -28,7 +33,7 @@ ELISA_ALLOW_STALE_STAGE1 ?= 1
 # include cannot leave a silently stale executable behind.
 ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check breakpoint-resolver-check timeline-capability-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check edir-file-loader-check breakpoint-resolver-check timeline-capability-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -49,6 +54,7 @@ module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check
 module-check: $(BUILD)/elisa-debugger-state-integrity-check
+module-check: edir-file-loader-check
 
 	"$(BUILD)/elisa-debugger-module-core-check"
 	"$(BUILD)/elisa-debugger-module-data-check"
@@ -163,6 +169,23 @@ $(BUILD)/elisa-debugger-dap-payload-check: tests/dap_payload_check.elisa $(ELISA
 
 dap-payload-check: $(BUILD)/elisa-debugger-dap-payload-check
 	"$(BUILD)/elisa-debugger-dap-payload-check"
+
+$(BUILD)/elisa-debugger-edir-fixture-writer: tests/edir_fixture_writer.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-edir-file-loader-check: tests/edir_file_loader_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+edir-file-loader-check: $(BUILD)/elisa-debugger-edir-fixture-writer $(BUILD)/elisa-debugger-edir-file-loader-check
+	"$(BUILD)/elisa-debugger-edir-fixture-writer" > "$(BUILD)/edir-fixture.edir"
+	: > "$(BUILD)/edir-empty.edir"
+	head -c $(EDIR_FILE_TRUNCATED_BYTES) "$(BUILD)/edir-fixture.edir" > "$(BUILD)/edir-truncated.edir"
+	cp "$(BUILD)/edir-fixture.edir" "$(BUILD)/edir-corrupt.edir"
+	dd if=/dev/zero of="$(BUILD)/edir-corrupt.edir" bs=$(EDIR_FILE_CORRUPT_PREFIX_BYTES) count=$(EDIR_FILE_CORRUPT_PREFIX_BYTES) conv=notrunc 2>/dev/null
+	dd if=/dev/zero of="$(BUILD)/edir-oversized.edir" bs=$(EDIR_FILE_TOO_LARGE_BYTES) count=1 2>/dev/null
+	"$(BUILD)/elisa-debugger-edir-file-loader-check"
 
 $(BUILD)/elisa-debugger-timeline-capability-check: tests/timeline_capability_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
@@ -449,7 +472,7 @@ $(BUILD)/elisa-debugger-capabilities-check: tests/capabilities_check.elisa $(ELI
 check: $(BUILD)/elisa-debugger
 	"$(BUILD)/elisa-debugger"
 
-smoke: check server dap-server cli ffi-check
+smoke: check server dap-server cli ffi-check edir-file-loader-check
 	printf '655360 ' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
 	printf '21 {' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
 	printf '$(IDLESS_LAUNCH_PAYLOAD_LENGTH) {"method":"launch"}\n' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
@@ -461,7 +484,7 @@ smoke: check server dap-server cli ffi-check
 	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"supportsStepBack":true'
 	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"supportsEvaluateForHovers":false' | grep -F '"supportsDataBreakpoints":false'
 	dap_initialize=$$(printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server"); dap_declared=$$(printf %s "$$dap_initialize" | sed -n 's/^Content-Length: //p' | tr -d '\r'); dap_body=$$(printf %s "$$dap_initialize" | sed -n '3p'); test "$$dap_declared" -eq "$$(printf %s "$$dap_body" | wc -c | tr -d ' ' )"
-	dap_unwired=$$(printf 'Content-Length: 45\r\n\r\n{"seq":1,"type":"request","command":"launch"}Content-Length: 47\r\n\r\n{"seq":2,"type":"request","command":"evaluate"}Content-Length: 53\r\n\r\n{"seq":3,"type":"request","command":"setBreakpoints"}Content-Length: 57\r\n\r\n{"seq":4,"type":"request","command":"setDataBreakpoints"}Content-Length: 61\r\n\r\n{"seq":5,"type":"request","command":"setFunctionBreakpoints"}' | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_unwired" | grep -F '"command":"evaluate","success":false'; echo "$$dap_unwired" | grep -F '"command":"setBreakpoints","success":false'; echo "$$dap_unwired" | grep -F '"command":"setDataBreakpoints","success":false'; echo "$$dap_unwired" | grep -F '"command":"setFunctionBreakpoints","success":false'
+	dap_unwired=$$(printf 'Content-Length: 45\r\n\r\n{"seq":1,"type":"request","command":"launch"}Content-Length: 47\r\n\r\n{"seq":2,"type":"request","command":"evaluate"}Content-Length: 53\r\n\r\n{"seq":3,"type":"request","command":"setBreakpoints"}Content-Length: 57\r\n\r\n{"seq":4,"type":"request","command":"setDataBreakpoints"}Content-Length: 61\r\n\r\n{"seq":5,"type":"request","command":"setFunctionBreakpoints"}' | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_unwired" | grep -F '"command":"launch","success":false'; echo "$$dap_unwired" | grep -F '"command":"evaluate","success":false'; echo "$$dap_unwired" | grep -F '"command":"setBreakpoints","success":false'; echo "$$dap_unwired" | grep -F '"command":"setDataBreakpoints","success":false'; echo "$$dap_unwired" | grep -F '"command":"setFunctionBreakpoints","success":false'
 	printf 'Content-Length: 41\r\n\r\n{"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 48\r\n\r\n{"seq":1,"type":"request","command":"initialize"' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: $(DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH)\r\n\r\n{"seq":0,"type":"request","command":"launch"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
@@ -479,8 +502,8 @@ smoke: check server dap-server cli ffi-check
 	printf 'Content-Length: 50\r\n\r\n{"seq":1,"type":"request","command":"initialize",}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 56\r\n\r\n{"seq":1,"type":"request","command":"initialize",,"x":1}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 58\r\n\r\n{"seq":1,"type":"request","command":"initialize","x":[{]}}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
-	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}Content-Length: 45\r\n\r\n{"seq":2,"type":"request","command":"launch"}Content-Length: 44\r\n\r\n{"seq":3,"type":"request","command":"pause"}Content-Length: 49\r\n\r\n{"seq":4,"type":"request","command":"stackTrace"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"stackFrames":[{"id":1,"name":"main","line":1'
-	dap_timeline=$$(printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}Content-Length: 45\r\n\r\n{"seq":2,"type":"request","command":"launch"}Content-Length: 44\r\n\r\n{"seq":3,"type":"request","command":"pause"}Content-Length: 43\r\n\r\n{"seq":4,"type":"request","command":"next"}Content-Length: 49\r\n\r\n{"seq":5,"type":"request","command":"stackTrace"}Content-Length: 47\r\n\r\n{"seq":6,"type":"request","command":"stepBack"}Content-Length: 49\r\n\r\n{"seq":7,"type":"request","command":"stackTrace"}' | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_timeline" | grep -F '"line":2'; echo "$$dap_timeline" | grep -F '"line":1'
+	launch_payload=' {"seq":2,"type":"request","command":"launch","arguments":{"program":"build/edir-fixture.edir"}}'; launch_length=$$(printf %s "$$launch_payload" | wc -c | tr -d ' '); dap_fixture=$$(printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}Content-Length: %s\r\n\r\n%sContent-Length: 44\r\n\r\n{"seq":3,"type":"request","command":"pause"}Content-Length: 49\r\n\r\n{"seq":4,"type":"request","command":"stackTrace"}' "$$launch_length" "$$launch_payload" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_fixture" | grep -F '"command":"launch","success":true'; echo "$$dap_fixture" | grep -F '"stackFrames":[{"id":1,"name":"main","line":41,"column":$(DAP_EXPECTED_MAPPED_COLUMN)}]}}'
+	launch_payload='{"seq":2,"type":"request","command":"launch","arguments":{"program":"build/edir-fixture.edir"}}'; launch_length=$$(printf %s "$$launch_payload" | wc -c | tr -d ' '); dap_timeline=$$(printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}Content-Length: %s\r\n\r\n%sContent-Length: 44\r\n\r\n{"seq":3,"type":"request","command":"pause"}Content-Length: 43\r\n\r\n{"seq":4,"type":"request","command":"next"}Content-Length: 49\r\n\r\n{"seq":5,"type":"request","command":"stackTrace"}Content-Length: 47\r\n\r\n{"seq":6,"type":"request","command":"stepBack"}Content-Length: 49\r\n\r\n{"seq":7,"type":"request","command":"stackTrace"}Content-Length: 43\r\n\r\n{"seq":8,"type":"request","command":"next"}Content-Length: 49\r\n\r\n{"seq":9,"type":"request","command":"stackTrace"}Content-Length: 44\r\n\r\n{"seq":10,"type":"request","command":"next"}Content-Length: 50\r\n\r\n{"seq":11,"type":"request","command":"stackTrace"}' "$$launch_length" "$$launch_payload" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_timeline" | grep -F '"line":42,"column":$(DAP_EXPECTED_MAPPED_COLUMN)}]}}'; echo "$$dap_timeline" | grep -F '"line":41,"column":$(DAP_EXPECTED_MAPPED_COLUMN)}]}}'; echo "$$dap_timeline" | grep -F '"line":$(DAP_UNKNOWN_SOURCE_LINE),"column":$(DAP_UNKNOWN_SOURCE_LINE)}]}}'
 	printf 'launch\npause\ncontinue\nclose\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=2'
 	cli_inspection=$$(printf 'launch\npause\nstack\nlocals\n' | "$(BUILD)/elisa-debugger-cli"); echo "$$cli_inspection" | grep -F 'frame id='; echo "$$cli_inspection" | grep -F 'locals count=0'
 	cli_unwired=$$(printf 'launch\npause\ntasks\nevaluate\nbreak\nwatch\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_unwired" | grep -c '^error code=')" -eq 4

@@ -7,7 +7,9 @@ module DebuggerDAPPayload:
         const ASCII_QUOTE: u8 = 34
         const ASCII_COLON: u8 = 58
         const ASCII_COMMA: u8 = 44
+        const ASCII_BRACE_OPEN: u8 = 123
         const ASCII_BRACE_CLOSE: u8 = 125
+        const ASCII_BRACKET_OPEN: u8 = 91
         const ASCII_BRACKET_CLOSE: u8 = 93
         const ASCII_BACKSLASH: u8 = 92
         const ASCII_SPACE: u8 = 32
@@ -29,6 +31,7 @@ module DebuggerDAPPayload:
         const ASCII_T: u8 = 116
         const ASCII_U: u8 = 117
         const ASCII_Y: u8 = 121
+        const ASCII_S: u8 = 115
         const ASCII_UPPER_A: u8 = 65
         const ASCII_UPPER_F: u8 = 70
         const ASCII_LOWER_X: u8 = 120
@@ -46,6 +49,59 @@ module DebuggerDAPPayload:
         const HEX_PREFIX_LENGTH: usize = 2
         const HEX_DIGIT_OFFSET: u64 = 10
         const FIRST_DIGIT_COUNT: usize = 1
+        const PROGRAM_FIELD: u8 = 3
+        const ARGUMENTS_FIELD: u8 = 4
+        const PROGRAM_PATH_CAPACITY: usize = 1024
+        const PROGRAM_FIELD_LENGTH: usize = 7
+        const ARGUMENTS_FIELD_LENGTH: usize = 9
+        const ASCII_P: u8 = 112
+        const ASCII_G: u8 = 103
+        const ASCII_SLASH: u8 = 47
+        const ASCII_BACKSPACE: u8 = 98
+        const ASCII_FORM_FEED: u8 = 102
+        const ASCII_NEWLINE: u8 = 110
+        const ASCII_CARRIAGE_RETURN_ESCAPE: u8 = 114
+        const ASCII_ESCAPE_TAB: u8 = 116
+        const ASCII_LOWER_U: u8 = 117
+        const UNICODE_HEX_DIGITS: usize = 4
+        const UNICODE_SURROGATE_HIGH_START: u64 = 55296
+        const UNICODE_SURROGATE_HIGH_END: u64 = 56319
+        const UNICODE_SURROGATE_LOW_START: u64 = 56320
+        const UNICODE_SURROGATE_LOW_END: u64 = 57343
+        const UNICODE_SURROGATE_BASE: u64 = 65536
+        const UNICODE_SURROGATE_SHIFT: u64 = 10
+        const UNICODE_HIGH_SURROGATE_OFFSET: u64 = 55296
+        const UNICODE_LOW_SURROGATE_OFFSET: u64 = 56320
+        const UNICODE_MAX_CODEPOINT: u64 = 1114111
+        const UNICODE_CONTROL_MAX: u64 = 31
+        const UNICODE_TWO_BYTE_MAX_EXCLUSIVE: u64 = 2048
+        const UNICODE_THREE_BYTE_MAX_EXCLUSIVE: u64 = 65536
+        const UTF8_CONTINUATION_BASE: u64 = 128
+        const UTF8_TWO_BYTE_BASE: u64 = 192
+        const UTF8_THREE_BYTE_BASE: u64 = 224
+        const UTF8_FOUR_BYTE_BASE: u64 = 240
+        const UTF8_CONTINUATION_MASK: u64 = 63
+        const UTF8_FIRST_TWO_MASK: u64 = 31
+        const UTF8_FIRST_THREE_MASK: u64 = 15
+        const UTF8_FIRST_FOUR_MASK: u64 = 7
+        const UTF8_SHIFT: u64 = 6
+        const ASCII_DELETE: u64 = 127
+        const UTF8_TWO_BYTE_START: u64 = 194
+        const UTF8_TWO_BYTE_END: u64 = 223
+        const UTF8_THREE_BYTE_START: u64 = 224
+        const UTF8_THREE_BYTE_END: u64 = 239
+        const UTF8_FOUR_BYTE_START: u64 = 240
+        const UTF8_FOUR_BYTE_END: u64 = 244
+        const UTF8_CONTINUATION_MIN: u64 = 128
+        const UTF8_CONTINUATION_MAX: u64 = 191
+        const UTF8_TWO_BYTE_MIN_CODEPOINT: u64 = 128
+        const UTF8_THREE_BYTE_MIN_CODEPOINT: u64 = 2048
+        const UTF8_FOUR_BYTE_MIN_CODEPOINT: u64 = 65536
+        const UTF8_TWO_BYTE_LENGTH: usize = 2
+        const UTF8_THREE_BYTE_LENGTH: usize = 3
+        const UTF8_FOUR_BYTE_LENGTH: usize = 4
+        const UNICODE_SURROGATE_RANGE_START: u64 = 55296
+        const UNICODE_SURROGATE_RANGE_END: u64 = 57343
 
         struct ParsedValue:
             valid: mutable bool
@@ -59,9 +115,29 @@ module DebuggerDAPPayload:
             return byte == ASCII_SPACE or byte == ASCII_TAB or byte == ASCII_LINE_FEED or byte == ASCII_CARRIAGE_RETURN
 
         def field_length(field: u8) -> usize:
+            return ARGUMENTS_FIELD_LENGTH if field == ARGUMENTS_FIELD
+            return PROGRAM_FIELD_LENGTH if field == PROGRAM_FIELD
             return MEMORY_REFERENCE_LENGTH if field == MEMORY_REFERENCE_FIELD else COUNT_LENGTH
 
         def field_byte(field: u8, position: usize) -> u8:
+            if field == ARGUMENTS_FIELD:
+                return ASCII_A if position == 0
+                return ASCII_R if position == 1
+                return ASCII_G if position == 2
+                return ASCII_U if position == 3
+                return ASCII_M if position == 4
+                return ASCII_E if position == 5
+                return ASCII_N if position == 6
+                return ASCII_T if position == 7
+                return ASCII_S
+            if field == PROGRAM_FIELD:
+                return ASCII_P if position == 0
+                return ASCII_R if position == 1
+                return ASCII_O if position == 2
+                return ASCII_G if position == 3
+                return ASCII_R if position == 4
+                return ASCII_A if position == 5
+                return ASCII_M
             if field == MEMORY_REFERENCE_FIELD:
                 return ASCII_M if position == 0
                 return ASCII_E if position == 1
@@ -134,11 +210,212 @@ module DebuggerDAPPayload:
                         index <- index + 1
             return NO_INDEX
 
+        def json_string_end(payload: u8&, length: usize, start: usize) -> usize:
+            return NO_INDEX if start >= length or payload[start] != ASCII_QUOTE
+            escaped: mutable bool = false
+            index: mutable usize = start + 1
+            while index < length:
+                byte: u8 = payload[index]
+                if escaped:
+                    escaped <- false
+                else:
+                    if byte == ASCII_BACKSLASH:
+                        escaped <- true
+                    else:
+                        return index + 1 if byte == ASCII_QUOTE
+                index <- index + 1
+            return NO_INDEX
+
+        def json_value_end(payload: u8&, length: usize, start: usize) -> usize:
+            return NO_INDEX if start >= length
+            return json_string_end(payload, length, start) if payload[start] == ASCII_QUOTE
+            if payload[start] == ASCII_BRACE_OPEN or payload[start] == ASCII_BRACKET_OPEN:
+                depth: mutable usize = 0
+                in_string: mutable bool = false
+                escaped: mutable bool = false
+                index: mutable usize = start
+                while index < length:
+                    byte: u8 = payload[index]
+                    if in_string:
+                        if escaped:
+                            escaped <- false
+                        else:
+                            if byte == ASCII_BACKSLASH:
+                                escaped <- true
+                            else:
+                                in_string <- false if byte == ASCII_QUOTE
+                    else:
+                        if byte == ASCII_QUOTE:
+                            in_string <- true
+                        else:
+                            if byte == ASCII_BRACE_OPEN or byte == ASCII_BRACKET_OPEN:
+                                depth <- depth + 1
+                            else:
+                                if byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE:
+                                    return index + 1 if depth == 1
+                                    depth <- depth - 1
+                    index <- index + 1
+                return NO_INDEX
+            index: mutable usize = start
+            while index < length:
+                byte: u8 = payload[index]
+                break if is_whitespace(byte) or byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE
+                index <- index + 1
+            return NO_INDEX if index == start else index
+
+        # Reads only direct properties from one object and skips complete
+        # nested values, so launch path lookup cannot accept nested decoys.
+        def object_field_value_start(payload: u8&, length: usize, object_start: usize, field: u8, occurrence: usize) -> usize:
+            return NO_INDEX if object_start >= length or payload[object_start] != ASCII_BRACE_OPEN
+            property_index: mutable usize = object_start + 1
+            matched: mutable usize = 0
+            while property_index < length:
+                while property_index < length and (is_whitespace(payload[property_index]) or payload[property_index] == ASCII_COMMA):
+                    property_index <- property_index + 1
+                return NO_INDEX if property_index >= length or payload[property_index] == ASCII_BRACE_CLOSE
+                key_start: usize = property_index
+                key_end: usize = json_string_end(payload, length, key_start)
+                return NO_INDEX if key_end == NO_INDEX
+                property_index <- key_end
+                while property_index < length and is_whitespace(payload[property_index]):
+                    property_index <- property_index + 1
+                return NO_INDEX if property_index >= length or payload[property_index] != ASCII_COLON
+                property_index <- property_index + 1
+                while property_index < length and is_whitespace(payload[property_index]):
+                    property_index <- property_index + 1
+                value_start: usize = property_index
+                value_end: usize = json_value_end(payload, length, value_start)
+                return NO_INDEX if value_end == NO_INDEX
+                if field_matches(payload, key_start, length, field):
+                    if matched == occurrence:
+                        return value_start
+                    matched <- matched + 1
+                property_index <- value_end
+            return NO_INDEX
+
         def hex_digit(byte: u8) -> ParsedValue:
             return ParsedValue{valid: true, value: (byte - ASCII_ZERO).u64(), end: 0} if byte >= ASCII_ZERO and byte <= ASCII_NINE
             return ParsedValue{valid: true, value: (byte - ASCII_A).u64() + HEX_DIGIT_OFFSET, end: 0} if byte >= ASCII_A and byte <= ASCII_F
             return ParsedValue{valid: true, value: (byte - ASCII_UPPER_A).u64() + HEX_DIGIT_OFFSET, end: 0} if byte >= ASCII_UPPER_A and byte <= ASCII_UPPER_F
             return invalid_value()
+
+        def parse_unicode_quad(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start > length or length - start < UNICODE_HEX_DIGITS
+            value: mutable u64 = 0
+            for offset in 0..<UNICODE_HEX_DIGITS:
+                digit: ParsedValue = hex_digit(payload[start + offset])
+                return invalid_value() if not digit.valid
+                value <- value * HEX_BASE + digit.value
+            return ParsedValue{valid: true, value: value, end: start + UNICODE_HEX_DIGITS}
+
+        def program_path_append(path: mutable ProgramPath&, value: u8) -> bool:
+            return false if path.length >= PROGRAM_PATH_CAPACITY
+            path.bytes[path.length] <- value
+            path.length <- path.length + 1
+            return true
+
+        def invalid_program_path() -> ProgramPath:
+            return ProgramPath{bytes: zeroed, length: 0, valid: false}
+
+        def program_path_append_codepoint(path: mutable ProgramPath&, value: u64) -> bool:
+            return false if value == 0 or value <= UNICODE_CONTROL_MAX or value == ASCII_DELETE
+            return false if value > UNICODE_MAX_CODEPOINT
+            if value < UTF8_CONTINUATION_BASE:
+                return program_path_append(path, value.u8())
+            if value < UNICODE_TWO_BYTE_MAX_EXCLUSIVE:
+                first: u8 = (UTF8_TWO_BYTE_BASE | (value >> UTF8_SHIFT)).u8()
+                second: u8 = (UTF8_CONTINUATION_BASE | (value & UTF8_CONTINUATION_MASK)).u8()
+                return false if not program_path_append(path, first)
+                return program_path_append(path, second)
+            if value < UNICODE_THREE_BYTE_MAX_EXCLUSIVE:
+                first: u8 = (UTF8_THREE_BYTE_BASE | (value >> (UTF8_SHIFT * 2))).u8()
+                second: u8 = (UTF8_CONTINUATION_BASE | ((value >> UTF8_SHIFT) & UTF8_CONTINUATION_MASK)).u8()
+                third: u8 = (UTF8_CONTINUATION_BASE | (value & UTF8_CONTINUATION_MASK)).u8()
+                return false if not program_path_append(path, first)
+                return false if not program_path_append(path, second)
+                return program_path_append(path, third)
+            first: u8 = (UTF8_FOUR_BYTE_BASE | (value >> (UTF8_SHIFT * 3))).u8()
+            second: u8 = (UTF8_CONTINUATION_BASE | ((value >> (UTF8_SHIFT * 2)) & UTF8_CONTINUATION_MASK)).u8()
+            third: u8 = (UTF8_CONTINUATION_BASE | ((value >> UTF8_SHIFT) & UTF8_CONTINUATION_MASK)).u8()
+            fourth: u8 = (UTF8_CONTINUATION_BASE | (value & UTF8_CONTINUATION_MASK)).u8()
+            return false if not program_path_append(path, first)
+            return false if not program_path_append(path, second)
+            return false if not program_path_append(path, third)
+            return program_path_append(path, fourth)
+
+        def program_path_utf8_is_valid(path: ProgramPath) -> bool:
+            index: mutable usize = 0
+            while index < path.length:
+                first: u64 = path.bytes[index].u64()
+                sequence_length: mutable usize = 1
+                minimum_codepoint: mutable u64 = 0
+                codepoint: mutable u64 = first
+                if first >= UTF8_TWO_BYTE_START and first <= UTF8_TWO_BYTE_END:
+                    sequence_length <- UTF8_TWO_BYTE_LENGTH
+                    minimum_codepoint <- UTF8_TWO_BYTE_MIN_CODEPOINT
+                    codepoint <- first & UTF8_FIRST_TWO_MASK
+                if first >= UTF8_THREE_BYTE_START and first <= UTF8_THREE_BYTE_END:
+                    sequence_length <- UTF8_THREE_BYTE_LENGTH
+                    minimum_codepoint <- UTF8_THREE_BYTE_MIN_CODEPOINT
+                    codepoint <- first & UTF8_FIRST_THREE_MASK
+                if first >= UTF8_FOUR_BYTE_START and first <= UTF8_FOUR_BYTE_END:
+                    sequence_length <- UTF8_FOUR_BYTE_LENGTH
+                    minimum_codepoint <- UTF8_FOUR_BYTE_MIN_CODEPOINT
+                    codepoint <- first & UTF8_FIRST_FOUR_MASK
+                if first >= UTF8_CONTINUATION_MIN and sequence_length == 1:
+                    return false
+                return false if sequence_length > path.length - index
+                for offset in 1..<sequence_length:
+                    continuation: u64 = path.bytes[index + offset].u64()
+                    return false if continuation < UTF8_CONTINUATION_MIN or continuation > UTF8_CONTINUATION_MAX
+                    codepoint <- (codepoint << UTF8_SHIFT) | (continuation & UTF8_CONTINUATION_MASK)
+                return false if codepoint < minimum_codepoint or codepoint > UNICODE_MAX_CODEPOINT
+                return false if codepoint >= UNICODE_SURROGATE_RANGE_START and codepoint <= UNICODE_SURROGATE_RANGE_END
+                index <- index + sequence_length
+            return true
+
+        def parse_program_path_string(payload: u8&, length: usize, start: usize) -> ProgramPath:
+            path: mutable ProgramPath = zeroed
+            path.valid <- true
+            return invalid_program_path() if start >= length or payload[start] != ASCII_QUOTE
+            index: mutable usize = start + 1
+            while index < length:
+                byte: u8 = payload[index]
+                if byte == ASCII_QUOTE:
+                    return invalid_program_path() if path.length == 0 or not program_path_utf8_is_valid(path)
+                    return path
+                if byte == ASCII_BACKSLASH:
+                    return invalid_program_path() if index + 1 >= length
+                    escaped: u8 = payload[index + 1]
+                    if escaped == ASCII_QUOTE or escaped == ASCII_BACKSLASH or escaped == ASCII_SLASH:
+                        path.valid <- program_path_append(path, escaped)
+                        return invalid_program_path() if not path.valid
+                        index <- index + 2
+                        continue
+                    if escaped == ASCII_LOWER_U:
+                        high: ParsedValue = parse_unicode_quad(payload, length, index + 2)
+                        return invalid_program_path() if not high.valid
+                        codepoint: mutable u64 = high.value
+                        index <- high.end
+                        if high.value >= UNICODE_SURROGATE_HIGH_START and high.value <= UNICODE_SURROGATE_HIGH_END:
+                            return invalid_program_path() if index + 1 >= length or payload[index] != ASCII_BACKSLASH or payload[index + 1] != ASCII_LOWER_U
+                            low: ParsedValue = parse_unicode_quad(payload, length, index + 2)
+                            return invalid_program_path() if not low.valid or low.value < UNICODE_SURROGATE_LOW_START or low.value > UNICODE_SURROGATE_LOW_END
+                            codepoint <- UNICODE_SURROGATE_BASE + ((high.value - UNICODE_HIGH_SURROGATE_OFFSET) << UNICODE_SURROGATE_SHIFT) + (low.value - UNICODE_LOW_SURROGATE_OFFSET)
+                            index <- low.end
+                        else:
+                            return invalid_program_path() if high.value >= UNICODE_SURROGATE_LOW_START and high.value <= UNICODE_SURROGATE_LOW_END
+                        path.valid <- program_path_append_codepoint(path, codepoint)
+                        return invalid_program_path() if not path.valid
+                        continue
+                    # Control escapes cannot name a useful portable filesystem path.
+                    return invalid_program_path() if escaped == ASCII_BACKSPACE or escaped == ASCII_FORM_FEED or escaped == ASCII_NEWLINE or escaped == ASCII_CARRIAGE_RETURN_ESCAPE or escaped == ASCII_ESCAPE_TAB
+                    return invalid_program_path()
+                return invalid_program_path() if byte < ASCII_SPACE or byte.u64() == ASCII_DELETE
+                path.valid <- program_path_append(path, byte)
+                return invalid_program_path() if not path.valid
+                index <- index + 1
+            return invalid_program_path()
 
         def parse_memory_reference(payload: u8&, length: usize, start: usize) -> ParsedValue:
             return invalid_value() if start >= length or payload[start] != ASCII_QUOTE
@@ -179,6 +456,11 @@ module DebuggerDAPPayload:
             return ParsedValue{valid: true, value: value, end: index}
 
     public:
+        struct ProgramPath:
+            bytes: mutable u8[PROGRAM_PATH_CAPACITY]
+            length: mutable usize
+            valid: mutable bool
+
         struct MemoryRequest:
             valid: mutable bool
             address: mutable u64
@@ -197,3 +479,15 @@ module DebuggerDAPPayload:
             request.address <- reference.value
             request.count <- count.value.usize()
             return request
+
+        def program_path_parse(payload: u8&, length: usize) -> ProgramPath:
+            result: mutable ProgramPath = zeroed
+            root_start: mutable usize = 0
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 0)
+            return result if arguments == NO_INDEX or object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 1) != NO_INDEX
+            return result if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
+            program: usize = object_field_value_start(payload, length, arguments, PROGRAM_FIELD, 0)
+            return result if program == NO_INDEX or object_field_value_start(payload, length, arguments, PROGRAM_FIELD, 1) != NO_INDEX
+            return parse_program_path_string(payload, length, program)

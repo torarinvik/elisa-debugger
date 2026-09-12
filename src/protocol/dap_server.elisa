@@ -16,6 +16,7 @@ include "./request.elisa"
 include "./dispatcher.elisa"
 include "./managed_service.elisa"
 include "./dap_payload.elisa"
+include "../vm/edir_file.elisa"
 
 module DebuggerDAPServer:
     private:
@@ -33,7 +34,7 @@ module DebuggerDAPServer:
         const DAP_NO_EXPECTED_GENERATION: u64 = 0
         const DAP_FALLBACK_REQUEST_ID: u64 = 1
         const DAP_MEMORY_DETAIL_ARGUMENT: u32 = 1
-        const DAP_MAX_SOURCE_LINE: u64 = 18446744073709551615
+        const DAP_UNKNOWN_SOURCE_LINE: u64 = 0
         const DECODER_HEADER_STATE: u8 = 0
         const DECODER_PAYLOAD_STATE: u8 = 2
         const DECODER_FAILED_STATE: u8 = 3
@@ -150,6 +151,12 @@ module DebuggerDAPServer:
         const DAP_INIT_SUFFIX_LENGTH: usize = 432
         const DAP_LAUNCH_COMMAND: cstr = "launch"
         const DAP_LAUNCH_COMMAND_LENGTH: usize = 6
+        const DAP_LAUNCH_INVALID_SUFFIX: cstr = "\",\"success\":false,\"message\":\"launch requires a valid EDIR artifact path\"}"
+        const DAP_LAUNCH_INVALID_SUFFIX_LENGTH: usize = 73
+        const DAP_LAUNCH_CORRUPT_SUFFIX: cstr = "\",\"success\":false,\"message\":\"EDIR artifact is malformed or unsupported\"}"
+        const DAP_LAUNCH_CORRUPT_SUFFIX_LENGTH: usize = 72
+        const DAP_LAUNCH_RESOURCE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"EDIR artifact exceeds the supported size\"}"
+        const DAP_LAUNCH_RESOURCE_SUFFIX_LENGTH: usize = 71
         const DAP_SIMPLE_SUCCESS_SUFFIX: cstr = "\",\"success\":true}"
         const DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH: usize = 17
         const DAP_CONFIGURATION_DONE_COMMAND: cstr = "configurationDone"
@@ -174,8 +181,10 @@ module DebuggerDAPServer:
         const DAP_STACK_TRACE_SUFFIX_LENGTH: usize = 85
         const DAP_STACK_DYNAMIC_BEFORE_LINE: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"main\",\"line\":"
         const DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH: usize = 69
-        const DAP_STACK_DYNAMIC_AFTER_LINE: cstr = ",\"column\":1}]}}"
-        const DAP_STACK_DYNAMIC_AFTER_LINE_LENGTH: usize = 15
+        const DAP_STACK_DYNAMIC_BEFORE_COLUMN: cstr = ",\"column\":"
+        const DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH: usize = 10
+        const DAP_STACK_DYNAMIC_AFTER_COLUMN: cstr = "}]}}"
+        const DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH: usize = 4
         const DAP_SCOPES_COMMAND: cstr = "scopes"
         const DAP_SCOPES_COMMAND_LENGTH: usize = 6
         const DAP_SCOPES_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"scopes\":[{\"name\":\"Locals\",\"variablesReference\":1,\"expensive\":false}]}}"
@@ -885,9 +894,21 @@ module DebuggerDAPServer:
             _ = printf(command) can Console
             _ = printf(suffix) can Console
 
-        def write_stack_response(result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
-            line: u64 = DAP_MAX_SOURCE_LINE if result.session.position.statement.value == DAP_MAX_SOURCE_LINE else result.session.position.statement.value + 1
-            body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(line) + DAP_STACK_DYNAMIC_AFTER_LINE_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
+        struct DAPSourceLocation:
+            line: mutable u64
+            column: mutable u64
+
+        def stack_source_location(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult) -> DAPSourceLocation:
+            instruction_index: u64 = result.session.position.statement.value
+            if instruction_index < service.controller.engine.image.program.instruction_count:
+                source: DebuggerIdentity::SourceSpan = service.controller.engine.image.instructions[instruction_index.usize()].source
+                if source.file.value != 0 and source.start_line != 0:
+                    return DAPSourceLocation{line: source.start_line.u64(), column: source.start_column.u64()}
+            return DAPSourceLocation{line: DAP_UNKNOWN_SOURCE_LINE, column: DAP_UNKNOWN_SOURCE_LINE}
+
+        def write_stack_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            location: DAPSourceLocation = stack_source_location(service, result)
+            body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(location.line) + DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(DAP_BODY_PREFIX) can Console
             _ = printf("%llu", response_sequence) can Console
@@ -896,8 +917,10 @@ module DebuggerDAPServer:
             _ = printf(DAP_COMMAND_PREFIX) can Console
             _ = printf(DAP_STACK_TRACE_COMMAND) can Console
             _ = printf(DAP_STACK_DYNAMIC_BEFORE_LINE) can Console
-            _ = printf("%llu", line) can Console
-            _ = printf(DAP_STACK_DYNAMIC_AFTER_LINE) can Console
+            _ = printf("%llu", location.line) can Console
+            _ = printf(DAP_STACK_DYNAMIC_BEFORE_COLUMN) can Console
+            _ = printf("%llu", location.column) can Console
+            _ = printf(DAP_STACK_DYNAMIC_AFTER_COLUMN) can Console
 
         def request_for(method: DebuggerProtocolRequest::RequestMethod, request_id: u64) -> DebuggerProtocolRequest::Request:
             request: mutable DebuggerProtocolRequest::Request = zeroed
@@ -935,11 +958,25 @@ module DebuggerDAPServer:
             memory <- DebuggerManagedService::service_memory(service, request.address, request.count)
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Memory, accepted: DebuggerMemory::memory_read_is_available(memory), stop_generation: service.controller.session.stop_generation, failure: memory.failure}
 
-        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult:
+        def dispatch_launch(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+            return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id) if service.controller.session.state != DebuggerSession::SessionState.Created
+            path: DebuggerDAPPayload::ProgramPath = DebuggerDAPPayload::program_path_parse(payload, payload_length)
+            if not path.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(path.bytes[0], path.length) can Blocking.IO, Unsafe.PointerCast
+            if not loaded.valid:
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
+            recording: DebuggerIdentity::DebugId = service.controller.engine.recording
+            session: DebuggerSession::Session = service.controller.session
+            service <- DebuggerManagedService::service_new(session, loaded.image, recording)
+            return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
+
+        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if command_hash == COMMAND_HASH_INITIALIZE:
                 return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request_for(DebuggerProtocolRequest::RequestMethod.Initialize, request_id), DAP_NO_EXPECTED_GENERATION)
             if command_hash == COMMAND_HASH_LAUNCH:
-                return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
+                return dispatch_launch(service, request_id, payload, payload_length) can Blocking.IO, Unsafe.PointerCast
             if command_hash == COMMAND_HASH_CONTINUE:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Continue, request_id)
             if command_hash == COMMAND_HASH_PAUSE:
@@ -1048,6 +1085,18 @@ module DebuggerDAPServer:
                 return
             write_dynamic_response(response_sequence, request_sequence, DAP_UNSUPPORTED_COMMAND, DAP_UNSUPPORTED_COMMAND_LENGTH, DAP_UNSUPPORTED_SUFFIX, DAP_UNSUPPORTED_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
 
+        def write_launch_failure_response(result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            if result.failure.code == DebuggerErrors::ErrorCode.InvalidArgument:
+                write_dynamic_response(response_sequence, request_sequence, DAP_LAUNCH_COMMAND, DAP_LAUNCH_COMMAND_LENGTH, DAP_LAUNCH_INVALID_SUFFIX, DAP_LAUNCH_INVALID_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if result.failure.code == DebuggerErrors::ErrorCode.Corrupt:
+                write_dynamic_response(response_sequence, request_sequence, DAP_LAUNCH_COMMAND, DAP_LAUNCH_COMMAND_LENGTH, DAP_LAUNCH_CORRUPT_SUFFIX, DAP_LAUNCH_CORRUPT_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if result.failure.code == DebuggerErrors::ErrorCode.ResourceLimit:
+                write_dynamic_response(response_sequence, request_sequence, DAP_LAUNCH_COMMAND, DAP_LAUNCH_COMMAND_LENGTH, DAP_LAUNCH_RESOURCE_SUFFIX, DAP_LAUNCH_RESOURCE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            write_failure_response(COMMAND_HASH_LAUNCH, request_sequence, response_sequence) can Console, Unsafe.PointerCast
+
         def write_memory_response(memory: DebuggerMemory::MemoryRead, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
             address_digits: mutable usize = DAP_FIRST_HEX_DIGIT_COUNT
             address_remaining: mutable u64 = memory.address
@@ -1069,10 +1118,13 @@ module DebuggerDAPServer:
                 _ = printf("%02llx", memory.bytes[index].u64()) can Console
             _ = printf(DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
 
-        def write_response(result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
                 if command_hash == COMMAND_HASH_READ_MEMORY and result.failure.code == DebuggerErrors::ErrorCode.InvalidArgument:
                     write_dynamic_response(response_sequence, request_sequence, DAP_READ_MEMORY_COMMAND, DAP_READ_MEMORY_COMMAND_LENGTH, DAP_MEMORY_INVALID_SUFFIX, DAP_MEMORY_INVALID_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                    return
+                if command_hash == COMMAND_HASH_LAUNCH:
+                    write_launch_failure_response(result, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                     return
                 write_failure_response(command_hash, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
@@ -1104,7 +1156,7 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, DAP_THREADS_COMMAND, DAP_THREADS_COMMAND_LENGTH, DAP_THREADS_SUFFIX, DAP_THREADS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_STACK_TRACE:
-                write_stack_response(result, request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                write_stack_response(service, result, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_SCOPES:
                 write_dynamic_response(response_sequence, request_sequence, DAP_SCOPES_COMMAND, DAP_SCOPES_COMMAND_LENGTH, DAP_SCOPES_SUFFIX, DAP_SCOPES_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -1146,7 +1198,7 @@ module DebuggerDAPServer:
             build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
             return DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
 
-        def run() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def run() -> i64 can[Console, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             decoder: mutable Decoder = decoder_new()
             chunk: mutable u8[DAP_READ_CHUNK_SIZE] = zeroed
             response_sequence: mutable u64 = 1
@@ -1162,7 +1214,7 @@ module DebuggerDAPServer:
                         memory <- zeroed
                         result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory)
                         service.controller.session <- result.session
-                        write_response(result, decoder.command_hash, decoder.request_sequence, response_sequence, memory) can Console, Unsafe.PointerCast
+                        write_response(service, result, decoder.command_hash, decoder.request_sequence, response_sequence, memory) can Console, Unsafe.PointerCast
                         return DAP_SERVER_INVALID_FRAME_EXIT_CODE if response_sequence == MAX_DAP_RESPONSE_SEQUENCE
                         response_sequence <- response_sequence + 1
                         decoder.command_hash <- 0
@@ -1174,5 +1226,5 @@ module DebuggerDAPServer:
             return DAP_SERVER_INVALID_FRAME_EXIT_CODE if decoder.state != DECODER_HEADER_STATE or decoder.header_prefix_position != 0
             return DAP_SERVER_SUCCESS_EXIT_CODE
 
-def main() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+def main() -> i64 can[Console, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     return DebuggerDAPServer::run()

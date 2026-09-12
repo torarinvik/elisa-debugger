@@ -1,0 +1,65 @@
+# Writes one verified EDIR fixture to stdout so the host build recipe can
+# redirect it into a disposable file for loader and DAP integration checks.
+
+extern write(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
+
+include "../src/vm/edir_codec.elisa"
+
+const STDOUT_FD: int = 1
+const PROGRAM_VERSION: u32 = 1
+const INSTRUCTION_COUNT: u64 = 5
+const LOCAL_COUNT: u64 = 2
+const SOURCE_FILE_ID: u64 = 7
+const SOURCE_FIRST_BYTE: u64 = 0
+const SOURCE_BYTE_WIDTH: u64 = 1
+const SOURCE_FIRST_LINE: u32 = 41
+const SOURCE_FIRST_COLUMN: u32 = 3
+const SOURCE_END_COLUMN: u32 = 4
+const SOURCE_LINE_STEP: u32 = 1
+const SOURCE_BYTE_STEP: u64 = 1
+const SOURCE_DISCRIMINATOR: u32 = 0
+const NO_SECOND_OPERAND: i64 = 0
+const FIRST_CONSTANT: i64 = 17
+const SECOND_CONSTANT: i64 = 29
+const FIRST_LOCAL_INDEX: i64 = 0
+const SECOND_LOCAL_INDEX: i64 = 1
+const FIRST_INSTRUCTION: usize = 0
+const SECOND_INSTRUCTION: usize = 1
+const THIRD_INSTRUCTION: usize = 2
+const FOURTH_INSTRUCTION: usize = 3
+const FIFTH_INSTRUCTION: usize = 4
+const WRITE_NO_PROGRESS: isize = 0
+
+def source_span(line: u32, byte_offset: u64) -> DebuggerIdentity::SourceSpan:
+    return DebuggerIdentity::SourceSpan{
+        file: DebuggerIdentity::debug_id(SOURCE_FILE_ID),
+        start_byte: byte_offset,
+        end_byte: byte_offset + SOURCE_BYTE_WIDTH,
+        start_line: line,
+        start_column: SOURCE_FIRST_COLUMN,
+        end_line: line,
+        end_column: SOURCE_END_COLUMN,
+        discriminator: SOURCE_DISCRIMINATOR
+    }
+
+def write_all(bytes: u8&, length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    offset: mutable usize = 0
+    while offset < length:
+        written: isize = write(STDOUT_FD, (&bytes[offset]).cast[void&], length - offset) can Blocking.IO, Unsafe.PointerCast
+        return false if written <= WRITE_NO_PROGRESS
+        return false if written.usize() > length - offset
+        offset <- offset + written.usize()
+    return true
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: LOCAL_COUNT, has_return: true}
+    image.instructions[FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: FIRST_CONSTANT, b: NO_SECOND_OPERAND, source: source_span(SOURCE_FIRST_LINE, SOURCE_FIRST_BYTE)}
+    image.instructions[SECOND_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: FIRST_LOCAL_INDEX, b: NO_SECOND_OPERAND, source: source_span(SOURCE_FIRST_LINE + SOURCE_LINE_STEP, SOURCE_FIRST_BYTE + SOURCE_BYTE_STEP)}
+    image.instructions[THIRD_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: SECOND_CONSTANT, b: NO_SECOND_OPERAND, source: zeroed}
+    image.instructions[FOURTH_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: SECOND_LOCAL_INDEX, b: NO_SECOND_OPERAND, source: source_span(SOURCE_FIRST_LINE + SOURCE_LINE_STEP * 3, SOURCE_FIRST_BYTE + SOURCE_BYTE_STEP * 3)}
+    image.instructions[FIFTH_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: NO_SECOND_OPERAND, b: NO_SECOND_OPERAND, source: source_span(SOURCE_FIRST_LINE + SOURCE_LINE_STEP * 4, SOURCE_FIRST_BYTE + SOURCE_BYTE_STEP * 4)}
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(image)
+    return 1 if not DebuggerTraceBinary::writer_is_valid(encoded)
+    return 2 if not write_all(encoded.bytes[0], encoded.length) can Blocking.IO, Unsafe.PointerCast
+    return 0

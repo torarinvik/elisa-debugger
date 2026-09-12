@@ -39,3 +39,21 @@ The artifact contains logical program metadata only. It contains no host
 pointers, native addresses, allocator state, file descriptors, or raw Elisa
 struct layout. Source IDs and build identity are supplied by the surrounding
 manifest so editor clients can validate source compatibility before launch.
+
+## Current file launch contract
+
+The managed DAP adapter accepts a local EDIR artifact path in the standard
+`launch` request's `arguments.program` field. It opens that path read-only,
+reads no more than the 7,961-byte artifact limit plus one byte, requires a
+complete file, decodes and verifies the entire artifact, and only then
+constructs the managed session with that image. Missing paths, oversized
+files, truncated streams, unsupported schemas, and verifier failures are
+reported as launch failures. The adapter accepts paths up to 1,024 UTF-8
+bytes and decodes JSON escapes, including Unicode surrogate pairs.
+
+This loader runs on the POSIX host boundary; file access is provided by
+`open`, `read`, and `close`, while bounds checks, decoding, and EDIR
+verification remain in Elisa. A source-to-EDIR compiler path is still under
+development, so this contract currently targets already-produced `.edir`
+files. It does not claim that arbitrary `.elisa` source or native executables
+can be launched by the managed engine.

@@ -8,9 +8,12 @@ replay, checkpoints, branches, and capability decisions.
 
 Register a debugger type whose adapter executable is
 `build/elisa-debugger-dap-server` (or the installed equivalent). Launch it with
-standard input/output transport. Forward the user's `program`, `args`,
-`cwd`, `env`, `stopOnEntry`, compiler/build identity, and source mappings in a
-DAP `launch` request. Do not invoke a shell to assemble a command line.
+standard input/output transport. For the current managed provider, pass a
+verified `.edir` artifact path in `arguments.program`. The adapter opens and
+verifies that artifact before launching the managed session. It does not yet
+compile Elisa source or apply `args`, `cwd`, `env`, or `stopOnEntry`; do not
+present those options as active until their execution path is implemented.
+Do not invoke a shell to assemble a command line.
 
 The adapter must be started once per debug session. The plugin should keep the
 returned session identity and use the normal DAP request/event lifecycle. The

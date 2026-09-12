@@ -8,52 +8,54 @@ include "../src/trace/reader.elisa"
 include "../src/trace/bundle.elisa"
 include "../src/trace/verify.elisa"
 include "../src/trace/export.elisa"
+include "../src/trace/pipeline.elisa"
 
 const TEST_BUILD: u64 = 31
 const TEST_RECORDING: u64 = 32
 const TEST_HASH: u64 = 33
 const TEST_SCHEMA: u32 = 1
-const TEST_EVENT_COUNT: u64 = 1
+const TEST_EVENT_COUNT: u64 = 17
+const TEST_EVENT_COUNT_USIZE: usize = 17
+const EXPECTED_EVENT_CHUNK_COUNT: usize = 2
+const EXPECTED_EVENT_CHUNK_COUNT_U64: u64 = 2
+const RECORDER_EVENT_CAPACITY: usize = 16
+const EXPECTED_PENDING_EVENT_COUNT: usize = 1
+const TEST_FIRST_EVENT: u64 = 0
+const TEST_LAST_EVENT: u64 = TEST_EVENT_COUNT - 1
 const MALFORMED_PAYLOAD_LENGTH: usize = 1
 const MALFORMED_PAYLOAD_BYTE: u8 = 0
-const TEST_LEGACY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
-const TEST_HASH_PRIME: u64 = 1099511628211
-
-def test_legacy_checksum(bytes: u8&, length: usize) -> u64:
-    checksum: mutable u64 = TEST_LEGACY_HASH_OFFSET_BASIS
-    for index in 0..<length:
-        checksum <- (checksum ^ bytes[index].u64()) * TEST_HASH_PRIME
-    return checksum
+const PIPELINE_PARTIAL_RECORDING_RESULT: i64 = 12
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
 
 def check_bundle_round_trip() -> i64:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
-    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING))
-    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_SCHEMA, 0, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_HASH)
-    return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
-    return 2 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(recorder))
-    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
-    chunk: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
-    chunk.header.sequence <- 0
-    chunk.checksum <- test_legacy_checksum(chunk.payload[0], chunk.payload_length)
-    chunk.header.checksum <- chunk.checksum
-    return 3 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, chunk))
-    return 4 if bundle.manifest.checkpoint_count != 0 or not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_seal(bundle, false))
+    for index in 0..<TEST_EVENT_COUNT_USIZE:
+        event_ordinal: u64 = index.u64()
+        position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING))
+        position.event <- event_ordinal
+        event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_SCHEMA, event_ordinal, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_HASH + event_ordinal)
+        return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
+    pipeline_result: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
+    return 2 if not pipeline_result.accepted or not DebuggerErrors::error_is_ok(pipeline_result.failure)
+    bundle: mutable DebuggerTraceBundle::TraceBundle = pipeline_result.bundle
+    return 3 if bundle.chunk_count != EXPECTED_EVENT_CHUNK_COUNT or bundle.manifest.compiler.value != TEST_BUILD or bundle.manifest.source.value != TEST_BUILD + 2 or bundle.manifest.first_event != TEST_FIRST_EVENT or bundle.manifest.last_event != TEST_LAST_EVENT
+    return 4 if bundle.manifest.checkpoint_count != 0
     report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
-    return 5 if report.state != DebuggerTraceVerify::VerificationState.Exact or not report.replayable or report.verified_chunks != TEST_EVENT_COUNT
+    return 5 if report.state != DebuggerTraceVerify::VerificationState.Exact or not report.replayable or report.verified_chunks != EXPECTED_EVENT_CHUNK_COUNT_U64
     exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle)
-    return 6 if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count != TEST_EVENT_COUNT
+    return 6 if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count != EXPECTED_EVENT_CHUNK_COUNT
     exported_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[0], exported.bytes.length)
     return 7 if exported_report.state != DebuggerTraceVerify::VerificationState.Exact or not exported_report.replayable
+    return 8 if recorder.status != DebuggerTraceRecorder::RecorderStatus.Recording or recorder.pending_count != EXPECTED_PENDING_EVENT_COUNT
     return 0
 
 def check_corrupt_bundle() -> i64:
     bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
     bundle.state <- DebuggerTraceBundle::BundleState.Corrupt
     report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
-    return 8 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
+    return 9 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
     return 0
 
 def check_rejects_malformed_exact_bundle() -> i64:
@@ -66,13 +68,23 @@ def check_rejects_malformed_exact_bundle() -> i64:
     chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
     chunk.payload[0] <- MALFORMED_PAYLOAD_BYTE
     rejected: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_append(bundle, chunk)
-    return 9 if DebuggerErrors::error_is_ok(rejected) or bundle.state != DebuggerTraceBundle::BundleState.Corrupt
+    return 10 if DebuggerErrors::error_is_ok(rejected) or bundle.state != DebuggerTraceBundle::BundleState.Corrupt
     sealed: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_seal(bundle, false)
-    return 10 if DebuggerErrors::error_is_ok(sealed)
+    return 11 if DebuggerErrors::error_is_ok(sealed)
+    return 0
+
+def check_pipeline_rejects_partial_recording() -> i64:
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(TEST_RECORDING))
+    position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TEST_RECORDING))
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_SCHEMA, 0, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Partial, TEST_HASH)
+    _ = DebuggerTraceRecorder::recorder_append(recorder, event)
+    result: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
+    return PIPELINE_PARTIAL_RECORDING_RESULT if result.accepted or DebuggerErrors::error_is_ok(result.failure) or result.bundle.chunk_count != 0
     return 0
 
 def main() -> i64:
     return check_bundle_round_trip() if check_bundle_round_trip() != 0
     return check_corrupt_bundle() if check_corrupt_bundle() != 0
     return check_rejects_malformed_exact_bundle() if check_rejects_malformed_exact_bundle() != 0
+    return check_pipeline_rejects_partial_recording() if check_pipeline_rejects_partial_recording() != 0
     return 0

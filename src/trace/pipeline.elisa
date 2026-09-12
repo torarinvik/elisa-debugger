@@ -1,0 +1,42 @@
+# Converts an exact recorder snapshot into the canonical in-memory bundle
+# consumed by verification, export, and replay adapters.
+
+include "./recorder.elisa"
+include "./bundle.elisa"
+include "../core/identity.elisa"
+include "../core/errors.elisa"
+
+module DebuggerTracePipeline:
+    private:
+        const DETAIL_RECORDER_NOT_EXACT: u32 = 1
+        const DETAIL_BUNDLE_REJECTED: u32 = 2
+
+    public:
+        struct BundleBuildResult:
+            accepted: mutable bool
+            bundle: mutable DebuggerTraceBundle::TraceBundle
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def bundle_build_error(failure: DebuggerErrors::DebuggerError) -> BundleBuildResult:
+            return BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
+
+        # Finalize a copy so callers can continue recording after taking a
+        # consistent export snapshot. Partial/corrupt recorders never become
+        # exact bundles through this bridge.
+        def bundle_from_recorder(recorder: DebuggerTraceRecorder::TraceRecorder) -> BundleBuildResult:
+            working: mutable DebuggerTraceRecorder::TraceRecorder = recorder
+            return bundle_build_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDER_NOT_EXACT)) if not DebuggerTraceRecorder::recorder_is_exact(working)
+            finalized: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_finalize(working)
+            return bundle_build_error(finalized) if not DebuggerErrors::error_is_ok(finalized)
+            return bundle_build_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RECORDER_NOT_EXACT)) if not DebuggerTraceRecorder::recorder_is_exact(working)
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: working.manifest.compiler, runtime: working.manifest.runtime, source: working.manifest.source, target: working.manifest.target, metadata_version: working.manifest.metadata_version}
+            bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
+            bundle.manifest <- working.manifest
+            for index in 0..<DebuggerTraceRecorder::recorder_chunk_count(working):
+                chunk: mutable DebuggerTraceStorage::StoredChunk = working.chunks[index]
+                chunk.header.sequence <- index.u64()
+                appended: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_append(bundle, chunk)
+                return bundle_build_error(appended) if not DebuggerErrors::error_is_ok(appended)
+            sealed: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_seal(bundle, false)
+            return bundle_build_error(sealed) if not DebuggerErrors::error_is_ok(sealed)
+            return BundleBuildResult{accepted: true, bundle: bundle, failure: DebuggerErrors::no_error()}

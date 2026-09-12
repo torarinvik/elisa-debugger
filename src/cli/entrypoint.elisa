@@ -3,8 +3,10 @@
 
 include "../core/session.elisa"
 include "../core/capabilities.elisa"
+include "../core/errors.elisa"
 include "../core/identity.elisa"
 include "../engine/default_image.elisa"
+include "../inspect/managed.elisa"
 include "./commands.elisa"
 include "../protocol/request.elisa"
 include "../protocol/dispatcher.elisa"
@@ -25,6 +27,22 @@ module DebuggerCLIEntrypoint:
         const EXIT_INPUT_ERROR: i64 = 2
         const FIRST_REQUEST_ID: u64 = 1
         const MAX_REQUEST_ID: u64 = 18446744073709551615
+        const CLI_FIRST_LOCAL_INDEX: usize = 0
+        const CLI_DEFAULT_LOCAL_REQUEST: usize = 0
+        const CLI_UNSUPPORTED_RESULT_DETAIL: u32 = 4
+
+        def write_frame(frame: DebuggerManagedInspection::FrameSnapshot) -> void can[Console]:
+            _ = printf("frame id=%llu event=%llu instruction=%llu accumulator=%lld result=%lld returnDepth=%llu\n", frame.id.value, frame.event, frame.instruction.value, frame.accumulator, frame.result, frame.return_depth.u64()) can Console
+
+        def write_locals(service: mutable DebuggerManagedService::Service&) -> void can[Console]:
+            page: DebuggerManagedInspection::LocalPage = DebuggerManagedService::service_locals(service, CLI_FIRST_LOCAL_INDEX, CLI_DEFAULT_LOCAL_REQUEST)
+            _ = printf("locals count=%llu next=%llu\n", page.count.u64(), page.next.u64()) can Console
+            for index in 0..<page.count:
+                entry: DebuggerManagedInspection::LocalSnapshot = page.entries[index]
+                if entry.available:
+                    _ = printf("local[%llu]=%lld\n", entry.index.u64(), entry.value) can Console
+                else:
+                    _ = printf("local[%llu]=uninitialized\n", entry.index.u64()) can Console
         def method_from_command(command: DebuggerCLI::Command) -> DebuggerProtocolRequest::RequestMethod:
             return DebuggerProtocolRequest::RequestMethod.Launch if command == DebuggerCLI::Command.Run or command == DebuggerCLI::Command.Launch
             return DebuggerProtocolRequest::RequestMethod.Attach if command == DebuggerCLI::Command.Attach
@@ -53,9 +71,12 @@ module DebuggerCLIEntrypoint:
             return DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
 
         def dispatch_request(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request) -> DebuggerProtocolDispatcher::DispatchResult:
-            if request.method == DebuggerProtocolRequest::RequestMethod.Launch or request.method == DebuggerProtocolRequest::RequestMethod.Pause or request.method == DebuggerProtocolRequest::RequestMethod.Continue or request.method == DebuggerProtocolRequest::RequestMethod.Step or request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep or request.method == DebuggerProtocolRequest::RequestMethod.Seek or request.method == DebuggerProtocolRequest::RequestMethod.Checkpoint or request.method == DebuggerProtocolRequest::RequestMethod.Compare or request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify or request.method == DebuggerProtocolRequest::RequestMethod.Close:
+            if request.method == DebuggerProtocolRequest::RequestMethod.Launch or request.method == DebuggerProtocolRequest::RequestMethod.Pause or request.method == DebuggerProtocolRequest::RequestMethod.Continue or request.method == DebuggerProtocolRequest::RequestMethod.Step or request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep or request.method == DebuggerProtocolRequest::RequestMethod.Seek or request.method == DebuggerProtocolRequest::RequestMethod.Checkpoint or request.method == DebuggerProtocolRequest::RequestMethod.Compare or request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify or request.method == DebuggerProtocolRequest::RequestMethod.Close or request.method == DebuggerProtocolRequest::RequestMethod.Evaluate or request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints or request.method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints:
                 result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
+            if request.method == DebuggerProtocolRequest::RequestMethod.Threads:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, CLI_UNSUPPORTED_RESULT_DETAIL)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
             return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, 0)
 
     public:
@@ -82,6 +103,8 @@ module DebuggerCLIEntrypoint:
                         service.controller.session <- result.session
                         if result.accepted:
                             _ = printf("ok generation=%llu\n", session.stop_generation) can Console
+                            write_frame(DebuggerManagedService::service_frame(service)) can Console if parsed.command == DebuggerCLI::Command.Stack
+                            write_locals(service) can Console if parsed.command == DebuggerCLI::Command.Locals or parsed.command == DebuggerCLI::Command.Inspect
                         else:
                             _ = printf("error code=%d detail=%u\n", result.failure.code, result.failure.detail) can Console
                     length <- 0

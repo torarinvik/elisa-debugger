@@ -60,6 +60,9 @@ const MANAGED_CHECKPOINT_RESOURCE_GENERATION: u64 = 1
 const MANAGED_CHECKPOINT_RESOURCE_LENGTH: usize = 1
 const MANAGED_CHECKPOINT_RESOURCE_BYTE: u8 = 41
 const MANAGED_CHECKPOINT_MUTATED_RESOURCE_BYTE: u8 = 42
+const MANAGED_HISTORY_LIMIT_CHECK_RESULT: i64 = 54
+const MANAGED_HISTORY_LIMIT_NO_OPERAND: i64 = 0
+const MANAGED_HISTORY_LIMIT_EXTRA_INSTRUCTIONS: usize = 1
 const TRACE_LIFECYCLE_UNSUPPORTED_RESULT: i64 = 38
 
 def managed_regression_source_span(line: u32, start_byte: u64) -> DebuggerIdentity::SourceSpan:
@@ -160,6 +163,19 @@ def check_full_checkpoint_side_state_integrity() -> i64:
     return 8 if controller.state.resources.count != 1 or controller.state.resources.files[0].bytes[0] != MANAGED_CHECKPOINT_RESOURCE_BYTE
     return 0
 
+def check_continue_history_limit_error() -> i64:
+    history_capacity: usize = DebuggerReplayEngine::replay_engine_history_capacity()
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: MANAGED_REGRESSION_PROGRAM_VERSION, instruction_count: (history_capacity + MANAGED_HISTORY_LIMIT_EXTRA_INSTRUCTIONS).u64(), local_count: MANAGED_REGRESSION_NO_LOCALS, has_return: true}
+    for index in 0..<history_capacity:
+        image.instructions[index] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: MANAGED_HISTORY_LIMIT_NO_OPERAND, b: MANAGED_HISTORY_LIMIT_NO_OPERAND, source: zeroed}
+    image.instructions[history_capacity] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: MANAGED_HISTORY_LIMIT_NO_OPERAND, b: MANAGED_HISTORY_LIMIT_NO_OPERAND, source: zeroed}
+    controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller))
+    failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(controller, history_capacity.u64())
+    return 2 if failure.code != DebuggerErrors::ErrorCode.ResourceLimit or failure.retryable or controller.engine.event_count != history_capacity or controller.session.state != DebuggerSession::SessionState.Stopped or controller.engine.machine.halted or controller.engine.machine.faulted
+    return 0
+
 def main() -> i64:
     source_step_over_status: i64 = check_managed_source_step_over()
     return MANAGED_SOURCE_STEP_CHECK_RESULT if source_step_over_status != 0
@@ -169,6 +185,8 @@ def main() -> i64:
     return MANAGED_PARENT_BREAKPOINT_CHECK_RESULT if parent_breakpoint_status != 0
     checkpoint_side_state_status: i64 = check_full_checkpoint_side_state_integrity()
     return MANAGED_CHECKPOINT_SIDE_STATE_CHECK_RESULT if checkpoint_side_state_status != 0
+    history_limit_status: i64 = check_continue_history_limit_error()
+    return MANAGED_HISTORY_LIMIT_CHECK_RESULT if history_limit_status != 0
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
     session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
     image: mutable DebuggerEDIR::ProgramImage = zeroed

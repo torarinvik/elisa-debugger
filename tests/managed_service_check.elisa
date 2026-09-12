@@ -20,6 +20,8 @@ const FORGED_CHECKPOINT_RESULT: i64 = 37
 const FORGED_CHECKPOINT_DELTA: i64 = 10
 const BREAKPOINT_FILE_ID: u64 = 44
 const BREAKPOINT_LINE: u32 = 2
+const SOURCE_BREAKPOINT_SET_COUNT: usize = 2
+const UNRESOLVED_BREAKPOINT_LINE: u32 = BREAKPOINT_LINE + 1
 const BOOKMARK_LABEL_ID: u64 = 700
 const BOOKMARK_NOTE_ID: u64 = 701
 
@@ -140,12 +142,21 @@ def main() -> i64:
     breakpoint_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(BREAKPOINT_FILE_ID), line: BREAKPOINT_LINE, column: 1, discriminator: 0}
     breakpoint_id: DebuggerIdentity::DebugId = DebuggerManagedService::service_set_source_breakpoint(service, breakpoint_location)
     return BRANCH_RESULT_FAILURE if breakpoint_id.value == 0
+    source_breakpoint_lines: mutable u32[SOURCE_BREAKPOINT_SET_COUNT] = [BREAKPOINT_LINE, UNRESOLVED_BREAKPOINT_LINE]
+    source_breakpoint_set: DebuggerManagedService::SourceBreakpointResult = DebuggerManagedService::service_replace_source_breakpoints(service, DebuggerIdentity::debug_id(BREAKPOINT_FILE_ID), source_breakpoint_lines[0], SOURCE_BREAKPOINT_SET_COUNT)
+    return BRANCH_RESULT_FAILURE if not source_breakpoint_set.accepted or source_breakpoint_set.count != SOURCE_BREAKPOINT_SET_COUNT
+    return BRANCH_RESULT_FAILURE if not source_breakpoint_set.points[0].verified or source_breakpoint_set.points[1].verified or source_breakpoint_set.points[0].line != BREAKPOINT_LINE or source_breakpoint_set.points[1].line != UNRESOLVED_BREAKPOINT_LINE
     forward_to_return: DebuggerManagedService::Result = DebuggerManagedService::service_step_over(service)
     return BRANCH_RESULT_FAILURE if not forward_to_return.accepted
     reverse_to_breakpoint: DebuggerManagedService::Result = DebuggerManagedService::service_reverse_continue(service)
     return BRANCH_RESULT_FAILURE if not reverse_to_breakpoint.accepted or service.controller.engine.event_count != TARGET_EVENT.usize() or DebuggerManagedService::service_timeline(service).bounds.current != TARGET_EVENT
     breakpoint_continue: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return BRANCH_RESULT_FAILURE if not breakpoint_continue.accepted or service.controller.engine.event_count != INSTRUCTION_COUNT.usize()
+    no_source_breakpoint_lines: mutable u32[SOURCE_BREAKPOINT_SET_COUNT] = zeroed
+    cleared_source_breakpoints: DebuggerManagedService::SourceBreakpointResult = DebuggerManagedService::service_replace_source_breakpoints(service, DebuggerIdentity::debug_id(BREAKPOINT_FILE_ID), no_source_breakpoint_lines[0], 0)
+    return BRANCH_RESULT_FAILURE if not cleared_source_breakpoints.accepted or cleared_source_breakpoints.count != 0 or service.controller.state.breakpoints.count != 0
+    invalid_source_breakpoints: DebuggerManagedService::SourceBreakpointResult = DebuggerManagedService::service_replace_source_breakpoints(service, DebuggerIdentity::debug_id(0), no_source_breakpoint_lines[0], 0)
+    return BRANCH_RESULT_FAILURE if invalid_source_breakpoints.accepted or invalid_source_breakpoints.failure.code != DebuggerErrors::ErrorCode.InvalidArgument or service.controller.state.breakpoints.count != 0
     service.controller.session <- DebuggerSession::session_resume(service.controller.session)
     running_seek: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, seek_request)
     reverse_request: mutable DebuggerProtocolRequest::Request = step_request

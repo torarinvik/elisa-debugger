@@ -35,6 +35,7 @@ module DebuggerDAPServer:
         const DAP_NO_EXPECTED_GENERATION: u64 = 0
         const DAP_FALLBACK_REQUEST_ID: u64 = 1
         const DAP_MEMORY_DETAIL_ARGUMENT: u32 = 1
+        const DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT: u32 = 10
         const DAP_VARIABLES_DETAIL_ARGUMENT: u32 = 1
         const DAP_VARIABLES_DETAIL_STALE_REFERENCE: u32 = 2
         const DAP_VARIABLES_DETAIL_ZERO_REFERENCE: u32 = 3
@@ -42,6 +43,9 @@ module DebuggerDAPServer:
         const DAP_VARIABLES_DETAIL_METHOD: u32 = 5
         const DAP_NO_VARIABLE_REFERENCE: u64 = 0
         const DAP_NO_VARIABLES_REQUESTED: usize = 0
+        const DAP_SOURCE_BREAKPOINT_LINE_INCREMENT: u64 = 1
+        const DAP_MAX_SOURCE_BREAKPOINT_LINE: u64 = 4294967295
+        const DAP_MAX_SOURCE_BREAKPOINTS: usize = 256
         const DAP_LOCALS_REFERENCE_FALLBACK: u64 = 1
         const DAP_UNKNOWN_SOURCE_LINE: u64 = 0
         const DECODER_HEADER_STATE: u8 = 0
@@ -242,6 +246,25 @@ module DebuggerDAPServer:
         const DAP_SET_BREAKPOINTS_COMMAND_LENGTH: usize = 14
         const DAP_SET_BREAKPOINTS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"breakpoints\":[]}}"
         const DAP_SET_BREAKPOINTS_SUFFIX_LENGTH: usize = 43
+        const DAP_SOURCE_BREAKPOINT_RESPONSE_PREFIX: cstr = "\",\"success\":true,\"body\":{\"breakpoints\":["
+        const DAP_SOURCE_BREAKPOINT_RESPONSE_PREFIX_LENGTH: usize = 40
+        const DAP_SOURCE_BREAKPOINT_RESPONSE_SUFFIX: cstr = "]}}"
+        const DAP_SOURCE_BREAKPOINT_RESPONSE_SUFFIX_LENGTH: usize = 3
+        const DAP_SOURCE_BREAKPOINT_ITEM_PREFIX: cstr = "{\"id\":"
+        const DAP_SOURCE_BREAKPOINT_ITEM_PREFIX_LENGTH: usize = 6
+        const DAP_SOURCE_BREAKPOINT_VERIFIED_PREFIX: cstr = ",\"verified\":"
+        const DAP_SOURCE_BREAKPOINT_VERIFIED_PREFIX_LENGTH: usize = 12
+        const DAP_SOURCE_BREAKPOINT_LINE_PREFIX: cstr = ",\"line\":"
+        const DAP_SOURCE_BREAKPOINT_LINE_PREFIX_LENGTH: usize = 8
+        const DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX: cstr = "}"
+        const DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX_LENGTH: usize = 1
+        const DAP_SOURCE_BREAKPOINT_SEPARATOR_LENGTH: usize = 1
+        const DAP_JSON_TRUE_LENGTH: usize = 4
+        const DAP_JSON_FALSE_LENGTH: usize = 5
+        const DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX: cstr = "\",\"success\":false,\"message\":\"sourceReference or breakpoint lines are invalid\"}"
+        const DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX_LENGTH: usize = 78
+        const DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"source breakpoint capacity is exhausted\"}"
+        const DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX_LENGTH: usize = 70
         const DAP_SET_FUNCTION_BREAKPOINTS_COMMAND: cstr = "setFunctionBreakpoints"
         const DAP_SET_FUNCTION_BREAKPOINTS_COMMAND_LENGTH: usize = 22
         const MAX_KNOWN_DAP_COMMAND_LENGTH: usize = DAP_SET_FUNCTION_BREAKPOINTS_COMMAND_LENGTH
@@ -1218,6 +1241,39 @@ module DebuggerDAPServer:
                 _ = printf(DAP_VARIABLE_SUFFIX) can Console
             _ = printf(DAP_VARIABLES_AFTER_ITEMS) can Console
 
+        def write_source_breakpoints_response(page: DebuggerManagedService::SourceBreakpointResult, coordinates: DebuggerDAPPayload::ClientCoordinates, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            body_length: mutable u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_SET_BREAKPOINTS_COMMAND_LENGTH + DAP_SOURCE_BREAKPOINT_RESPONSE_PREFIX_LENGTH + DAP_SOURCE_BREAKPOINT_RESPONSE_SUFFIX_LENGTH).u64()
+            for index in 0..<page.count:
+                entry: DebuggerManagedService::SourceBreakpointEntry = page.points[index]
+                verified_length: usize = DAP_JSON_TRUE_LENGTH if entry.verified else DAP_JSON_FALSE_LENGTH
+                body_length <- body_length + (DAP_SOURCE_BREAKPOINT_ITEM_PREFIX_LENGTH + decimal_digits(entry.id.value) + DAP_SOURCE_BREAKPOINT_VERIFIED_PREFIX_LENGTH + verified_length + DAP_SOURCE_BREAKPOINT_LINE_PREFIX_LENGTH + decimal_digits(entry.line.u64()) + DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX_LENGTH).u64()
+                body_length <- body_length + DAP_SOURCE_BREAKPOINT_SEPARATOR_LENGTH.u64() if index > 0
+            _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
+            _ = printf(DAP_BODY_PREFIX) can Console
+            _ = printf("%llu", response_sequence) can Console
+            _ = printf(DAP_BODY_MIDDLE) can Console
+            _ = printf("%llu", request_sequence) can Console
+            _ = printf(DAP_COMMAND_PREFIX) can Console
+            _ = printf(DAP_SET_BREAKPOINTS_COMMAND) can Console
+            _ = printf(DAP_SOURCE_BREAKPOINT_RESPONSE_PREFIX) can Console
+            for index in 0..<page.count:
+                entry: DebuggerManagedService::SourceBreakpointEntry = page.points[index]
+                if index > 0:
+                    _ = printf(",") can Console
+                _ = printf(DAP_SOURCE_BREAKPOINT_ITEM_PREFIX) can Console
+                _ = printf("%llu", entry.id.value) can Console
+                _ = printf(DAP_SOURCE_BREAKPOINT_VERIFIED_PREFIX) can Console
+                if entry.verified:
+                    _ = printf("true") can Console
+                else:
+                    _ = printf("false") can Console
+                _ = printf(DAP_SOURCE_BREAKPOINT_LINE_PREFIX) can Console
+                response_line: mutable u64 = entry.line.u64()
+                response_line <- response_line - DAP_SOURCE_BREAKPOINT_LINE_INCREMENT if not coordinates.lines_start_at_one
+                _ = printf("%llu", response_line) can Console
+                _ = printf(DAP_SOURCE_BREAKPOINT_ITEM_SUFFIX) can Console
+            _ = printf(DAP_SOURCE_BREAKPOINT_RESPONSE_SUFFIX) can Console
+
         def request_for(method: DebuggerProtocolRequest::RequestMethod, request_id: u64) -> DebuggerProtocolRequest::Request:
             request: mutable DebuggerProtocolRequest::Request = zeroed
             request.method <- method
@@ -1272,6 +1328,24 @@ module DebuggerDAPServer:
             page.count <- DAP_NO_VARIABLES_REQUESTED if request.has_count and request.count == DAP_NO_VARIABLES_REQUESTED
             return result
 
+        def dispatch_source_breakpoints(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize, coordinates: DebuggerDAPPayload::ClientCoordinates, response: mutable DebuggerManagedService::SourceBreakpointResult&) -> DebuggerProtocolDispatcher::DispatchResult:
+            request: mutable DebuggerDAPPayload::SourceBreakpointsRequest = DebuggerDAPPayload::source_breakpoints_request_parse(payload, payload_length)
+            if not request.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            for index in 0..<request.count:
+                if coordinates.lines_start_at_one:
+                    if request.lines[index] == 0:
+                        failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
+                        return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                else:
+                    if request.lines[index].u64() >= DAP_MAX_SOURCE_BREAKPOINT_LINE:
+                        failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
+                        return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                    request.lines[index] <- (request.lines[index].u64() + DAP_SOURCE_BREAKPOINT_LINE_INCREMENT).u32()
+            response <- DebuggerManagedService::service_replace_source_breakpoints(service, DebuggerIdentity::debug_id(request.source_reference), request.lines[0], request.count)
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: response.accepted, stop_generation: service.controller.session.stop_generation, failure: response.failure}
+
         def dispatch_launch(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id) if service.controller.session.state != DebuggerSession::SessionState.Created
             path: DebuggerDAPPayload::ProgramPath = DebuggerDAPPayload::program_path_parse(payload, payload_length)
@@ -1286,7 +1360,7 @@ module DebuggerDAPServer:
             service <- DebuggerManagedService::service_new(session, loaded.image, recording)
             return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
 
-        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if command_hash == COMMAND_HASH_INITIALIZE:
                 coordinates: DebuggerDAPPayload::ClientCoordinates = DebuggerDAPPayload::client_coordinates_parse(payload, payload_length)
                 if not coordinates.valid:
@@ -1317,7 +1391,7 @@ module DebuggerDAPServer:
             if command_hash == COMMAND_HASH_EVALUATE:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Evaluate, request_id)
             if command_hash == COMMAND_HASH_SET_BREAKPOINTS:
-                return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.SetBreakpoints, request_id)
+                return dispatch_source_breakpoints(service, request_id, payload, payload_length, client_coordinates, source_breakpoints)
             if command_hash == COMMAND_HASH_SET_FUNCTION_BREAKPOINTS:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.SetBreakpoints, request_id)
             if command_hash == COMMAND_HASH_SET_DATA_BREAKPOINTS:
@@ -1437,7 +1511,7 @@ module DebuggerDAPServer:
                 _ = printf("%02llx", memory.bytes[index].u64()) can Console
             _ = printf(DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, client_coordinates: DebuggerDAPPayload::ClientCoordinates, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, client_coordinates: DebuggerDAPPayload::ClientCoordinates, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
                 if command_hash == COMMAND_HASH_VARIABLES:
                     suffix: mutable cstr = DAP_UNAVAILABLE_SUFFIX
@@ -1460,6 +1534,12 @@ module DebuggerDAPServer:
                     return
                 if command_hash == COMMAND_HASH_READ_MEMORY and result.failure.code == DebuggerErrors::ErrorCode.InvalidArgument:
                     write_dynamic_response(response_sequence, request_sequence, DAP_READ_MEMORY_COMMAND, DAP_READ_MEMORY_COMMAND_LENGTH, DAP_MEMORY_INVALID_SUFFIX, DAP_MEMORY_INVALID_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                    return
+                if command_hash == COMMAND_HASH_SET_BREAKPOINTS and result.failure.code == DebuggerErrors::ErrorCode.InvalidArgument:
+                    write_dynamic_response(response_sequence, request_sequence, DAP_SET_BREAKPOINTS_COMMAND, DAP_SET_BREAKPOINTS_COMMAND_LENGTH, DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX, DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                    return
+                if command_hash == COMMAND_HASH_SET_BREAKPOINTS and result.failure.code == DebuggerErrors::ErrorCode.ResourceLimit:
+                    write_dynamic_response(response_sequence, request_sequence, DAP_SET_BREAKPOINTS_COMMAND, DAP_SET_BREAKPOINTS_COMMAND_LENGTH, DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX, DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                     return
                 if command_hash == COMMAND_HASH_LAUNCH:
                     write_launch_failure_response(result, request_sequence, response_sequence, payload, command_start, command_end) can Console, Unsafe.PointerCast
@@ -1506,7 +1586,7 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, DAP_EVALUATE_COMMAND, DAP_EVALUATE_COMMAND_LENGTH, DAP_EVALUATE_SUFFIX, DAP_EVALUATE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_SET_BREAKPOINTS:
-                write_dynamic_response(response_sequence, request_sequence, DAP_SET_BREAKPOINTS_COMMAND, DAP_SET_BREAKPOINTS_COMMAND_LENGTH, DAP_SET_BREAKPOINTS_SUFFIX, DAP_SET_BREAKPOINTS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                write_source_breakpoints_response(source_breakpoints, client_coordinates, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == COMMAND_HASH_SET_FUNCTION_BREAKPOINTS:
                 write_dynamic_response(response_sequence, request_sequence, DAP_SET_FUNCTION_BREAKPOINTS_COMMAND, DAP_SET_FUNCTION_BREAKPOINTS_COMMAND_LENGTH, DAP_SET_BREAKPOINTS_SUFFIX, DAP_SET_BREAKPOINTS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -1554,6 +1634,7 @@ module DebuggerDAPServer:
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
             memory: mutable DebuggerMemory::MemoryRead = zeroed
             variables: mutable DebuggerManagedInspection::LocalPage = zeroed
+            source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult = zeroed
             while true:
                 count: isize = read(STDIN_FD, (&chunk[0]).cast[void&], DAP_READ_CHUNK_SIZE) can Console
                 break if count <= 0
@@ -1561,9 +1642,10 @@ module DebuggerDAPServer:
                     completed: bool = decoder_accept(decoder, chunk[index])
                     if completed:
                         memory <- zeroed
-                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, variables, client_coordinates)
+                        source_breakpoints <- zeroed
+                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, variables, source_breakpoints, client_coordinates)
                         service.controller.session <- result.session
-                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, memory, variables, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
+                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, memory, variables, source_breakpoints, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
                         return DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == MAX_DAP_OUTBOUND_SEQUENCE
                         outbound_sequence <- outbound_sequence + DAP_DECIMAL_INCREMENT
                         event_batch: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(event_request_kind(decoder.command_hash), result.accepted, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)

@@ -223,7 +223,33 @@ module DebuggerManagedEngine:
             managed_refresh_values(controller)
             return DebuggerErrors::no_error()
 
+        def managed_replace_source_breakpoints(controller: mutable ManagedController&, source: DebuggerIdentity::DebugId, lines: u32&, requested_count: usize) -> DebuggerBreakpointManager::BreakpointReplacement:
+            return zeroed if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
+            replacement: mutable DebuggerBreakpointManager::BreakpointReplacement = DebuggerBreakpointManager::breakpoint_table_replace_source(controller.state.breakpoints, source, controller.engine.branch, lines, requested_count)
+            return replacement if not replacement.accepted
+            for request_index in 0..<replacement.count:
+                requested_line: u32 = replacement.results[request_index].line
+                resolved: mutable bool = false
+                resolved_column: mutable u32 = 0
+                for instruction_index in 0..<controller.engine.image.program.instruction_count.usize():
+                    span: DebuggerIdentity::SourceSpan = controller.engine.image.instructions[instruction_index].source
+                    if DebuggerMetadata::source_span_is_valid(span) and span.file.value == source.value and requested_line >= span.start_line and requested_line <= span.end_line:
+                        candidate_column: u32 = span.start_column if requested_line == span.start_line else 0
+                        candidate_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: source, line: requested_line, column: candidate_column, discriminator: 0}
+                        if DebuggerMetadata::source_span_contains(span, candidate_location) and (not resolved or candidate_column < resolved_column):
+                            resolved <- true
+                            resolved_column <- candidate_column
+                if resolved:
+                    for breakpoint_index in 0..<replacement.table.count:
+                        if replacement.table.points[breakpoint_index].id.value == replacement.results[request_index].id.value:
+                            replacement.table.points[breakpoint_index].source.column <- resolved_column
+                    replacement.table <- DebuggerBreakpointManager::breakpoint_table_resolve(replacement.table, source, requested_line.u64())
+                    replacement.results[request_index].verified <- true
+            controller.state.breakpoints <- replacement.table
+            return replacement
+
         def managed_set_source_breakpoint(controller: mutable ManagedController&, location: DebuggerMetadata::SourceLocation) -> DebuggerIdentity::DebugId:
+            return DebuggerIdentity::debug_id(0) if not DebuggerMetadata::source_location_is_valid(location) or controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
             point: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{
                 id: DebuggerIdentity::debug_id(0),
                 branch: controller.engine.branch,
@@ -242,7 +268,11 @@ module DebuggerManagedEngine:
             previous_count: usize = controller.state.breakpoints.count
             updated: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_add(controller.state.breakpoints, point)
             return DebuggerIdentity::debug_id(0) if updated.count == previous_count
-            updated <- DebuggerBreakpointManager::breakpoint_table_resolve(updated, location.file, location.line.u64())
+            for instruction_index in 0..<controller.engine.image.program.instruction_count.usize():
+                span: DebuggerIdentity::SourceSpan = controller.engine.image.instructions[instruction_index].source
+                if DebuggerMetadata::source_span_contains(span, location):
+                    updated <- DebuggerBreakpointManager::breakpoint_table_resolve(updated, location.file, location.line.u64())
+                    break
             controller.state.breakpoints <- updated
             return DebuggerIdentity::debug_id(next_id)
 

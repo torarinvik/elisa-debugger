@@ -9,6 +9,11 @@ const FIRST_HIT_TARGET: u64 = 2
 const SECOND_HIT_TARGET: u64 = 1
 const EXPECTED_FIRST_HIT_COUNT: u64 = 1
 const EXPECTED_SECOND_HIT_COUNT: u64 = 1
+const OTHER_SOURCE_ID: u64 = 88
+const REPLACEMENT_LINE: u32 = SOURCE_LINE + 1
+const REPLACEMENT_BRANCH_ID: u64 = 9
+const REPLACEMENT_BREAKPOINT_COUNT: usize = 1
+const EXPECTED_REPLACED_TABLE_COUNT: usize = 2
 
 def breakpoint_for(source: DebuggerMetadata::SourceLocation, target: u64) -> DebuggerBreakpoints::Breakpoint:
     return DebuggerBreakpoints::Breakpoint{id: zeroed, branch: DebuggerIdentity::debug_id(0), kind: DebuggerBreakpoints::BreakpointKind.Source, status: DebuggerBreakpoints::BreakpointStatus.Pending, source: source, condition: DebuggerIdentity::debug_id(0), hit_target: target, hit_count: 0, hit_stride: 0, task: DebuggerIdentity::debug_id(0), logpoint: false, temporary: false}
@@ -47,7 +52,24 @@ def main() -> i64:
     invalid_table: mutable DebuggerBreakpointManager::BreakpointTable = table
     invalid_table.next_id <- 0
     return 11 if DebuggerBreakpointManager::breakpoint_table_is_valid(invalid_table)
-    invalid_counter: DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_new()
+    invalid_counter: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_new()
+    invalid_counter <- DebuggerBreakpointManager::breakpoint_table_add(invalid_counter, breakpoint_for(location, 0))
     invalid_counter.next_id <- 9
+    invalid_counter.points[0].id <- DebuggerIdentity::debug_id(invalid_counter.next_id)
     return 12 if DebuggerBreakpointManager::breakpoint_table_is_valid(invalid_counter)
+    multi_source: mutable DebuggerBreakpointManager::BreakpointTable = table
+    other_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(OTHER_SOURCE_ID), line: SOURCE_LINE, column: CURRENT_COLUMN, discriminator: 0}
+    multi_source <- DebuggerBreakpointManager::breakpoint_table_add(multi_source, breakpoint_for(other_location, 0))
+    replacement_lines: mutable u32[REPLACEMENT_BREAKPOINT_COUNT] = [REPLACEMENT_LINE]
+    replacement: DebuggerBreakpointManager::BreakpointReplacement = DebuggerBreakpointManager::breakpoint_table_replace_source(multi_source, DebuggerIdentity::debug_id(SOURCE_ID), DebuggerIdentity::debug_id(REPLACEMENT_BRANCH_ID), replacement_lines[0], REPLACEMENT_BREAKPOINT_COUNT)
+    return 13 if not replacement.accepted or replacement.count != REPLACEMENT_BREAKPOINT_COUNT or replacement.table.count != EXPECTED_REPLACED_TABLE_COUNT
+    return 14 if replacement.results[0].id.value != multi_source.next_id or replacement.results[0].line != REPLACEMENT_LINE or replacement.results[0].verified
+    return 15 if replacement.table.points[0].source.file.value != OTHER_SOURCE_ID or replacement.table.points[1].source.file.value != SOURCE_ID
+    return 16 if not DebuggerBreakpointManager::breakpoint_table_is_valid(replacement.table)
+    empty_lines: mutable u32[REPLACEMENT_BREAKPOINT_COUNT] = zeroed
+    cleared: DebuggerBreakpointManager::BreakpointReplacement = DebuggerBreakpointManager::breakpoint_table_replace_source(replacement.table, DebuggerIdentity::debug_id(SOURCE_ID), DebuggerIdentity::debug_id(REPLACEMENT_BRANCH_ID), empty_lines[0], 0)
+    return 17 if not cleared.accepted or cleared.count != 0 or cleared.table.count != 1 or cleared.table.points[0].source.file.value != OTHER_SOURCE_ID
+    invalid_lines: mutable u32[REPLACEMENT_BREAKPOINT_COUNT] = [0]
+    rejected_replacement: DebuggerBreakpointManager::BreakpointReplacement = DebuggerBreakpointManager::breakpoint_table_replace_source(replacement.table, DebuggerIdentity::debug_id(SOURCE_ID), DebuggerIdentity::debug_id(REPLACEMENT_BRANCH_ID), invalid_lines[0], REPLACEMENT_BREAKPOINT_COUNT)
+    return 18 if rejected_replacement.accepted or replacement.table.count != EXPECTED_REPLACED_TABLE_COUNT
     return 0

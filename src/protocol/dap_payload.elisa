@@ -21,6 +21,7 @@ module DebuggerDAPPayload:
         const ASCII_NINE: u8 = 57
         const ASCII_MINUS: u8 = 45
         const ASCII_A: u8 = 97
+        const ASCII_B: u8 = 98
         const ASCII_C: u8 = 99
         const ASCII_E: u8 = 101
         const ASCII_F: u8 = 102
@@ -31,6 +32,7 @@ module DebuggerDAPPayload:
         const ASCII_UPPER_R: u8 = 82
         const ASCII_T: u8 = 116
         const ASCII_U: u8 = 117
+        const ASCII_V: u8 = 118
         const ASCII_Y: u8 = 121
         const ASCII_S: u8 = 115
         const ASCII_I: u8 = 105
@@ -61,11 +63,15 @@ module DebuggerDAPPayload:
         const ARGUMENTS_FIELD: u8 = 4
         const LINES_START_AT_ONE_FIELD: u8 = 5
         const COLUMNS_START_AT_ONE_FIELD: u8 = 6
+        const VARIABLES_REFERENCE_FIELD: u8 = 8
+        const START_FIELD: u8 = 9
         const PROGRAM_PATH_CAPACITY: usize = 1024
         const PROGRAM_FIELD_LENGTH: usize = 7
         const ARGUMENTS_FIELD_LENGTH: usize = 9
         const LINES_START_AT_ONE_FIELD_LENGTH: usize = 13
         const COLUMNS_START_AT_ONE_FIELD_LENGTH: usize = 15
+        const VARIABLES_REFERENCE_FIELD_LENGTH: usize = 18
+        const START_FIELD_LENGTH: usize = 5
         const JSON_TRUE_LENGTH: usize = 4
         const JSON_FALSE_LENGTH: usize = 5
         const ASCII_P: u8 = 112
@@ -131,6 +137,8 @@ module DebuggerDAPPayload:
         def field_length(field: u8) -> usize:
             return LINES_START_AT_ONE_FIELD_LENGTH if field == LINES_START_AT_ONE_FIELD
             return COLUMNS_START_AT_ONE_FIELD_LENGTH if field == COLUMNS_START_AT_ONE_FIELD
+            return VARIABLES_REFERENCE_FIELD_LENGTH if field == VARIABLES_REFERENCE_FIELD
+            return START_FIELD_LENGTH if field == START_FIELD
             return ARGUMENTS_FIELD_LENGTH if field == ARGUMENTS_FIELD
             return PROGRAM_FIELD_LENGTH if field == PROGRAM_FIELD
             return MEMORY_REFERENCE_LENGTH if field == MEMORY_REFERENCE_FIELD
@@ -167,6 +175,31 @@ module DebuggerDAPPayload:
                 return ASCII_UPPER_A if position == 12
                 return ASCII_T if position == 13
                 return ASCII_ONE
+            if field == VARIABLES_REFERENCE_FIELD:
+                return ASCII_V if position == 0
+                return ASCII_A if position == 1
+                return ASCII_R if position == 2
+                return ASCII_I if position == 3
+                return ASCII_A if position == 4
+                return ASCII_B if position == 5
+                return ASCII_L if position == 6
+                return ASCII_E if position == 7
+                return ASCII_S if position == 8
+                return ASCII_UPPER_R if position == 9
+                return ASCII_E if position == 10
+                return ASCII_F if position == 11
+                return ASCII_E if position == 12
+                return ASCII_R if position == 13
+                return ASCII_E if position == 14
+                return ASCII_N if position == 15
+                return ASCII_C if position == 16
+                return ASCII_E
+            if field == START_FIELD:
+                return ASCII_S if position == 0
+                return ASCII_T if position == 1
+                return ASCII_A if position == 2
+                return ASCII_R if position == 3
+                return ASCII_T
             if field == ARGUMENTS_FIELD:
                 return ASCII_A if position == 0
                 return ASCII_R if position == 1
@@ -527,7 +560,7 @@ module DebuggerDAPPayload:
                 return invalid_value() if not is_whitespace(delimiter) and delimiter != ASCII_COMMA and delimiter != ASCII_BRACE_CLOSE and delimiter != ASCII_BRACKET_CLOSE
             return ParsedValue{valid: true, value: value, end: index + 1}
 
-        def parse_count(payload: u8&, length: usize, start: usize) -> ParsedValue:
+        def parse_unsigned_bounded(payload: u8&, length: usize, start: usize, maximum: u64) -> ParsedValue:
             return invalid_value() if start >= length or payload[start] < ASCII_ZERO or payload[start] > ASCII_NINE
             index: mutable usize = start
             value: mutable u64 = 0
@@ -535,7 +568,7 @@ module DebuggerDAPPayload:
             while index < length and payload[index] >= ASCII_ZERO and payload[index] <= ASCII_NINE:
                 return invalid_value() if digits == FIRST_DIGIT_COUNT and value == 0
                 digit: u64 = (payload[index] - ASCII_ZERO).u64()
-                return invalid_value() if value > (MEMORY_COUNT_MAX - digit) / DECIMAL_BASE
+                return invalid_value() if value > (maximum - digit) / DECIMAL_BASE
                 value <- value * DECIMAL_BASE + digit
                 digits <- digits + 1
                 index <- index + 1
@@ -543,6 +576,9 @@ module DebuggerDAPPayload:
             if index < length:
                 return invalid_value() if not is_whitespace(payload[index]) and payload[index] != ASCII_COMMA and payload[index] != ASCII_BRACE_CLOSE and payload[index] != ASCII_BRACKET_CLOSE
             return ParsedValue{valid: true, value: value, end: index}
+
+        def parse_count(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return parse_unsigned_bounded(payload, length, start, MEMORY_COUNT_MAX)
 
         def parse_signed_offset(payload: u8&, length: usize, start: usize) -> ParsedValue:
             return invalid_value() if start >= length
@@ -579,6 +615,43 @@ module DebuggerDAPPayload:
             valid: mutable bool
             address: mutable u64
             count: mutable usize
+
+        struct VariablesRequest:
+            valid: mutable bool
+            reference: mutable u64
+            start: mutable usize
+            count: mutable usize
+            has_count: mutable bool
+
+        # Decode only the direct DAP arguments used for paged variable
+        # inspection. Nested decoys and duplicate properties are rejected.
+        def variables_request_parse(payload: u8&, length: usize) -> VariablesRequest:
+            request: mutable VariablesRequest = zeroed
+            root_start: mutable usize = 0
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 0)
+            return request if arguments == NO_INDEX or object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 1) != NO_INDEX
+            return request if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
+            reference_start: usize = object_field_value_start(payload, length, arguments, VARIABLES_REFERENCE_FIELD, 0)
+            start_start: usize = object_field_value_start(payload, length, arguments, START_FIELD, 0)
+            count_start: usize = object_field_value_start(payload, length, arguments, COUNT_FIELD, 0)
+            return request if reference_start == NO_INDEX
+            return request if object_field_value_start(payload, length, arguments, VARIABLES_REFERENCE_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, arguments, START_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, arguments, COUNT_FIELD, 1) != NO_INDEX
+            reference: ParsedValue = parse_unsigned_bounded(payload, length, reference_start, MAX_INTEGER)
+            return request if not reference.valid
+            request.reference <- reference.value
+            if start_start != NO_INDEX:
+                start: ParsedValue = parse_count(payload, length, start_start)
+                return request if not start.valid
+                request.start <- start.value.usize()
+            if count_start != NO_INDEX:
+                count: ParsedValue = parse_count(payload, length, count_start)
+                return request if not count.valid
+                request.count <- count.value.usize()
+                request.has_count <- true
+            request.valid <- true
+            return request
 
         def memory_request_parse(payload: u8&, length: usize) -> MemoryRequest:
             request: mutable MemoryRequest = zeroed

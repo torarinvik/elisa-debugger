@@ -12,12 +12,17 @@ Trace files are a sequence of little-endian records. A record begins with a
 | 16 | 8 | first logical event |
 | 24 | 8 | last logical event |
 | 32 | 8 | payload length |
-| 40 | 8 | payload FNV-1a checksum |
+| 40 | 8 | payload FNV-1a checksum (64-bit standard offset basis) |
 
 The payload follows immediately and is limited by the storage reader's named
 capacity. Event payloads use the recorder's versioned fixed-width envelope;
 manifest payloads use the manifest codec. All fields are encoded explicitly by
 `DebuggerTraceBinary`.
+
+New writers use the standard 64-bit FNV-1a offset basis
+`14695981039346656037`. Readers also accept the historical Elisa v1 basis
+`1469598103934665603` so existing trace files remain readable. Re-encoding a
+legacy chunk writes its checksum with the standard basis.
 
 The manifest `checkpoint_count` is the number of `Checkpoint` kind chunks in
 the bundle. Event chunk count is tracked independently by the reader. A trace

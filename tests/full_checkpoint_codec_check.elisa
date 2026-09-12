@@ -73,6 +73,39 @@ const TEST_TRACE_EVENT_HASH: u64 = 9901
 const TEST_TRACE_EVENT_SEQUENCE: u64 = 2
 const TEST_TRACE_FOOTER_SEQUENCE: u64 = 3
 const TEST_TRACE_CHUNK_COUNT: u64 = 3
+const TEST_TRACE_HEADER_BYTES: usize = 48
+const TEST_TRACE_CHECKSUM_OFFSET: usize = 40
+const TEST_CODEC_CHECKSUM_BYTES: usize = 8
+const TEST_HASH_BYTE_BITS: u64 = 8
+const TEST_HASH_PRIME: u64 = 1099511628211
+const TEST_FNV64_STANDARD_OFFSET_BASIS: u64 = 14695981039346656037
+const TEST_FNV64_LEGACY_OFFSET_BASIS: u64 = 1469598103934665603
+const TEST_STANDARD_CHECKSUM_FAILURE: i64 = 19
+const TEST_LEGACY_CHECKPOINT_FAILURE: i64 = 20
+const TEST_LEGACY_TRACE_SCAN_FAILURE: i64 = 21
+
+def test_checksum_with_basis(bytes: u8&, length: usize, basis: u64) -> u64:
+    checksum: mutable u64 = basis
+    for index in 0..<length:
+        checksum <- (checksum ^ bytes[index].u64()) * TEST_HASH_PRIME
+    return checksum
+
+def test_legacy_checksum(bytes: u8&, length: usize) -> u64:
+    return test_checksum_with_basis(bytes, length, TEST_FNV64_LEGACY_OFFSET_BASIS)
+
+def test_put_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+    for index in 0..<8:
+        bytes[offset + index] <- (value >> (index.u64() * TEST_HASH_BYTE_BITS)).u8()
+
+def test_get_u64(bytes: u8&, offset: usize) -> u64:
+    value: mutable u64 = 0
+    for index in 0..<8:
+        value <- value | (bytes[offset + index].u64() << (index.u64() * TEST_HASH_BYTE_BITS))
+    return value
+
+def test_rewrite_frame_checksum_legacy(bytes: mutable u8&, frame_offset: usize, payload_length: usize) -> void:
+    checksum: u64 = test_legacy_checksum(bytes[frame_offset + TEST_TRACE_HEADER_BYTES], payload_length)
+    test_put_u64(bytes, frame_offset + TEST_TRACE_CHECKSUM_OFFSET, checksum)
 
 def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -217,9 +250,17 @@ def check_round_trip() -> i64:
     return TEST_RESOURCE_ROUND_TRIP_FAILURE if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
     encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
     return TEST_DECODE_ROUND_TRIP_FAILURE if encoded.failed or encoded.length <= 0 or encoded.length > DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY
+    encoded_standard_checksum: u64 = test_get_u64(encoded.bytes[0], encoded.length - TEST_CODEC_CHECKSUM_BYTES)
+    expected_standard_checksum: u64 = test_checksum_with_basis(encoded.bytes[0], encoded.length - TEST_CODEC_CHECKSUM_BYTES, TEST_FNV64_STANDARD_OFFSET_BASIS)
+    return TEST_STANDARD_CHECKSUM_FAILURE if encoded_standard_checksum != expected_standard_checksum
     decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length)
     return TEST_DECODE_ROUND_TRIP_FAILURE if decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not DebuggerFullCheckpoint::full_checkpoint_is_valid(decoded.checkpoint)
     return TEST_DECODE_ROUND_TRIP_FAILURE if not checkpoints_are_equal(checkpoint, decoded.checkpoint)
+    legacy_checkpoint: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = encoded
+    legacy_inner_checksum: u64 = test_legacy_checksum(legacy_checkpoint.bytes[0], legacy_checkpoint.length - TEST_CODEC_CHECKSUM_BYTES)
+    test_put_u64(legacy_checkpoint.bytes[0], legacy_checkpoint.length - TEST_CODEC_CHECKSUM_BYTES, legacy_inner_checksum)
+    legacy_checkpoint_decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(legacy_checkpoint.bytes[0], legacy_checkpoint.length)
+    return TEST_LEGACY_CHECKPOINT_FAILURE if legacy_checkpoint_decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not checkpoints_are_equal(checkpoint, legacy_checkpoint_decoded.checkpoint)
     trace_chunk: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(checkpoint, TEST_TRACE_SEQUENCE)
     return TEST_TRACE_CHUNK_CREATE_FAILURE if trace_chunk.status != DebuggerTraceStorage::StorageStatus.Ready
     return 15 if not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(trace_chunk.chunk)
@@ -244,6 +285,16 @@ def check_round_trip() -> i64:
     append_trace_bytes(trace_bytes, footer)
     scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(trace_bytes.bytes[0], trace_bytes.length)
     return TEST_TRACE_SCAN_FAILURE if not DebuggerTraceBinary::writer_is_valid(trace_bytes) or scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or scan.verified_chunks != TEST_TRACE_CHUNK_COUNT
+    legacy_trace: mutable DebuggerTraceBinary::ByteWriter = trace_bytes
+    checkpoint_frame_offset: usize = manifest_frame.length
+    event_frame_offset: usize = manifest_frame.length + trace_frame.length
+    legacy_inner_trace_checksum: u64 = test_legacy_checksum(legacy_trace.bytes[checkpoint_frame_offset + TEST_TRACE_HEADER_BYTES], encoded.length - TEST_CODEC_CHECKSUM_BYTES)
+    test_put_u64(legacy_trace.bytes[0], checkpoint_frame_offset + TEST_TRACE_HEADER_BYTES + encoded.length - TEST_CODEC_CHECKSUM_BYTES, legacy_inner_trace_checksum)
+    test_rewrite_frame_checksum_legacy(legacy_trace.bytes[0], 0, manifest_frame.length - TEST_TRACE_HEADER_BYTES)
+    test_rewrite_frame_checksum_legacy(legacy_trace.bytes[0], checkpoint_frame_offset, trace_frame.length - TEST_TRACE_HEADER_BYTES)
+    test_rewrite_frame_checksum_legacy(legacy_trace.bytes[0], event_frame_offset, event_frame.length - TEST_TRACE_HEADER_BYTES)
+    legacy_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(legacy_trace.bytes[0], legacy_trace.length)
+    return TEST_LEGACY_TRACE_SCAN_FAILURE if legacy_scan.status != DebuggerTraceStorage::StorageStatus.Ready or not legacy_scan.footer_verified or legacy_scan.verified_chunks != TEST_TRACE_CHUNK_COUNT
     return 0
 
 def check_rejects_malformed_inputs() -> i64:

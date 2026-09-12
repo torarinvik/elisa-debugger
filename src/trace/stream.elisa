@@ -12,7 +12,8 @@ module DebuggerTraceStream:
         const TRACE_SEQUENCE_INCREMENT: u64 = 1
         const TRACE_MAX_SEQUENCE: u64 = 18446744073709551615
         const TRACE_MAX_EVENT: u64 = 18446744073709551615
-        const TRACE_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const TRACE_HASH_OFFSET_BASIS: u64 = 14695981039346656037
+        const TRACE_LEGACY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
         const TRACE_HASH_PRIME: u64 = 1099511628211
 
     public:
@@ -28,6 +29,7 @@ module DebuggerTraceStream:
             payload: mutable u8[TRACE_MAX_PAYLOAD]
             payload_received: mutable usize
             checksum: mutable u64
+            legacy_checksum: mutable u64
             complete: mutable bool
 
         struct TraceStream:
@@ -42,6 +44,12 @@ module DebuggerTraceStream:
             stream.next_sequence <- TRACE_FIRST_SEQUENCE
             stream.status <- TraceReadStatus.Empty
             return stream
+
+    private:
+        def trace_checksum_matches(chunk: TraceChunk, expected: u64) -> bool:
+            return chunk.checksum == expected or chunk.legacy_checksum == expected
+
+    public:
 
         def trace_stream_begin(stream: TraceStream, header: DebuggerTrace::ChunkHeader) -> TraceStream:
             updated: mutable TraceStream = stream
@@ -71,12 +79,14 @@ module DebuggerTraceStream:
             updated.chunks[stream.chunk_count].header <- header
             updated.chunks[stream.chunk_count].payload_received <- 0
             updated.chunks[stream.chunk_count].checksum <- TRACE_HASH_OFFSET_BASIS
+            updated.chunks[stream.chunk_count].legacy_checksum <- TRACE_LEGACY_HASH_OFFSET_BASIS
             updated.chunks[stream.chunk_count].complete <- header.payload_length == 0
             if header.payload_length == 0:
                 updated.chunk_count <- updated.chunk_count + 1
                 updated.next_sequence <- stream.next_sequence + TRACE_SEQUENCE_INCREMENT
-                updated.verified_event <- header.last_event if header.kind == DebuggerTrace::ChunkKind.Events and header.checksum == TRACE_HASH_OFFSET_BASIS
-                updated.status <- TraceReadStatus.Complete if header.checksum == TRACE_HASH_OFFSET_BASIS else TraceReadStatus.Corrupt
+                empty_checksum_matches: bool = header.checksum == TRACE_HASH_OFFSET_BASIS or header.checksum == TRACE_LEGACY_HASH_OFFSET_BASIS
+                updated.verified_event <- header.last_event if header.kind == DebuggerTrace::ChunkKind.Events and empty_checksum_matches
+                updated.status <- TraceReadStatus.Complete if empty_checksum_matches else TraceReadStatus.Corrupt
                 return updated
             updated.status <- TraceReadStatus.Truncated
             return updated
@@ -90,6 +100,7 @@ module DebuggerTraceStream:
             return updated if chunk.payload_received >= TRACE_MAX_PAYLOAD
             chunk.payload[chunk.payload_received] <- byte
             chunk.checksum <- (chunk.checksum ^ byte.u64()) * TRACE_HASH_PRIME
+            chunk.legacy_checksum <- (chunk.legacy_checksum ^ byte.u64()) * TRACE_HASH_PRIME
             chunk.payload_received <- chunk.payload_received + 1
             updated.chunks[index] <- chunk
             if chunk.payload_received == chunk.header.payload_length.usize():
@@ -100,8 +111,8 @@ module DebuggerTraceStream:
                     updated.status <- TraceReadStatus.ResourceLimit
                     return updated
                 updated.next_sequence <- stream.next_sequence + TRACE_SEQUENCE_INCREMENT
-                updated.verified_event <- chunk.header.last_event if chunk.header.kind == DebuggerTrace::ChunkKind.Events and chunk.checksum == chunk.header.checksum
-                updated.status <- TraceReadStatus.Complete if chunk.checksum == chunk.header.checksum else TraceReadStatus.Corrupt
+                updated.verified_event <- chunk.header.last_event if chunk.header.kind == DebuggerTrace::ChunkKind.Events and trace_checksum_matches(chunk, chunk.header.checksum)
+                updated.status <- TraceReadStatus.Complete if trace_checksum_matches(chunk, chunk.header.checksum) else TraceReadStatus.Corrupt
             return updated
 
         def trace_stream_verify(stream: TraceStream) -> TraceReadStatus:
@@ -124,10 +135,13 @@ module DebuggerTraceStream:
                     event_seen <- true
                     expected_event <- chunk.header.last_event if chunk.header.last_event == TRACE_MAX_EVENT else chunk.header.last_event + 1
                 computed: mutable u64 = TRACE_HASH_OFFSET_BASIS
+                legacy_computed: mutable u64 = TRACE_LEGACY_HASH_OFFSET_BASIS
                 for payload_index in 0..<chunk.payload_received:
                     computed <- (computed ^ chunk.payload[payload_index].u64()) * TRACE_HASH_PRIME
+                    legacy_computed <- (legacy_computed ^ chunk.payload[payload_index].u64()) * TRACE_HASH_PRIME
                 return TraceReadStatus.Corrupt if chunk.checksum != computed
-                return TraceReadStatus.Corrupt if chunk.checksum != chunk.header.checksum
+                return TraceReadStatus.Corrupt if chunk.legacy_checksum != legacy_computed
+                return TraceReadStatus.Corrupt if not trace_checksum_matches(chunk, chunk.header.checksum)
             return TraceReadStatus.Corrupt if stream.next_sequence != TRACE_FIRST_SEQUENCE + stream.chunk_count.u64()
             return TraceReadStatus.Complete
 

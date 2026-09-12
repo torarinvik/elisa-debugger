@@ -9,7 +9,8 @@ module DebuggerTraceBinary:
         const BINARY_BUFFER_CAPACITY: usize = 65536
         const BYTE_BITS: u64 = 8
         const BYTE_MASK: u64 = 255
-        const BINARY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+        const BINARY_HASH_OFFSET_BASIS: u64 = 14695981039346656037
+        const BINARY_LEGACY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
         const BINARY_HASH_PRIME: u64 = 1099511628211
         const BINARY_INVALID_CHECKSUM: u64 = 0
 
@@ -65,12 +66,29 @@ module DebuggerTraceBinary:
             updated <- writer_put_byte(updated, ((value >> (BYTE_BITS * 7)) & BYTE_MASK).u8())
             return updated
 
+    private:
+        def bytes_checksum_with_basis(bytes: u8&, length: usize, offset_basis: u64) -> u64:
+            return BINARY_INVALID_CHECKSUM if length > BINARY_BUFFER_CAPACITY
+            checksum: mutable u64 = offset_basis
+            for index in 0..<length:
+                checksum <- (checksum ^ bytes[index].u64()) * BINARY_HASH_PRIME
+            return checksum
+
+    public:
+        def bytes_checksum(bytes: u8&, length: usize) -> u64:
+            return bytes_checksum_with_basis(bytes, length, BINARY_HASH_OFFSET_BASIS)
+
+        def bytes_checksum_matches(bytes: u8&, length: usize, expected: u64) -> bool:
+            return false if length > BINARY_BUFFER_CAPACITY
+            return bytes_checksum_with_basis(bytes, length, BINARY_HASH_OFFSET_BASIS) == expected or bytes_checksum_with_basis(bytes, length, BINARY_LEGACY_HASH_OFFSET_BASIS) == expected
+
         def writer_checksum(writer: ByteWriter) -> u64:
             return BINARY_INVALID_CHECKSUM if writer.failed or writer.length > BINARY_BUFFER_CAPACITY
-            checksum: mutable u64 = BINARY_HASH_OFFSET_BASIS
-            for index in 0..<writer.length:
-                checksum <- (checksum ^ writer.bytes[index].u64()) * BINARY_HASH_PRIME
-            return checksum
+            return bytes_checksum(writer.bytes[0], writer.length)
+
+        def writer_checksum_matches(writer: ByteWriter, expected: u64) -> bool:
+            return false if writer.failed or writer.length > BINARY_BUFFER_CAPACITY
+            return bytes_checksum_matches(writer.bytes[0], writer.length, expected)
 
         def writer_is_valid(writer: ByteWriter) -> bool:
             return not writer.failed and writer.length <= BINARY_BUFFER_CAPACITY

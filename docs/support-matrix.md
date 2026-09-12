@@ -12,7 +12,7 @@ human-readable guide, not a substitute for negotiation.
 | Source breakpoints | Resolver and pending statuses | Resolver contract | Metadata dependent |
 | Typed value states | Supported bounded store, including absent and historical states | Capability contract | Availability depends on metadata |
 | Expression arithmetic | Bounded side-effect-free evaluator | Provider dependent | Provider dependent |
-| Record/replay effects | Effect oracle contract with mismatch detection | Not exact | Unsupported |
+| Record/replay effects | Generic oracle exactly replays scalar clock samples; other effect kinds mark the oracle incomplete | Not exact | Unsupported |
 | Reverse step and seek | Supported within retained EDIR history | Disabled | Unsupported |
 | Durable checkpoint codec | Supported for the current EDIR machine state | Not resumable | Core artifacts are inspect-only |
 | Deterministic task model | Bounded scheduler and wait graph | Not exact | Unsupported |

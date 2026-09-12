@@ -76,6 +76,10 @@ const INVALID_VALUE_CHILDREN_RESULT: i64 = 121
 const INVALID_VALUE_STATE_RESULT: i64 = 122
 const INVALID_VALUE_CHILD_COUNT: usize = 17
 const TAMPERED_LIVE_EXACT_RESULT: i64 = 123
+const UNSUPPORTED_EFFECT_EXACT_RESULT: i64 = 126
+const UNSUPPORTED_EFFECT_REPLAY_RESULT: i64 = 127
+const INCOMPLETE_EFFECT_REPLAY_COMPLETE_RESULT: i64 = 128
+const INCOMPLETE_EFFECT_UPGRADE_RESULT: i64 = 129
 const INVALID_AGGREGATE_STATE_RESULT: i64 = 124
 const INVALID_CHILD_NODE_RESULT: i64 = 125
 const PROVENANCE_OVERFLOW_RESULT: i64 = 126
@@ -291,12 +295,22 @@ def main() -> i64:
     return 27 if binding_expression.value != 12 or not DebuggerErrors::error_is_ok(binding_expression.failure)
     oracle: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
     oracle <- DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11, 22, 3)
-    return 2 if oracle.count != 1 or not oracle.records[0].suppress_external_write
+    return 2 if oracle.count != 1 or not oracle.records[0].suppress_external_write or oracle.exactness != DebuggerEffects::Exactness.Incomplete or oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported
+    return UNSUPPORTED_EFFECT_EXACT_RESULT if DebuggerEffects::effect_oracle_is_exact(oracle)
+    incomplete_with_clock: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, 12, 23, 4)
+    return INCOMPLETE_EFFECT_UPGRADE_RESULT if incomplete_with_clock.count != 2 or incomplete_with_clock.exactness != DebuggerEffects::Exactness.Incomplete or incomplete_with_clock.last_error.code != DebuggerErrors::ErrorCode.Unsupported
     oracle.mode <- DebuggerEffects::EffectMode.Replaying
-    oracle <- DebuggerEffects::effect_oracle_replay(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11)
-    return 3 if not DebuggerEffects::effect_oracle_is_exact(oracle) or oracle.cursor != 1 or DebuggerEffects::effect_oracle_last_value(oracle) != 3
-    replay_record: DebuggerEffects::EffectRecord = DebuggerEffects::effect_oracle_last_record(oracle)
-    return 56 if not DebuggerEffects::effect_record_suppresses_write(replay_record) or not DebuggerEffects::effect_oracle_replay_complete(oracle)
+    incomplete_replay: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11)
+    return UNSUPPORTED_EFFECT_REPLAY_RESULT if incomplete_replay.accepted or incomplete_replay.oracle.exactness != DebuggerEffects::Exactness.Incomplete or incomplete_replay.failure.code != DebuggerErrors::ErrorCode.Unsupported or incomplete_replay.oracle.cursor != 0
+    return INCOMPLETE_EFFECT_REPLAY_COMPLETE_RESULT if DebuggerEffects::effect_oracle_replay_complete(oracle)
+    forged_oracle: mutable DebuggerEffects::EffectOracle = oracle
+    forged_oracle.exactness <- DebuggerEffects::Exactness.Exact
+    forged_oracle.last_error <- DebuggerErrors::no_error()
+    return UNSUPPORTED_EFFECT_EXACT_RESULT if DebuggerEffects::effect_oracle_is_exact(forged_oracle)
+    forged_cursor: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_replay(forged_oracle, DebuggerEffects::EffectKind.NetworkWrite, 11)
+    return UNSUPPORTED_EFFECT_REPLAY_RESULT if forged_cursor.exactness != DebuggerEffects::Exactness.Incomplete or forged_cursor.last_error.code != DebuggerErrors::ErrorCode.Unsupported or forged_cursor.cursor != 0
+    forged_replay: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(forged_oracle, DebuggerEffects::EffectKind.NetworkWrite, 11)
+    return UNSUPPORTED_EFFECT_REPLAY_RESULT if forged_replay.accepted or forged_replay.oracle.exactness != DebuggerEffects::Exactness.Incomplete or forged_replay.failure.code != DebuggerErrors::ErrorCode.Unsupported
     result_source: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
     result_source <- DebuggerEffects::effect_oracle_record(result_source, DebuggerEffects::EffectKind.Clock, 31, 32, 33)
     result_source.mode <- DebuggerEffects::EffectMode.Replaying
@@ -304,10 +318,10 @@ def main() -> i64:
     return EFFECT_REPLAY_RESULT_FAILURE if not replay_result.accepted or replay_result.result_hash != 32 or replay_result.result_value != 33 or replay_result.oracle.cursor != 1 or not DebuggerErrors::error_is_ok(replay_result.failure)
     mismatch_result: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(result_source, DebuggerEffects::EffectKind.Random, 31)
     return EFFECT_REPLAY_RESULT_FAILURE if mismatch_result.accepted or mismatch_result.oracle.exactness != DebuggerEffects::Exactness.Diverged or mismatch_result.failure.code != DebuggerErrors::ErrorCode.Diverged
-    invalid_effect: mutable DebuggerEffects::EffectOracle = oracle
-    invalid_effect.records[0].suppress_external_write <- false
+    invalid_effect: mutable DebuggerEffects::EffectOracle = result_source
+    invalid_effect.records[0].suppress_external_write <- true
     return 96 if DebuggerEffects::effect_oracle_is_exact(invalid_effect)
-    replay_write: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.FileWrite, 12, 23, 4)
+    replay_write: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_record(result_source, DebuggerEffects::EffectKind.FileWrite, 12, 23, 4)
     return 80 if replay_write.exactness != DebuggerEffects::Exactness.Diverged or replay_write.last_error.code != DebuggerErrors::ErrorCode.Diverged
     live_oracle: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Live)
     live_oracle <- DebuggerEffects::effect_oracle_record(live_oracle, DebuggerEffects::EffectKind.Clock, 1, 2, 3)
@@ -318,10 +332,10 @@ def main() -> i64:
     barrier_oracle: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Barrier)
     barrier_oracle <- DebuggerEffects::effect_oracle_record(barrier_oracle, DebuggerEffects::EffectKind.Foreign, 1, 2, 3)
     return 66 if DebuggerEffects::effect_oracle_is_exact(barrier_oracle)
-    tampered_oracle: mutable DebuggerEffects::EffectOracle = oracle
+    tampered_oracle: mutable DebuggerEffects::EffectOracle = result_source
     tampered_oracle.cursor <- 0
     tampered_oracle.records[0].sequence <- 9
-    tampered_oracle <- DebuggerEffects::effect_oracle_replay(tampered_oracle, DebuggerEffects::EffectKind.NetworkWrite, 11)
+    tampered_oracle <- DebuggerEffects::effect_oracle_replay(tampered_oracle, DebuggerEffects::EffectKind.Clock, 31)
     return 57 if tampered_oracle.exactness != DebuggerEffects::Exactness.Diverged
     incomplete_effect_replay: mutable DebuggerEffects::EffectOracle = oracle
     incomplete_effect_replay.mode <- DebuggerEffects::EffectMode.Replaying

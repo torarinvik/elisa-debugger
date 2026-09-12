@@ -1,0 +1,276 @@
+# Round-trip and corruption tests for the complete managed checkpoint codec.
+
+include "../src/trace/storage.elisa"
+include "../src/trace/reader.elisa"
+
+const TEST_RECORDING_ID: u64 = 901
+const TEST_BRANCH_ID: u64 = 7
+const TEST_CHECKPOINT_EVENT: u64 = 12
+const TEST_FIRST_TASK_ID: u64 = 1
+const TEST_SECOND_TASK_ID: u64 = 2
+const TEST_WAIT_RESOURCE_ID: u64 = 88
+const TEST_RESOURCE_PATH_ID: u64 = 501
+const TEST_RESOURCE_GENERATION: u64 = 3
+const TEST_EFFECT_REQUEST_HASH: u64 = 3001
+const TEST_EFFECT_RESULT_HASH: u64 = 3002
+const TEST_EFFECT_RESULT_VALUE: i64 = 3003
+const TEST_MACHINE_PC: u64 = 5
+const TEST_MACHINE_RETURN_PC: u64 = 9
+const TEST_MACHINE_LOCAL_VALUE: i64 = 41
+const TEST_MACHINE_FRAME_VALUE: i64 = 42
+const TEST_MACHINE_MEMORY_VALUE: i64 = 43
+const TEST_MACHINE_ACCUMULATOR: i64 = 44
+const TEST_MACHINE_RESULT: i64 = 45
+const TEST_MACHINE_HEAP_NEXT: usize = 2
+const TEST_MACHINE_STACK_POINTER: usize = 1
+const TEST_LOCAL_INDEX: usize = 0
+const TEST_FRAME_LOCAL_INDEX: usize = 0
+const TEST_MEMORY_INDEX: usize = 0
+const TEST_RESOURCE_BYTES: usize = 5
+const TEST_RESOURCE_CURSOR: usize = 2
+const TEST_RESOURCE_BYTE_0: u8 = 11
+const TEST_RESOURCE_BYTE_1: u8 = 22
+const TEST_RESOURCE_BYTE_2: u8 = 33
+const TEST_RESOURCE_BYTE_3: u8 = 44
+const TEST_RESOURCE_BYTE_4: u8 = 55
+const TEST_TRUNCATION: usize = 1
+const TEST_DECODE_ROUND_TRIP_FAILURE: i64 = 1
+const TEST_TASK_ROUND_TRIP_FAILURE: i64 = 2
+const TEST_EFFECT_ROUND_TRIP_FAILURE: i64 = 3
+const TEST_RESOURCE_ROUND_TRIP_FAILURE: i64 = 4
+const TEST_TRUNCATED_INPUT_ACCEPTED: i64 = 5
+const TEST_INVALID_HEADER_ACCEPTED: i64 = 6
+const TEST_INVALID_CHECKSUM_ACCEPTED: i64 = 7
+const TEST_OVERSIZED_INPUT_ACCEPTED: i64 = 8
+const TEST_INVALID_ENCODE_ACCEPTED: i64 = 9
+const TEST_TASK_CAPACITY: usize = 64
+const TEST_WAIT_CAPACITY: usize = 128
+const TEST_SCHEDULE_CAPACITY: usize = 512
+const TEST_EFFECT_CAPACITY: usize = 256
+const TEST_RESOURCE_CAPACITY: usize = 16
+const TEST_EFFECT_KIND_CLOCK_CODE: u16 = 0
+const TEST_EFFECT_KIND_FILE_WRITE_CODE: u16 = 5
+const TEST_CODEC_CAPACITY_OFFSET: usize = 1
+const NO_SYNC_RESOURCE: u64 = 0
+const NO_PARENT_TASK: u64 = 0
+const TEST_TRACE_SEQUENCE: u64 = 1
+const TEST_TRACE_MANIFEST_SEQUENCE: u64 = 0
+const TEST_TRACE_CHECKPOINT_COUNT: u64 = 1
+const TEST_METADATA_VERSION: u32 = 1
+const TEST_TRACE_CHUNK_CREATE_FAILURE: i64 = 10
+const TEST_TRACE_FRAME_ENCODE_FAILURE: i64 = 11
+const TEST_TRACE_FRAME_DECODE_FAILURE: i64 = 12
+const TEST_TRACE_CHECKPOINT_RESTORE_FAILURE: i64 = 13
+const TEST_TRACE_INVALID_CHECKPOINT_ACCEPTED: i64 = 14
+const TEST_TRACE_READER_INGEST_FAILURE: i64 = 16
+const TEST_TRACE_READER_RESTORE_FAILURE: i64 = 17
+const TEST_TRACE_SCAN_FAILURE: i64 = 18
+const TEST_COMPILER_ID: u64 = 101
+const TEST_RUNTIME_ID: u64 = 102
+const TEST_SOURCE_ID: u64 = 103
+const TEST_TARGET_ID: u64 = 104
+const TEST_TRACE_SCHEMA: u32 = 1
+const TEST_TRACE_EVENT_HASH: u64 = 9901
+const TEST_TRACE_EVENT_SEQUENCE: u64 = 2
+const TEST_TRACE_FOOTER_SEQUENCE: u64 = 3
+const TEST_TRACE_CHUNK_COUNT: u64 = 3
+
+def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
+    machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    machine.program_counter <- TEST_MACHINE_PC
+    machine.accumulator <- TEST_MACHINE_ACCUMULATOR
+    machine.result <- TEST_MACHINE_RESULT
+    machine.locals[TEST_LOCAL_INDEX] <- TEST_MACHINE_LOCAL_VALUE
+    machine.locals_initialized[TEST_LOCAL_INDEX] <- true
+    machine.return_stack_pointer <- TEST_MACHINE_STACK_POINTER
+    machine.return_stack[TEST_LOCAL_INDEX] <- TEST_MACHINE_RETURN_PC
+    machine.frame_locals[TEST_FRAME_LOCAL_INDEX] <- TEST_MACHINE_FRAME_VALUE
+    machine.frame_locals_initialized[TEST_FRAME_LOCAL_INDEX] <- true
+    machine.heap_next <- TEST_MACHINE_HEAP_NEXT
+    machine.memory[TEST_MEMORY_INDEX] <- TEST_MACHINE_MEMORY_VALUE
+    machine.memory_initialized[TEST_MEMORY_INDEX] <- true
+    machine.steps <- TEST_CHECKPOINT_EVENT
+
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    first_task: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(NO_PARENT_TASK))
+    second_task: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(NO_PARENT_TASK))
+    _ = DebuggerConcurrencyRuntime::runtime_wait(runtime, first_task, second_task, DebuggerIdentity::debug_id(TEST_WAIT_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex)
+    _ = DebuggerConcurrencyRuntime::runtime_schedule(runtime, second_task, DebuggerScheduler::ScheduleKind.Run, DebuggerIdentity::debug_id(NO_SYNC_RESOURCE))
+    tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
+
+    effects: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
+    effects <- DebuggerEffects::effect_oracle_record(effects, DebuggerEffects::EffectKind.Clock, TEST_EFFECT_REQUEST_HASH, TEST_EFFECT_RESULT_HASH, TEST_EFFECT_RESULT_VALUE)
+    effects <- DebuggerEffects::effect_oracle_record(effects, DebuggerEffects::EffectKind.FileWrite, TEST_EFFECT_REQUEST_HASH + 1, TEST_EFFECT_RESULT_HASH + 1, TEST_EFFECT_RESULT_VALUE + 1)
+
+    resources: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording)
+    handle: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(resources, DebuggerIdentity::debug_id(TEST_RESOURCE_PATH_ID), true, TEST_RESOURCE_GENERATION)
+    data: mutable u8[TEST_RESOURCE_BYTES] = zeroed
+    data[0] <- TEST_RESOURCE_BYTE_0
+    data[1] <- TEST_RESOURCE_BYTE_1
+    data[2] <- TEST_RESOURCE_BYTE_2
+    data[3] <- TEST_RESOURCE_BYTE_3
+    data[4] <- TEST_RESOURCE_BYTE_4
+    _ = DebuggerVirtualResources::resources_seed(resources, handle, data[0], TEST_RESOURCE_BYTES)
+    _ = DebuggerVirtualResources::resources_seek(resources, handle, TEST_RESOURCE_CURSOR)
+
+    machine_probe: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(TEST_CHECKPOINT_EVENT + 1), TEST_CHECKPOINT_EVENT, 0)
+    state_hash: u64 = DebuggerCheckpoint::snapshot_state_hash(machine_probe)
+    return DebuggerFullCheckpoint::full_checkpoint_capture(machine, tasks, effects, resources, DebuggerIdentity::debug_id(TEST_RECORDING_ID), DebuggerIdentity::debug_id(TEST_BRANCH_ID), TEST_CHECKPOINT_EVENT, state_hash)
+
+def checkpoint_manifest_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerTraceStorage::StoredChunk:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(TEST_COMPILER_ID),
+        runtime: DebuggerIdentity::debug_id(TEST_RUNTIME_ID),
+        source: DebuggerIdentity::debug_id(TEST_SOURCE_ID),
+        target: DebuggerIdentity::debug_id(TEST_TARGET_ID),
+        metadata_version: TEST_METADATA_VERSION
+    }
+    manifest: mutable DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
+    manifest.first_event <- checkpoint.event
+    manifest.last_event <- checkpoint.event
+    manifest.checkpoint_count <- TEST_TRACE_CHECKPOINT_COUNT
+    payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
+    checksum: u64 = DebuggerTraceBinary::writer_checksum(payload)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: manifest.schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest, sequence: TEST_TRACE_MANIFEST_SEQUENCE, first_event: checkpoint.event, last_event: checkpoint.event, payload_length: payload.length.u64(), checksum: checksum}
+    chunk.payload_length <- payload.length
+    chunk.checksum <- checksum
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
+def checkpoint_trace_event_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerTraceStorage::StoredChunk:
+    position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(checkpoint.recording)
+    position.branch <- checkpoint.branch
+    position.event <- checkpoint.event
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(TEST_TRACE_SCHEMA, checkpoint.event, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, TEST_TRACE_EVENT_HASH)
+    payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    payload <- DebuggerTraceBinary::writer_put_u32(payload, event.schema)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.ordinal)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.task.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.recording.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.branch.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.event)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.task.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.invocation.value)
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.position.statement.value)
+    payload <- DebuggerTraceBinary::writer_put_u32(payload, event.position.microstep)
+    payload <- DebuggerTraceBinary::writer_put_u16(payload, event.kind.u16())
+    payload <- DebuggerTraceBinary::writer_put_u16(payload, event.quality.u16())
+    payload <- DebuggerTraceBinary::writer_put_u64(payload, event.payload_hash)
+    checksum: u64 = DebuggerTraceBinary::writer_checksum(payload)
+    chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
+    chunk.header <- DebuggerTrace::ChunkHeader{schema: TEST_TRACE_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: TEST_TRACE_EVENT_SEQUENCE, first_event: checkpoint.event, last_event: checkpoint.event, payload_length: payload.length.u64(), checksum: checksum}
+    chunk.payload_length <- payload.length
+    chunk.checksum <- checksum
+    for index in 0..<payload.length:
+        chunk.payload[index] <- payload.bytes[index]
+    return chunk
+
+def append_trace_bytes(output: mutable DebuggerTraceBinary::ByteWriter&, source: DebuggerTraceBinary::ByteWriter) -> void:
+    if not DebuggerTraceBinary::writer_is_valid(source):
+        output.failed <- true
+        return
+    for index in 0..<source.length:
+        output <- DebuggerTraceBinary::writer_put_byte(output, source.bytes[index])
+
+def machine_snapshot_is_equal(left: DebuggerCheckpoint::MachineSnapshot, right: DebuggerCheckpoint::MachineSnapshot) -> bool:
+    return false if left.id.value != right.id.value or left.event != right.event or left.state_hash != right.state_hash
+    restored: DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(right)
+    return DebuggerCheckpoint::snapshot_matches_machine(left, restored)
+
+def task_info_is_equal(left: DebuggerConcurrency::TaskInfo, right: DebuggerConcurrency::TaskInfo) -> bool:
+    return left.id.value == right.id.value and left.parent.value == right.parent.value and left.state == right.state and left.logical_time == right.logical_time and left.os_thread == right.os_thread
+
+def checkpoints_are_equal(left: DebuggerFullCheckpoint::ManagedCheckpoint, right: DebuggerFullCheckpoint::ManagedCheckpoint) -> bool:
+    return false if left.schema != right.schema or left.recording.value != right.recording.value or left.branch.value != right.branch.value or left.event != right.event or left.state_hash != right.state_hash
+    return false if not machine_snapshot_is_equal(left.machine, right.machine)
+    return false if left.tasks.task_count != right.tasks.task_count or left.tasks.next_id != right.tasks.next_id or left.tasks.status != right.tasks.status or left.tasks.current.value != right.tasks.current.value or left.tasks.wait_count != right.tasks.wait_count or left.tasks.scheduler_cursor != right.tasks.scheduler_cursor or left.tasks.scheduler_count != right.tasks.scheduler_count or left.tasks.scheduler_replaying != right.tasks.scheduler_replaying or left.tasks.scheduler_diverged != right.tasks.scheduler_diverged or left.tasks.scheduler_overflowed != right.tasks.scheduler_overflowed
+    return false if left.tasks.task_count > TEST_TASK_CAPACITY or left.tasks.wait_count > TEST_WAIT_CAPACITY or left.tasks.scheduler_count > TEST_SCHEDULE_CAPACITY
+    for index in 0..<left.tasks.task_count:
+        return false if not task_info_is_equal(left.tasks.tasks[index], right.tasks.tasks[index])
+    for index in 0..<left.tasks.wait_count:
+        return false if left.tasks.waits[index].waiter.value != right.tasks.waits[index].waiter.value or left.tasks.waits[index].owner.value != right.tasks.waits[index].owner.value or left.tasks.waits[index].resource.value != right.tasks.waits[index].resource.value or left.tasks.waits[index].kind != right.tasks.waits[index].kind
+    for index in 0..<left.tasks.scheduler_count:
+        ldecision: DebuggerScheduler::ScheduleDecision = left.tasks.scheduler_decisions[index]
+        rdecision: DebuggerScheduler::ScheduleDecision = right.tasks.scheduler_decisions[index]
+        return false if ldecision.ordinal != rdecision.ordinal or not task_info_is_equal(ldecision.task, rdecision.task) or ldecision.kind != rdecision.kind or ldecision.synchronization != rdecision.synchronization
+    return false if left.effects.count != right.effects.count or left.effects.cursor != right.effects.cursor or left.effects.mode != right.effects.mode or left.effects.exactness != right.effects.exactness or left.effects.overflowed != right.effects.overflowed
+    return false if left.effects.count > TEST_EFFECT_CAPACITY
+    return false if left.effects.last_error.code != right.effects.last_error.code or left.effects.last_error.severity != right.effects.last_error.severity or left.effects.last_error.retryable != right.effects.last_error.retryable or left.effects.last_error.detail != right.effects.last_error.detail
+    for index in 0..<left.effects.count:
+        lrecord: DebuggerEffects::EffectRecord = left.effects.records[index]
+        rrecord: DebuggerEffects::EffectRecord = right.effects.records[index]
+        return false if lrecord.sequence != rrecord.sequence or lrecord.kind != rrecord.kind or lrecord.request_hash != rrecord.request_hash or lrecord.result_hash != rrecord.result_hash or lrecord.result_value != rrecord.result_value or lrecord.suppress_external_write != rrecord.suppress_external_write
+    return false if left.resources.count != right.resources.count or left.resources.next_handle != right.resources.next_handle or left.resources.mode != right.resources.mode or left.resources.count > TEST_RESOURCE_CAPACITY
+    for index in 0..<left.resources.count:
+        lfile: DebuggerVirtualResources::VirtualFile = left.resources.files[index]
+        rfile: DebuggerVirtualResources::VirtualFile = right.resources.files[index]
+        return false if lfile.handle.value != rfile.handle.value or lfile.path.value != rfile.path.value or lfile.length != rfile.length or lfile.cursor != rfile.cursor or lfile.writable != rfile.writable or lfile.generation != rfile.generation
+        for byte_index in 0..<lfile.length:
+            return false if lfile.bytes[byte_index] != rfile.bytes[byte_index]
+    return true
+
+def check_round_trip() -> i64:
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
+    return TEST_TASK_ROUND_TRIP_FAILURE if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
+    return TEST_EFFECT_ROUND_TRIP_FAILURE if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or checkpoint.effects.records[0].kind.u16() != TEST_EFFECT_KIND_CLOCK_CODE or checkpoint.effects.records[1].kind.u16() != TEST_EFFECT_KIND_FILE_WRITE_CODE
+    return TEST_RESOURCE_ROUND_TRIP_FAILURE if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+    encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
+    return TEST_DECODE_ROUND_TRIP_FAILURE if encoded.failed or encoded.length <= 0 or encoded.length > DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY
+    decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length)
+    return TEST_DECODE_ROUND_TRIP_FAILURE if decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not DebuggerFullCheckpoint::full_checkpoint_is_valid(decoded.checkpoint)
+    return TEST_DECODE_ROUND_TRIP_FAILURE if not checkpoints_are_equal(checkpoint, decoded.checkpoint)
+    trace_chunk: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(checkpoint, TEST_TRACE_SEQUENCE)
+    return TEST_TRACE_CHUNK_CREATE_FAILURE if trace_chunk.status != DebuggerTraceStorage::StorageStatus.Ready
+    return 15 if not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(trace_chunk.chunk)
+    trace_frame: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(trace_chunk.chunk)
+    return TEST_TRACE_FRAME_ENCODE_FAILURE if not DebuggerTraceBinary::writer_is_valid(trace_frame)
+    decoded_frame: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(trace_frame.bytes[0], trace_frame.length)
+    return TEST_TRACE_FRAME_DECODE_FAILURE if decoded_frame.status != DebuggerTraceStorage::StorageStatus.Ready or decoded_frame.chunk.header.sequence != TEST_TRACE_SEQUENCE
+    restored_checkpoint: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerTraceStorage::storage_checkpoint_chunk_decode(decoded_frame.chunk)
+    return TEST_TRACE_CHECKPOINT_RESTORE_FAILURE if restored_checkpoint.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not checkpoints_are_equal(checkpoint, restored_checkpoint.checkpoint)
+    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    return TEST_TRACE_READER_INGEST_FAILURE if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, checkpoint_manifest_chunk(checkpoint)))
+    return TEST_TRACE_READER_INGEST_FAILURE if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest_encoded(reader, trace_frame.bytes[0], trace_frame.length))
+    lookup: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_full_checkpoint_at(reader, 0)
+    return TEST_TRACE_READER_RESTORE_FAILURE if not lookup.found or DebuggerTraceReader::reader_full_checkpoint_count(reader) != 1 or not checkpoints_are_equal(checkpoint, lookup.checkpoint)
+    manifest_frame: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(checkpoint_manifest_chunk(checkpoint))
+    event_frame: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(checkpoint_trace_event_chunk(checkpoint))
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(TEST_TRACE_FOOTER_SEQUENCE, checkpoint.event)
+    trace_bytes: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_trace_bytes(trace_bytes, manifest_frame)
+    append_trace_bytes(trace_bytes, trace_frame)
+    append_trace_bytes(trace_bytes, event_frame)
+    append_trace_bytes(trace_bytes, footer)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(trace_bytes.bytes[0], trace_bytes.length)
+    return TEST_TRACE_SCAN_FAILURE if not DebuggerTraceBinary::writer_is_valid(trace_bytes) or scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or scan.verified_chunks != TEST_TRACE_CHUNK_COUNT
+    return 0
+
+def check_rejects_malformed_inputs() -> i64:
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
+    encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
+    truncated: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length - TEST_TRUNCATION)
+    return TEST_TRUNCATED_INPUT_ACCEPTED if truncated.status != DebuggerFullCheckpointCodec::DecodeStatus.Truncated
+    bad_header: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = encoded
+    bad_header.bytes[0] <- 0
+    invalid_header: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(bad_header.bytes[0], bad_header.length)
+    return TEST_INVALID_HEADER_ACCEPTED if invalid_header.status != DebuggerFullCheckpointCodec::DecodeStatus.Invalid
+    bad_checksum: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = encoded
+    bad_checksum.bytes[bad_checksum.length - 1] <- bad_checksum.bytes[bad_checksum.length - 1] + 1
+    invalid_checksum: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(bad_checksum.bytes[0], bad_checksum.length)
+    return TEST_INVALID_CHECKSUM_ACCEPTED if invalid_checksum.status != DebuggerFullCheckpointCodec::DecodeStatus.Invalid
+    oversized: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY + TEST_CODEC_CAPACITY_OFFSET)
+    return TEST_OVERSIZED_INPUT_ACCEPTED if oversized.status != DebuggerFullCheckpointCodec::DecodeStatus.Oversized
+    malformed: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    malformed.branch <- DebuggerIdentity::debug_id(18446744073709551615)
+    rejected: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(malformed)
+    return TEST_INVALID_ENCODE_ACCEPTED if not rejected.failed or rejected.length != 0
+    rejected_trace_chunk: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(malformed, TEST_TRACE_SEQUENCE)
+    return TEST_TRACE_INVALID_CHECKPOINT_ACCEPTED if rejected_trace_chunk.status != DebuggerTraceStorage::StorageStatus.Invalid
+    return 0
+
+def main() -> i64:
+    round_trip: i64 = check_round_trip()
+    return round_trip if round_trip != 0
+    return check_rejects_malformed_inputs()

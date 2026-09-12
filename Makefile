@@ -46,7 +46,7 @@ ELISA_ALLOW_STALE_STAGE1 ?= 1
 # include cannot leave a silently stale executable behind.
 ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check trace-checkpoint-validation-check checkpoint-state-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check edir-file-loader-check compiler-edir-check breakpoint-resolver-check timeline-capability-check path-policy-check process-spawn-check clean
+.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check trace-checkpoint-validation-check checkpoint-state-check full-checkpoint-codec-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check replay-provenance-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check dap-events-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check edir-file-loader-check compiler-edir-check breakpoint-resolver-check timeline-capability-check path-policy-check process-spawn-check clean
 
 build: $(BUILD)/elisa-debugger
 
@@ -66,8 +66,11 @@ module-check: $(BUILD)/elisa-debugger-native-artifact-check
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check
+module-check: $(BUILD)/elisa-debugger-replay-provenance-check
 module-check: $(BUILD)/elisa-debugger-state-integrity-check
 module-check: $(BUILD)/elisa-debugger-trace-checkpoint-validation-check
+module-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
+module-check: $(BUILD)/elisa-debugger-dap-events-check
 module-check: edir-file-loader-check
 
 	"$(BUILD)/elisa-debugger-module-core-check"
@@ -89,6 +92,9 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-trace-checkpoint-validation-check"
 	"$(BUILD)/elisa-debugger-remote-authentication-check"
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
+	"$(BUILD)/elisa-debugger-full-checkpoint-codec-check"
+	"$(BUILD)/elisa-debugger-dap-events-check"
+	"$(BUILD)/elisa-debugger-replay-provenance-check"
 	"$(BUILD)/elisa-debugger-trace-manifest-status-check"
 	"$(BUILD)/elisa-debugger-adapter-recording-bounds-check"
 	"$(BUILD)/elisa-debugger-runtime-status-check"
@@ -137,6 +143,13 @@ $(BUILD)/elisa-debugger-replay-branches-check: tests/replay_branches_check.elisa
 replay-branches-check: $(BUILD)/elisa-debugger-replay-branches-check
 	"$(BUILD)/elisa-debugger-replay-branches-check"
 
+$(BUILD)/elisa-debugger-replay-provenance-check: tests/replay_provenance_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+replay-provenance-check: $(BUILD)/elisa-debugger-replay-provenance-check
+	"$(BUILD)/elisa-debugger-replay-provenance-check"
+
 $(BUILD)/elisa-debugger-state-integrity-check: tests/state_integrity_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
@@ -183,6 +196,13 @@ capabilities-check: $(BUILD)/elisa-debugger-capabilities-check
 $(BUILD)/elisa-debugger-dap-payload-check: tests/dap_payload_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-dap-events-check: tests/dap_events_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+dap-events-check: $(BUILD)/elisa-debugger-dap-events-check
+	"$(BUILD)/elisa-debugger-dap-events-check"
 
 dap-payload-check: $(BUILD)/elisa-debugger-dap-payload-check
 	"$(BUILD)/elisa-debugger-dap-payload-check"
@@ -437,6 +457,13 @@ $(BUILD)/elisa-debugger-checkpoint-state-check: tests/checkpoint_state_check.eli
 checkpoint-state-check: $(BUILD)/elisa-debugger-checkpoint-state-check
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
 
+$(BUILD)/elisa-debugger-full-checkpoint-codec-check: tests/full_checkpoint_codec_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+full-checkpoint-codec-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
+	"$(BUILD)/elisa-debugger-full-checkpoint-codec-check"
+
 $(BUILD)/elisa-debugger-trace-manifest-status-check: tests/trace_manifest_status_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
@@ -526,7 +553,7 @@ smoke: check server dap-server cli ffi-check edir-file-loader-check
 	printf '$(IDLESS_LAUNCH_PAYLOAD_LENGTH) {"method":"launch"}\n' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 655360\r\n\r\n' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 49\r\n\r\n{' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
-	printf '21 {"method":"discover"}\n' | "$(BUILD)/elisa-debugger-server" | grep -F '"protocolMajor":1' | grep -F '"productVersion":"0.1.0"' | grep -F '"sourceBreakpoints":false' | grep -F '"typedValues":false' | grep -F '"historicalQueries":false' | grep -F '"traceExport":false' | grep -F '"installationHealthy":true'
+	printf '21 {"method":"discover"}\n' | "$(BUILD)/elisa-debugger-server" | grep -F '"protocolMajor":1' | grep -F '"productVersion":"0.1.0"' | grep -F '"sourceBreakpoints":false' | grep -F '"reverseExecution":true' | grep -F '"typedValues":false' | grep -F '"historicalQueries":false' | grep -F '"traceExport":false' | grep -F '"installationHealthy":true'
 	server_timeline=$$(printf '30 {"method":"initialize","id":1}\n26 {"method":"launch","id":2}\n25 {"method":"pause","id":3}\n24 {"method":"step","id":4}\n31 {"method":"reverseStep","id":5}\n25 {"method":"close","id":6}\n' | "$(BUILD)/elisa-debugger-server"); echo "$$server_timeline" | grep -F '"id":"4","ok":true'; echo "$$server_timeline" | grep -F '"id":"5","ok":true'; printf '%s\n' "$$server_timeline" | while IFS=' ' read -r declared payload; do test "$$declared" -eq "$$(printf %s "$$payload" | wc -c | tr -d ' ')"; done
 	server_inspection=$$(printf '26 {"method":"launch","id":1}\n25 {"method":"pause","id":2}\n25 {"method":"stack","id":3}\n27 {"method":"threads","id":4}\n26 {"method":"scopes","id":5}\n29 {"method":"variables","id":6}\n26 {"method":"memory","id":7}\n' | "$(BUILD)/elisa-debugger-server"); echo "$$server_inspection" | grep -F '"id":"3","ok":false'; echo "$$server_inspection" | grep -F '"id":"4","ok":false'; echo "$$server_inspection" | grep -F '"id":"5","ok":false'; echo "$$server_inspection" | grep -F '"id":"6","ok":false'; echo "$$server_inspection" | grep -F '"id":"7","ok":false'
 	printf 'Content-Length: 49\r\n\r\n{"seq":1,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" | grep -F '"supportsStepBack":true'

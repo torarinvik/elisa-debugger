@@ -16,6 +16,7 @@ include "./request.elisa"
 include "./dispatcher.elisa"
 include "./managed_service.elisa"
 include "./dap_payload.elisa"
+include "./dap.elisa"
 include "../vm/edir_file.elisa"
 
 module DebuggerDAPServer:
@@ -27,7 +28,7 @@ module DebuggerDAPServer:
         const FIRST_DAP_SEQUENCE_DIGIT_COUNT: usize = 1
         const MAX_DAP_SEQUENCE_VALUE: u64 = 18446744073709551615
         const DAP_MIN_REQUEST_SEQUENCE: u64 = 1
-        const MAX_DAP_RESPONSE_SEQUENCE: u64 = 18446744073709551615
+        const MAX_DAP_OUTBOUND_SEQUENCE: u64 = 18446744073709551615
         const DAP_READ_CHUNK_SIZE: usize = 4096
         const DAP_SERVER_SUCCESS_EXIT_CODE: i64 = 0
         const DAP_SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
@@ -275,6 +276,49 @@ module DebuggerDAPServer:
         const DAP_UNSUPPORTED_SUFFIX_LENGTH: usize = 50
         const DAP_UNAVAILABLE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"operation is unavailable\"}"
         const DAP_UNAVAILABLE_SUFFIX_LENGTH: usize = 55
+        const DAP_MAIN_THREAD_ID: u64 = 1
+        const DAP_EVENT_PREFIX: cstr = "{\"seq\":"
+        const DAP_EVENT_PREFIX_LENGTH: usize = 7
+        const DAP_EVENT_MIDDLE: cstr = ",\"type\":\"event\",\"event\":\""
+        const DAP_EVENT_MIDDLE_LENGTH: usize = 25
+        const DAP_EVENT_BODY_FIELD: cstr = ",\"body\":"
+        const DAP_EVENT_BODY_FIELD_LENGTH: usize = 8
+        const DAP_EVENT_NAME_END: cstr = "\""
+        const DAP_EVENT_NAME_END_LENGTH: usize = 1
+        const DAP_EVENT_NO_BODY_SUFFIX: cstr = "\"}"
+        const DAP_EVENT_NO_BODY_SUFFIX_LENGTH: usize = 2
+        const DAP_EVENT_OBJECT_END: cstr = "}"
+        const DAP_EVENT_OBJECT_END_LENGTH: usize = 1
+        const DAP_EVENT_INITIALIZED_NAME: cstr = "initialized"
+        const DAP_EVENT_INITIALIZED_NAME_LENGTH: usize = 11
+        const DAP_EVENT_CONTINUED_NAME: cstr = "continued"
+        const DAP_EVENT_CONTINUED_NAME_LENGTH: usize = 9
+        const DAP_EVENT_STOPPED_NAME: cstr = "stopped"
+        const DAP_EVENT_STOPPED_NAME_LENGTH: usize = 7
+        const DAP_EVENT_TERMINATED_NAME: cstr = "terminated"
+        const DAP_EVENT_TERMINATED_NAME_LENGTH: usize = 10
+        const DAP_EVENT_EXITED_NAME: cstr = "exited"
+        const DAP_EVENT_EXITED_NAME_LENGTH: usize = 6
+        const DAP_EVENT_CONTINUED_BODY_PREFIX: cstr = "{\"threadId\":"
+        const DAP_EVENT_CONTINUED_BODY_PREFIX_LENGTH: usize = 12
+        const DAP_EVENT_CONTINUED_BODY_SUFFIX: cstr = ",\"allThreadsContinued\":true}"
+        const DAP_EVENT_CONTINUED_BODY_SUFFIX_LENGTH: usize = 28
+        const DAP_EVENT_STOPPED_BODY_PREFIX: cstr = "{\"reason\":\""
+        const DAP_EVENT_STOPPED_BODY_PREFIX_LENGTH: usize = 11
+        const DAP_EVENT_STOPPED_THREAD_FIELD: cstr = "\",\"threadId\":"
+        const DAP_EVENT_STOPPED_THREAD_FIELD_LENGTH: usize = 13
+        const DAP_EVENT_STOPPED_BODY_SUFFIX: cstr = ",\"allThreadsStopped\":true}"
+        const DAP_EVENT_STOPPED_BODY_SUFFIX_LENGTH: usize = 26
+        const DAP_EVENT_REASON_STEP: cstr = "step"
+        const DAP_EVENT_REASON_STEP_LENGTH: usize = 4
+        const DAP_EVENT_REASON_PAUSE: cstr = "pause"
+        const DAP_EVENT_REASON_PAUSE_LENGTH: usize = 5
+        const DAP_EVENT_REASON_BREAKPOINT: cstr = "breakpoint"
+        const DAP_EVENT_REASON_BREAKPOINT_LENGTH: usize = 10
+        const DAP_EVENT_EXIT_BODY_PREFIX: cstr = "{\"exitCode\":"
+        const DAP_EVENT_EXIT_BODY_PREFIX_LENGTH: usize = 12
+        const DAP_EVENT_EXIT_BODY_SUFFIX: cstr = "}"
+        const DAP_EVENT_EXIT_BODY_SUFFIX_LENGTH: usize = 1
 
         struct DecodedJSONString:
             valid: mutable bool
@@ -990,6 +1034,72 @@ module DebuggerDAPServer:
                 count <- count + 1
             return count
 
+        def adapter_event_name(kind: DebuggerDAP::EventKind) -> cstr:
+            return DAP_EVENT_INITIALIZED_NAME if kind == DebuggerDAP::EventKind.Initialized
+            return DAP_EVENT_CONTINUED_NAME if kind == DebuggerDAP::EventKind.Continued
+            return DAP_EVENT_STOPPED_NAME if kind == DebuggerDAP::EventKind.Stopped
+            return DAP_EVENT_TERMINATED_NAME if kind == DebuggerDAP::EventKind.Terminated
+            return DAP_EVENT_EXITED_NAME
+
+        def adapter_event_name_length(kind: DebuggerDAP::EventKind) -> usize:
+            return DAP_EVENT_INITIALIZED_NAME_LENGTH if kind == DebuggerDAP::EventKind.Initialized
+            return DAP_EVENT_CONTINUED_NAME_LENGTH if kind == DebuggerDAP::EventKind.Continued
+            return DAP_EVENT_STOPPED_NAME_LENGTH if kind == DebuggerDAP::EventKind.Stopped
+            return DAP_EVENT_TERMINATED_NAME_LENGTH if kind == DebuggerDAP::EventKind.Terminated
+            return DAP_EVENT_EXITED_NAME_LENGTH
+
+        def adapter_event_reason_name(reason: DebuggerDAP::StopReason) -> cstr:
+            return DAP_EVENT_REASON_STEP if reason == DebuggerDAP::StopReason.Step
+            return DAP_EVENT_REASON_PAUSE if reason == DebuggerDAP::StopReason.Pause
+            return DAP_EVENT_REASON_BREAKPOINT
+
+        def adapter_event_reason_name_length(reason: DebuggerDAP::StopReason) -> usize:
+            return DAP_EVENT_REASON_STEP_LENGTH if reason == DebuggerDAP::StopReason.Step
+            return DAP_EVENT_REASON_PAUSE_LENGTH if reason == DebuggerDAP::StopReason.Pause
+            return DAP_EVENT_REASON_BREAKPOINT_LENGTH
+
+        def adapter_event_has_body(event: DebuggerDAP::AdapterEvent) -> bool:
+            return event.kind == DebuggerDAP::EventKind.Continued or event.kind == DebuggerDAP::EventKind.Stopped or event.kind == DebuggerDAP::EventKind.Exited
+
+        def adapter_event_body_length(event: DebuggerDAP::AdapterEvent) -> usize:
+            if event.kind == DebuggerDAP::EventKind.Continued:
+                return DAP_EVENT_CONTINUED_BODY_PREFIX_LENGTH + decimal_digits(DAP_MAIN_THREAD_ID) + DAP_EVENT_CONTINUED_BODY_SUFFIX_LENGTH
+            if event.kind == DebuggerDAP::EventKind.Stopped:
+                return DAP_EVENT_STOPPED_BODY_PREFIX_LENGTH + adapter_event_reason_name_length(event.reason) + DAP_EVENT_STOPPED_THREAD_FIELD_LENGTH + decimal_digits(DAP_MAIN_THREAD_ID) + DAP_EVENT_STOPPED_BODY_SUFFIX_LENGTH
+            if event.kind == DebuggerDAP::EventKind.Exited:
+                return DAP_EVENT_EXIT_BODY_PREFIX_LENGTH + signed_decimal_digits(event.exit_code) + DAP_EVENT_EXIT_BODY_SUFFIX_LENGTH
+            return 0
+
+        def write_adapter_event(event: DebuggerDAP::AdapterEvent, outbound_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            has_body: bool = adapter_event_has_body(event)
+            suffix_length: usize = DAP_EVENT_NO_BODY_SUFFIX_LENGTH if not has_body else DAP_EVENT_NAME_END_LENGTH + DAP_EVENT_BODY_FIELD_LENGTH + adapter_event_body_length(event) + DAP_EVENT_OBJECT_END_LENGTH
+            frame_length: u64 = (DAP_EVENT_PREFIX_LENGTH + decimal_digits(outbound_sequence) + DAP_EVENT_MIDDLE_LENGTH + adapter_event_name_length(event.kind) + suffix_length).u64()
+            _ = printf("Content-Length: %llu\r\n\r\n", frame_length) can Console
+            _ = printf("%s", DAP_EVENT_PREFIX) can Console
+            _ = printf("%llu", outbound_sequence) can Console
+            _ = printf("%s", DAP_EVENT_MIDDLE) can Console
+            _ = printf("%s", adapter_event_name(event.kind)) can Console
+            if not has_body:
+                _ = printf("%s", DAP_EVENT_NO_BODY_SUFFIX) can Console
+                return
+            _ = printf("%s", DAP_EVENT_NAME_END) can Console
+            _ = printf("%s", DAP_EVENT_BODY_FIELD) can Console
+            if event.kind == DebuggerDAP::EventKind.Continued:
+                _ = printf("%s", DAP_EVENT_CONTINUED_BODY_PREFIX) can Console
+                _ = printf("%llu", DAP_MAIN_THREAD_ID) can Console
+                _ = printf("%s", DAP_EVENT_CONTINUED_BODY_SUFFIX) can Console
+            if event.kind == DebuggerDAP::EventKind.Stopped:
+                _ = printf("%s", DAP_EVENT_STOPPED_BODY_PREFIX) can Console
+                _ = printf("%s", adapter_event_reason_name(event.reason)) can Console
+                _ = printf("%s", DAP_EVENT_STOPPED_THREAD_FIELD) can Console
+                _ = printf("%llu", DAP_MAIN_THREAD_ID) can Console
+                _ = printf("%s", DAP_EVENT_STOPPED_BODY_SUFFIX) can Console
+            if event.kind == DebuggerDAP::EventKind.Exited:
+                _ = printf("%s", DAP_EVENT_EXIT_BODY_PREFIX) can Console
+                _ = printf("%lld", event.exit_code) can Console
+                _ = printf("%s", DAP_EVENT_EXIT_BODY_SUFFIX) can Console
+            _ = printf("%s", DAP_EVENT_OBJECT_END) can Console
+
         def write_dynamic_response(response_sequence: u64, request_sequence: u64, command: cstr, command_length: usize, suffix: cstr, suffix_length: usize) -> void can[Console, Unsafe.PointerCast]:
             body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + command_length + suffix_length + DAP_JSON_TERMINATOR_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
@@ -1421,6 +1531,15 @@ module DebuggerDAPServer:
                 return
             write_unknown_command_response(response_sequence, request_sequence, payload, command_start, command_end) can Console, Unsafe.PointerCast
 
+        def event_request_kind(command_hash: u64) -> DebuggerDAP::RequestKind:
+            return DebuggerDAP::RequestKind.Launch if command_hash == COMMAND_HASH_LAUNCH
+            return DebuggerDAP::RequestKind.Continue if command_hash == COMMAND_HASH_CONTINUE
+            return DebuggerDAP::RequestKind.Pause if command_hash == COMMAND_HASH_PAUSE
+            return DebuggerDAP::RequestKind.Step if command_hash == COMMAND_HASH_NEXT or command_hash == COMMAND_HASH_STEP_IN or command_hash == COMMAND_HASH_STEP_OUT or command_hash == COMMAND_HASH_STEP_BACK
+            return DebuggerDAP::RequestKind.ReverseContinue if command_hash == COMMAND_HASH_REVERSE_CONTINUE
+            return DebuggerDAP::RequestKind.Terminate if command_hash == COMMAND_HASH_TERMINATE
+            return DebuggerDAP::RequestKind.Other
+
     public:
         def initial_session() -> DebuggerSession::Session:
             build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
@@ -1429,7 +1548,7 @@ module DebuggerDAPServer:
         def run() -> i64 can[Console, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             decoder: mutable Decoder = decoder_new()
             chunk: mutable u8[DAP_READ_CHUNK_SIZE] = zeroed
-            response_sequence: mutable u64 = 1
+            outbound_sequence: mutable u64 = 1
             client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates = DebuggerDAPPayload::client_coordinates_default()
             session: DebuggerSession::Session = initial_session()
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
@@ -1444,9 +1563,14 @@ module DebuggerDAPServer:
                         memory <- zeroed
                         result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, variables, client_coordinates)
                         service.controller.session <- result.session
-                        write_response(service, result, decoder.command_hash, decoder.request_sequence, response_sequence, memory, variables, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
-                        return DAP_SERVER_INVALID_FRAME_EXIT_CODE if response_sequence == MAX_DAP_RESPONSE_SEQUENCE
-                        response_sequence <- response_sequence + 1
+                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, memory, variables, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
+                        return DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == MAX_DAP_OUTBOUND_SEQUENCE
+                        outbound_sequence <- outbound_sequence + DAP_DECIMAL_INCREMENT
+                        event_batch: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(event_request_kind(decoder.command_hash), result.accepted, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)
+                        for event_index in 0..<event_batch.count:
+                            write_adapter_event(event_batch.events[event_index], outbound_sequence) can Console, Unsafe.PointerCast
+                            return DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == MAX_DAP_OUTBOUND_SEQUENCE
+                            outbound_sequence <- outbound_sequence + DAP_DECIMAL_INCREMENT
                         decoder.command_hash <- 0
                         decoder.request_sequence <- 0
                         decoder.sequence_digits <- 0

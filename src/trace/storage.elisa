@@ -5,6 +5,7 @@ include "./binary.elisa"
 include "./format.elisa"
 include "./manifest.elisa"
 include "../replay/checkpoint_codec.elisa"
+include "../replay/full_checkpoint_codec.elisa"
 
 extern write(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
 
@@ -51,7 +52,7 @@ module DebuggerTraceStorage:
         const TRACE_NO_RECORDING_ID: u64 = 0
 
     public:
-        const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+        const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY
 
         enum StorageStatus:
             Ready
@@ -81,6 +82,10 @@ module DebuggerTraceStorage:
             chunk: mutable StoredChunk
             status: mutable StorageStatus
 
+        struct CheckpointChunkEncoding:
+            chunk: mutable StoredChunk
+            status: mutable StorageStatus
+
         struct Footer:
             next_sequence: mutable u64
             verified_event: mutable u64
@@ -99,6 +104,12 @@ module DebuggerTraceStorage:
             return StorageStatus.Ready
 
     private:
+        def storage_payload_checksum(bytes: u8&, length: usize) -> u64:
+            checksum: mutable u64 = TRACE_HASH_OFFSET_BASIS
+            for index in 0..<length:
+                checksum <- (checksum ^ bytes[index].u64()) * TRACE_HASH_PRIME
+            return checksum
+
         def storage_event_payload_is_valid_with_recording(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64, recording_id: mutable u64&) -> bool:
             return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
             event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
@@ -146,22 +157,42 @@ module DebuggerTraceStorage:
             return true
 
         def storage_checkpoint_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, first_event: u64, last_event: u64) -> bool:
-            return false if first_event != last_event or payload_length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
-            checkpoint_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
-            return false if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(checkpoint_reader)
-            decoded_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
-            snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpointCodec::checkpoint_decode(decoded_reader)
-            return snapshot.event == first_event
+            return false if first_event != last_event
+            if payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES:
+                checkpoint_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
+                return false if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(checkpoint_reader)
+                decoded_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
+                snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpointCodec::checkpoint_decode(decoded_reader)
+                return snapshot.event == first_event
+            full_checkpoint: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(bytes[payload_offset], payload_length)
+            return full_checkpoint.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and full_checkpoint.checkpoint.event == first_event
 
         def storage_checkpoint_chunk_is_valid(chunk: StoredChunk) -> bool:
             return false if chunk.header.kind != DebuggerTrace::ChunkKind.Checkpoint
+            return false if chunk.header.schema != TRACE_FORMAT_VERSION.u32()
+            return false if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
             return false if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
-            return false if chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY or chunk.payload_length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
-            payload: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
-            for index in 0..<chunk.payload_length:
-                payload <- DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
-            return false if not DebuggerTraceBinary::writer_is_valid(payload) or DebuggerTraceBinary::writer_checksum(payload) != chunk.checksum
+            return false if chunk.payload_length == 0 or chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY
+            return false if storage_payload_checksum(chunk.payload[0], chunk.payload_length) != chunk.checksum
             return storage_checkpoint_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.first_event, chunk.header.last_event)
+
+        def storage_checkpoint_chunk_new(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint, sequence: u64) -> CheckpointChunkEncoding:
+            return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Invalid} if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+            encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
+            return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Oversized} if encoded.failed or encoded.length == 0 or encoded.length > TRACE_STORAGE_PAYLOAD_CAPACITY
+            checksum: u64 = storage_payload_checksum(encoded.bytes[0], encoded.length)
+            chunk: mutable StoredChunk = zeroed
+            chunk.header <- DebuggerTrace::ChunkHeader{schema: TRACE_FORMAT_VERSION.u32(), kind: DebuggerTrace::ChunkKind.Checkpoint, sequence: sequence, first_event: checkpoint.event, last_event: checkpoint.event, payload_length: encoded.length.u64(), checksum: checksum}
+            chunk.payload_length <- encoded.length
+            chunk.checksum <- checksum
+            for index in 0..<encoded.length:
+                chunk.payload[index] <- encoded.bytes[index]
+            return CheckpointChunkEncoding{chunk: chunk, status: StorageStatus.Ready}
+
+        def storage_checkpoint_chunk_decode(chunk: StoredChunk) -> DebuggerFullCheckpointCodec::DecodedCheckpoint:
+            invalid: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::DecodedCheckpoint{checkpoint: zeroed, status: DebuggerFullCheckpointCodec::DecodeStatus.Invalid}
+            return invalid if not storage_checkpoint_chunk_is_valid(chunk) or chunk.payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+            return DebuggerFullCheckpointCodec::full_checkpoint_decode(chunk.payload[0], chunk.payload_length)
 
         def storage_checkpoint_event_is_within_trace(event: u64, first_event: u64, last_event: u64) -> bool:
             return false if event < first_event
@@ -174,7 +205,7 @@ module DebuggerTraceStorage:
             return result if length < TRACE_HEADER_BYTES
             result.status <- StorageStatus.Oversized if length > TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY
             return result if length > TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY
-            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], length)
+            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], TRACE_HEADER_BYTES)
             magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
             magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
             magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
@@ -195,13 +226,11 @@ module DebuggerTraceStorage:
             result.chunk.header <- DebuggerTrace::ChunkHeader{schema: schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest if kind == TRACE_MANIFEST_KIND else DebuggerTrace::ChunkKind.Metadata if kind == TRACE_METADATA_KIND else DebuggerTrace::ChunkKind.Events if kind == TRACE_EVENTS_KIND else DebuggerTrace::ChunkKind.Checkpoint if kind == TRACE_CHECKPOINT_KIND else DebuggerTrace::ChunkKind.Resource if kind == TRACE_RESOURCE_KIND else DebuggerTrace::ChunkKind.Index, sequence: sequence, first_event: first_event, last_event: last_event, payload_length: payload_length, checksum: checksum}
             result.chunk.payload_length <- payload_length.usize()
             result.chunk.checksum <- checksum
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != TRACE_HEADER_BYTES
             for index in 0..<result.chunk.payload_length:
-                result.chunk.payload[index] <- DebuggerTraceBinary::reader_take_byte(reader)
-            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+                result.chunk.payload[index] <- bytes[TRACE_HEADER_BYTES + index]
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if not DebuggerTrace::trace_chunk_range_valid(result.chunk.header)
-            computed: mutable u64 = TRACE_HASH_OFFSET_BASIS
-            for index in 0..<result.chunk.payload_length:
-                computed <- (computed ^ result.chunk.payload[index].u64()) * TRACE_HASH_PRIME
+            computed: u64 = storage_payload_checksum(result.chunk.payload[0], result.chunk.payload_length)
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if computed != checksum
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and result.chunk.payload_length == 0
             # Chunk decoding is also a public validation boundary; do not let a

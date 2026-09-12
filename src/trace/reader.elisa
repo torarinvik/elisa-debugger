@@ -13,6 +13,7 @@ module DebuggerTraceReader:
         const READER_EVENT_CAPACITY: usize = 256
         # A bundle stores up to eight non-manifest chunks plus one manifest.
         const READER_EVENT_CHUNK_CAPACITY: usize = 8
+        const READER_FULL_CHECKPOINT_CAPACITY: usize = READER_EVENT_CHUNK_CAPACITY
         const READER_MANIFEST_CHUNK_COUNT: usize = 1
         const READER_CHUNK_CAPACITY: usize = READER_EVENT_CHUNK_CAPACITY + READER_MANIFEST_CHUNK_COUNT
         const READER_FIRST_SEQUENCE: u64 = 0
@@ -48,7 +49,9 @@ module DebuggerTraceReader:
         struct TraceReader:
             manifest: mutable DebuggerTraceManifest::BundleManifest
             events: mutable DebuggerEvents::EventEnvelope[READER_EVENT_CAPACITY]
+            full_checkpoints: mutable DebuggerFullCheckpoint::ManagedCheckpoint[READER_FULL_CHECKPOINT_CAPACITY]
             event_count: mutable usize
+            full_checkpoint_count: mutable usize
             next_sequence: mutable u64
             next_event: mutable u64
             recording: mutable DebuggerIdentity::DebugId
@@ -64,6 +67,7 @@ module DebuggerTraceReader:
             reader: mutable TraceReader = zeroed
             reader.next_sequence <- READER_FIRST_SEQUENCE
             reader.next_event <- 0
+            reader.full_checkpoint_count <- 0
             reader.recording <- DebuggerIdentity::debug_id(0)
             reader.recording_seen <- false
             reader.manifest_seen <- false
@@ -170,6 +174,8 @@ module DebuggerTraceReader:
                     reader.recording <- recording
                     reader.recording_seen <- true
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if recording.value != reader.recording.value
+                for checkpoint_index in 0..<reader.full_checkpoint_count:
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if reader.full_checkpoints[checkpoint_index].recording.value != recording.value
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if event_id != ordinal
                 event.schema <- schema
                 event.ordinal <- ordinal
@@ -202,6 +208,13 @@ module DebuggerTraceReader:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32() or not DebuggerTrace::trace_chunk_range_valid(chunk.header)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(chunk)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not DebuggerTraceStorage::storage_checkpoint_event_is_within_trace(chunk.header.first_event, reader.manifest.first_event, reader.manifest.last_event)
+            if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and chunk.payload_length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY) if reader.full_checkpoint_count >= READER_FULL_CHECKPOINT_CAPACITY
+                checkpoint: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerTraceStorage::storage_checkpoint_chunk_decode(chunk)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if checkpoint.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_ENCODING) if reader.recording_seen and checkpoint.checkpoint.recording.value != reader.recording.value
+                reader.full_checkpoints[reader.full_checkpoint_count] <- checkpoint.checkpoint
+                reader.full_checkpoint_count <- reader.full_checkpoint_count + 1
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE) if reader.next_sequence == READER_MAX_SEQUENCE
             reader.next_sequence <- reader.next_sequence + 1
             reader.checkpoint_chunk_count <- reader.checkpoint_chunk_count + 1 if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint
@@ -272,3 +285,14 @@ module DebuggerTraceReader:
 
         def reader_event_count(reader: TraceReader) -> usize:
             return reader.event_count
+
+        struct FullCheckpointLookup:
+            found: mutable bool
+            checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint
+
+        def reader_full_checkpoint_count(reader: TraceReader) -> usize:
+            return reader.full_checkpoint_count
+
+        def reader_full_checkpoint_at(reader: TraceReader, index: usize) -> FullCheckpointLookup:
+            return FullCheckpointLookup{found: false, checkpoint: zeroed} if index >= reader.full_checkpoint_count
+            return FullCheckpointLookup{found: true, checkpoint: reader.full_checkpoints[index]}

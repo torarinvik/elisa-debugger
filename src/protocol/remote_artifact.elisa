@@ -15,6 +15,13 @@ module DebuggerRemoteArtifact:
         const DETAIL_CHECKSUM: u32 = 3
         const DETAIL_STATE: u32 = 4
 
+        def transfer_payload_checksum_matches(transfer: ArtifactTransfer) -> bool:
+            return false if transfer.received > TRANSFER_CAPACITY
+            checksum: mutable u64 = HASH_OFFSET_BASIS
+            for index in 0..<transfer.received:
+                checksum <- (checksum ^ transfer.bytes[index].u64()) * HASH_PRIME
+            return checksum == transfer.checksum and checksum == transfer.expected_checksum
+
     public:
         enum TransferState:
             Receiving
@@ -73,7 +80,7 @@ module DebuggerRemoteArtifact:
                 transfer.state <- TransferState.Corrupt
                 transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SIZE)
                 return transfer.last_error
-            if transfer.checksum != transfer.expected_checksum:
+            if not transfer_payload_checksum_matches(transfer):
                 transfer.state <- TransferState.Corrupt
                 transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM)
                 return transfer.last_error
@@ -82,7 +89,7 @@ module DebuggerRemoteArtifact:
             return DebuggerErrors::no_error()
 
         def transfer_is_complete(transfer: ArtifactTransfer) -> bool:
-            return transfer.state == TransferState.Complete and DebuggerErrors::error_is_ok(transfer.last_error) and transfer.expected_size <= TRANSFER_CAPACITY and transfer.received == transfer.expected_size and transfer.received <= TRANSFER_CAPACITY and transfer.checksum == transfer.expected_checksum
+            return transfer.state == TransferState.Complete and DebuggerErrors::error_is_ok(transfer.last_error) and transfer.expected_size <= TRANSFER_CAPACITY and transfer.received == transfer.expected_size and transfer_payload_checksum_matches(transfer)
 
         def transfer_bytes_received(transfer: ArtifactTransfer) -> usize:
             return transfer.received

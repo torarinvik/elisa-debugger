@@ -40,6 +40,10 @@ module DebuggerTraceStorage:
         const TRACE_EVENT_ENUM_BYTES: usize = 2
         const TRACE_EVENT_PAYLOAD_BYTES: usize = 8
         const TRACE_EVENT_ENCODED_BYTES: usize = TRACE_EVENT_SCHEMA_BYTES + TRACE_EVENT_ORDINAL_BYTES + TRACE_EVENT_ID_BYTES * 7 + TRACE_EVENT_MICROSTEP_BYTES + TRACE_EVENT_ENUM_BYTES * 2 + TRACE_EVENT_PAYLOAD_BYTES
+        const TRACE_EVENT_QUALITY_OFFSET: usize = TRACE_EVENT_ENCODED_BYTES - TRACE_EVENT_PAYLOAD_BYTES - TRACE_EVENT_ENUM_BYTES
+        const TRACE_EVENT_QUALITY_HIGH_BYTE_OFFSET: usize = 1
+        const TRACE_EVENT_QUALITY_EXACT_CODE: u16 = 0
+        const TRACE_BYTE_BITS: u64 = 8
         const TRACE_EVENT_KIND_MAX: u16 = 20
         const TRACE_EVENT_QUALITY_MAX: u16 = 4
         const TRACE_EVENT_CORRUPT_QUALITY: u16 = 4
@@ -68,6 +72,7 @@ module DebuggerTraceStorage:
             manifest_seen: mutable bool
             manifest_exact: mutable bool
             event_chunk_seen: mutable bool
+            event_qualities_exact: mutable bool
 
         struct ChunkDecode:
             chunk: mutable StoredChunk
@@ -121,6 +126,18 @@ module DebuggerTraceStorage:
         # This prevents a transport adapter from accidentally accepting a
         # valid prefix while leaving trailing bytes to be interpreted as a
         # second message.
+        def storage_event_payload_is_exact(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
+            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
+            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
+            for index in 0..<event_count:
+                event_offset: usize = payload_offset + index * TRACE_EVENT_ENCODED_BYTES
+                quality_offset: usize = event_offset + TRACE_EVENT_QUALITY_OFFSET
+                quality_low: u64 = bytes[quality_offset].u64()
+                quality_high: u64 = bytes[quality_offset + TRACE_EVENT_QUALITY_HIGH_BYTE_OFFSET].u64()
+                quality: u16 = (quality_low | (quality_high << TRACE_BYTE_BITS)).u16()
+                return false if quality != TRACE_EVENT_QUALITY_EXACT_CODE
+            return true
+
         def storage_decode_chunk(bytes: u8&, length: usize) -> ChunkDecode:
             result: mutable ChunkDecode = zeroed
             result.status <- StorageStatus.Truncated if length < TRACE_HEADER_BYTES
@@ -233,6 +250,7 @@ module DebuggerTraceStorage:
             scan: mutable StorageScan = zeroed
             scan.status <- StorageStatus.Ready
             scan.next_sequence <- 0
+            scan.event_qualities_exact <- true
             manifest_first_event: mutable u64 = 0
             manifest_last_event: mutable u64 = 0
             expected_event: mutable u64 = 0
@@ -240,8 +258,8 @@ module DebuggerTraceStorage:
             event_seen: mutable bool = false
             checkpoint_chunk_count: mutable u64 = 0
             manifest_checkpoint_count: mutable u64 = 0
-            return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false} if length > TRACE_STORAGE_MAX_BYTES
-            return StorageScan{status: StorageStatus.Invalid, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false} if length == 0
+            return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if length > TRACE_STORAGE_MAX_BYTES
+            return StorageScan{status: StorageStatus.Invalid, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if length == 0
             offset: mutable usize = 0
             while offset < length:
                 if length - offset == TRACE_FOOTER_BYTES:
@@ -258,7 +276,7 @@ module DebuggerTraceStorage:
                     scan.status <- StorageStatus.Truncated
                     return scan
                 reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_HEADER_BYTES)
-                return StorageScan{status: StorageStatus.Truncated, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false} if not DebuggerTraceBinary::reader_is_valid(reader)
+                return StorageScan{status: StorageStatus.Truncated, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if not DebuggerTraceBinary::reader_is_valid(reader)
                 magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
@@ -304,6 +322,7 @@ module DebuggerTraceStorage:
                     if event_exhausted or (scan.manifest_seen and not event_seen and first_event != manifest_first_event) or (event_seen and first_event != expected_event) or not storage_event_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), version.u32(), first_event, last_event):
                         scan.status <- StorageStatus.Invalid
                         return scan
+                    scan.event_qualities_exact <- false if not storage_event_payload_is_exact(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize())
                     event_seen <- true
                     scan.event_chunk_seen <- true
                     scan.verified_event <- last_event

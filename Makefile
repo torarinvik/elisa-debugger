@@ -46,7 +46,7 @@ ELISA_ALLOW_STALE_STAGE1 ?= 1
 # include cannot leave a silently stale executable behind.
 ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
-.PHONY: check build server dap-server cli module-check ffi-check smoke managed-inspection-check managed-service-check managed-trace-service-check managed-source-path-check managed-memory-write-history-check terminal-checkpoint-check protocol-events-check protocol-encoding-check protocol-framing-check server-buffer-check server-flush-check remote-authentication-check remote-artifacts-check native-elf-check native-macho-check native-artifact-check native-symbols-identity-check native-symbol-loader-check native-controller-check trace-storage-decode-check trace-reader-encoded-check trace-checkpoint-validation-check checkpoint-state-check full-checkpoint-codec-check trace-manifest-status-check adapter-recording-bounds-check runtime-status-check source-store-check replay-branches-check replay-provenance-check state-integrity-check request-whitespace-check cli-commands-check value-store-check historical-values-check query-engine-check query-evaluator-check breakpoint-manager-check advanced-analysis-check integration-contract-check integration-surface-check trace-retention-check coordinator-seek-check capabilities-check dap-payload-check dap-events-check dap-command-check dap-stack-frame-check dap-frame-length-check trace-codec-check trace-recording-check trace-bundle-check edir-codec-check edir-file-loader-check compiler-edir-check breakpoint-resolver-check timeline-capability-check path-policy-check process-spawn-check clean
+.PHONY: cli-flush-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -55,6 +55,9 @@ server: $(BUILD)/elisa-debugger-server
 dap-server: $(BUILD)/elisa-debugger-dap-server
 
 cli: $(BUILD)/elisa-debugger-cli
+
+cli-flush-check: $(BUILD)/elisa-debugger-cli
+	sh tests/cli_flush_check.sh "$(BUILD)/elisa-debugger-cli"
 
 module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-edir-codec-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-managed-trace-service-check $(BUILD)/elisa-debugger-managed-memory-write-history-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-protocol-encoding-check $(BUILD)/elisa-debugger-protocol-framing-check $(BUILD)/elisa-debugger-remote-authentication-check $(BUILD)/elisa-debugger-trace-storage-decode-check $(BUILD)/elisa-debugger-trace-reader-encoded-check $(BUILD)/elisa-debugger-checkpoint-state-check $(BUILD)/elisa-debugger-trace-manifest-status-check $(BUILD)/elisa-debugger-adapter-recording-bounds-check $(BUILD)/elisa-debugger-runtime-status-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-query-evaluator-check $(BUILD)/elisa-debugger-breakpoint-manager-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-integration-surface-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check $(BUILD)/elisa-debugger-dap-payload-check $(BUILD)/elisa-debugger-ffi-probe $(BUILD)/elisa-debugger-path-policy-check $(BUILD)/elisa-debugger-process-spawn-check
 
@@ -94,10 +97,18 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-trace-reader-encoded-check"
 	"$(BUILD)/elisa-debugger-trace-checkpoint-validation-check"
 	"$(BUILD)/elisa-debugger-remote-authentication-check"
+	"$(BUILD)/elisa-debugger-remote-artifacts-check"
+	"$(BUILD)/elisa-debugger-native-elf-check"
+	"$(BUILD)/elisa-debugger-native-macho-check"
+	"$(BUILD)/elisa-debugger-native-artifact-check"
+	"$(BUILD)/elisa-debugger-native-symbols-identity-check"
+	"$(BUILD)/elisa-debugger-native-symbol-loader-check"
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
 	"$(BUILD)/elisa-debugger-full-checkpoint-codec-check"
 	"$(BUILD)/elisa-debugger-dap-events-check"
 	"$(BUILD)/elisa-debugger-replay-provenance-check"
+	"$(BUILD)/elisa-debugger-replay-branches-check"
+	"$(BUILD)/elisa-debugger-state-integrity-check"
 	"$(BUILD)/elisa-debugger-trace-manifest-status-check"
 	"$(BUILD)/elisa-debugger-adapter-recording-bounds-check"
 	"$(BUILD)/elisa-debugger-runtime-status-check"
@@ -585,7 +596,7 @@ $(BUILD)/elisa-debugger-capabilities-check: tests/capabilities_check.elisa $(ELI
 check: $(BUILD)/elisa-debugger
 	"$(BUILD)/elisa-debugger"
 
-smoke: check server dap-server cli ffi-check edir-file-loader-check managed-source-path-check server-flush-check dap-command-check dap-frame-length-check
+smoke: check server dap-server cli cli-flush-check ffi-check edir-file-loader-check managed-source-path-check server-flush-check dap-command-check dap-frame-length-check
 	dap_windows_case_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize"}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"build/edir-fixture.edir","sourcePathRoot":"C:\\Workspace"}}' '{"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"c:\\workspace\\main.elisa"},"breakpoints":[{"line":42}]}}' '{"seq":4,"type":"request","command":"continue"}' '{"seq":5,"type":"request","command":"stackTrace"}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); dap_windows_case_paths=$$(printf %s "$$dap_windows_case_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_windows_case_paths" | grep -F '"command":"setBreakpoints","success":true'; echo "$$dap_windows_case_paths" | grep -F '"source":{"name":"main.elisa","path":"C:/Workspace/main.elisa"}'; echo "$$dap_windows_case_paths" | grep -F '"reason":"breakpoint"'
 	dap_unc_path_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize"}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"build/edir-fixture.edir","sourcePathRoot":"\\\\server\\share"}}' '{"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"\\\\SERVER\\SHARE\\main.elisa"},"breakpoints":[{"line":42}]}}' '{"seq":4,"type":"request","command":"continue"}' '{"seq":5,"type":"request","command":"stackTrace"}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); dap_unc_paths=$$(printf %s "$$dap_unc_path_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_unc_paths" | grep -F '"command":"setBreakpoints","success":true'; echo "$$dap_unc_paths" | grep -F '"source":{"name":"main.elisa","path":"//server/share/main.elisa"}'; echo "$$dap_unc_paths" | grep -F '"reason":"breakpoint"'
 	printf '655360 ' | "$(BUILD)/elisa-debugger-server" >/dev/null; test "$$?" -eq 2
@@ -632,7 +643,8 @@ smoke: check server dap-server cli ffi-check edir-file-loader-check managed-sour
 	cli_inspection=$$(printf 'launch\npause\nstack\nlocals\n' | "$(BUILD)/elisa-debugger-cli"); echo "$$cli_inspection" | grep -F 'frame id='; echo "$$cli_inspection" | grep -F 'locals count=0'
 	cli_unwired=$$(printf 'launch\npause\ntasks\nevaluate\nbreak\nwatch\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_unwired" | grep -c '^error code=')" -eq 4
 	printf 'launch\npause\nseek 1\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=2'
-	printf 'launch\npause\nsaveTrace\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=1'
+	cli_save_trace=$$(printf 'launch\npause\nsaveTrace\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_save_trace" | grep -c '^ok generation=')" -eq 2 && printf '%s\n' "$$cli_save_trace" | tail -n 1 | grep -F 'error code='
+	cli_replay=$$(printf 'launch\npause\nreplay\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_replay" | grep -c '^ok generation=')" -eq 2 && printf '%s\n' "$$cli_replay" | tail -n 1 | grep -F 'error code='
 	printf 'run\nclose\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=0'
 	printf 'launch' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=0'
 	printf 'launch\r\npause\r\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=1'

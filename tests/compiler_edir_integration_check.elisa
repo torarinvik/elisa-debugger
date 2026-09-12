@@ -1,13 +1,23 @@
 include "../src/vm/edir_file.elisa"
 
 const ARTIFACT_PATH_LENGTH: usize = 35
-const ARTIFACT_PATH: u8[ARTIFACT_PATH_LENGTH] = [98, 117, 105, 108, 100, 47, 99, 111, 109, 112, 105, 108, 101, 114, 95, 101, 100, 105, 114, 95, 97, 114, 105, 116, 104, 109, 101, 116, 105, 99, 46, 101, 100, 105, 114]
+const ARTIFACT_PATH: cstr = "build/compiler_edir_arithmetic.edir"
 const EXPECTED_RESULT: i64 = 42
 const EXPECTED_SOURCE_FILE_ID: u64 = 1
-const EXPECTED_SOURCE_LINE: u32 = 2
+const EXPECTED_INITIALIZER_SOURCE_LINE: u32 = 2
+const EXPECTED_DECLARATION_SOURCE_LINE: u32 = 2
+const EXPECTED_EXPRESSION_SOURCE_LINE: u32 = 3
+const EXPECTED_RETURN_SOURCE_LINE: u32 = 3
 const EXPECTED_LEFT_OPERAND: i64 = 40
 const EXPECTED_RIGHT_OPERAND: i64 = 2
-const EXPECTED_INSTRUCTION_COUNT: u64 = 3
+const EXPECTED_LOCAL_COUNT: u64 = 1
+const EXPECTED_LOCAL_INDEX: i64 = 0
+const EXPECTED_INSTRUCTION_COUNT: u64 = 5
+const CONSTANT_INSTRUCTION_INDEX: usize = 0
+const STORE_LOCAL_INSTRUCTION_INDEX: usize = 1
+const LOAD_LOCAL_INSTRUCTION_INDEX: usize = 2
+const ARITHMETIC_INSTRUCTION_INDEX: usize = 3
+const EXPECTED_RETURN_INSTRUCTION_INDEX: usize = 4
 const RUN_STEP_BUDGET: u64 = EXPECTED_INSTRUCTION_COUNT
 
 const RESULT_ARTIFACT_LOAD: i64 = 1
@@ -17,12 +27,18 @@ const RESULT_SOURCE_SPAN: i64 = 4
 const RESULT_EXECUTION: i64 = 5
 
 def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
-    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(ARTIFACT_PATH[0], ARTIFACT_PATH_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(ARTIFACT_PATH.cast[u8&], ARTIFACT_PATH_LENGTH) can Blocking.IO, Unsafe.PointerCast
     return RESULT_ARTIFACT_LOAD if not loaded.valid or loaded.status != DebuggerEDIRFile::LoadStatus.Ready
     return RESULT_IMAGE_VERIFICATION if not DebuggerEDIR::verify_image(loaded.image).valid
-    return RESULT_INSTRUCTION_SHAPE if loaded.image.program.instruction_count != EXPECTED_INSTRUCTION_COUNT or loaded.image.program.local_count != 0 or not loaded.image.program.has_return or loaded.image.instructions[0].opcode != DebuggerEDIR::Opcode.Constant or loaded.image.instructions[0].a != EXPECTED_LEFT_OPERAND or loaded.image.instructions[1].opcode != DebuggerEDIR::Opcode.Add or loaded.image.instructions[1].a != EXPECTED_RIGHT_OPERAND or loaded.image.instructions[2].opcode != DebuggerEDIR::Opcode.Return
-    source: DebuggerIdentity::SourceSpan = loaded.image.instructions[0].source
-    return RESULT_SOURCE_SPAN if source.file.value != EXPECTED_SOURCE_FILE_ID or source.start_line != EXPECTED_SOURCE_LINE or source.start_byte >= source.end_byte or source.start_column == 0
+    return RESULT_INSTRUCTION_SHAPE if loaded.image.program.instruction_count != EXPECTED_INSTRUCTION_COUNT or loaded.image.program.local_count != EXPECTED_LOCAL_COUNT or not loaded.image.program.has_return or loaded.image.instructions[CONSTANT_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.Constant or loaded.image.instructions[CONSTANT_INSTRUCTION_INDEX].a != EXPECTED_LEFT_OPERAND or loaded.image.instructions[STORE_LOCAL_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.StoreLocal or loaded.image.instructions[STORE_LOCAL_INSTRUCTION_INDEX].a != EXPECTED_LOCAL_INDEX or loaded.image.instructions[LOAD_LOCAL_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.LoadLocal or loaded.image.instructions[LOAD_LOCAL_INSTRUCTION_INDEX].a != EXPECTED_LOCAL_INDEX or loaded.image.instructions[ARITHMETIC_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.Add or loaded.image.instructions[ARITHMETIC_INSTRUCTION_INDEX].a != EXPECTED_RIGHT_OPERAND or loaded.image.instructions[EXPECTED_RETURN_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.Return
+    source: DebuggerIdentity::SourceSpan = loaded.image.instructions[CONSTANT_INSTRUCTION_INDEX].source
+    return RESULT_SOURCE_SPAN if source.file.value != EXPECTED_SOURCE_FILE_ID or source.start_line != EXPECTED_INITIALIZER_SOURCE_LINE or source.start_byte >= source.end_byte or source.start_column == 0
+    declaration: DebuggerIdentity::SourceSpan = loaded.image.instructions[STORE_LOCAL_INSTRUCTION_INDEX].source
+    return RESULT_SOURCE_SPAN if declaration.file.value != EXPECTED_SOURCE_FILE_ID or declaration.start_line != EXPECTED_DECLARATION_SOURCE_LINE or declaration.start_byte >= declaration.end_byte
+    expression: DebuggerIdentity::SourceSpan = loaded.image.instructions[ARITHMETIC_INSTRUCTION_INDEX].source
+    return RESULT_SOURCE_SPAN if expression.file.value != EXPECTED_SOURCE_FILE_ID or expression.start_line != EXPECTED_EXPRESSION_SOURCE_LINE or expression.start_byte >= expression.end_byte
+    returned: DebuggerIdentity::SourceSpan = loaded.image.instructions[EXPECTED_RETURN_INSTRUCTION_INDEX].source
+    return RESULT_SOURCE_SPAN if returned.file.value != EXPECTED_SOURCE_FILE_ID or returned.start_line != EXPECTED_RETURN_SOURCE_LINE or returned.start_byte >= returned.end_byte
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(loaded.image, DebuggerEDIR::machine_new(), RUN_STEP_BUDGET)
-    return RESULT_EXECUTION if machine.faulted or not machine.halted or machine.result != EXPECTED_RESULT
+    return RESULT_EXECUTION if machine.faulted or not machine.halted or machine.result != EXPECTED_RESULT or not machine.locals_initialized[EXPECTED_LOCAL_INDEX.usize()] or machine.locals[EXPECTED_LOCAL_INDEX.usize()] != EXPECTED_LEFT_OPERAND
     return 0

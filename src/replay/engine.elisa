@@ -12,6 +12,8 @@ module DebuggerReplayEngine:
         const REPLAY_HISTORY_CAPACITY: usize = 64
         const REPLAY_BRANCH_LINEAGE_CAPACITY: usize = REPLAY_HISTORY_CAPACITY + 1
         const REPLAY_ROOT_BRANCH: u64 = 0
+        const REPLAY_ROOT_LINEAGE_INDEX: usize = 0
+        const REPLAY_ROOT_LINEAGE_COUNT: usize = 1
         const REPLAY_SCHEMA_VERSION: u32 = 1
         const REPLAY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
         const REPLAY_HASH_PRIME: u64 = 1099511628211
@@ -23,11 +25,14 @@ module DebuggerReplayEngine:
         const REPLAY_MAX_PROGRAM_COUNTER: u64 = 256
         const REPLAY_MAX_HEAP: usize = 64
         const REPLAY_FIRST_BRANCH_ID: u64 = 1
+        const REPLAY_FIRST_CHILD_LINEAGE_INDEX: usize = REPLAY_ROOT_LINEAGE_COUNT
+        const REPLAY_NON_ROOT_LINEAGE_MINIMUM: usize = REPLAY_ROOT_LINEAGE_COUNT + REPLAY_FIRST_CHILD_LINEAGE_INDEX
+        const REPLAY_ROOT_FORK_EVENT: u64 = 0
+        const REPLAY_ROOT_FORK_HASH: u64 = 0
         const REPLAY_MAX_BRANCH_ID: u64 = 18446744073709551615
         const REPLAY_CHECKPOINT_ID_OFFSET: u64 = 1
         const HASH_FALSE: u64 = 0
         const HASH_TRUE: u64 = 1
-        const REPLAY_NO_BRANCH: u64 = 0
 
     public:
         enum EngineError:
@@ -47,6 +52,8 @@ module DebuggerReplayEngine:
             branch: mutable DebuggerIdentity::DebugId
             parent_branch: mutable DebuggerIdentity::DebugId
             branch_lineage: mutable DebuggerIdentity::DebugId[REPLAY_BRANCH_LINEAGE_CAPACITY]
+            branch_fork_events: mutable u64[REPLAY_BRANCH_LINEAGE_CAPACITY]
+            branch_fork_hashes: mutable u64[REPLAY_BRANCH_LINEAGE_CAPACITY]
             branch_lineage_count: mutable usize
             fork_event: mutable usize
             fork_state_hash: mutable u64
@@ -60,10 +67,11 @@ module DebuggerReplayEngine:
             engine.recording <- recording
             engine.branch <- DebuggerIdentity::debug_id(REPLAY_ROOT_BRANCH)
             engine.parent_branch <- DebuggerIdentity::debug_id(REPLAY_ROOT_BRANCH)
-            engine.branch_lineage[0] <- DebuggerIdentity::debug_id(REPLAY_ROOT_BRANCH)
+            engine.branch_lineage[REPLAY_ROOT_LINEAGE_INDEX] <- DebuggerIdentity::debug_id(REPLAY_ROOT_BRANCH)
+            engine.branch_fork_events[REPLAY_ROOT_LINEAGE_INDEX] <- REPLAY_ROOT_FORK_EVENT
             engine.branch_lineage_count <- 1
             engine.fork_event <- 0
-            engine.fork_state_hash <- 0
+            engine.fork_state_hash <- REPLAY_ROOT_FORK_HASH
             engine.next_branch_id <- REPLAY_FIRST_BRANCH_ID
             engine.engine_error <- EngineError.None
             verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image(engine.image)
@@ -75,10 +83,19 @@ module DebuggerReplayEngine:
 
         def replay_engine_position(engine: mutable ReplayEngine&) -> DebuggerIdentity::Position:
             position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(engine.recording)
-            position.branch <- engine.branch
+            position.branch <- replay_engine_branch_at(engine, engine.event_count.u64())
             position.event <- engine.event_count.u64()
             position.statement <- DebuggerIdentity::debug_id(engine.machine.program_counter)
             return position
+
+        # A branch only owns events from its fork boundary onward. Earlier
+        # events remain in the parent branch even while a child is selected.
+        def replay_engine_branch_at(engine: ReplayEngine&, event: u64) -> DebuggerIdentity::DebugId:
+            return engine.branch if engine.branch_lineage_count == 0 or engine.branch_lineage_count > REPLAY_BRANCH_LINEAGE_CAPACITY
+            result: mutable DebuggerIdentity::DebugId = engine.branch_lineage[REPLAY_ROOT_LINEAGE_INDEX]
+            for index in REPLAY_FIRST_CHILD_LINEAGE_INDEX..<engine.branch_lineage_count:
+                result <- engine.branch_lineage[index] if event >= engine.branch_fork_events[index]
+            return result
 
         def replay_engine_machine_state_hash(machine: DebuggerEDIR::Machine, event: u64) -> u64:
             hash: mutable u64 = REPLAY_HASH_OFFSET_BASIS + machine.program_counter
@@ -229,17 +246,30 @@ module DebuggerReplayEngine:
             return false if not DebuggerEDIR::verify_image(engine.image).valid
             return false if engine.next_branch_id == REPLAY_ROOT_BRANCH or engine.next_branch_id > REPLAY_MAX_BRANCH_ID
             return false if engine.branch_lineage_count == 0 or engine.branch_lineage_count > REPLAY_BRANCH_LINEAGE_CAPACITY
-            return false if engine.branch_lineage[0].value != REPLAY_ROOT_BRANCH or engine.branch_lineage[engine.branch_lineage_count - 1].value != engine.branch.value
-            for lineage_index in 1..<engine.branch_lineage_count:
+            return false if engine.branch_lineage[REPLAY_ROOT_LINEAGE_INDEX].value != REPLAY_ROOT_BRANCH or engine.branch_lineage[engine.branch_lineage_count - 1].value != engine.branch.value
+            for lineage_index in REPLAY_FIRST_CHILD_LINEAGE_INDEX..<engine.branch_lineage_count:
                 lineage_id: u64 = engine.branch_lineage[lineage_index].value
                 return false if lineage_id == REPLAY_ROOT_BRANCH or lineage_id == REPLAY_MAX_BRANCH_ID
-                for earlier_index in 0..<lineage_index:
+                for earlier_index in REPLAY_ROOT_LINEAGE_INDEX..<lineage_index:
                     return false if engine.branch_lineage[earlier_index].value == lineage_id
             if engine.branch.value == REPLAY_ROOT_BRANCH:
-                return false if engine.branch_lineage_count != 1 or engine.parent_branch.value != REPLAY_ROOT_BRANCH or engine.fork_event != 0 or engine.fork_state_hash != 0
+                return false if engine.branch_lineage_count != REPLAY_ROOT_LINEAGE_COUNT or engine.parent_branch.value != REPLAY_ROOT_BRANCH or engine.fork_event != REPLAY_ROOT_FORK_EVENT or engine.fork_state_hash != REPLAY_ROOT_FORK_HASH
             else:
-                return false if engine.branch_lineage_count < 2 or engine.parent_branch.value != engine.branch_lineage[engine.branch_lineage_count - 2].value or engine.fork_event > engine.event_count
+                return false if engine.branch_lineage_count < REPLAY_NON_ROOT_LINEAGE_MINIMUM or engine.parent_branch.value != engine.branch_lineage[engine.branch_lineage_count - REPLAY_NON_ROOT_LINEAGE_MINIMUM].value or engine.fork_event > engine.event_count
+                return false if engine.branch_fork_events[engine.branch_lineage_count - 1] != engine.fork_event
+                return false if engine.branch_fork_hashes[engine.branch_lineage_count - 1] != engine.fork_state_hash
             return false if engine.branch.value != REPLAY_ROOT_BRANCH and engine.event_count == engine.fork_event and replay_engine_state_hash(engine) != engine.fork_state_hash
+            return false if engine.branch_fork_events[REPLAY_ROOT_LINEAGE_INDEX] != REPLAY_ROOT_FORK_EVENT
+            for lineage_index in REPLAY_FIRST_CHILD_LINEAGE_INDEX..<engine.branch_lineage_count:
+                fork_event: u64 = engine.branch_fork_events[lineage_index]
+                return false if fork_event > engine.event_count
+                return false if fork_event < engine.branch_fork_events[lineage_index - 1]
+                if fork_event == engine.event_count:
+                    return false if engine.branch_fork_hashes[lineage_index] != replay_engine_state_hash(engine)
+                else:
+                    fork_snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[fork_event.usize()]
+                    return false if not replay_engine_snapshot_is_valid(engine, fork_event.usize(), fork_snapshot)
+                    return false if engine.branch_fork_hashes[lineage_index] != fork_snapshot.state_hash
             for index in 0..<engine.event_count:
                 event: DebuggerEvents::EventEnvelope = engine.events[index]
                 return false if event.ordinal != index.u64() or event.schema != REPLAY_SCHEMA_VERSION or event.kind != DebuggerEvents::EventKind.ExecutionBoundary or event.quality != DebuggerEvents::EventQuality.Exact or event.task.value != event.position.task.value or event.position.recording.value != engine.recording.value or event.position.event != index.u64()
@@ -247,8 +277,7 @@ module DebuggerReplayEngine:
                 for lineage_index in 0..<engine.branch_lineage_count:
                     lineage_event_found <- true if engine.branch_lineage[lineage_index].value == event.position.branch.value
                 return false if not lineage_event_found
-                return false if engine.branch.value == REPLAY_NO_BRANCH and event.position.branch.value != REPLAY_NO_BRANCH
-                return false if engine.branch.value != REPLAY_NO_BRANCH and index >= engine.fork_event and event.position.branch.value != engine.branch.value
+                return false if event.position.branch.value != replay_engine_branch_at(engine, index.u64()).value
                 return false if not replay_engine_snapshot_is_valid(engine, index, engine.history[index])
                 replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
                 DebuggerEDIR::machine_step_in_place(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
@@ -262,7 +291,23 @@ module DebuggerReplayEngine:
             if branch.value == REPLAY_ROOT_BRANCH or branch.value == REPLAY_MAX_BRANCH_ID or engine.engine_error != EngineError.None or engine.branch_lineage_count == 0 or engine.branch_lineage_count >= REPLAY_BRANCH_LINEAGE_CAPACITY:
                 forked.engine_error <- EngineError.HistoryUnavailable
                 return forked
-            if engine.branch_lineage[0].value != REPLAY_ROOT_BRANCH or engine.branch_lineage[engine.branch_lineage_count - 1].value != engine.branch.value:
+            if engine.branch_lineage_count > 1 and engine.event_count.u64() < engine.fork_event:
+                forked.engine_error <- EngineError.HistoryUnavailable
+                return forked
+            if engine.branch_fork_events[REPLAY_ROOT_LINEAGE_INDEX] != REPLAY_ROOT_FORK_EVENT:
+                forked.engine_error <- EngineError.HistoryUnavailable
+                return forked
+            for lineage_index in REPLAY_FIRST_CHILD_LINEAGE_INDEX..<engine.branch_lineage_count:
+                if engine.branch_fork_events[lineage_index] > engine.event_count.u64() or engine.branch_fork_events[lineage_index] < engine.branch_fork_events[lineage_index - REPLAY_FIRST_CHILD_LINEAGE_INDEX]:
+                    forked.engine_error <- EngineError.HistoryUnavailable
+                    return forked
+            if engine.branch_lineage_count > 1 and engine.branch_fork_events[engine.branch_lineage_count - 1] != engine.fork_event:
+                forked.engine_error <- EngineError.HistoryUnavailable
+                return forked
+            if not replay_engine_is_exact(engine):
+                forked.engine_error <- EngineError.HistoryUnavailable
+                return forked
+            if engine.branch_lineage[REPLAY_ROOT_LINEAGE_INDEX].value != REPLAY_ROOT_BRANCH or engine.branch_lineage[engine.branch_lineage_count - 1].value != engine.branch.value:
                 forked.engine_error <- EngineError.HistoryUnavailable
                 return forked
             if engine.branch_lineage_count == 1:
@@ -280,6 +325,8 @@ module DebuggerReplayEngine:
             forked.branch <- branch
             forked.parent_branch <- engine.branch
             forked.branch_lineage[engine.branch_lineage_count] <- branch
+            forked.branch_fork_events[engine.branch_lineage_count] <- engine.event_count.u64()
+            forked.branch_fork_hashes[engine.branch_lineage_count] <- replay_engine_state_hash(engine)
             forked.branch_lineage_count <- engine.branch_lineage_count + 1
             forked.fork_event <- engine.event_count
             forked.fork_state_hash <- replay_engine_state_hash(engine)

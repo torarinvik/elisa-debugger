@@ -24,6 +24,7 @@ COMPILER_EDIR_ARTIFACT := $(BUILD)/compiler_edir_arithmetic.edir
 COMPILER_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_arithmetic_native
 COMPILER_EDIR_INTEGRATION_CHECK := $(BUILD)/elisa-debugger-compiler-edir-integration-check
 COMPILER_EDIR_EXPECTED_EXIT := 42
+COMPILER_EDIR_DAP_LOCAL_REFERENCE := 5
 IDLESS_LAUNCH_PAYLOAD_LENGTH := 19
 DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH := 45
 EDIR_FILE_TOO_LARGE_BYTES := 7962
@@ -209,10 +210,11 @@ $(COMPILER_EDIR_INTEGRATION_CHECK): tests/compiler_edir_integration_check.elisa 
 # stage1 wrapper; stale compiler products are rejected unless explicitly
 # allowed with ELISA_EDIR_ALLOW_STALE_STAGE1=1. No non-Elisa fixture compiler
 # or test runner is involved.
-compiler-edir-check: $(COMPILER_EDIR_INTEGRATION_CHECK)
+compiler-edir-check: $(COMPILER_EDIR_INTEGRATION_CHECK) $(BUILD)/elisa-debugger-dap-server
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
 	"$(COMPILER_EDIR_INTEGRATION_CHECK)"
+	compiler_dap_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize"}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"$(COMPILER_EDIR_ARTIFACT)"}}' '{"seq":3,"type":"request","command":"pause"}' '{"seq":4,"type":"request","command":"stepIn"}' '{"seq":5,"type":"request","command":"stepIn"}' '{"seq":6,"type":"request","command":"stepIn"}' '{"seq":7,"type":"request","command":"stepIn"}' '{"seq":8,"type":"request","command":"scopes","arguments":{"frameId":1}}' '{"seq":9,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_DAP_LOCAL_REFERENCE)}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); compiler_dap_output=$$(printf %s "$$compiler_dap_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$compiler_dap_output" | grep -F '"name":"local0","value":"40","type":"i64"'
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
 	native_status=0; "$(COMPILER_NATIVE_ARTIFACT)" || native_status=$$?; test "$$native_status" -eq "$(COMPILER_EDIR_EXPECTED_EXIT)"
 

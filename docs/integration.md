@@ -59,10 +59,22 @@ frames in one write and may fragment a frame across reads.
 For the current managed provider, set `arguments.program` to a verified `.edir`
 artifact path. The adapter loads and verifies the file before starting the
 session, then reports instruction source lines from that artifact. Missing or
-invalid artifacts fail the launch. The Elisa compiler does not emit EDIR yet,
-so this path is for artifacts produced by a fixture or a compatible external
-producer; ordinary source compilation and native-program launch are not
-available through this provider today.
+invalid artifacts fail the launch. Use the `variablesReference` returned by
+`scopes` to request the current locals. The reference is tied to the stop
+generation and becomes stale after execution advances. Variable requests may
+include bounded `start` and `count` fields; initialized integer locals are
+returned as values, while uninitialized locals are marked `<unavailable>`.
+Until source-name metadata is emitted, locals use stable ordinal names such as
+`local0`.
+
+The normal adjacent compiler checkout may not include the EDIR lowering
+extension. With an Elisa compiler checkout that supports `-emit edir`, run
+`make ELISA_EDIR_COMPILER=/path/to/elisac_stage1.sh compiler-edir-check` to
+compile the typed-local fixture, load and execute its artifact in the debugger
+VM, exercise DAP local inspection, and compare the native result. This gate
+currently covers one typed `i64` local with literal arithmetic; unsupported
+source shapes are rejected by the compiler. Ordinary source compilation and
+native-program launch through DAP remain unavailable on this managed provider.
 
 ## JetBrains
 

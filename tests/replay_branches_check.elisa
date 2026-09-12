@@ -11,6 +11,82 @@ const THIRD_BRANCH_ID: u64 = 3
 const REUSED_ANCESTOR_RESULT: i64 = 6
 const INVALID_BRANCH_FORK_RESULT: i64 = 7
 const VALID_DEEP_LINEAGE_RESULT: i64 = 8
+const BRANCH_PREFIX_RESULT: i64 = 9
+const BRANCH_EARLY_FORK_RESULT: i64 = 10
+const BRANCH_DEEP_PREFIX_RESULT: i64 = 11
+const BRANCH_POSITION_RESULT: i64 = 12
+const BRANCH_FORK_HASH_RESULT: i64 = 13
+const BRANCH_CORRUPT_FORK_RESULT: i64 = 14
+const TEST_PROGRAM_VERSION: u32 = 1
+const TEST_PROGRAM_INSTRUCTION_COUNT: u64 = 8
+const TEST_PROGRAM_RETURN_INDEX: usize = 7
+const TEST_PROGRAM_LOCAL_COUNT: u64 = 0
+const TEST_NO_OPERAND: i64 = 0
+const TEST_ROOT_BRANCH_ID: u64 = 0
+const TEST_FIRST_INSTRUCTION_INDEX: usize = 0
+const TEST_FIRST_BRANCH_LINEAGE_INDEX: usize = 1
+const TEST_PARENT_FORK_EVENT: usize = 4
+const TEST_PARENT_CURRENT_EVENT: usize = 6
+const TEST_REWIND_EVENT: usize = 2
+const TEST_DEEP_REWIND_EVENT: usize = 1
+const TEST_PREFIX_FIRST_EVENT: usize = 2
+const TEST_PREFIX_SECOND_EVENT: usize = 3
+const TEST_PARENT_FIRST_EVENT: usize = 4
+const TEST_PARENT_LAST_EVENT: usize = 5
+
+def branch_test_image() -> DebuggerEDIR::ProgramImage:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: TEST_PROGRAM_VERSION, instruction_count: TEST_PROGRAM_INSTRUCTION_COUNT, local_count: TEST_PROGRAM_LOCAL_COUNT, has_return: true}
+    for index in TEST_FIRST_INSTRUCTION_INDEX..<TEST_PROGRAM_RETURN_INDEX:
+        image.instructions[index] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: TEST_NO_OPERAND, b: TEST_NO_OPERAND, source: zeroed}
+    image.instructions[TEST_PROGRAM_RETURN_INDEX] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: TEST_NO_OPERAND, b: TEST_NO_OPERAND, source: zeroed}
+    return image
+
+def branch_engine_step_count(engine: mutable DebuggerReplayEngine::ReplayEngine&, count: usize) -> void:
+    for index in TEST_FIRST_INSTRUCTION_INDEX..<count:
+        DebuggerReplayEngine::replay_engine_step(engine)
+
+def check_seek_preserves_branch_prefix() -> i64:
+    root: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_new(branch_test_image(), DebuggerIdentity::debug_id(ENGINE_RECORDING_ID))
+    branch_engine_step_count(root, TEST_PARENT_FORK_EVENT)
+    child: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_fork(root, DebuggerIdentity::debug_id(FIRST_BRANCH_ID))
+    return BRANCH_PREFIX_RESULT if child.engine_error != DebuggerReplayEngine::EngineError.None
+    branch_engine_step_count(child, TEST_PARENT_CURRENT_EVENT - TEST_PARENT_FORK_EVENT)
+    return BRANCH_PREFIX_RESULT if not DebuggerReplayEngine::replay_engine_is_exact(child)
+
+    DebuggerReplayEngine::replay_engine_seek(child, TEST_REWIND_EVENT)
+    return BRANCH_PREFIX_RESULT if child.engine_error != DebuggerReplayEngine::EngineError.None or child.event_count != TEST_REWIND_EVENT
+    return BRANCH_POSITION_RESULT if DebuggerReplayEngine::replay_engine_position(child).branch.value != TEST_ROOT_BRANCH_ID
+    early_fork: DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_fork(child, DebuggerIdentity::debug_id(THIRD_BRANCH_ID))
+    return BRANCH_EARLY_FORK_RESULT if early_fork.engine_error != DebuggerReplayEngine::EngineError.HistoryUnavailable
+    branch_engine_step_count(child, TEST_PARENT_FORK_EVENT - TEST_REWIND_EVENT)
+    return BRANCH_PREFIX_RESULT if child.events[TEST_PREFIX_FIRST_EVENT].position.branch.value != TEST_ROOT_BRANCH_ID or child.events[TEST_PREFIX_SECOND_EVENT].position.branch.value != TEST_ROOT_BRANCH_ID or child.events[TEST_PARENT_FIRST_EVENT].position.branch.value != FIRST_BRANCH_ID or child.events[TEST_PARENT_LAST_EVENT].position.branch.value != FIRST_BRANCH_ID
+    return BRANCH_PREFIX_RESULT if not DebuggerReplayEngine::replay_engine_is_exact(child)
+    branch_engine_step_count(child, TEST_PARENT_CURRENT_EVENT - TEST_PARENT_FORK_EVENT)
+    return BRANCH_PREFIX_RESULT if not DebuggerReplayEngine::replay_engine_is_exact(child)
+    corrupt_fork_hash: mutable DebuggerReplayEngine::ReplayEngine = child
+    corrupt_fork_hash.branch_fork_hashes[TEST_FIRST_BRANCH_LINEAGE_INDEX] <- corrupt_fork_hash.branch_fork_hashes[TEST_FIRST_BRANCH_LINEAGE_INDEX] + 1
+    return BRANCH_FORK_HASH_RESULT if DebuggerReplayEngine::replay_engine_is_exact(corrupt_fork_hash)
+    corrupt_current_fork_hash: mutable DebuggerReplayEngine::ReplayEngine = child
+    corrupt_current_fork_hash.fork_state_hash <- corrupt_current_fork_hash.fork_state_hash + 1
+    return BRANCH_FORK_HASH_RESULT if DebuggerReplayEngine::replay_engine_is_exact(corrupt_current_fork_hash)
+    corrupt_parent_history: mutable DebuggerReplayEngine::ReplayEngine = child
+    corrupt_parent_history.events[TEST_FIRST_INSTRUCTION_INDEX].payload_hash <- corrupt_parent_history.events[TEST_FIRST_INSTRUCTION_INDEX].payload_hash + 1
+    rejected_corrupt_fork: DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_fork(corrupt_parent_history, DebuggerIdentity::debug_id(THIRD_BRANCH_ID))
+    return BRANCH_CORRUPT_FORK_RESULT if rejected_corrupt_fork.engine_error != DebuggerReplayEngine::EngineError.HistoryUnavailable
+
+    grandchild: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_fork(child, DebuggerIdentity::debug_id(SECOND_BRANCH_ID))
+    return BRANCH_DEEP_PREFIX_RESULT if grandchild.engine_error != DebuggerReplayEngine::EngineError.None
+    branch_engine_step_count(grandchild, TEST_PROGRAM_INSTRUCTION_COUNT.usize() - TEST_PARENT_CURRENT_EVENT)
+    DebuggerReplayEngine::replay_engine_seek(grandchild, TEST_DEEP_REWIND_EVENT)
+    return BRANCH_DEEP_PREFIX_RESULT if grandchild.engine_error != DebuggerReplayEngine::EngineError.None
+    branch_engine_step_count(grandchild, TEST_PARENT_CURRENT_EVENT - TEST_DEEP_REWIND_EVENT)
+    return BRANCH_DEEP_PREFIX_RESULT if grandchild.events[TEST_PREFIX_FIRST_EVENT].position.branch.value != TEST_ROOT_BRANCH_ID or grandchild.events[TEST_PREFIX_SECOND_EVENT].position.branch.value != TEST_ROOT_BRANCH_ID or grandchild.events[TEST_PARENT_FIRST_EVENT].position.branch.value != FIRST_BRANCH_ID or grandchild.events[TEST_PARENT_LAST_EVENT].position.branch.value != FIRST_BRANCH_ID or grandchild.events[TEST_PARENT_CURRENT_EVENT].position.branch.value != SECOND_BRANCH_ID
+    return BRANCH_DEEP_PREFIX_RESULT if not DebuggerReplayEngine::replay_engine_is_exact(grandchild)
+    corrupt_ancestor_fork_hash: mutable DebuggerReplayEngine::ReplayEngine = grandchild
+    corrupt_ancestor_fork_hash.branch_fork_hashes[TEST_FIRST_BRANCH_LINEAGE_INDEX] <- corrupt_ancestor_fork_hash.branch_fork_hashes[TEST_FIRST_BRANCH_LINEAGE_INDEX] + 1
+    return BRANCH_FORK_HASH_RESULT if DebuggerReplayEngine::replay_engine_is_exact(corrupt_ancestor_fork_hash)
+    return 0
 
 def main() -> i64:
     store: mutable DebuggerBranches::BranchStore = DebuggerBranches::branches_new()
@@ -48,4 +124,6 @@ def main() -> i64:
     return REUSED_ANCESTOR_RESULT if reused_ancestor.engine_error != DebuggerReplayEngine::EngineError.HistoryUnavailable
     return VALID_DEEP_LINEAGE_RESULT if not DebuggerReplayEngine::replay_engine_is_exact(third)
     return INVALID_BRANCH_FORK_RESULT if DebuggerReplayEngine::replay_engine_is_exact(reused_ancestor)
+    branch_prefix_result: i64 = check_seek_preserves_branch_prefix()
+    return branch_prefix_result if branch_prefix_result != 0
     return 0

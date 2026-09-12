@@ -20,6 +20,7 @@ human-readable guide, not a substitute for negotiation.
 | Historical queries | Cancellable last-write/first-change queries over captured provenance | Capability contract | Unsupported |
 | Concurrency diagnostics | Deterministic scheduler, wait graph, bounded alternate schedules, observed races | Capability contract | Unsupported |
 | Trace storage | Checksummed chunks, manifests, recovery scan | Format contract | Read-only artifact mode |
+| Managed trace capture/export | Exact single-root EDIR boundary events through the typed service API; rewinds and child-branch execution make the capture partial | Unsupported | Unsupported |
 | DAP | Bounded adapter | Capability dependent | Capability dependent |
 | Headless session service | Versioned compact framing | Capability dependent | Capability dependent |
 | Remote transport | Handshake, quotas, resumable artifact transfer, reconnect state | Not qualified | Not qualified |

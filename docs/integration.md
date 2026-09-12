@@ -16,6 +16,20 @@ the provider-neutral lifecycle dispatcher for now; in-process clients that
 need managed execution can call `DebuggerSessionService::managed_new` and
 `service_handle_managed` with the same envelope model.
 
+The managed service captures each committed EDIR execution-boundary event in
+its bounded event journal. Once the session is stopped, in-process Elisa
+adapters can include `protocol/managed_trace.elisa` and call
+`DebuggerManagedTraceService::service_trace_verify` and
+`DebuggerManagedTraceService::service_trace_export`; export
+returns a canonical, checksummed byte buffer that the adapter can write or
+transport. Export builds a snapshot and leaves the live recorder usable. The
+current exact trace covers one deterministic root execution. A reverse move or
+execution on a child branch marks that linear capture partial, so later export
+cannot claim that it contains the changed execution. The JSON headless server
+does not yet carry trace artifact bytes, so its `trace.export` request remains
+unavailable; clients should use the typed service API until the versioned
+artifact response is implemented.
+
 Call `DebuggerDiscovery::discovery_for` before selecting optional UI actions.
 The returned protocol version, provider kind, history mode, capabilities, and
 resource limits are stable machine-readable data. Timeline positions and
@@ -103,8 +117,9 @@ native-program launch through DAP remain unavailable on this managed provider.
 ## JetBrains
 
 Implement the JetBrains debugger-process bridge against the same DAP endpoint,
-or use the headless service when the plugin needs reverse execution and trace
-verification. The service is a child process with protocol-only stdout. Each
+or use the headless service when the plugin needs reverse execution. In-process
+Elisa adapters can also use the typed managed trace verification and export
+functions. The service is a child process with protocol-only stdout. Each
 request is a decimal byte count, one space, the UTF-8 JSON payload, and a final
 newline. Numeric request IDs and event ordinals are represented as decimal
 strings at the external boundary so JavaScript, Kotlin, and Java clients do

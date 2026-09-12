@@ -1,0 +1,57 @@
+include "../src/protocol/managed_trace.elisa"
+
+const TEST_COMPILER_ID: u64 = 71
+const TEST_RUNTIME_ID: u64 = 72
+const TEST_SOURCE_ID: u64 = 73
+const TEST_TARGET_ID: u64 = 74
+const TEST_SESSION_ID: u64 = 75
+const TEST_RECORDING_ID: u64 = 76
+const TEST_REQUEST_ID: u64 = 1
+const TEST_PROGRAM_VERSION: u32 = 1
+const TEST_INSTRUCTION_COUNT: u64 = 3
+const TEST_EVENT_COUNT: usize = 3
+const TEST_LAST_EVENT: u64 = 2
+const TEST_RESULT: i64 = 42
+const TEST_FAILURE_LAUNCH: i64 = 1
+const TEST_FAILURE_CONTINUE: i64 = 2
+const TEST_FAILURE_RECORDING: i64 = 3
+const TEST_FAILURE_VERIFY: i64 = 4
+const TEST_FAILURE_EXPORT: i64 = 5
+const TEST_FAILURE_STORAGE_VERIFY: i64 = 6
+const TEST_FAILURE_REVERSE: i64 = 7
+const TEST_FAILURE_PARTIAL: i64 = 8
+const TEST_FAILURE_UNAVAILABLE: i64 = 9
+
+def main() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_COMPILER_ID), runtime: DebuggerIdentity::debug_id(TEST_RUNTIME_ID), source: DebuggerIdentity::debug_id(TEST_SOURCE_ID), target: DebuggerIdentity::debug_id(TEST_TARGET_ID), metadata_version: TEST_PROGRAM_VERSION}
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(TEST_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: TEST_PROGRAM_VERSION, instruction_count: TEST_INSTRUCTION_COUNT, local_count: 0, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: TEST_RESULT, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: 0, b: 0, source: zeroed}
+    image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, image, DebuggerIdentity::debug_id(TEST_RECORDING_ID))
+    launch_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: TEST_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, launch_request)
+    return TEST_FAILURE_LAUNCH if not launched.accepted
+    continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: TEST_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
+    return TEST_FAILURE_CONTINUE if not continued.accepted or service.recorded_event_count != TEST_EVENT_COUNT
+    trace_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TEST_FAILURE_VERIFY if trace_report.state != DebuggerTraceVerify::VerificationState.Exact or not trace_report.replayable or trace_report.verified_event != TEST_LAST_EVENT
+    exported: DebuggerTraceExport::ExportResult = DebuggerManagedTraceService::service_trace_export(service)
+    return TEST_FAILURE_EXPORT if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count == 0 or not DebuggerTraceBinary::writer_is_valid(exported.bytes)
+    storage_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[0], exported.bytes.length)
+    return TEST_FAILURE_STORAGE_VERIFY if storage_report.state != DebuggerTraceVerify::VerificationState.Exact or not storage_report.replayable or storage_report.verified_event != TEST_LAST_EVENT
+    return TEST_FAILURE_RECORDING if service.trace_partial or service.recorded_event_count != TEST_EVENT_COUNT
+    for index in 0..<TEST_EVENT_COUNT:
+        return TEST_FAILURE_RECORDING if service.recorded_events[index].ordinal != index.u64() or service.recorded_events[index].position.recording.value != TEST_RECORDING_ID
+    reverse_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.ReverseStep, id: TEST_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    reversed: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, reverse_request)
+    return TEST_FAILURE_REVERSE if not reversed.accepted or service.controller.engine.event_count != TEST_EVENT_COUNT - 1
+    partial_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TEST_FAILURE_PARTIAL if partial_report.state != DebuggerTraceVerify::VerificationState.Partial or partial_report.replayable or DebuggerErrors::error_is_ok(partial_report.failure)
+    service.controller.session.capabilities.trace_export <- false
+    unavailable_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TEST_FAILURE_UNAVAILABLE if unavailable_report.state != DebuggerTraceVerify::VerificationState.Unavailable or unavailable_report.replayable or unavailable_report.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    return 0

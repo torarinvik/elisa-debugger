@@ -34,6 +34,9 @@ module DebuggerManagedService:
         const REQUEST_METHOD_MAX: u16 = 29
         const MAX_SEEK_EVENT: u64 = 64
         const MAX_SOURCE_BREAKPOINTS: usize = 256
+        const SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
+        const ROOT_RECORDING_BRANCH: u64 = 0
+        const DETAIL_RECORDING_DIVERGED: u32 = 10
 
         def memory_history_error(window: DebuggerHistory::QueryWindow, failure: DebuggerErrors::DebuggerError) -> DebuggerQueryEngine::QueryExecution:
             result: mutable DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_execution_new(window)
@@ -43,12 +46,43 @@ module DebuggerManagedService:
     public:
         struct Service:
             controller: mutable DebuggerManagedEngine::ManagedController
+            recorded_events: mutable DebuggerEvents::EventEnvelope[SERVICE_EVENT_CAPTURE_CAPACITY]
+            recorded_event_count: mutable usize
+            trace_partial: mutable bool
+            trace_failure: mutable DebuggerErrors::DebuggerError
             last_error: mutable DebuggerErrors::DebuggerError
             last_checkpoint_event: mutable u64
             last_checkpoint_hash: mutable u64
             has_checkpoint: mutable bool
             last_branch: mutable DebuggerIdentity::DebugId
             timeline: mutable DebuggerTimeline::Timeline
+
+    private:
+        def service_recording_mark_partial(service: mutable Service&, failure: DebuggerErrors::DebuggerError) -> void:
+            service.trace_partial <- true
+            service.trace_failure <- failure
+
+        def service_capture_recording(service: mutable Service&) -> void:
+            return if service.trace_partial
+            current_event_count: usize = service.controller.engine.event_count
+            if current_event_count < service.recorded_event_count:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
+                service_recording_mark_partial(service, failure)
+                return
+            if current_event_count > SERVICE_EVENT_CAPTURE_CAPACITY:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_RECORDING_DIVERGED)
+                service_recording_mark_partial(service, failure)
+                return
+            while service.recorded_event_count < current_event_count:
+                event: DebuggerEvents::EventEnvelope = service.controller.engine.events[service.recorded_event_count]
+                if event.position.branch.value != ROOT_RECORDING_BRANCH or event.ordinal != service.recorded_event_count.u64():
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
+                    service_recording_mark_partial(service, failure)
+                    return
+                service.recorded_events[service.recorded_event_count] <- event
+                service.recorded_event_count <- service.recorded_event_count + 1
+
+    public:
 
         struct Result:
             accepted: mutable bool
@@ -71,7 +105,7 @@ module DebuggerManagedService:
             failure: mutable DebuggerErrors::DebuggerError
 
         def service_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> Service:
-            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), last_error: DebuggerErrors::no_error(), last_checkpoint_event: 0, last_checkpoint_hash: 0, has_checkpoint: false, last_branch: DebuggerIdentity::debug_id(0), timeline: DebuggerTimeline::timeline_new(session.position, session.capabilities)}
+            return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), recorded_events: zeroed, recorded_event_count: 0, trace_partial: false, trace_failure: DebuggerErrors::no_error(), last_error: DebuggerErrors::no_error(), last_checkpoint_event: 0, last_checkpoint_hash: 0, has_checkpoint: false, last_branch: DebuggerIdentity::debug_id(0), timeline: DebuggerTimeline::timeline_new(session.position, session.capabilities)}
 
         def result_error(failure: DebuggerErrors::DebuggerError) -> Result:
             return Result{accepted: false, failure: failure}
@@ -93,6 +127,7 @@ module DebuggerManagedService:
         # a service lifetime: moving backward changes the current position but
         # never erases retained history.
         def service_sync_timeline(service: mutable Service&) -> void:
+            service_capture_recording(service)
             position: DebuggerIdentity::Position = service.controller.session.position
             bounds: mutable DebuggerTimeline::HistoryBounds = service.timeline.bounds
             if not bounds.has_retained:
@@ -235,6 +270,9 @@ module DebuggerManagedService:
 
         def service_is_exact(service: mutable Service&) -> bool:
             return DebuggerManagedEngine::managed_is_exact(service.controller)
+
+        def service_capture_trace_events(service: mutable Service&) -> void:
+            service_capture_recording(service)
 
         def service_checkpoint(service: mutable Service&) -> DebuggerTraceBinary::ByteWriter:
             return DebuggerManagedEngine::managed_checkpoint(service.controller)

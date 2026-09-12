@@ -8,8 +8,8 @@ human-readable guide, not a substitute for negotiation.
 | --- | --- | --- | --- |
 | Launch | Supported for the bounded managed image | Capability boundary only | Unsupported |
 | Attach | Unsupported | Controller contract present | Process attach model present |
-| Source and function metadata | Bounded source/function tables | Symbol table and source spans | Symbol table plus bounds-checked ELF/Mach-O artifact headers |
-| Source breakpoints | Resolver and pending statuses | Resolver contract | Metadata dependent |
+| Source and function metadata | Bounded source/function tables; EDIR v2 binds source IDs to normalized paths and content digests | Symbol table and source spans | Symbol table plus bounds-checked ELF/Mach-O artifact headers |
+| Source breakpoints | DAP resolves logical paths against the EDIR v2 table; absolute editor paths use an explicit `sourcePathRoot` launch mapping, and explicit source references remain supported | Resolver contract | Metadata dependent |
 | Typed value states | Supported bounded store, including absent and historical states | Capability contract | Availability depends on metadata |
 | Expression arithmetic | Bounded side-effect-free evaluator | Provider dependent | Provider dependent |
 | Record/replay effects | Generic oracle exactly replays scalar clock samples; other effect kinds mark the oracle incomplete | Not exact | Unsupported |

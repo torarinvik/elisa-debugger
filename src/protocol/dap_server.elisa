@@ -33,6 +33,8 @@ module DebuggerDAPServer:
         const DAP_SERVER_SUCCESS_EXIT_CODE: i64 = 0
         const DAP_SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
         const DAP_NO_EXPECTED_GENERATION: u64 = 0
+        const DAP_NO_SOURCE_FILE_ID: u64 = 0
+        const DAP_NO_SOURCE_REFERENCE: u64 = 0
         const DAP_FALLBACK_REQUEST_ID: u64 = 1
         const DAP_MEMORY_DETAIL_ARGUMENT: u32 = 1
         const DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT: u32 = 10
@@ -206,6 +208,18 @@ module DebuggerDAPServer:
         const DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH: usize = 10
         const DAP_STACK_DYNAMIC_AFTER_COLUMN: cstr = "}]}}"
         const DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH: usize = 4
+        const DAP_STACK_SOURCE_BEFORE_NAME: cstr = ",\"source\":{\"name\":"
+        const DAP_STACK_SOURCE_BEFORE_NAME_LENGTH: usize = 18
+        const DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH: cstr = ",\"path\":"
+        const DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH_LENGTH: usize = 8
+        const DAP_STACK_SOURCE_AFTER_PATH: cstr = "}"
+        const DAP_STACK_SOURCE_AFTER_PATH_LENGTH: usize = 1
+        const DAP_STACK_SOURCE_PATH_CAPACITY: usize = DebuggerMetadata::MAPPED_SOURCE_PATH_CAPACITY
+        const DAP_STACK_SOURCE_NO_NAME_LENGTH: usize = 0
+        const DAP_STACK_SOURCE_NO_NAME_START: usize = 0
+        const DAP_STACK_SOURCE_ROOT_DISABLED_LENGTH: usize = 0
+        const DAP_STACK_SOURCE_PATH_SEPARATOR: u8 = 47
+        const DAP_JSON_STRING_QUOTE_BYTES: usize = 2
         const DAP_SCOPES_COMMAND: cstr = "scopes"
         const DAP_SCOPES_COMMAND_LENGTH: usize = 6
         const DAP_SCOPES_BEFORE_REFERENCE: cstr = "\",\"success\":true,\"body\":{\"scopes\":[{\"name\":\"Locals\",\"variablesReference\":"
@@ -261,8 +275,8 @@ module DebuggerDAPServer:
         const DAP_SOURCE_BREAKPOINT_SEPARATOR_LENGTH: usize = 1
         const DAP_JSON_TRUE_LENGTH: usize = 4
         const DAP_JSON_FALSE_LENGTH: usize = 5
-        const DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX: cstr = "\",\"success\":false,\"message\":\"sourceReference or breakpoint lines are invalid\"}"
-        const DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX_LENGTH: usize = 78
+        const DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX: cstr = "\",\"success\":false,\"message\":\"source path/reference or breakpoint lines are invalid\"}"
+        const DAP_SOURCE_BREAKPOINT_INVALID_SUFFIX_LENGTH: usize = 84
         const DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"source breakpoint capacity is exhausted\"}"
         const DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX_LENGTH: usize = 70
         const DAP_SET_FUNCTION_BREAKPOINTS_COMMAND: cstr = "setFunctionBreakpoints"
@@ -1152,22 +1166,70 @@ module DebuggerDAPServer:
         struct DAPSourceLocation:
             line: mutable u64
             column: mutable u64
+            source_path_bytes: mutable u8[DAP_STACK_SOURCE_PATH_CAPACITY]
+            source_path_length: mutable usize
+            source_name_start: mutable usize
+            source_name_length: mutable usize
+            has_source: mutable bool
 
         def stack_source_location(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, coordinates: DebuggerDAPPayload::ClientCoordinates) -> DAPSourceLocation:
+            location: mutable DAPSourceLocation = zeroed
+            location.line <- DAP_UNKNOWN_SOURCE_LINE
+            location.column <- DAP_UNKNOWN_SOURCE_LINE
             instruction_index: u64 = result.session.position.statement.value
             if instruction_index < service.controller.engine.image.program.instruction_count:
                 source: DebuggerIdentity::SourceSpan = service.controller.engine.image.instructions[instruction_index.usize()].source
-                if source.file.value != 0 and source.start_line != 0:
+                if source.file.value != DAP_NO_SOURCE_FILE_ID and source.start_line != DAP_UNKNOWN_SOURCE_LINE:
                     line: mutable u64 = source.start_line.u64()
                     column: mutable u64 = source.start_column.u64()
                     line <- line - 1 if not coordinates.lines_start_at_one
                     column <- column + 1 if coordinates.columns_start_at_one
-                    return DAPSourceLocation{line: line, column: column}
-            return DAPSourceLocation{line: DAP_UNKNOWN_SOURCE_LINE, column: DAP_UNKNOWN_SOURCE_LINE}
+                    location.line <- line
+                    location.column <- column
+                    if service.controller.engine.image.source_file_count <= DebuggerEDIR::source_file_capacity():
+                        for file_index in 0..<service.controller.engine.image.source_file_count:
+                            file: DebuggerMetadata::SourceFile = service.controller.engine.image.source_files[file_index]
+                            continue if file.id.value != source.file.value or file.path_length == DAP_STACK_SOURCE_NO_NAME_LENGTH or file.path_length > DebuggerMetadata::source_path_capacity()
+                            root_length: usize = service.controller.source_path_root_length
+                            if root_length > DAP_STACK_SOURCE_ROOT_DISABLED_LENGTH and root_length <= DebuggerMetadata::source_path_capacity():
+                                for path_index in 0..<root_length:
+                                    location.source_path_bytes[path_index] <- service.controller.source_path_root[path_index]
+                                location.source_path_length <- root_length
+                                if service.controller.source_path_root[root_length - 1] != DAP_STACK_SOURCE_PATH_SEPARATOR:
+                                    location.source_path_bytes[location.source_path_length] <- DAP_STACK_SOURCE_PATH_SEPARATOR
+                                    location.source_path_length <- location.source_path_length + 1
+                            for path_index in 0..<file.path_length:
+                                location.source_path_bytes[location.source_path_length + path_index] <- file.path_bytes[path_index]
+                            location.source_path_length <- location.source_path_length + file.path_length
+                            location.source_name_start <- DAP_STACK_SOURCE_NO_NAME_START
+                            for path_index in 0..<location.source_path_length:
+                                location.source_name_start <- path_index + 1 if location.source_path_bytes[path_index] == DAP_STACK_SOURCE_PATH_SEPARATOR
+                            location.source_name_length <- location.source_path_length - location.source_name_start
+                            location.has_source <- true
+                            return location
+            return location
+
+        def json_string_encoded_length(bytes: u8&, start: usize, length: usize) -> usize:
+            encoded_length: mutable usize = length + DAP_JSON_STRING_QUOTE_BYTES
+            for index in start..<(start + length):
+                encoded_length <- encoded_length + 1 if bytes[index] == ASCII_QUOTE or bytes[index] == ASCII_BACKSLASH
+            return encoded_length
+
+        def write_json_string(bytes: u8&, start: usize, length: usize) -> void can[Console, Unsafe.PointerCast]:
+            _ = printf("%c", ASCII_QUOTE.i32()) can Console
+            for index in start..<(start + length):
+                if bytes[index] == ASCII_QUOTE or bytes[index] == ASCII_BACKSLASH:
+                    _ = printf("%c", ASCII_BACKSLASH.i32()) can Console
+                _ = printf("%c", bytes[index].i32()) can Console
+            _ = printf("%c", ASCII_QUOTE.i32()) can Console
 
         def write_stack_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64, coordinates: DebuggerDAPPayload::ClientCoordinates) -> void can[Console, Unsafe.PointerCast]:
             location: DAPSourceLocation = stack_source_location(service, result, coordinates)
-            body_length: u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(location.line) + DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
+            body_length: mutable u64 = (DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + DAP_COMMAND_PREFIX_LENGTH + DAP_STACK_TRACE_COMMAND_LENGTH + DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH + decimal_digits(location.line) + DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + DAP_JSON_TERMINATOR_LENGTH).u64()
+            if location.has_source:
+                source_name_length: usize = json_string_encoded_length(location.source_path_bytes[0], location.source_name_start, location.source_name_length)
+                source_path_length: usize = json_string_encoded_length(location.source_path_bytes[0], 0, location.source_path_length)
+                body_length <- body_length + (DAP_STACK_SOURCE_BEFORE_NAME_LENGTH + source_name_length + DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH_LENGTH + source_path_length + DAP_STACK_SOURCE_AFTER_PATH_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(DAP_BODY_PREFIX) can Console
             _ = printf("%llu", response_sequence) can Console
@@ -1179,6 +1241,12 @@ module DebuggerDAPServer:
             _ = printf("%llu", location.line) can Console
             _ = printf(DAP_STACK_DYNAMIC_BEFORE_COLUMN) can Console
             _ = printf("%llu", location.column) can Console
+            if location.has_source:
+                _ = printf(DAP_STACK_SOURCE_BEFORE_NAME) can Console, Unsafe.PointerCast
+                write_json_string(location.source_path_bytes[0], location.source_name_start, location.source_name_length) can Console, Unsafe.PointerCast
+                _ = printf(DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH) can Console, Unsafe.PointerCast
+                write_json_string(location.source_path_bytes[0], 0, location.source_path_length) can Console, Unsafe.PointerCast
+                _ = printf(DAP_STACK_SOURCE_AFTER_PATH) can Console, Unsafe.PointerCast
             _ = printf(DAP_STACK_DYNAMIC_AFTER_COLUMN) can Console
 
         def locals_reference_for_generation(generation: u64) -> u64:
@@ -1333,6 +1401,21 @@ module DebuggerDAPServer:
             if not request.valid:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            source_id: mutable DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DAP_NO_SOURCE_FILE_ID)
+            if request.has_source_reference and request.source_reference != DAP_NO_SOURCE_REFERENCE:
+                source_id <- DebuggerIdentity::debug_id(request.source_reference)
+                if not DebuggerManagedEngine::managed_source_file_id_is_known(service.controller, source_id):
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
+                    return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            if request.has_source_path:
+                path_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_source_file_id_for_path(service.controller, request.source_path.bytes[0], request.source_path.length)
+                if path_id.value == DAP_NO_SOURCE_FILE_ID or (source_id.value != DAP_NO_SOURCE_FILE_ID and source_id.value != path_id.value):
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
+                    return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                source_id <- path_id
+            if source_id.value == DAP_NO_SOURCE_FILE_ID:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             for index in 0..<request.count:
                 if coordinates.lines_start_at_one:
                     if request.lines[index] == 0:
@@ -1343,7 +1426,7 @@ module DebuggerDAPServer:
                         failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_SOURCE_BREAKPOINT_DETAIL_ARGUMENT)
                         return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
                     request.lines[index] <- (request.lines[index].u64() + DAP_SOURCE_BREAKPOINT_LINE_INCREMENT).u32()
-            response <- DebuggerManagedService::service_replace_source_breakpoints(service, DebuggerIdentity::debug_id(request.source_reference), request.lines[0], request.count)
+            response <- DebuggerManagedService::service_replace_source_breakpoints(service, source_id, request.lines[0], request.count)
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: response.accepted, stop_generation: service.controller.session.stop_generation, failure: response.failure}
 
         def dispatch_launch(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
@@ -1352,12 +1435,19 @@ module DebuggerDAPServer:
             if not path.valid:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            source_root: DebuggerDAPPayload::SourcePathRootRequest = DebuggerDAPPayload::source_path_root_parse(payload, payload_length)
+            if not source_root.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(path.bytes[0], path.length) can Blocking.IO, Unsafe.PointerCast
             if not loaded.valid:
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
             recording: DebuggerIdentity::DebugId = service.controller.engine.recording
             session: DebuggerSession::Session = service.controller.session
             service <- DebuggerManagedService::service_new(session, loaded.image, recording)
+            if source_root.has_root and not DebuggerManagedEngine::managed_set_source_path_root(service.controller, source_root.root.bytes[0], source_root.root.length):
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
 
         def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:

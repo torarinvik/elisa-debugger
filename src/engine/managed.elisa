@@ -27,6 +27,29 @@ module DebuggerManagedEngine:
         const MAX_LOCAL_VALUES: usize = 32
         const MAX_GLOBAL_VALUES: usize = 16
         const COMPOUND_STEP_LIMIT: u64 = 64
+        const SOURCE_PATH_SLASH: u8 = 47
+        const SOURCE_PATH_BACKSLASH: u8 = 92
+        const SOURCE_PATH_ROOT_COLON: u8 = 58
+        const SOURCE_PATH_DOT: u8 = 46
+        const SOURCE_PATH_ROOT_MINIMUM_LENGTH: usize = 1
+        const SOURCE_PATH_WINDOWS_ROOT_MINIMUM_LENGTH: usize = 3
+        const SOURCE_PATH_UNC_PREFIX_LENGTH: usize = 2
+        const SOURCE_PATH_UNC_MINIMUM_SEPARATORS: usize = 1
+        const SOURCE_PATH_ROOT_COLON_INDEX: usize = 1
+        const SOURCE_PATH_ROOT_SLASH_INDEX: usize = 2
+        const SOURCE_PATH_ROOT_INITIAL_INDEX: usize = 0
+        const SOURCE_PATH_UNC_SECOND_SLASH_INDEX: usize = 1
+        const SOURCE_PATH_UNC_SERVER_START_INDEX: usize = 2
+        const SOURCE_PATH_SINGLE_DOT_SEGMENT_LENGTH: usize = 1
+        const SOURCE_PATH_PARENT_SEGMENT_LENGTH: usize = 2
+        const SOURCE_PATH_ROOT_DISABLED_LENGTH: usize = 0
+        const SOURCE_PATH_EMPTY_LENGTH: usize = 0
+        const SOURCE_PATH_ASCII_CONTROL_MAX: u8 = 31
+        const SOURCE_PATH_ASCII_DELETE: u8 = 127
+        const SOURCE_PATH_ASCII_UPPER_A: u8 = 65
+        const SOURCE_PATH_ASCII_UPPER_Z: u8 = 90
+        const SOURCE_PATH_ASCII_CASE_OFFSET: u8 = 32
+        const NO_SOURCE_FILE_ID: u64 = 0
 
     public:
         struct ManagedController:
@@ -34,9 +57,11 @@ module DebuggerManagedEngine:
             engine: mutable DebuggerReplayEngine::ReplayEngine
             state: mutable DebuggerManagedState::State
             last_error: mutable DebuggerErrors::DebuggerError
+            source_path_root: mutable u8[DebuggerMetadata::SOURCE_PATH_CAPACITY]
+            source_path_root_length: mutable usize
 
         def managed_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> ManagedController:
-            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error()}
+            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error(), source_path_root: zeroed, source_path_root_length: SOURCE_PATH_ROOT_DISABLED_LENGTH}
 
         def managed_sync_position(controller: mutable ManagedController&) -> void:
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
@@ -247,6 +272,105 @@ module DebuggerManagedEngine:
                     replacement.results[request_index].verified <- true
             controller.state.breakpoints <- replacement.table
             return replacement
+
+        def managed_source_root_is_valid(root: u8&, root_length: usize) -> bool:
+            return false if root_length < SOURCE_PATH_ROOT_MINIMUM_LENGTH or root_length > DebuggerMetadata::SOURCE_PATH_CAPACITY
+            return false if not DebuggerMetadata::source_path_utf8_is_valid(root, root_length)
+            windows_drive_root: bool = root_length >= SOURCE_PATH_WINDOWS_ROOT_MINIMUM_LENGTH and root[SOURCE_PATH_ROOT_COLON_INDEX] == SOURCE_PATH_ROOT_COLON and root[SOURCE_PATH_ROOT_SLASH_INDEX] == SOURCE_PATH_SLASH
+            windows_unc_root: bool = root_length >= SOURCE_PATH_UNC_PREFIX_LENGTH and root[SOURCE_PATH_ROOT_INITIAL_INDEX] == SOURCE_PATH_SLASH and root[SOURCE_PATH_UNC_SECOND_SLASH_INDEX] == SOURCE_PATH_SLASH
+            return false if root[SOURCE_PATH_ROOT_INITIAL_INDEX] != SOURCE_PATH_SLASH and not windows_drive_root
+            segment_start: mutable usize = SOURCE_PATH_ROOT_MINIMUM_LENGTH if root[SOURCE_PATH_ROOT_INITIAL_INDEX] == SOURCE_PATH_SLASH else SOURCE_PATH_WINDOWS_ROOT_MINIMUM_LENGTH
+            segment_start <- SOURCE_PATH_UNC_PREFIX_LENGTH if windows_unc_root
+            return true if root_length == segment_start and not windows_unc_root
+            unc_separator_count: mutable usize = 0
+            for index in segment_start..<root_length:
+                return false if root[index] <= SOURCE_PATH_ASCII_CONTROL_MAX or root[index] == SOURCE_PATH_ASCII_DELETE
+                return false if root[index] == SOURCE_PATH_BACKSLASH
+                if root[index] == SOURCE_PATH_SLASH:
+                    segment_length: usize = index - segment_start
+                    return false if segment_length == 0 or (segment_length == SOURCE_PATH_SINGLE_DOT_SEGMENT_LENGTH and root[segment_start] == SOURCE_PATH_DOT)
+                    return false if segment_length == SOURCE_PATH_PARENT_SEGMENT_LENGTH and root[segment_start] == SOURCE_PATH_DOT and root[segment_start + 1] == SOURCE_PATH_DOT
+                    unc_separator_count <- unc_separator_count + 1 if windows_unc_root
+                    segment_start <- index + 1
+            final_segment_length: usize = root_length - segment_start
+            return false if final_segment_length == 0 or (final_segment_length == SOURCE_PATH_SINGLE_DOT_SEGMENT_LENGTH and root[segment_start] == SOURCE_PATH_DOT)
+            return false if final_segment_length == SOURCE_PATH_PARENT_SEGMENT_LENGTH and root[segment_start] == SOURCE_PATH_DOT and root[segment_start + 1] == SOURCE_PATH_DOT
+            return false if windows_unc_root and unc_separator_count < SOURCE_PATH_UNC_MINIMUM_SEPARATORS
+            return true
+
+        def managed_set_source_path_root(controller: mutable ManagedController&, root: u8&, root_length: usize) -> bool:
+            return false if root_length == SOURCE_PATH_ROOT_DISABLED_LENGTH or root_length > DebuggerMetadata::SOURCE_PATH_CAPACITY
+            candidate_root: mutable u8[DebuggerMetadata::SOURCE_PATH_CAPACITY] = zeroed
+            normalized_length: mutable usize = root_length
+            for index in 0..<root_length:
+                candidate_root[index] <- SOURCE_PATH_SLASH if root[index] == SOURCE_PATH_BACKSLASH else root[index]
+            windows_drive_root: bool = normalized_length >= SOURCE_PATH_WINDOWS_ROOT_MINIMUM_LENGTH and candidate_root[SOURCE_PATH_ROOT_COLON_INDEX] == SOURCE_PATH_ROOT_COLON and candidate_root[SOURCE_PATH_ROOT_SLASH_INDEX] == SOURCE_PATH_SLASH
+            windows_unc_root: bool = normalized_length >= SOURCE_PATH_UNC_PREFIX_LENGTH and candidate_root[SOURCE_PATH_ROOT_INITIAL_INDEX] == SOURCE_PATH_SLASH and candidate_root[SOURCE_PATH_UNC_SECOND_SLASH_INDEX] == SOURCE_PATH_SLASH
+            return false if candidate_root[SOURCE_PATH_ROOT_INITIAL_INDEX] != SOURCE_PATH_SLASH and not windows_drive_root
+            minimum_root_length: mutable usize = SOURCE_PATH_WINDOWS_ROOT_MINIMUM_LENGTH if windows_drive_root else SOURCE_PATH_ROOT_MINIMUM_LENGTH
+            minimum_root_length <- SOURCE_PATH_UNC_PREFIX_LENGTH if windows_unc_root
+            while normalized_length > minimum_root_length and candidate_root[normalized_length - 1] == SOURCE_PATH_SLASH:
+                normalized_length <- normalized_length - 1
+            return false if not managed_source_root_is_valid(candidate_root[0], normalized_length)
+            for index in 0..<normalized_length:
+                controller.source_path_root[index] <- candidate_root[index]
+            controller.source_path_root_length <- normalized_length
+            return true
+
+        def managed_source_root_is_windows(root: u8&, root_length: usize) -> bool:
+            return root[SOURCE_PATH_ROOT_INITIAL_INDEX] != SOURCE_PATH_SLASH or (root_length >= SOURCE_PATH_UNC_PREFIX_LENGTH and root[SOURCE_PATH_UNC_SECOND_SLASH_INDEX] == SOURCE_PATH_SLASH)
+
+        def managed_source_path_ascii_lower(byte: u8) -> u8:
+            return byte + SOURCE_PATH_ASCII_CASE_OFFSET if byte >= SOURCE_PATH_ASCII_UPPER_A and byte <= SOURCE_PATH_ASCII_UPPER_Z
+            return byte
+
+        def managed_source_root_byte_matches(client_byte: u8, root_byte: u8, windows_root: bool) -> bool:
+            return true if client_byte == root_byte
+            return managed_source_path_ascii_lower(client_byte) == managed_source_path_ascii_lower(root_byte) if windows_root
+            return false
+
+        def managed_source_file_id_for_path(controller: mutable ManagedController&, path: u8&, path_length: usize) -> DebuggerIdentity::DebugId:
+            return DebuggerIdentity::debug_id(NO_SOURCE_FILE_ID) if path_length == SOURCE_PATH_EMPTY_LENGTH or path_length > DebuggerMetadata::MAPPED_SOURCE_PATH_CAPACITY
+            return DebuggerIdentity::debug_id(NO_SOURCE_FILE_ID) if controller.engine.image.source_file_count > DebuggerEDIR::source_file_capacity()
+            matched_id: mutable DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(NO_SOURCE_FILE_ID)
+            relative_start: mutable usize = 0
+            relative_length: mutable usize = path_length
+            if controller.source_path_root_length > SOURCE_PATH_ROOT_DISABLED_LENGTH:
+                root_length: usize = controller.source_path_root_length
+                windows_root: bool = managed_source_root_is_windows(controller.source_path_root[0], root_length)
+                same_root: mutable bool = path_length > root_length
+                if path_length >= root_length:
+                    for byte_index in 0..<root_length:
+                        client_byte: u8 = SOURCE_PATH_SLASH if path[byte_index] == SOURCE_PATH_BACKSLASH else path[byte_index]
+                        same_root <- false if not managed_source_root_byte_matches(client_byte, controller.source_path_root[byte_index], windows_root)
+                else:
+                    same_root <- false
+                root_has_separator: bool = controller.source_path_root[root_length - 1] == SOURCE_PATH_SLASH
+                if same_root:
+                    if root_has_separator:
+                        relative_start <- root_length
+                        relative_length <- path_length - root_length
+                    else:
+                        if path[root_length] == SOURCE_PATH_SLASH or path[root_length] == SOURCE_PATH_BACKSLASH:
+                            relative_start <- root_length + 1
+                            relative_length <- path_length - relative_start
+            for file_index in 0..<controller.engine.image.source_file_count:
+                file: DebuggerMetadata::SourceFile = controller.engine.image.source_files[file_index]
+                continue if file.path_length != relative_length
+                same_path: mutable bool = true
+                for byte_index in 0..<relative_length:
+                    client_byte: u8 = SOURCE_PATH_SLASH if path[relative_start + byte_index] == SOURCE_PATH_BACKSLASH else path[relative_start + byte_index]
+                    same_path <- false if client_byte != file.path_bytes[byte_index]
+                if same_path:
+                    return DebuggerIdentity::debug_id(NO_SOURCE_FILE_ID) if matched_id.value != NO_SOURCE_FILE_ID
+                    matched_id <- file.id
+            return matched_id
+
+        def managed_source_file_id_is_known(controller: mutable ManagedController&, file_id: DebuggerIdentity::DebugId) -> bool:
+            return false if file_id.value == NO_SOURCE_FILE_ID or controller.engine.image.source_file_count > DebuggerEDIR::source_file_capacity()
+            for file_index in 0..<controller.engine.image.source_file_count:
+                return true if controller.engine.image.source_files[file_index].id.value == file_id.value
+            return false
 
         def managed_set_source_breakpoint(controller: mutable ManagedController&, location: DebuggerMetadata::SourceLocation) -> DebuggerIdentity::DebugId:
             return DebuggerIdentity::debug_id(0) if not DebuggerMetadata::source_location_is_valid(location) or controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted

@@ -67,6 +67,30 @@ returned as values, while uninitialized locals are marked `<unavailable>`.
 Until source-name metadata is emitted, locals use stable ordinal names such as
 `local0`.
 
+EDIR schema 2 carries a bounded source-file table with source IDs, normalized
+logical paths, content digests, and line counts. `setBreakpoints` accepts the
+standard `source.path` form and resolves it only against that table; it never
+derives a file ID from the client path. A positive `sourceReference` remains
+supported for clients that already use the earlier adapter extension. If both
+fields are supplied they must resolve to the same source file. Path matching
+uses exact normalized path bytes, with client backslashes treated as `/`;
+unknown or ambiguous paths fail the request. Since editors normally send an
+absolute path while EDIR stores portable relative logical paths, a DAP `launch`
+request can include the adapter option `sourcePathRoot` set to the local
+workspace root. The adapter strips only that exact root prefix at a path
+separator boundary, then resolves the remaining relative path exactly. For
+example, `/work/project/src/main.elisa` maps to `src/main.elisa` when
+`sourcePathRoot` is `/work/project`; Windows drive roots and backslash paths are
+also supported, including UNC roots. Windows root matching ignores ASCII case
+differences and normalizes backslashes; the relative logical path still matches
+exactly. The option must be an absolute POSIX path, a drive path, or a UNC
+share path, and it never performs basename or suffix matching. `stackTrace` returns a DAP
+`source` object using the same mapped path, so clients can open the frame and
+reuse its path in later breakpoint requests. Clients that already send the
+EDIR logical path can omit the option. The metadata currently contains no
+embedded source text, so a content digest alone does not prove that a client's
+workspace file has matching contents.
+
 The normal adjacent compiler checkout may not include the EDIR lowering
 extension. With an Elisa compiler checkout that supports `-emit edir`, run
 `make ELISA_EDIR_COMPILER=/path/to/elisac_stage1.sh compiler-edir-check` to

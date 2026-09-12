@@ -6,14 +6,53 @@ module DebuggerMetadata:
     private:
         const SOURCE_NO_FILE: u64 = 0
         const SOURCE_NO_LINE: u32 = 0
+        const SOURCE_PATH_EMPTY: usize = 0
+        const SOURCE_PATH_ASCII_MAX: u64 = 127
+        const SOURCE_PATH_UTF8_CONTINUATION_BASE: u64 = 128
+        const SOURCE_PATH_UTF8_CONTINUATION_MAX: u64 = 191
+        const SOURCE_PATH_UTF8_CONTINUATION_MASK: u64 = 63
+        const SOURCE_PATH_UTF8_SHIFT: u64 = 6
+        const SOURCE_PATH_UTF8_FIRST_TWO_MASK: u64 = 31
+        const SOURCE_PATH_UTF8_FIRST_THREE_MASK: u64 = 15
+        const SOURCE_PATH_UTF8_FIRST_FOUR_MASK: u64 = 7
+        const SOURCE_PATH_UTF8_TWO_BYTE_START: u64 = 194
+        const SOURCE_PATH_UTF8_TWO_BYTE_END: u64 = 223
+        const SOURCE_PATH_UTF8_THREE_BYTE_START: u64 = 224
+        const SOURCE_PATH_UTF8_THREE_BYTE_END: u64 = 239
+        const SOURCE_PATH_UTF8_FOUR_BYTE_START: u64 = 240
+        const SOURCE_PATH_UTF8_FOUR_BYTE_END: u64 = 244
+        const SOURCE_PATH_UTF8_TWO_BYTE_MIN: u64 = 128
+        const SOURCE_PATH_UTF8_THREE_BYTE_MIN: u64 = 2048
+        const SOURCE_PATH_UTF8_FOUR_BYTE_MIN: u64 = 65536
+        const SOURCE_PATH_UNICODE_MAX: u64 = 1114111
+        const SOURCE_PATH_SURROGATE_START: u64 = 55296
+        const SOURCE_PATH_SURROGATE_END: u64 = 57343
+        const SOURCE_PATH_ASCII_CONTROL_MAX: u64 = 31
+        const SOURCE_PATH_DELETE: u64 = 127
+        const SOURCE_PATH_C1_CONTROL_MAX: u64 = 159
+        const SOURCE_PATH_SLASH: u8 = 47
+        const SOURCE_PATH_BACKSLASH: u8 = 92
+        const SOURCE_PATH_COLON: u8 = 58
+        const SOURCE_PATH_DOT: u8 = 46
+        const SOURCE_PATH_UPPER_A: u8 = 65
+        const SOURCE_PATH_UPPER_Z: u8 = 90
+        const SOURCE_PATH_LOWER_A: u8 = 97
+        const SOURCE_PATH_LOWER_Z: u8 = 122
+        const SOURCE_PATH_SINGLE_DOT_LENGTH: usize = 1
+        const SOURCE_PATH_PARENT_SEGMENT_LENGTH: usize = 2
 
     public:
+        const SOURCE_PATH_CAPACITY: usize = 1024
+        const SOURCE_PATH_SEPARATOR_COUNT: usize = 1
+        const MAPPED_SOURCE_PATH_CAPACITY: usize = SOURCE_PATH_CAPACITY * 2 + SOURCE_PATH_SEPARATOR_COUNT
+
         struct SourceFile:
             id: mutable DebuggerIdentity::DebugId
             logical_path: mutable DebuggerIdentity::DebugId
             content: mutable DebuggerIdentity::DebugId
             line_count: mutable u64
-            embedded: mutable bool
+            path_bytes: mutable u8[SOURCE_PATH_CAPACITY]
+            path_length: mutable usize
 
         struct FunctionInfo:
             id: mutable DebuggerIdentity::DebugId
@@ -53,8 +92,79 @@ module DebuggerMetadata:
         def source_location_is_valid(location: SourceLocation) -> bool:
             return location.file.value != SOURCE_NO_FILE and location.line != SOURCE_NO_LINE
 
+        def source_path_capacity() -> usize:
+            return SOURCE_PATH_CAPACITY
+
+        def source_path_utf8_is_valid(bytes: u8&, path_length: usize) -> bool:
+            return false if path_length > SOURCE_PATH_CAPACITY
+            index: mutable usize = 0
+            while index < path_length:
+                first: u64 = bytes[index].u64()
+                sequence_length: mutable usize = 1
+                minimum_codepoint: mutable u64 = 0
+                codepoint: mutable u64 = first
+                if first > SOURCE_PATH_ASCII_MAX:
+                    if first >= SOURCE_PATH_UTF8_TWO_BYTE_START and first <= SOURCE_PATH_UTF8_TWO_BYTE_END:
+                        sequence_length <- 2
+                        minimum_codepoint <- SOURCE_PATH_UTF8_TWO_BYTE_MIN
+                        codepoint <- first & SOURCE_PATH_UTF8_FIRST_TWO_MASK
+                    if first >= SOURCE_PATH_UTF8_THREE_BYTE_START and first <= SOURCE_PATH_UTF8_THREE_BYTE_END:
+                        sequence_length <- 3
+                        minimum_codepoint <- SOURCE_PATH_UTF8_THREE_BYTE_MIN
+                        codepoint <- first & SOURCE_PATH_UTF8_FIRST_THREE_MASK
+                    if first >= SOURCE_PATH_UTF8_FOUR_BYTE_START and first <= SOURCE_PATH_UTF8_FOUR_BYTE_END:
+                        sequence_length <- 4
+                        minimum_codepoint <- SOURCE_PATH_UTF8_FOUR_BYTE_MIN
+                        codepoint <- first & SOURCE_PATH_UTF8_FIRST_FOUR_MASK
+                    return false if sequence_length == 1 or sequence_length > path_length - index
+                    for continuation_index in 1..<sequence_length:
+                        continuation: u64 = bytes[index + continuation_index].u64()
+                        return false if continuation < SOURCE_PATH_UTF8_CONTINUATION_BASE or continuation > SOURCE_PATH_UTF8_CONTINUATION_MAX
+                        codepoint <- (codepoint << SOURCE_PATH_UTF8_SHIFT) | (continuation & SOURCE_PATH_UTF8_CONTINUATION_MASK)
+                    return false if codepoint < minimum_codepoint or codepoint > SOURCE_PATH_UNICODE_MAX
+                    return false if codepoint >= SOURCE_PATH_SURROGATE_START and codepoint <= SOURCE_PATH_SURROGATE_END
+                return false if codepoint <= SOURCE_PATH_ASCII_CONTROL_MAX or codepoint >= SOURCE_PATH_DELETE and codepoint <= SOURCE_PATH_C1_CONTROL_MAX
+                index <- index + sequence_length
+            return true
+
+        def source_path_has_drive_prefix(file: SourceFile) -> bool:
+            return false if file.path_length <= SOURCE_PATH_SINGLE_DOT_LENGTH
+            if file.path_length > SOURCE_PATH_SINGLE_DOT_LENGTH and file.path_bytes[SOURCE_PATH_SINGLE_DOT_LENGTH] == SOURCE_PATH_COLON:
+                first: u8 = file.path_bytes[0]
+                return first >= SOURCE_PATH_UPPER_A and first <= SOURCE_PATH_UPPER_Z or first >= SOURCE_PATH_LOWER_A and first <= SOURCE_PATH_LOWER_Z
+            return false
+
+        def source_path_segments_are_normalized(file: SourceFile) -> bool:
+            return false if file.path_bytes[0] == SOURCE_PATH_SLASH or file.path_bytes[file.path_length - 1] == SOURCE_PATH_SLASH or source_path_has_drive_prefix(file)
+            segment_start: mutable usize = 0
+            for index in 0..<file.path_length:
+                byte: u8 = file.path_bytes[index]
+                return false if byte == SOURCE_PATH_BACKSLASH
+                if byte == SOURCE_PATH_SLASH:
+                    segment_length: usize = index - segment_start
+                    return false if segment_length == SOURCE_PATH_EMPTY
+                    return false if segment_length == SOURCE_PATH_SINGLE_DOT_LENGTH and file.path_bytes[segment_start] == SOURCE_PATH_DOT
+                    return false if segment_length == SOURCE_PATH_PARENT_SEGMENT_LENGTH and file.path_bytes[segment_start] == SOURCE_PATH_DOT and file.path_bytes[segment_start + 1] == SOURCE_PATH_DOT
+                    segment_start <- index + 1
+            final_segment_length: usize = file.path_length - segment_start
+            return false if final_segment_length == SOURCE_PATH_EMPTY
+            return false if final_segment_length == SOURCE_PATH_SINGLE_DOT_LENGTH and file.path_bytes[segment_start] == SOURCE_PATH_DOT
+            return false if final_segment_length == SOURCE_PATH_PARENT_SEGMENT_LENGTH and file.path_bytes[segment_start] == SOURCE_PATH_DOT and file.path_bytes[segment_start + 1] == SOURCE_PATH_DOT
+            return true
+
+        def source_file_path_is_valid(file: SourceFile) -> bool:
+            return false if file.path_length == SOURCE_PATH_EMPTY or file.path_length > SOURCE_PATH_CAPACITY
+            return source_path_utf8_is_valid(file.path_bytes[0], file.path_length) and source_path_segments_are_normalized(file)
+
+        def source_file_paths_equal(left: SourceFile, right: SourceFile) -> bool:
+            return false if left.path_length != right.path_length
+            return false if left.path_length > SOURCE_PATH_CAPACITY or right.path_length > SOURCE_PATH_CAPACITY
+            for index in 0..<left.path_length:
+                return false if left.path_bytes[index] != right.path_bytes[index]
+            return true
+
         def source_file_is_valid(file: SourceFile) -> bool:
-            return file.id.value != SOURCE_NO_FILE and file.logical_path.value != SOURCE_NO_FILE and file.content.value != SOURCE_NO_FILE and file.line_count > 0
+            return file.id.value != SOURCE_NO_FILE and file.logical_path.value != SOURCE_NO_FILE and file.content.value != SOURCE_NO_FILE and file.line_count > 0 and source_file_path_is_valid(file)
 
         def function_info_is_valid(function: FunctionInfo) -> bool:
             return function.id.value != SOURCE_NO_FILE and function.name.value != SOURCE_NO_FILE and source_span_is_valid(function.source)

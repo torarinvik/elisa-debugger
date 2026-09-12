@@ -5,19 +5,55 @@ const PROGRAM_VERSION: u32 = 1
 const INSTRUCTION_COUNT: u64 = 3
 const LOCAL_COUNT: u64 = 1
 const ENTRY_CONSTANT: i64 = 7
-const ENTRY_OPCODE_OFFSET: usize = 25
+const EDIR_HEADER_BYTES: usize = 29
+const EDIR_U16_FIELD_BYTES: usize = 2
+const EDIR_U32_FIELD_BYTES: usize = 4
+const EDIR_U64_FIELD_BYTES: usize = 8
+const SOURCE_FILE_FIXED_BYTES: usize = 36
+const SOURCE_FILE_ROW_MAX_BYTES: usize = SOURCE_FILE_FIXED_BYTES + DebuggerMetadata::SOURCE_PATH_CAPACITY
+const SOURCE_PATH_LENGTH: usize = 10
+const SOURCE_PATH_BYTES: u8[SOURCE_PATH_LENGTH] = [109, 97, 105, 110, 46, 101, 108, 105, 115, 97]
+const ENTRY_OPCODE_OFFSET: usize = EDIR_HEADER_BYTES + SOURCE_FILE_FIXED_BYTES + SOURCE_PATH_LENGTH
+const SOURCE_FILE_COUNT_OFFSET: usize = EDIR_HEADER_BYTES - EDIR_U32_FIELD_BYTES
+const SOURCE_FILE_PATH_OFFSET: usize = EDIR_HEADER_BYTES + SOURCE_FILE_FIXED_BYTES
+const SOURCE_FILE_LINE_COUNT_OFFSET: usize = EDIR_HEADER_BYTES + EDIR_U64_FIELD_BYTES * 3
+const SOURCE_FILE_PATH_LENGTH_OFFSET: usize = EDIR_HEADER_BYTES + EDIR_U64_FIELD_BYTES * 4
+const ENTRY_SOURCE_FILE_OFFSET: usize = ENTRY_OPCODE_OFFSET + EDIR_U16_FIELD_BYTES + EDIR_U64_FIELD_BYTES * 2
+const SECOND_MAX_SOURCE_ROW_OFFSET: usize = EDIR_HEADER_BYTES + SOURCE_FILE_ROW_MAX_BYTES
+const SECOND_MAX_SOURCE_PATH_OFFSET: usize = SECOND_MAX_SOURCE_ROW_OFFSET + SOURCE_FILE_FIXED_BYTES
+const SOURCE_FILE_COUNT_ONE: usize = 1
+const SOURCE_FILE_COUNT_TWO: usize = 2
 const INVALID_OPCODE_BYTE: u8 = 255
+const INVALID_PATH_BYTE: u8 = 92
+const INVALID_UTF8_BYTE: u8 = 255
+const DRIVE_PATH_LENGTH: usize = 10
+const DRIVE_PATH_BYTES: u8[DRIVE_PATH_LENGTH] = [67, 58, 47, 97, 46, 101, 108, 105, 115, 97]
 const SOURCE_FILE: u64 = 11
+const SOURCE_LOGICAL_PATH: u64 = 12
+const SOURCE_CONTENT_DIGEST: u64 = 13
+const SOURCE_LINE_COUNT: u64 = 2
 const SOURCE_START_BYTE: u64 = 4
 const SOURCE_END_BYTE: u64 = 5
 const SOURCE_LINE: u32 = 2
 const SOURCE_COLUMN: u32 = 3
 const SOURCE_DISCRIMINATOR: u32 = 1
 const MAX_ARTIFACT_INSTRUCTIONS: usize = 128
-const MAX_ARTIFACT_BYTES: usize = 7961
+const MAX_ARTIFACT_SOURCE_FILES: usize = 16
+const MAX_ARTIFACT_BYTES: usize = 24925
+const FIRST_SOURCE_INDEX: usize = 0
+const DUPLICATE_SOURCE_INDEX: usize = 1
+const SOURCE_ID_BASE: u64 = 100
+const SOURCE_PATH_ID_BASE: u64 = 200
+const SOURCE_DIGEST_ID: u64 = 300
+const PATH_FILL_BYTE: u8 = 97
+const LEGACY_SCHEMA_VALUE: u8 = 1
+const MAX_SOURCE_FILE_COUNT_PLUS_ONE: u8 = 17
+const OVERSIZE_PATH_LENGTH_LOW_BYTE: u8 = 1
+const OVERSIZE_PATH_LENGTH_HIGH_BYTE: u8 = 4
 
 def main() -> i64:
     return 6 if DebuggerEDIRCodec::artifact_max_instruction_count() != MAX_ARTIFACT_INSTRUCTIONS or DebuggerEDIRCodec::artifact_max_bytes() != MAX_ARTIFACT_BYTES
+    return 9 if DebuggerEDIRCodec::artifact_max_source_file_count() != MAX_ARTIFACT_SOURCE_FILES or DebuggerEDIRCodec::artifact_source_path_capacity() != DebuggerMetadata::source_path_capacity()
     source: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{
         file: DebuggerIdentity::debug_id(SOURCE_FILE),
         start_byte: SOURCE_START_BYTE,
@@ -30,6 +66,16 @@ def main() -> i64:
     }
     image: mutable DebuggerEDIR::ProgramImage = zeroed
     image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: INSTRUCTION_COUNT, local_count: LOCAL_COUNT, has_return: true}
+    image.source_file_count <- SOURCE_FILE_COUNT_ONE
+    source_file: mutable DebuggerMetadata::SourceFile = zeroed
+    source_file.id <- DebuggerIdentity::debug_id(SOURCE_FILE)
+    source_file.logical_path <- DebuggerIdentity::debug_id(SOURCE_LOGICAL_PATH)
+    source_file.content <- DebuggerIdentity::debug_id(SOURCE_CONTENT_DIGEST)
+    source_file.line_count <- SOURCE_LINE_COUNT
+    source_file.path_length <- SOURCE_PATH_LENGTH
+    for path_index in 0..<SOURCE_PATH_LENGTH:
+        source_file.path_bytes[path_index] <- SOURCE_PATH_BYTES[path_index]
+    image.source_files[FIRST_SOURCE_INDEX] <- source_file
     image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: ENTRY_CONSTANT, b: 0, source: source}
     image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: 0, b: 0, source: source}
     image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: source}
@@ -39,6 +85,10 @@ def main() -> i64:
     decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(reader)
     return 2 if not decoded.valid or decoded.image.program.instruction_count != INSTRUCTION_COUNT or decoded.image.instructions[0].opcode != DebuggerEDIR::Opcode.Constant or decoded.image.instructions[0].a != ENTRY_CONSTANT
     return 3 if decoded.image.instructions[0].source.file.value != SOURCE_FILE or decoded.image.instructions[0].source.start_line != SOURCE_LINE or decoded.image.instructions[0].source.discriminator != SOURCE_DISCRIMINATOR
+    return 10 if decoded.image.source_file_count != 1 or decoded.image.source_files[FIRST_SOURCE_INDEX].path_length != SOURCE_PATH_LENGTH
+    return 11 if decoded.image.source_files[FIRST_SOURCE_INDEX].id.value != SOURCE_FILE or decoded.image.source_files[FIRST_SOURCE_INDEX].logical_path.value != SOURCE_LOGICAL_PATH or decoded.image.source_files[FIRST_SOURCE_INDEX].content.value != SOURCE_CONTENT_DIGEST or decoded.image.source_files[FIRST_SOURCE_INDEX].line_count != SOURCE_LINE_COUNT
+    for index in 0..<SOURCE_PATH_LENGTH:
+        return 12 if decoded.image.source_files[FIRST_SOURCE_INDEX].path_bytes[index] != SOURCE_PATH_BYTES[index]
     invalid: mutable DebuggerTraceBinary::ByteWriter = encoded
     invalid.bytes[ENTRY_OPCODE_OFFSET] <- INVALID_OPCODE_BYTE
     invalid_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid.bytes[0], invalid.length)
@@ -46,8 +96,77 @@ def main() -> i64:
     short_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], ENTRY_OPCODE_OFFSET)
     short_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(short_reader)
     return 5 if short_decoded.valid
+    legacy: mutable DebuggerTraceBinary::ByteWriter = encoded
+    legacy.bytes[0] <- LEGACY_SCHEMA_VALUE
+    legacy_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(legacy.bytes[0], legacy.length)
+    legacy_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(legacy_reader)
+    legacy_validity_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(legacy.bytes[0], legacy.length)
+    return 13 if legacy_decoded.valid or DebuggerEDIRCodec::artifact_is_valid(legacy_validity_reader)
+    unknown_file: mutable DebuggerEDIR::ProgramImage = image
+    unknown_file.instructions[0].source.file <- DebuggerIdentity::debug_id(SOURCE_FILE + 1)
+    unknown_file_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(unknown_file)
+    return 14 if DebuggerTraceBinary::writer_is_valid(unknown_file_encoded)
+    out_of_range_line: mutable DebuggerEDIR::ProgramImage = image
+    out_of_range_line.source_files[FIRST_SOURCE_INDEX].line_count <- SOURCE_LINE - 1
+    out_of_range_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(out_of_range_line)
+    return 15 if DebuggerTraceBinary::writer_is_valid(out_of_range_encoded)
+    duplicate_id: mutable DebuggerEDIR::ProgramImage = image
+    duplicate_id.source_file_count <- SOURCE_FILE_COUNT_TWO
+    duplicate_id.source_files[DUPLICATE_SOURCE_INDEX] <- image.source_files[FIRST_SOURCE_INDEX]
+    duplicate_id_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(duplicate_id)
+    return 16 if DebuggerTraceBinary::writer_is_valid(duplicate_id_encoded)
+    too_many_source_rows: mutable DebuggerEDIR::ProgramImage = image
+    too_many_source_rows.source_file_count <- MAX_ARTIFACT_SOURCE_FILES + 1
+    too_many_source_rows_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(too_many_source_rows)
+    return 28 if DebuggerTraceBinary::writer_is_valid(too_many_source_rows_encoded)
+    invalid_path: mutable DebuggerEDIR::ProgramImage = image
+    invalid_path.source_files[FIRST_SOURCE_INDEX].path_length <- DebuggerMetadata::source_path_capacity() + 1
+    invalid_path_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(invalid_path)
+    return 17 if DebuggerTraceBinary::writer_is_valid(invalid_path_encoded)
+    invalid_serialized_path: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_serialized_path.bytes[SOURCE_FILE_PATH_OFFSET] <- INVALID_PATH_BYTE
+    invalid_serialized_path_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_path.bytes[0], invalid_serialized_path.length)
+    return 18 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_path_reader)
+    invalid_serialized_utf8: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_serialized_utf8.bytes[SOURCE_FILE_PATH_OFFSET] <- INVALID_UTF8_BYTE
+    invalid_serialized_utf8_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_utf8.bytes[0], invalid_serialized_utf8.length)
+    return 19 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_utf8_reader)
+    invalid_serialized_drive_path: mutable DebuggerTraceBinary::ByteWriter = encoded
+    for path_index in 0..<DRIVE_PATH_LENGTH:
+        invalid_serialized_drive_path.bytes[SOURCE_FILE_PATH_OFFSET + path_index] <- DRIVE_PATH_BYTES[path_index]
+    invalid_serialized_drive_path_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_drive_path.bytes[0], invalid_serialized_drive_path.length)
+    return 27 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_drive_path_reader)
+    invalid_serialized_source: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_serialized_source.bytes[ENTRY_SOURCE_FILE_OFFSET] <- (SOURCE_FILE + 1).u8()
+    invalid_serialized_source_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_source.bytes[0], invalid_serialized_source.length)
+    return 20 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_source_reader)
+    invalid_serialized_line_count: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_serialized_line_count.bytes[SOURCE_FILE_LINE_COUNT_OFFSET] <- (SOURCE_LINE - 1).u8()
+    invalid_serialized_line_count_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_line_count.bytes[0], invalid_serialized_line_count.length)
+    return 21 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_line_count_reader)
+    invalid_serialized_source_count: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_serialized_source_count.bytes[SOURCE_FILE_COUNT_OFFSET] <- MAX_SOURCE_FILE_COUNT_PLUS_ONE
+    invalid_serialized_source_count_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_source_count.bytes[0], invalid_serialized_source_count.length)
+    return 22 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_source_count_reader)
+    invalid_serialized_path_length: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_serialized_path_length.bytes[SOURCE_FILE_PATH_LENGTH_OFFSET] <- OVERSIZE_PATH_LENGTH_LOW_BYTE
+    invalid_serialized_path_length.bytes[SOURCE_FILE_PATH_LENGTH_OFFSET + 1] <- OVERSIZE_PATH_LENGTH_HIGH_BYTE
+    invalid_serialized_path_length_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_path_length.bytes[0], invalid_serialized_path_length.length)
+    return 23 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_path_length_reader)
     max_image: mutable DebuggerEDIR::ProgramImage = zeroed
     max_image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: MAX_ARTIFACT_INSTRUCTIONS.u64(), local_count: 0, has_return: true}
+    max_image.source_file_count <- MAX_ARTIFACT_SOURCE_FILES
+    for source_index in 0..<MAX_ARTIFACT_SOURCE_FILES:
+        max_file: mutable DebuggerMetadata::SourceFile = zeroed
+        max_file.id <- DebuggerIdentity::debug_id(SOURCE_ID_BASE + source_index.u64())
+        max_file.logical_path <- DebuggerIdentity::debug_id(SOURCE_PATH_ID_BASE + source_index.u64())
+        max_file.content <- DebuggerIdentity::debug_id(SOURCE_DIGEST_ID)
+        max_file.line_count <- SOURCE_LINE_COUNT
+        max_file.path_length <- DebuggerMetadata::source_path_capacity()
+        for path_index in 0..<max_file.path_length:
+            max_file.path_bytes[path_index] <- PATH_FILL_BYTE
+        max_file.path_bytes[max_file.path_length - 1] <- (PATH_FILL_BYTE.u64() + source_index.u64()).u8()
+        max_image.source_files[source_index] <- max_file
     for index in 0..<MAX_ARTIFACT_INSTRUCTIONS:
         max_image.instructions[index] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: 0, b: 0, source: zeroed}
     max_image.instructions[MAX_ARTIFACT_INSTRUCTIONS - 1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
@@ -55,4 +174,16 @@ def main() -> i64:
     return 7 if not DebuggerTraceBinary::writer_is_valid(max_encoded) or max_encoded.length != MAX_ARTIFACT_BYTES
     max_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(max_encoded.bytes[0], max_encoded.length)
     return 8 if not DebuggerEDIRCodec::artifact_is_valid(max_reader)
+    duplicate_serialized_id: mutable DebuggerTraceBinary::ByteWriter = max_encoded
+    duplicate_serialized_id.bytes[SECOND_MAX_SOURCE_ROW_OFFSET] <- SOURCE_ID_BASE.u8()
+    duplicate_serialized_id_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(duplicate_serialized_id.bytes[0], duplicate_serialized_id.length)
+    return 24 if DebuggerEDIRCodec::artifact_is_valid(duplicate_serialized_id_reader)
+    duplicate_serialized_path: mutable DebuggerTraceBinary::ByteWriter = max_encoded
+    duplicate_serialized_path.bytes[SECOND_MAX_SOURCE_PATH_OFFSET + DebuggerMetadata::source_path_capacity() - 1] <- PATH_FILL_BYTE
+    duplicate_serialized_path_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(duplicate_serialized_path.bytes[0], duplicate_serialized_path.length)
+    return 25 if DebuggerEDIRCodec::artifact_is_valid(duplicate_serialized_path_reader)
+    duplicate_serialized_logical_id: mutable DebuggerTraceBinary::ByteWriter = max_encoded
+    duplicate_serialized_logical_id.bytes[SECOND_MAX_SOURCE_ROW_OFFSET + EDIR_U64_FIELD_BYTES] <- SOURCE_PATH_ID_BASE.u8()
+    duplicate_serialized_logical_id_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(duplicate_serialized_logical_id.bytes[0], duplicate_serialized_logical_id.length)
+    return 26 if DebuggerEDIRCodec::artifact_is_valid(duplicate_serialized_logical_id_reader)
     return 0

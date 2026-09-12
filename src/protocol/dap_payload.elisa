@@ -2,6 +2,8 @@
 # the memory fields needed by readMemory and never treats arbitrary JSON text as
 # an address or a length.
 
+include "../metadata/source.elisa"
+
 module DebuggerDAPPayload:
     private:
         const ASCII_QUOTE: u8 = 34
@@ -32,6 +34,7 @@ module DebuggerDAPPayload:
         const ASCII_K: u8 = 107
         const ASCII_R: u8 = 114
         const ASCII_UPPER_R: u8 = 82
+        const ASCII_UPPER_P: u8 = 80
         const ASCII_T: u8 = 116
         const ASCII_U: u8 = 117
         const ASCII_V: u8 = 118
@@ -78,7 +81,11 @@ module DebuggerDAPPayload:
         const CONDITION_FIELD: u8 = 16
         const HIT_CONDITION_FIELD: u8 = 17
         const LOG_MESSAGE_FIELD: u8 = 18
-        const PROGRAM_PATH_CAPACITY: usize = 1024
+        const SOURCE_PATH_FIELD: u8 = 19
+        const SOURCE_PATH_ROOT_FIELD: u8 = 20
+        const NO_SOURCE_REFERENCE: u64 = 0
+        const DAP_PATH_COMPONENT_CAPACITY: usize = DebuggerMetadata::SOURCE_PATH_CAPACITY
+        const PROGRAM_PATH_CAPACITY: usize = DebuggerMetadata::MAPPED_SOURCE_PATH_CAPACITY
         const DAP_SOURCE_BREAKPOINT_LIMIT: usize = 256
         const PROGRAM_FIELD_LENGTH: usize = 7
         const ARGUMENTS_FIELD_LENGTH: usize = 9
@@ -95,6 +102,8 @@ module DebuggerDAPPayload:
         const CONDITION_FIELD_LENGTH: usize = 9
         const HIT_CONDITION_FIELD_LENGTH: usize = 12
         const LOG_MESSAGE_FIELD_LENGTH: usize = 10
+        const SOURCE_PATH_FIELD_LENGTH: usize = 4
+        const SOURCE_PATH_ROOT_FIELD_LENGTH: usize = 14
         const MAX_U32_INTEGER: u64 = 4294967295
         const JSON_TRUE_LENGTH: usize = 4
         const JSON_FALSE_LENGTH: usize = 5
@@ -169,6 +178,8 @@ module DebuggerDAPPayload:
             return CONDITION_FIELD_LENGTH if field == CONDITION_FIELD
             return HIT_CONDITION_FIELD_LENGTH if field == HIT_CONDITION_FIELD
             return LOG_MESSAGE_FIELD_LENGTH if field == LOG_MESSAGE_FIELD
+            return SOURCE_PATH_FIELD_LENGTH if field == SOURCE_PATH_FIELD
+            return SOURCE_PATH_ROOT_FIELD_LENGTH if field == SOURCE_PATH_ROOT_FIELD
             return LINES_START_AT_ONE_FIELD_LENGTH if field == LINES_START_AT_ONE_FIELD
             return COLUMNS_START_AT_ONE_FIELD_LENGTH if field == COLUMNS_START_AT_ONE_FIELD
             return VARIABLES_REFERENCE_FIELD_LENGTH if field == VARIABLES_REFERENCE_FIELD
@@ -186,6 +197,26 @@ module DebuggerDAPPayload:
                 return ASCII_R if position == 3
                 return ASCII_C if position == 4
                 return ASCII_E
+            if field == SOURCE_PATH_FIELD:
+                return ASCII_P if position == 0
+                return ASCII_A if position == 1
+                return ASCII_T if position == 2
+                return ASCII_H
+            if field == SOURCE_PATH_ROOT_FIELD:
+                return ASCII_S if position == 0
+                return ASCII_O if position == 1
+                return ASCII_U if position == 2
+                return ASCII_R if position == 3
+                return ASCII_C if position == 4
+                return ASCII_E if position == 5
+                return ASCII_UPPER_P if position == 6
+                return ASCII_A if position == 7
+                return ASCII_T if position == 8
+                return ASCII_H if position == 9
+                return ASCII_UPPER_R if position == 10
+                return ASCII_O if position == 11
+                return ASCII_O if position == 12
+                return ASCII_T
             if field == SOURCE_REFERENCE_FIELD:
                 return ASCII_S if position == 0
                 return ASCII_O if position == 1
@@ -747,8 +778,16 @@ module DebuggerDAPPayload:
         struct SourceBreakpointsRequest:
             valid: mutable bool
             source_reference: mutable u64
+            has_source_reference: mutable bool
+            source_path: mutable ProgramPath
+            has_source_path: mutable bool
             lines: mutable u32[DAP_SOURCE_BREAKPOINT_LIMIT]
             count: mutable usize
+
+        struct SourcePathRootRequest:
+            valid: mutable bool
+            root: mutable ProgramPath
+            has_root: mutable bool
 
         def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64) -> bool:
             return false if request.count >= DAP_SOURCE_BREAKPOINT_LIMIT or line > MAX_U32_INTEGER
@@ -795,9 +834,9 @@ module DebuggerDAPPayload:
                 return false if lookahead >= length or payload[lookahead] == ASCII_BRACKET_CLOSE
             return false
 
-        # A sourceReference is the explicit EDIR source-file DebugId. The
-        # current artifact format has no path table, so paths alone are not
-        # guessed or hashed into source identities.
+        # A sourceReference is the explicit EDIR source-file DebugId. Paths
+        # are resolved only against an artifact's source table; never hash an
+        # editor path into a guessed source identity.
         def source_breakpoints_request_parse(payload: u8&, length: usize) -> SourceBreakpointsRequest:
             request: mutable SourceBreakpointsRequest = zeroed
             root_start: mutable usize = 0
@@ -813,16 +852,33 @@ module DebuggerDAPPayload:
             return request if object_field_value_start(payload, length, arguments, SOURCE_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, arguments, BREAKPOINTS_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, arguments, LINES_FIELD, 1) != NO_INDEX
             return request if breakpoints != NO_INDEX and lines != NO_INDEX
             source_reference: usize = object_field_value_start(payload, length, source, SOURCE_REFERENCE_FIELD, 0)
-            return request if source_reference == NO_INDEX or object_field_value_start(payload, length, source, SOURCE_REFERENCE_FIELD, 1) != NO_INDEX
-            parsed_reference: ParsedValue = parse_unsigned_bounded(payload, length, source_reference, MAX_INTEGER)
-            return request if not parsed_reference.valid or parsed_reference.value == 0
-            request.source_reference <- parsed_reference.value
+            source_path_start: usize = object_field_value_start(payload, length, source, SOURCE_PATH_FIELD, 0)
+            return request if object_field_value_start(payload, length, source, SOURCE_REFERENCE_FIELD, 1) != NO_INDEX or object_field_value_start(payload, length, source, SOURCE_PATH_FIELD, 1) != NO_INDEX
+            if source_reference != NO_INDEX:
+                parsed_reference: ParsedValue = parse_source_reference(payload, length, source_reference)
+                return request if not parsed_reference.valid
+                request.source_reference <- parsed_reference.value
+                request.has_source_reference <- true
+            if source_path_start != NO_INDEX:
+                request.source_path <- parse_program_path_string(payload, length, source_path_start)
+                return request if not request.source_path.valid
+                request.has_source_path <- true
+            return request if not request.has_source_reference and not request.has_source_path
+            return request if request.source_reference == NO_SOURCE_REFERENCE and not request.has_source_path
             if breakpoints != NO_INDEX:
                 return request if not source_breakpoints_parse_array(payload, length, breakpoints, request, true)
             if lines != NO_INDEX:
                 return request if not source_breakpoints_parse_array(payload, length, lines, request, false)
             request.valid <- true
             return request
+
+        def parse_source_reference(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start >= length
+            if payload[start] == ASCII_ZERO:
+                end: usize = start + FIRST_DIGIT_COUNT
+                return invalid_value() if end < length and not is_whitespace(payload[end]) and payload[end] != ASCII_COMMA and payload[end] != ASCII_BRACE_CLOSE and payload[end] != ASCII_BRACKET_CLOSE
+                return ParsedValue{valid: true, value: 0, end: end}
+            return parse_unsigned_bounded(payload, length, start, MAX_INTEGER)
 
         # Decode only the direct DAP arguments used for paged variable
         # inspection. Nested decoys and duplicate properties are rejected.
@@ -895,7 +951,33 @@ module DebuggerDAPPayload:
             return result if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
             program: usize = object_field_value_start(payload, length, arguments, PROGRAM_FIELD, 0)
             return result if program == NO_INDEX or object_field_value_start(payload, length, arguments, PROGRAM_FIELD, 1) != NO_INDEX
-            return parse_program_path_string(payload, length, program)
+            parsed: ProgramPath = parse_program_path_string(payload, length, program)
+            return invalid_program_path() if not parsed.valid or parsed.length > DAP_PATH_COMPONENT_CAPACITY
+            return parsed
+
+        def source_path_root_parse(payload: u8&, length: usize) -> SourcePathRootRequest:
+            request: mutable SourcePathRootRequest = zeroed
+            request.valid <- true
+            root_start: mutable usize = 0
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 0)
+            if object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 1) != NO_INDEX:
+                request.valid <- false
+                return request
+            return request if arguments == NO_INDEX
+            if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN:
+                request.valid <- false
+                return request
+            root: usize = object_field_value_start(payload, length, arguments, SOURCE_PATH_ROOT_FIELD, 0)
+            if object_field_value_start(payload, length, arguments, SOURCE_PATH_ROOT_FIELD, 1) != NO_INDEX:
+                request.valid <- false
+                return request
+            return request if root == NO_INDEX
+            request.root <- parse_program_path_string(payload, length, root)
+            request.valid <- request.root.valid and request.root.length <= DAP_PATH_COMPONENT_CAPACITY
+            request.has_root <- request.root.valid
+            return request
 
         def client_coordinates_default() -> ClientCoordinates:
             return ClientCoordinates{valid: true, lines_start_at_one: true, columns_start_at_one: true}

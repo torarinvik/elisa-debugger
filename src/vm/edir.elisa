@@ -3,12 +3,16 @@
 # future trace loading and remote execution.
 
 include "../core/identity.elisa"
+include "../metadata/source.elisa"
 
 module DebuggerEDIR:
     private:
         const EDIR_PROGRAM_VERSION: u32 = 1
         const EDIR_OPCODE_MAX: u16 = 19
         const EDIR_MAX_INSTRUCTIONS: usize = 256
+        const EDIR_MAX_SOURCE_FILES: usize = 16
+        const EDIR_NO_SOURCE_FILE_ID: u64 = 0
+        const EDIR_NO_SOURCE_LINE: u32 = 0
         const EDIR_MAX_LOCALS: usize = 32
         const EDIR_MAX_LOCALS_INDEX: i64 = 32
         const EDIR_MAX_GLOBALS: usize = 16
@@ -55,7 +59,33 @@ module DebuggerEDIR:
             return false if source.start_line == source.end_line and source.end_column < source.start_column
             return true
 
+        def source_file_index(image: ProgramImage, file_id: DebuggerIdentity::DebugId) -> usize:
+            return EDIR_MAX_SOURCE_FILES if image.source_file_count > EDIR_MAX_SOURCE_FILES
+            for index in 0..<image.source_file_count:
+                return index if image.source_files[index].id.value == file_id.value
+            return EDIR_MAX_SOURCE_FILES
+
+        def source_file_table_is_valid(image: ProgramImage) -> bool:
+            return false if image.source_file_count > EDIR_MAX_SOURCE_FILES
+            for index in 0..<image.source_file_count:
+                file: DebuggerMetadata::SourceFile = image.source_files[index]
+                return false if not DebuggerMetadata::source_file_is_valid(file)
+                for previous in 0..<index:
+                    prior: DebuggerMetadata::SourceFile = image.source_files[previous]
+                    return false if prior.id.value == file.id.value or prior.logical_path.value == file.logical_path.value
+                    return false if DebuggerMetadata::source_file_paths_equal(prior, file)
+            for index in 0..<image.program.instruction_count.usize():
+                span: DebuggerIdentity::SourceSpan = image.instructions[index].source
+                continue if span.file.value == EDIR_NO_SOURCE_FILE_ID
+                file_index: usize = source_file_index(image, span.file)
+                return false if file_index == EDIR_MAX_SOURCE_FILES
+                file: DebuggerMetadata::SourceFile = image.source_files[file_index]
+                return false if span.start_line == EDIR_NO_SOURCE_LINE or span.end_line == EDIR_NO_SOURCE_LINE or span.start_line.u64() > file.line_count or span.end_line.u64() > file.line_count
+            return true
+
     public:
+        const EDIR_SOURCE_FILE_CAPACITY: usize = EDIR_MAX_SOURCE_FILES
+
         enum Opcode:
             Nop
             Constant
@@ -88,6 +118,7 @@ module DebuggerEDIR:
             UninitializedLocal
             MissingReturn
             InvalidSourceRange
+            InvalidSourceTable
             InvalidCallDepth
 
         struct Instruction:
@@ -105,6 +136,8 @@ module DebuggerEDIR:
         struct ProgramImage:
             program: mutable Program
             instructions: mutable Instruction[EDIR_MAX_INSTRUCTIONS]
+            source_file_count: mutable usize
+            source_files: mutable DebuggerMetadata::SourceFile[EDIR_MAX_SOURCE_FILES]
 
         struct Verification:
             valid: mutable bool
@@ -132,6 +165,9 @@ module DebuggerEDIR:
 
         def frame_local_slot(depth: usize, local: usize) -> usize:
             return depth * EDIR_MAX_LOCALS + local
+
+        def source_file_capacity() -> usize:
+            return EDIR_SOURCE_FILE_CAPACITY
 
         def frame_save(machine: mutable Machine&, depth: usize) -> void:
             return if depth >= EDIR_MAX_CALL_DEPTH
@@ -315,6 +351,12 @@ module DebuggerEDIR:
             initialization_verification: Verification = verify_local_initialization(image)
             return initialization_verification if not initialization_verification.valid
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
+
+        def verify_image_with_source_table(image: mutable ProgramImage&) -> Verification:
+            verification: Verification = verify_image(image)
+            return verification if not verification.valid
+            return verification_failure(VerificationError.InvalidSourceTable, EDIR_NO_SOURCE_FILE_ID) if not source_file_table_is_valid(image)
+            return verification
 
         def machine_new() -> Machine:
             machine: Machine = zeroed

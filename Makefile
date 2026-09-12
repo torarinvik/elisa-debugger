@@ -18,6 +18,7 @@ endif
 ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_LINK="$(ELISA_LINK_FLAGS)"
 BUILD ?= build
 IDLESS_LAUNCH_PAYLOAD_LENGTH := 19
+DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH := 45
 # The sibling compiler checkout may contain unrelated uncommitted source edits.
 # Keep the local debugger build usable by default; CI can set this to 0 for the
 # strict product-freshness gate.
@@ -463,6 +464,7 @@ smoke: check server dap-server cli ffi-check
 	dap_unwired=$$(printf 'Content-Length: 45\r\n\r\n{"seq":1,"type":"request","command":"launch"}Content-Length: 47\r\n\r\n{"seq":2,"type":"request","command":"evaluate"}Content-Length: 53\r\n\r\n{"seq":3,"type":"request","command":"setBreakpoints"}Content-Length: 57\r\n\r\n{"seq":4,"type":"request","command":"setDataBreakpoints"}Content-Length: 61\r\n\r\n{"seq":5,"type":"request","command":"setFunctionBreakpoints"}' | "$(BUILD)/elisa-debugger-dap-server"); echo "$$dap_unwired" | grep -F '"command":"evaluate","success":false'; echo "$$dap_unwired" | grep -F '"command":"setBreakpoints","success":false'; echo "$$dap_unwired" | grep -F '"command":"setDataBreakpoints","success":false'; echo "$$dap_unwired" | grep -F '"command":"setFunctionBreakpoints","success":false'
 	printf 'Content-Length: 41\r\n\r\n{"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 48\r\n\r\n{"seq":1,"type":"request","command":"initialize"' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
+	printf 'Content-Length: $(DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH)\r\n\r\n{"seq":0,"type":"request","command":"launch"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 50\r\n\r\n{"seq":1,"type":"request","command":"initialize"}x' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 50\r\n\r\n{"seq":01,"type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2
 	printf 'Content-Length: 49\r\n\r\n{"seq":1 "type":"request","command":"initialize"}' | "$(BUILD)/elisa-debugger-dap-server" >/dev/null; test "$$?" -eq 2

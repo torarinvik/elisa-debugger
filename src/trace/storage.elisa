@@ -15,6 +15,7 @@ module DebuggerTraceStorage:
         const TRACE_MAGIC_1: u8 = 76
         const TRACE_MAGIC_2: u8 = 84
         const TRACE_MAGIC_3: u8 = 82
+        const TRACE_CHUNK_MAGIC_BYTES: usize = 4
         const TRACE_FORMAT_VERSION: u16 = 1
         const TRACE_FOOTER_MAGIC: u32 = 1380270920
         const TRACE_HEADER_BYTES: usize = 48
@@ -104,6 +105,10 @@ module DebuggerTraceStorage:
             return StorageStatus.Ready
 
     private:
+        def storage_has_chunk_magic_prefix(bytes: u8&, offset: usize, available: usize) -> bool:
+            return false if available < TRACE_CHUNK_MAGIC_BYTES
+            return bytes[offset] == TRACE_MAGIC_0 and bytes[offset + 1] == TRACE_MAGIC_1 and bytes[offset + 2] == TRACE_MAGIC_2 and bytes[offset + 3] == TRACE_MAGIC_3
+
         def storage_payload_checksum(bytes: u8&, length: usize) -> u64:
             checksum: mutable u64 = TRACE_HASH_OFFSET_BASIS
             for index in 0..<length:
@@ -326,7 +331,13 @@ module DebuggerTraceStorage:
             return StorageScan{status: StorageStatus.Invalid, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false} if length == 0
             offset: mutable usize = 0
             while offset < length:
-                if length - offset == TRACE_FOOTER_BYTES:
+                remaining: usize = length - offset
+                # A write can stop exactly where the footer would begin while
+                # having persisted only a prefix of the next chunk header. A
+                # chunk magic prefix is stronger evidence of a torn chunk than
+                # of a footer, so preserve the verified trace prefix as
+                # Truncated instead of treating those bytes as footer damage.
+                if remaining == TRACE_FOOTER_BYTES and not storage_has_chunk_magic_prefix(bytes, offset, remaining):
                     footer: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_FOOTER_BYTES)
                     footer_magic: u32 = DebuggerTraceBinary::reader_take_u32(footer)
                     footer_sequence: u64 = DebuggerTraceBinary::reader_take_u64(footer)
@@ -336,7 +347,7 @@ module DebuggerTraceStorage:
                     else:
                         scan.footer_verified <- true
                     return scan
-                if length - offset < TRACE_HEADER_BYTES:
+                if remaining < TRACE_HEADER_BYTES:
                     scan.status <- StorageStatus.Truncated
                     return scan
                 reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_HEADER_BYTES)

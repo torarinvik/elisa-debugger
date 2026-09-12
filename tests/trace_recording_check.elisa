@@ -46,6 +46,12 @@ const RESULT_LIMIT_EVENT_APPEND_FAILED: i64 = 23
 const RESULT_LIMIT_NOT_REPORTED: i64 = 24
 const RESULT_LIMIT_PREFIX_MISMATCH: i64 = 25
 const RESULT_LIMIT_PREFIX_SCAN_FAILED: i64 = 26
+const RESULT_TORN_NEXT_HEADER_ENCODE_FAILED: i64 = 28
+const RESULT_TORN_NEXT_HEADER_NOT_TRUNCATED: i64 = 29
+const RESULT_TORN_NEXT_HEADER_PREFIX_COUNT: i64 = 30
+const RESULT_TORN_NEXT_HEADER_EVENT: i64 = 31
+const RESULT_TORN_NEXT_HEADER_SEQUENCE: i64 = 32
+const RESULT_TORN_NEXT_HEADER_FOOTER: i64 = 33
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
@@ -114,6 +120,19 @@ def check_record_and_read_full_checkpoint() -> i64:
     append_trace_bytes(trace, footer)
     scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(trace.bytes[0], trace.length)
     return RESULT_CHECKPOINT_STORAGE_SCAN_FAILED if not DebuggerTraceBinary::writer_is_valid(trace) or scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified or scan.verified_chunks != recorder.chunk_count.u64() + TEST_FOOTER_SEQUENCE_OFFSET
+    torn_prefix: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_trace_chunk(torn_prefix, make_manifest_chunk(recorder.manifest))
+    append_trace_chunk(torn_prefix, recorder.chunks[TEST_FIRST_EVENT_CHUNK_INDEX])
+    following_chunk: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(recorder.chunks[TEST_CHECKPOINT_CHUNK_INDEX])
+    return RESULT_TORN_NEXT_HEADER_ENCODE_FAILED if not DebuggerTraceBinary::writer_is_valid(following_chunk) or following_chunk.length < footer.length
+    for index in 0..<footer.length:
+        torn_prefix <- DebuggerTraceBinary::writer_put_byte(torn_prefix, following_chunk.bytes[index])
+    torn_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(torn_prefix.bytes[0], torn_prefix.length)
+    return RESULT_TORN_NEXT_HEADER_NOT_TRUNCATED if torn_scan.status != DebuggerTraceStorage::StorageStatus.Truncated
+    return RESULT_TORN_NEXT_HEADER_PREFIX_COUNT if torn_scan.verified_chunks != TEST_FOOTER_SEQUENCE_OFFSET + 1
+    return RESULT_TORN_NEXT_HEADER_EVENT if torn_scan.verified_event != TEST_FIRST_EVENT
+    return RESULT_TORN_NEXT_HEADER_SEQUENCE if torn_scan.next_sequence != TEST_FOOTER_SEQUENCE_OFFSET + 1
+    return RESULT_TORN_NEXT_HEADER_FOOTER if torn_scan.footer_verified
     return 0
 
 def check_resource_limit_keeps_verified_prefix() -> i64:

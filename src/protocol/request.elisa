@@ -40,6 +40,12 @@ module DebuggerProtocolRequest:
         const ASCII_S: u8 = 115
         const REQUEST_HASH_MULTIPLIER: u64 = 31
         const DECIMAL_BASE: u64 = 10
+        const REQUEST_HEX_BASE: u64 = 16
+        const REQUEST_ASCII_MAX: u64 = 127
+        const REQUEST_UNICODE_ESCAPE_DIGITS: usize = 4
+        const REQUEST_UNICODE_ESCAPE_MARKER_BYTES: usize = 1
+        const REQUEST_FIRST_UNICODE_HEX_DIGIT_OFFSET: usize = 1
+        const REQUEST_HEX_LETTER_OFFSET: u64 = 10
         const MAX_REQUEST_INTEGER: u64 = 18446744073709551615
         const JSON_NESTING_CAPACITY: usize = 64
         const REQUEST_KEY_NONE: u8 = 0
@@ -186,6 +192,120 @@ module DebuggerProtocolRequest:
             return RequestMethod.Close if hash == HASH_CLOSE
             return RequestMethod.Cancel if hash == HASH_CANCEL
             return RequestMethod.Memory if hash == HASH_MEMORY
+            return RequestMethod.Unknown
+
+        def request_method_name(method: RequestMethod) -> cstr:
+            return "discover" if method == RequestMethod.Discover
+            return "initialize" if method == RequestMethod.Initialize
+            return "createSession" if method == RequestMethod.CreateSession
+            return "launch" if method == RequestMethod.Launch
+            return "attach" if method == RequestMethod.Attach
+            return "openTrace" if method == RequestMethod.OpenTrace
+            return "replay" if method == RequestMethod.Replay
+            return "pause" if method == RequestMethod.Pause
+            return "continue" if method == RequestMethod.Continue
+            return "step" if method == RequestMethod.Step
+            return "reverseStep" if method == RequestMethod.ReverseStep
+            return "seek" if method == RequestMethod.Seek
+            return "threads" if method == RequestMethod.Threads
+            return "stack" if method == RequestMethod.Stack
+            return "scopes" if method == RequestMethod.Scopes
+            return "variables" if method == RequestMethod.Variables
+            return "evaluate" if method == RequestMethod.Evaluate
+            return "setBreakpoints" if method == RequestMethod.SetBreakpoints
+            return "setDataBreakpoints" if method == RequestMethod.SetDataBreakpoints
+            return "checkpoint" if method == RequestMethod.Checkpoint
+            return "branch" if method == RequestMethod.Branch
+            return "compare" if method == RequestMethod.Compare
+            return "trace.verify" if method == RequestMethod.TraceVerify
+            return "trace.export" if method == RequestMethod.TraceExport
+            return "detach" if method == RequestMethod.Detach
+            return "terminate" if method == RequestMethod.Terminate
+            return "close" if method == RequestMethod.Close
+            return "cancel" if method == RequestMethod.Cancel
+            return "memory" if method == RequestMethod.Memory
+            return ""
+
+        def request_cstr_length(value: cstr) -> usize:
+            length: mutable usize = 0
+            while value[length] != 0:
+                length <- length + 1
+            return length
+
+        # Hashes are only a quick candidate lookup.  Compare the decoded JSON
+        # string with the canonical token before trusting the enum so a rolling
+        # hash collision cannot turn an unknown method into a real operation.
+        def request_method_json_string_matches(payload: u8&, start: usize, end: usize, expected: cstr) -> bool:
+            cursor: mutable usize = start
+            expected_index: mutable usize = 0
+            expected_length: usize = request_cstr_length(expected)
+            while cursor < end:
+                character: mutable u64 = 0
+                if payload[cursor] == ASCII_BACKSLASH:
+                    cursor <- cursor + 1
+                    return false if cursor >= end
+                    escape: u8 = payload[cursor]
+                    if escape == ASCII_U:
+                        return false if end - cursor <= REQUEST_UNICODE_ESCAPE_DIGITS
+                        for offset in REQUEST_FIRST_UNICODE_HEX_DIGIT_OFFSET..<(REQUEST_UNICODE_ESCAPE_DIGITS + REQUEST_UNICODE_ESCAPE_MARKER_BYTES):
+                            digit: u8 = payload[cursor + offset]
+                            hex_value: mutable u64 = 0
+                            if digit >= ASCII_ZERO and digit <= ASCII_NINE:
+                                hex_value <- (digit - ASCII_ZERO).u64()
+                            else:
+                                if digit >= ASCII_A and digit <= ASCII_F:
+                                    hex_value <- (digit - ASCII_A).u64() + REQUEST_HEX_LETTER_OFFSET
+                                else:
+                                    if digit >= ASCII_UPPER_A and digit <= ASCII_UPPER_F:
+                                        hex_value <- (digit - ASCII_UPPER_A).u64() + REQUEST_HEX_LETTER_OFFSET
+                                    else:
+                                        return false
+                            character <- character * REQUEST_HEX_BASE + hex_value
+                        cursor <- cursor + REQUEST_UNICODE_ESCAPE_DIGITS + REQUEST_UNICODE_ESCAPE_MARKER_BYTES
+                    else:
+                        # None of the canonical method names contains a JSON
+                        # escapable punctuation or control character.
+                        return false
+                else:
+                    character <- payload[cursor].u64()
+                    cursor <- cursor + 1
+                return false if character > REQUEST_ASCII_MAX
+                return false if expected_index >= expected_length
+                return false if expected[expected_index].u8().u64() != character
+                expected_index <- expected_index + 1
+            return expected_index == expected_length
+
+        def request_method_from_json_value(payload: u8&, start: usize, end: usize, hash_candidate: RequestMethod) -> RequestMethod:
+            return hash_candidate if hash_candidate != RequestMethod.Unknown and request_method_json_string_matches(payload, start, end, request_method_name(hash_candidate))
+            return RequestMethod.Discover if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Discover))
+            return RequestMethod.Initialize if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Initialize))
+            return RequestMethod.CreateSession if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.CreateSession))
+            return RequestMethod.Launch if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Launch))
+            return RequestMethod.Attach if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Attach))
+            return RequestMethod.OpenTrace if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.OpenTrace))
+            return RequestMethod.Replay if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Replay))
+            return RequestMethod.Pause if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Pause))
+            return RequestMethod.Continue if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Continue))
+            return RequestMethod.Step if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Step))
+            return RequestMethod.ReverseStep if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.ReverseStep))
+            return RequestMethod.Seek if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Seek))
+            return RequestMethod.Threads if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Threads))
+            return RequestMethod.Stack if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Stack))
+            return RequestMethod.Scopes if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Scopes))
+            return RequestMethod.Variables if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Variables))
+            return RequestMethod.Evaluate if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Evaluate))
+            return RequestMethod.SetBreakpoints if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.SetBreakpoints))
+            return RequestMethod.SetDataBreakpoints if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.SetDataBreakpoints))
+            return RequestMethod.Checkpoint if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Checkpoint))
+            return RequestMethod.Branch if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Branch))
+            return RequestMethod.Compare if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Compare))
+            return RequestMethod.TraceVerify if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.TraceVerify))
+            return RequestMethod.TraceExport if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.TraceExport))
+            return RequestMethod.Detach if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Detach))
+            return RequestMethod.Terminate if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Terminate))
+            return RequestMethod.Close if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Close))
+            return RequestMethod.Cancel if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Cancel))
+            return RequestMethod.Memory if request_method_json_string_matches(payload, start, end, request_method_name(RequestMethod.Memory))
             return RequestMethod.Unknown
 
         def is_numeric_terminator(byte: u8) -> bool:
@@ -458,6 +578,8 @@ module DebuggerProtocolRequest:
             method_field_seen: mutable bool = false
             method_hash: mutable u64 = 0
             method_length: mutable usize = 0
+            method_value_start: mutable usize = 0
+            method_value_escaped: mutable bool = false
             id_prefix: mutable u8[REQUEST_ID_PREFIX_LENGTH] = [ASCII_QUOTE, ASCII_I, ASCII_D, ASCII_QUOTE, ASCII_COLON]
             id_position: mutable usize = 0
             in_id: mutable bool = false
@@ -488,6 +610,8 @@ module DebuggerProtocolRequest:
                             in_method <- true
                             method_field_seen <- true
                             prefix_position <- 0
+                            method_value_start <- index + 1
+                            method_value_escaped <- false
                     else:
                         if not (is_json_whitespace(byte) and (prefix_position == REQUEST_METHOD_PREFIX_LENGTH - 2 or prefix_position == REQUEST_METHOD_PREFIX_LENGTH - 1)):
                             if byte == prefix[0] and not json_byte_is_escaped(payload, index):
@@ -495,11 +619,18 @@ module DebuggerProtocolRequest:
                             else:
                                 prefix_position <- 0
                 else:
-                    if byte == ASCII_QUOTE:
-                        request.method <- request_method_from_hash(method_hash)
-                        request.valid <- request.method != RequestMethod.Unknown
-                        in_method <- false
+                    if method_value_escaped:
+                        method_value_escaped <- false
                     else:
+                        if byte == ASCII_BACKSLASH:
+                            method_value_escaped <- true
+                        else:
+                            if byte == ASCII_QUOTE:
+                                candidate: RequestMethod = request_method_from_hash(method_hash)
+                                request.method <- request_method_from_json_value(payload, method_value_start, index, candidate)
+                                request.valid <- request.method != RequestMethod.Unknown
+                                in_method <- false
+                    if in_method:
                         method_hash <- request_hash_byte(method_hash, byte)
                         method_length <- method_length + 1
                         return invalid_request() if method_length > REQUEST_MAX_METHOD_LENGTH

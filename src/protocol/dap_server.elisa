@@ -34,6 +34,7 @@ module DebuggerDAPServer:
         const DAP_SERVER_SUCCESS_EXIT_CODE: i64 = 0
         const DAP_SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
         const DAP_NO_EXPECTED_GENERATION: u64 = 0
+        const DAP_UNKNOWN_COMMAND_HASH: u64 = 0
         const DAP_NO_SOURCE_FILE_ID: u64 = 0
         const DAP_NO_SOURCE_REFERENCE: u64 = 0
         const DAP_FALLBACK_REQUEST_ID: u64 = 1
@@ -101,6 +102,7 @@ module DebuggerDAPServer:
         const JSON_HEX_ALPHA_BASE: u64 = 10
         const JSON_HEX_BASE: u64 = 16
         const JSON_UNICODE_ESCAPE_DIGITS: usize = 4
+        const JSON_UNICODE_ESCAPE_MARKER_BYTES: usize = 1
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_L: u8 = 76
         const ASCII_UPPER_A: u8 = 65
@@ -529,6 +531,56 @@ module DebuggerDAPServer:
             decoded.hash <- 0 if not decoded.ascii_only or decoded.length > MAX_KNOWN_DAP_COMMAND_LENGTH
             return decoded
 
+        # Hashes accelerate dispatch, but exact decoded spelling decides the
+        # command. This also recognizes valid JSON Unicode escapes for ASCII
+        # command characters while preventing rolling-hash collisions.
+        def dap_json_string_matches_ascii(payload: u8&, start: usize, end: usize, expected: cstr, expected_length: usize) -> bool:
+            cursor: mutable usize = start
+            expected_index: mutable usize = 0
+            while cursor < end:
+                character: mutable u64 = 0
+                if payload[cursor] == ASCII_BACKSLASH:
+                    cursor <- cursor + 1
+                    return false if cursor >= end or payload[cursor] != ASCII_U
+                    return false if end - cursor < JSON_UNICODE_ESCAPE_DIGITS + JSON_UNICODE_ESCAPE_MARKER_BYTES
+                    for offset in JSON_UNICODE_ESCAPE_MARKER_BYTES..<(JSON_UNICODE_ESCAPE_DIGITS + JSON_UNICODE_ESCAPE_MARKER_BYTES):
+                        digit: u8 = payload[cursor + offset]
+                        return false if not is_json_hex_digit(digit)
+                        character <- character * JSON_HEX_BASE + json_hex_digit_value(digit)
+                    cursor <- cursor + JSON_UNICODE_ESCAPE_DIGITS + JSON_UNICODE_ESCAPE_MARKER_BYTES
+                else:
+                    character <- payload[cursor].u64()
+                    cursor <- cursor + 1
+                return false if expected_index >= expected_length
+                return false if character > JSON_ASCII_MAX.u64()
+                return false if character != expected[expected_index].u64()
+                expected_index <- expected_index + 1
+            return expected_index == expected_length
+
+        def exact_dap_command_hash(payload: u8&, start: usize, end: usize, candidate_hash: u64) -> u64:
+            return COMMAND_HASH_INITIALIZE if candidate_hash == COMMAND_HASH_INITIALIZE and dap_json_string_matches_ascii(payload, start, end, DAP_INIT_COMMAND, DAP_INIT_COMMAND_LENGTH)
+            return COMMAND_HASH_LAUNCH if candidate_hash == COMMAND_HASH_LAUNCH and dap_json_string_matches_ascii(payload, start, end, DAP_LAUNCH_COMMAND, DAP_LAUNCH_COMMAND_LENGTH)
+            return COMMAND_HASH_CONFIGURATION_DONE if candidate_hash == COMMAND_HASH_CONFIGURATION_DONE and dap_json_string_matches_ascii(payload, start, end, DAP_CONFIGURATION_DONE_COMMAND, DAP_CONFIGURATION_DONE_COMMAND_LENGTH)
+            return COMMAND_HASH_CONTINUE if candidate_hash == COMMAND_HASH_CONTINUE and dap_json_string_matches_ascii(payload, start, end, DAP_CONTINUE_COMMAND, DAP_CONTINUE_COMMAND_LENGTH)
+            return COMMAND_HASH_NEXT if candidate_hash == COMMAND_HASH_NEXT and dap_json_string_matches_ascii(payload, start, end, DAP_NEXT_COMMAND, DAP_NEXT_COMMAND_LENGTH)
+            return COMMAND_HASH_STEP_BACK if candidate_hash == COMMAND_HASH_STEP_BACK and dap_json_string_matches_ascii(payload, start, end, DAP_STEP_BACK_COMMAND, DAP_STEP_BACK_COMMAND_LENGTH)
+            return COMMAND_HASH_PAUSE if candidate_hash == COMMAND_HASH_PAUSE and dap_json_string_matches_ascii(payload, start, end, DAP_PAUSE_COMMAND, DAP_PAUSE_COMMAND_LENGTH)
+            return COMMAND_HASH_THREADS if candidate_hash == COMMAND_HASH_THREADS and dap_json_string_matches_ascii(payload, start, end, DAP_THREADS_COMMAND, DAP_THREADS_COMMAND_LENGTH)
+            return COMMAND_HASH_STACK_TRACE if candidate_hash == COMMAND_HASH_STACK_TRACE and dap_json_string_matches_ascii(payload, start, end, DAP_STACK_TRACE_COMMAND, DAP_STACK_TRACE_COMMAND_LENGTH)
+            return COMMAND_HASH_SCOPES if candidate_hash == COMMAND_HASH_SCOPES and dap_json_string_matches_ascii(payload, start, end, DAP_SCOPES_COMMAND, DAP_SCOPES_COMMAND_LENGTH)
+            return COMMAND_HASH_VARIABLES if candidate_hash == COMMAND_HASH_VARIABLES and dap_json_string_matches_ascii(payload, start, end, DAP_VARIABLES_COMMAND, DAP_VARIABLES_COMMAND_LENGTH)
+            return COMMAND_HASH_EVALUATE if candidate_hash == COMMAND_HASH_EVALUATE and dap_json_string_matches_ascii(payload, start, end, DAP_EVALUATE_COMMAND, DAP_EVALUATE_COMMAND_LENGTH)
+            return COMMAND_HASH_SET_BREAKPOINTS if candidate_hash == COMMAND_HASH_SET_BREAKPOINTS and dap_json_string_matches_ascii(payload, start, end, DAP_SET_BREAKPOINTS_COMMAND, DAP_SET_BREAKPOINTS_COMMAND_LENGTH)
+            return COMMAND_HASH_SET_FUNCTION_BREAKPOINTS if candidate_hash == COMMAND_HASH_SET_FUNCTION_BREAKPOINTS and dap_json_string_matches_ascii(payload, start, end, DAP_SET_FUNCTION_BREAKPOINTS_COMMAND, DAP_SET_FUNCTION_BREAKPOINTS_COMMAND_LENGTH)
+            return COMMAND_HASH_SET_DATA_BREAKPOINTS if candidate_hash == COMMAND_HASH_SET_DATA_BREAKPOINTS and dap_json_string_matches_ascii(payload, start, end, DAP_SET_DATA_BREAKPOINTS_COMMAND, DAP_SET_DATA_BREAKPOINTS_COMMAND_LENGTH)
+            return COMMAND_HASH_READ_MEMORY if candidate_hash == COMMAND_HASH_READ_MEMORY and dap_json_string_matches_ascii(payload, start, end, DAP_READ_MEMORY_COMMAND, DAP_READ_MEMORY_COMMAND_LENGTH)
+            return COMMAND_HASH_STEP_IN if candidate_hash == COMMAND_HASH_STEP_IN and dap_json_string_matches_ascii(payload, start, end, DAP_STEP_IN_COMMAND, DAP_STEP_IN_COMMAND_LENGTH)
+            return COMMAND_HASH_STEP_OUT if candidate_hash == COMMAND_HASH_STEP_OUT and dap_json_string_matches_ascii(payload, start, end, DAP_STEP_OUT_COMMAND, DAP_STEP_OUT_COMMAND_LENGTH)
+            return COMMAND_HASH_REVERSE_CONTINUE if candidate_hash == COMMAND_HASH_REVERSE_CONTINUE and dap_json_string_matches_ascii(payload, start, end, DAP_REVERSE_CONTINUE_COMMAND, DAP_REVERSE_CONTINUE_COMMAND_LENGTH)
+            return COMMAND_HASH_DISCONNECT if candidate_hash == COMMAND_HASH_DISCONNECT and dap_json_string_matches_ascii(payload, start, end, DAP_DISCONNECT_COMMAND, DAP_DISCONNECT_COMMAND_LENGTH)
+            return COMMAND_HASH_TERMINATE if candidate_hash == COMMAND_HASH_TERMINATE and dap_json_string_matches_ascii(payload, start, end, DAP_TERMINATE_COMMAND, DAP_TERMINATE_COMMAND_LENGTH)
+            return DAP_UNKNOWN_COMMAND_HASH
+
         def json_primitive_literal_length(kind: u8) -> u8:
             return 4 if kind == JSON_PRIMITIVE_TRUE or kind == JSON_PRIMITIVE_NULL
             return 5 if kind == JSON_PRIMITIVE_FALSE
@@ -887,7 +939,7 @@ module DebuggerDAPServer:
                                 if not decoded_command.valid:
                                     decoder_fail(decoder)
                                     return
-                                decoder.command_hash <- decoded_command.hash
+                                decoder.command_hash <- exact_dap_command_hash(decoder.payload[0], decoder.command_value_start, decoder.command_value_end, decoded_command.hash)
             else:
                 decoder.command_prefix_position <- 0 if not decoder.in_command
             type_context: bool = decoder.in_type or decoder_json_top_level_field_context(decoder, decoder.type_prefix_position, TYPE_PREFIX_FINAL_POSITION, byte)

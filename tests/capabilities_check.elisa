@@ -2,20 +2,33 @@ include "../src/core/capabilities.elisa"
 include "../src/core/session.elisa"
 include "../src/protocol/dap.elisa"
 
+const RESULT_MANAGED_CAPABILITIES: i64 = 1
+const RESULT_NATIVE_ATTACH_CAPABILITIES: i64 = 2
+const RESULT_INVALID_CAPABILITIES: i64 = 3
+const RESULT_POSTMORTEM_CAPABILITIES: i64 = 4
+const RESULT_NATIVE_DAP_CAPABILITIES: i64 = 5
+const RESULT_MANAGED_DAP_CAPABILITIES: i64 = 6
+const RESULT_NATIVE_LIVE_CAPABILITIES: i64 = 7
+
 def main() -> i64:
     managed: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::managed_capabilities()
-    return 1 if not DebuggerCapabilities::capabilities_is_valid(managed) or not DebuggerCapabilities::capability_supports_history(managed, DebuggerCapabilities::HistoryKind.Exact) or not managed.trace_verification or not managed.trace_export or not managed.historical_queries or not managed.schedule_exploration or not managed.memory_read
+    return RESULT_MANAGED_CAPABILITIES if not DebuggerCapabilities::capabilities_is_valid(managed) or not DebuggerCapabilities::capability_supports_history(managed, DebuggerCapabilities::HistoryKind.Exact) or not managed.trace_verification or not managed.trace_export or not managed.historical_queries or not managed.schedule_exploration or not managed.memory_read
+    native_live: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::native_live_capabilities()
+    return RESULT_NATIVE_ATTACH_CAPABILITIES if not DebuggerCapabilities::capabilities_is_valid(native_live) or native_live.history != DebuggerCapabilities::HistoryKind.None or native_live.source_breakpoints or native_live.function_breakpoints or native_live.typed_values or native_live.memory_read or native_live.remote_transport
+    dap_native_live: DebuggerDAP::AdapterCapabilities = DebuggerDAP::capabilities_for(DebuggerSession::new_session(DebuggerIdentity::debug_id(4), zeroed, native_live))
+    return RESULT_NATIVE_LIVE_CAPABILITIES if dap_native_live.supports_terminate_request or dap_native_live.supports_disassemble_request or dap_native_live.supports_read_memory
     native: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::native_attach_capabilities()
-    return 2 if not DebuggerCapabilities::capabilities_is_valid(native) or native.engine != DebuggerCapabilities::EngineKind.AttachedNative or not native.native_attach or native.trace_export or native.historical_queries
+    return RESULT_NATIVE_ATTACH_CAPABILITIES if not DebuggerCapabilities::capabilities_is_valid(native) or native.engine != DebuggerCapabilities::EngineKind.AttachedNative or native.native_attach or native.source_breakpoints or native.function_breakpoints or native.typed_values or native.memory_read or native.trace_export or native.historical_queries
     native_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), zeroed, native)
     dap_native: DebuggerDAP::AdapterCapabilities = DebuggerDAP::capabilities_for(native_session)
-    return 5 if dap_native.supports_conditional_breakpoints or dap_native.supports_hit_conditional_breakpoints or dap_native.supports_terminate_request
+    return RESULT_NATIVE_DAP_CAPABILITIES if dap_native.supports_conditional_breakpoints or dap_native.supports_hit_conditional_breakpoints or dap_native.supports_terminate_request or dap_native.supports_read_memory
     dap_managed: DebuggerDAP::AdapterCapabilities = DebuggerDAP::capabilities_for(DebuggerSession::new_session(DebuggerIdentity::debug_id(3), zeroed, managed))
-    return 6 if dap_managed.supports_function_breakpoints or dap_managed.supports_conditional_breakpoints or dap_managed.supports_hit_conditional_breakpoints or dap_managed.supports_data_breakpoints or dap_managed.supports_evaluate_for_hovers
+    return RESULT_MANAGED_DAP_CAPABILITIES if dap_managed.supports_function_breakpoints or dap_managed.supports_conditional_breakpoints or dap_managed.supports_hit_conditional_breakpoints or dap_managed.supports_data_breakpoints or dap_managed.supports_evaluate_for_hovers
     invalid: mutable DebuggerCapabilities::CapabilitySet = managed
     invalid.reverse_execution <- true
     invalid.history <- DebuggerCapabilities::HistoryKind.None
-    return 3 if DebuggerCapabilities::capabilities_is_valid(invalid)
+    return RESULT_INVALID_CAPABILITIES if DebuggerCapabilities::capabilities_is_valid(invalid)
     postmortem: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::postmortem_capabilities()
-    return 4 if postmortem.reverse_execution or postmortem.remote_transport or not postmortem.postmortem_inspection or not postmortem.memory_read or DebuggerDAP::capabilities_for(DebuggerSession::new_session(DebuggerIdentity::debug_id(2), zeroed, postmortem)).supports_terminate_request
+    postmortem_dap: DebuggerDAP::AdapterCapabilities = DebuggerDAP::capabilities_for(DebuggerSession::new_session(DebuggerIdentity::debug_id(2), zeroed, postmortem))
+    return RESULT_POSTMORTEM_CAPABILITIES if postmortem.typed_values or postmortem.reverse_execution or postmortem.remote_transport or postmortem.postmortem_inspection or postmortem.memory_read or postmortem.trace_verification or postmortem.trace_export or postmortem_dap.supports_terminate_request or postmortem_dap.supports_read_memory
     return 0

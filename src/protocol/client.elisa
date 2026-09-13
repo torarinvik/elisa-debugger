@@ -32,6 +32,7 @@ module DebuggerProtocolClient:
             next_request_id: mutable u64
             stop_generation: mutable u64
             pending: mutable u64[CLIENT_PENDING_CAPACITY]
+            pending_generation: mutable u64[CLIENT_PENDING_CAPACITY]
             pending_count: mutable usize
             state: mutable ClientState
             last_error: mutable DebuggerErrors::DebuggerError
@@ -90,6 +91,7 @@ module DebuggerProtocolClient:
             request.page_size <- DebuggerProtocol::protocol_bound_page_size(page_size)
             request.target_event <- 0
             client.pending[client.pending_count] <- request.request_id
+            client.pending_generation[client.pending_count] <- client.stop_generation
             client.pending_count <- client.pending_count + 1
             client.next_request_id <- 0 if request.request_id == CLIENT_MAX_REQUEST_ID
             client.next_request_id <- request.request_id + CLIENT_FIRST_REQUEST_ID if request.request_id != CLIENT_MAX_REQUEST_ID
@@ -98,6 +100,7 @@ module DebuggerProtocolClient:
 
         def client_accept(client: mutable ReferenceClient&, response: DebuggerProtocol::ResponseEnvelope) -> DebuggerErrors::DebuggerError:
             found: mutable bool = false
+            request_generation: mutable u64 = 0
             if client.pending_count > CLIENT_PENDING_CAPACITY:
                 capacity_failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_UNKNOWN_RESPONSE)
                 client.state <- ClientState.Failed
@@ -110,7 +113,9 @@ module DebuggerProtocolClient:
                 return envelope_failure
             for index in 0..<client.pending_count:
                 if client.pending[index] == response.request_id:
+                    request_generation <- client.pending_generation[index]
                     client.pending[index] <- client.pending[client.pending_count - 1]
+                    client.pending_generation[index] <- client.pending_generation[client.pending_count - 1]
                     client.pending_count <- client.pending_count - 1
                     found <- true
                     break
@@ -119,7 +124,10 @@ module DebuggerProtocolClient:
                 client.state <- ClientState.Failed
                 client.last_error <- unknown_response
                 return unknown_response
-            if response.stop_generation < client.stop_generation:
+            # Responses may complete out of request order. Validate against the
+            # generation captured when this request was sent, then keep the
+            # client-wide generation as a monotonic high-water mark.
+            if response.stop_generation < request_generation:
                 generation_failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_PROTOCOL)
                 client.state <- ClientState.Failed
                 client.last_error <- generation_failure

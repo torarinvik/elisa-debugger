@@ -67,6 +67,7 @@ ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
 .PHONY: remote-authorization-check server-version-check compiler-edir-loop-check
+.PHONY: protocol-client-ordering-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -101,6 +102,7 @@ module-check: $(BUILD)/elisa-debugger-trace-checkpoint-validation-check
 module-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
 module-check: $(BUILD)/elisa-debugger-managed-memory-write-history-check
 module-check: $(BUILD)/elisa-debugger-dap-events-check
+module-check: $(BUILD)/elisa-debugger-protocol-client-ordering-check
 module-check: edir-file-loader-check
 
 	"$(BUILD)/elisa-debugger-module-core-check"
@@ -117,6 +119,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-managed-trace-service-check"
 	"$(BUILD)/elisa-debugger-managed-memory-write-history-check"
 	"$(BUILD)/elisa-debugger-protocol-events-check"
+	"$(BUILD)/elisa-debugger-protocol-client-ordering-check"
 	"$(BUILD)/elisa-debugger-protocol-encoding-check"
 	"$(BUILD)/elisa-debugger-protocol-framing-check"
 	"$(BUILD)/elisa-debugger-trace-storage-decode-check"
@@ -446,6 +449,13 @@ managed-memory-write-history-check: $(BUILD)/elisa-debugger-managed-memory-write
 $(BUILD)/elisa-debugger-protocol-events-check: tests/protocol_events_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-protocol-client-ordering-check: tests/protocol_client_ordering_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+protocol-client-ordering-check: $(BUILD)/elisa-debugger-protocol-client-ordering-check
+	"$(BUILD)/elisa-debugger-protocol-client-ordering-check"
 
 $(BUILD)/elisa-debugger-protocol-encoding-check: tests/protocol_encoding_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

@@ -16,6 +16,8 @@ const WAKE_EDGE_COUNT_RESULT: i64 = 25
 const COMPLETED_RESPAWN_RESULT: i64 = 26
 const BLOCKED_RESPAWN_RESULT: i64 = 27
 const THIRD_WAIT_RESOURCE_ID: u64 = 101
+const CURRENT_FALLBACK_RESULT: i64 = 28
+const CURRENT_FALLBACK_RESOURCE_ID: u64 = 102
 
 def runtime_with_blocked_waiter() -> DebuggerConcurrencyRuntime::TaskRuntime:
     runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
@@ -115,4 +117,14 @@ def main() -> i64:
     return BLOCKED_RESPAWN_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(blocked_runtime, blocked_waiter, blocked_owner, DebuggerIdentity::debug_id(SECOND_WAIT_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex) or not DebuggerConcurrencyRuntime::runtime_wait(blocked_runtime, blocked_owner, blocked_waiter, DebuggerIdentity::debug_id(THIRD_WAIT_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex) or blocked_runtime.status != DebuggerConcurrencyRuntime::RuntimeStatus.Blocked or not DebuggerConcurrencyRuntime::runtime_is_valid(blocked_runtime)
     blocked_respawn: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(blocked_runtime, DebuggerIdentity::debug_id(0))
     return BLOCKED_RESPAWN_RESULT if blocked_respawn.value == 0 or blocked_runtime.status != DebuggerConcurrencyRuntime::RuntimeStatus.Ready or blocked_runtime.current.value != blocked_respawn.value or not DebuggerConcurrencyRuntime::runtime_is_valid(blocked_runtime)
+    fallback_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    completed_current: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(fallback_runtime, DebuggerIdentity::debug_id(0))
+    fallback_waiter: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(fallback_runtime, DebuggerIdentity::debug_id(0))
+    running_owner: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(fallback_runtime, DebuggerIdentity::debug_id(0))
+    return CURRENT_FALLBACK_RESULT if not DebuggerConcurrencyRuntime::runtime_transition(fallback_runtime, completed_current, DebuggerConcurrency::TaskState.Running) or not DebuggerConcurrencyRuntime::runtime_transition(fallback_runtime, fallback_waiter, DebuggerConcurrency::TaskState.Running) or not DebuggerConcurrencyRuntime::runtime_transition(fallback_runtime, running_owner, DebuggerConcurrency::TaskState.Running)
+    return CURRENT_FALLBACK_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(fallback_runtime, fallback_waiter, running_owner, DebuggerIdentity::debug_id(CURRENT_FALLBACK_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex)
+    return CURRENT_FALLBACK_RESULT if not DebuggerConcurrencyRuntime::runtime_transition(fallback_runtime, completed_current, DebuggerConcurrency::TaskState.Completed) or fallback_runtime.current.value != running_owner.value or not DebuggerConcurrencyRuntime::runtime_is_valid(fallback_runtime)
+    blocked_current_snapshot: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(fallback_runtime)
+    blocked_current_snapshot.current <- fallback_waiter
+    return CURRENT_FALLBACK_RESULT if DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(blocked_current_snapshot)
     return 0

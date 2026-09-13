@@ -6,16 +6,22 @@ include "../core/errors.elisa"
 
 module DebuggerRemoteArtifacts:
     private:
-        const ARTIFACT_CHUNK_CAPACITY: usize = 16
-        const ARTIFACT_CHUNK_BYTES: usize = 512
-        const ARTIFACT_MAX_BYTES: usize = ARTIFACT_CHUNK_CAPACITY * ARTIFACT_CHUNK_BYTES
-        const ARTIFACT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
-        const ARTIFACT_HASH_PRIME: u64 = 1099511628211
-        const ARTIFACT_MAX_SEQUENCE: u64 = 18446744073709551615
-        const DETAIL_STATE: u32 = 1
-        const DETAIL_SEQUENCE: u32 = 2
-        const DETAIL_SIZE: u32 = 3
-        const DETAIL_CHECKSUM: u32 = 4
+
+        const module Checksum:
+            ARTIFACT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+            ARTIFACT_HASH_PRIME: u64 = 1099511628211
+
+        const module ErrorDetail:
+            PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_STATE: u32 = 1
+            PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SEQUENCE: u32 = 2
+            PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SIZE: u32 = 3
+            PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_CHECKSUM: u32 = 4
+
+        const module TransferLimits:
+            ARTIFACT_CHUNK_CAPACITY: usize = 16
+            ARTIFACT_CHUNK_BYTES: usize = 512
+            ARTIFACT_MAX_BYTES: usize = TransferLimits::ARTIFACT_CHUNK_CAPACITY * TransferLimits::ARTIFACT_CHUNK_BYTES
+            ARTIFACT_MAX_SEQUENCE: u64 = 18446744073709551615
 
     public:
         enum TransferState:
@@ -31,32 +37,32 @@ module DebuggerRemoteArtifacts:
             received_size: mutable usize
             next_sequence: mutable u64
             checksum: mutable u64
-            chunks: mutable u8[ARTIFACT_MAX_BYTES]
+            chunks: mutable u8[TransferLimits::ARTIFACT_MAX_BYTES]
             last_error: mutable DebuggerErrors::DebuggerError
 
         def transfer_new() -> ArtifactTransfer:
-            return ArtifactTransfer{state: TransferState.Empty, expected_size: 0, expected_checksum: 0, received_size: 0, next_sequence: 0, checksum: ARTIFACT_HASH_OFFSET_BASIS, chunks: zeroed, last_error: DebuggerErrors::no_error()}
+            return ArtifactTransfer{state: TransferState.Empty, expected_size: 0, expected_checksum: 0, received_size: 0, next_sequence: 0, checksum: Checksum::ARTIFACT_HASH_OFFSET_BASIS, chunks: zeroed, last_error: DebuggerErrors::no_error()}
 
         def transfer_checksum(bytes: u8&, length: usize) -> u64:
-            return 0 if length > ARTIFACT_MAX_BYTES
-            checksum: mutable u64 = ARTIFACT_HASH_OFFSET_BASIS
+            return 0 if length > TransferLimits::ARTIFACT_MAX_BYTES
+            checksum: mutable u64 = Checksum::ARTIFACT_HASH_OFFSET_BASIS
             for index in 0..<length:
-                checksum <- (checksum ^ bytes[index].u64()) * ARTIFACT_HASH_PRIME
+                checksum <- (checksum ^ bytes[index].u64()) * Checksum::ARTIFACT_HASH_PRIME
             return checksum
 
         def transfer_begin(transfer: ArtifactTransfer, size: usize, checksum: u64) -> ArtifactTransfer:
             updated: mutable ArtifactTransfer = transfer
             return updated if transfer.state == TransferState.Receiving
-            if size == 0 or size > ARTIFACT_MAX_BYTES:
+            if size == 0 or size > TransferLimits::ARTIFACT_MAX_BYTES:
                 updated.state <- TransferState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SIZE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SIZE)
                 return updated
             updated.state <- TransferState.Receiving
             updated.expected_size <- size
             updated.expected_checksum <- checksum
             updated.received_size <- 0
             updated.next_sequence <- 0
-            updated.checksum <- ARTIFACT_HASH_OFFSET_BASIS
+            updated.checksum <- Checksum::ARTIFACT_HASH_OFFSET_BASIS
             updated.last_error <- DebuggerErrors::no_error()
             return updated
 
@@ -65,19 +71,19 @@ module DebuggerRemoteArtifacts:
             return updated if transfer.state != TransferState.Receiving
             if sequence != transfer.next_sequence:
                 updated.state <- TransferState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SEQUENCE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SEQUENCE)
                 return updated
-            if length == 0 or length > ARTIFACT_CHUNK_BYTES or length > transfer.expected_size or transfer.received_size > transfer.expected_size - length:
+            if length == 0 or length > TransferLimits::ARTIFACT_CHUNK_BYTES or length > transfer.expected_size or transfer.received_size > transfer.expected_size - length:
                 updated.state <- TransferState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SIZE)
                 return updated
             for index in 0..<length:
                 updated.chunks[transfer.received_size + index] <- bytes[index]
-                updated.checksum <- (updated.checksum ^ bytes[index].u64()) * ARTIFACT_HASH_PRIME
+                updated.checksum <- (updated.checksum ^ bytes[index].u64()) * Checksum::ARTIFACT_HASH_PRIME
             updated.received_size <- transfer.received_size + length
-            if transfer.next_sequence == ARTIFACT_MAX_SEQUENCE:
+            if transfer.next_sequence == TransferLimits::ARTIFACT_MAX_SEQUENCE:
                 updated.state <- TransferState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SEQUENCE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SEQUENCE)
                 return updated
             updated.next_sequence <- transfer.next_sequence + 1
             return updated
@@ -87,11 +93,11 @@ module DebuggerRemoteArtifacts:
             return updated if transfer.state != TransferState.Receiving
             if transfer.received_size != transfer.expected_size:
                 updated.state <- TransferState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_SIZE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SIZE)
                 return updated
             if transfer.checksum != transfer.expected_checksum:
                 updated.state <- TransferState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_CHECKSUM)
                 return updated
             updated.state <- TransferState.Complete
             updated.last_error <- DebuggerErrors::no_error()
@@ -101,18 +107,18 @@ module DebuggerRemoteArtifacts:
             return transfer.state == TransferState.Complete and transfer.received_size == transfer.expected_size and transfer.checksum == transfer.expected_checksum and transfer_checksum_matches(transfer) and DebuggerErrors::error_is_ok(transfer.last_error)
 
         def transfer_checksum_matches(transfer: ArtifactTransfer) -> bool:
-            return false if transfer.received_size > ARTIFACT_MAX_BYTES
-            computed: mutable u64 = ARTIFACT_HASH_OFFSET_BASIS
+            return false if transfer.received_size > TransferLimits::ARTIFACT_MAX_BYTES
+            computed: mutable u64 = Checksum::ARTIFACT_HASH_OFFSET_BASIS
             for index in 0..<transfer.received_size:
-                computed <- (computed ^ transfer.chunks[index].u64()) * ARTIFACT_HASH_PRIME
+                computed <- (computed ^ transfer.chunks[index].u64()) * Checksum::ARTIFACT_HASH_PRIME
             return computed == transfer.checksum
 
         def transfer_is_valid(transfer: ArtifactTransfer) -> bool:
             if transfer.state == TransferState.Empty:
-                return transfer.expected_size == 0 and transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == ARTIFACT_HASH_OFFSET_BASIS
+                return transfer.expected_size == 0 and transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == Checksum::ARTIFACT_HASH_OFFSET_BASIS
             if transfer.state == TransferState.Failed and transfer.expected_size == 0:
-                return transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == ARTIFACT_HASH_OFFSET_BASIS
-            return false if transfer.expected_size == 0 or transfer.expected_size > ARTIFACT_MAX_BYTES or transfer.received_size > transfer.expected_size or transfer.next_sequence > ARTIFACT_MAX_SEQUENCE
+                return transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == Checksum::ARTIFACT_HASH_OFFSET_BASIS
+            return false if transfer.expected_size == 0 or transfer.expected_size > TransferLimits::ARTIFACT_MAX_BYTES or transfer.received_size > transfer.expected_size or transfer.next_sequence > TransferLimits::ARTIFACT_MAX_SEQUENCE
             return false if not transfer_checksum_matches(transfer)
             return false if transfer.state == TransferState.Failed and DebuggerErrors::error_is_ok(transfer.last_error)
             return false if transfer.state == TransferState.Complete and not transfer_is_complete(transfer)
@@ -125,8 +131,8 @@ module DebuggerRemoteArtifacts:
             return transfer.state == TransferState.Receiving
 
         def transfer_copy(transfer: ArtifactTransfer, output: mutable u8&, capacity: usize) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE) if not transfer_is_complete(transfer)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if capacity < transfer.expected_size
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_STATE) if not transfer_is_complete(transfer)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SIZE) if capacity < transfer.expected_size
             for index in 0..<transfer.expected_size:
                 output[index] <- transfer.chunks[index]
             return DebuggerErrors::no_error()

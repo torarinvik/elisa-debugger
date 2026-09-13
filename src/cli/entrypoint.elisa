@@ -19,24 +19,38 @@ extern fflush(stream: mutable void&?) -> int can[Console]
 
 module DebuggerCLIEntrypoint:
     private:
-        const STDIN_FD: int = 0
-        const LINE_CAPACITY: usize = 256
-        const ASCII_NEWLINE: u8 = 10
-        const ASCII_CARRIAGE_RETURN: u8 = 13
-        const ASCII_SPACE: u8 = 32
-        const EXIT_OK: i64 = 0
-        const EXIT_INPUT_ERROR: i64 = 2
-        const FIRST_REQUEST_ID: u64 = 1
-        const MAX_REQUEST_ID: u64 = 18446744073709551615
-        const CLI_FIRST_LOCAL_INDEX: usize = 0
-        const CLI_DEFAULT_LOCAL_REQUEST: usize = 0
-        const CLI_UNSUPPORTED_RESULT_DETAIL: u32 = 4
+        const module Bounds:
+            MAX_REQUEST_ID: u64 = 18446744073709551615
+
+        const module Cli:
+            CLI_ENTRYPOINT_FIRST_LOCAL_INDEX: usize = 0
+            DEFAULT_LOCAL_REQUEST: usize = 0
+            UNSUPPORTED_RESULT_DETAIL: u32 = 4
+
+        const module Encoding:
+            CLI_ENTRYPOINT_ENCODING_ASCII_NEWLINE: u8 = 10
+            CLI_ENTRYPOINT_ENCODING_ASCII_CARRIAGE_RETURN: u8 = 13
+            CLI_ENTRYPOINT_ENCODING_ASCII_SPACE: u8 = 32
+
+        const module Exit:
+            OK: i64 = 0
+            INPUT_ERROR: i64 = 2
+
+        const module First:
+            CLI_ENTRYPOINT_FIRST_REQUEST_ID: u64 = 1
+
+        const module Line:
+            CLI_ENTRYPOINT_LINE_CAPACITY: usize = 256
+
+        const module Stdin:
+            FD: int = 0
+
 
         def write_frame(frame: DebuggerManagedInspection::FrameSnapshot) -> void can[Console]:
             _ = printf("frame id=%llu event=%llu instruction=%llu accumulator=%lld result=%lld returnDepth=%llu\n", frame.id.value, frame.event, frame.instruction.value, frame.accumulator, frame.result, frame.return_depth.u64()) can Console
 
         def write_locals(service: mutable DebuggerManagedService::Service&) -> void can[Console]:
-            page: DebuggerManagedInspection::LocalPage = DebuggerManagedService::service_locals(service, CLI_FIRST_LOCAL_INDEX, CLI_DEFAULT_LOCAL_REQUEST)
+            page: DebuggerManagedInspection::LocalPage = DebuggerManagedService::service_locals(service, Cli::CLI_ENTRYPOINT_FIRST_LOCAL_INDEX, Cli::DEFAULT_LOCAL_REQUEST)
             _ = printf("locals count=%llu next=%llu\n", page.count.u64(), page.next.u64()) can Console
             for index in 0..<page.count:
                 entry: DebuggerManagedInspection::LocalSnapshot = page.entries[index]
@@ -76,7 +90,7 @@ module DebuggerCLIEntrypoint:
                 result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
             if request.method == DebuggerProtocolRequest::RequestMethod.Threads:
-                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, CLI_UNSUPPORTED_RESULT_DETAIL)
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Cli::UNSUPPORTED_RESULT_DETAIL)
                 return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
             return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, 0)
 
@@ -103,23 +117,23 @@ module DebuggerCLIEntrypoint:
         def run_cli() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             session: mutable DebuggerSession::Session = initial_session()
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
-            line: mutable u8[LINE_CAPACITY] = zeroed
+            line: mutable u8[Line::CLI_ENTRYPOINT_LINE_CAPACITY] = zeroed
             length: mutable usize = 0
-            request_id: mutable u64 = FIRST_REQUEST_ID
+            request_id: mutable u64 = First::CLI_ENTRYPOINT_FIRST_REQUEST_ID
             while true:
-                count: isize = read(STDIN_FD, (&line[length]).cast[void&], 1) can Console
+                count: isize = read(Stdin::FD, (&line[length]).cast[void&], 1) can Console
                 if count <= 0:
                     process_line(service, session, line[0], length, request_id) can Console if length > 0
                     break
                 byte: u8 = line[length]
-                if byte == ASCII_NEWLINE:
+                if byte == Encoding::CLI_ENTRYPOINT_ENCODING_ASCII_NEWLINE:
                     process_line(service, session, line[0], length, request_id) can Console
                     length <- 0
-                    request_id <- request_id if request_id == MAX_REQUEST_ID else request_id + FIRST_REQUEST_ID
+                    request_id <- request_id if request_id == Bounds::MAX_REQUEST_ID else request_id + First::CLI_ENTRYPOINT_FIRST_REQUEST_ID
                 else:
-                    return EXIT_INPUT_ERROR if length + 1 >= LINE_CAPACITY
+                    return Exit::INPUT_ERROR if length + 1 >= Line::CLI_ENTRYPOINT_LINE_CAPACITY
                     length <- length + 1
-            return EXIT_OK
+            return Exit::OK
 
 def main() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     return DebuggerCLIEntrypoint::run_cli()

@@ -6,17 +6,19 @@ include "../vm/edir.elisa"
 
 module DebuggerCheckpoint:
     private:
-        const SNAPSHOT_MAX_LOCALS: usize = 32
-        const SNAPSHOT_MAX_GLOBALS: usize = 16
-        const SNAPSHOT_MAX_MEMORY: usize = 64
-        const SNAPSHOT_MAX_CALL_DEPTH: usize = 16
-        const SNAPSHOT_FRAME_LOCAL_CAPACITY: usize = SNAPSHOT_MAX_CALL_DEPTH * SNAPSHOT_MAX_LOCALS
-        const SNAPSHOT_MAX_PROGRAM_COUNTER: u64 = 256
-        const SNAPSHOT_INVALID_ID: u64 = 0
-        const SNAPSHOT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
-        const SNAPSHOT_HASH_PRIME: u64 = 1099511628211
-        const SNAPSHOT_HASH_FALSE: u64 = 0
-        const SNAPSHOT_HASH_TRUE: u64 = 1
+        const module Snapshot:
+            REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS: usize = 32
+            REPLAY_CHECKPOINT_SNAPSHOT_MAX_GLOBALS: usize = 16
+            REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY: usize = 64
+            REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH: usize = 16
+            REPLAY_CHECKPOINT_SNAPSHOT_FRAME_LOCAL_CAPACITY: usize = Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS
+            REPLAY_CHECKPOINT_SNAPSHOT_MAX_PROGRAM_COUNTER: u64 = 256
+            REPLAY_CHECKPOINT_SNAPSHOT_INVALID_ID: u64 = 0
+            REPLAY_CHECKPOINT_SNAPSHOT_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+            REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME: u64 = 1099511628211
+            HASH_FALSE: u64 = 0
+            HASH_TRUE: u64 = 1
+
 
     public:
         struct MachineSnapshot:
@@ -25,16 +27,16 @@ module DebuggerCheckpoint:
             state_hash: mutable u64
             program_counter: mutable u64
             accumulator: mutable i64
-            locals: mutable i64[SNAPSHOT_MAX_LOCALS]
-            locals_initialized: mutable bool[SNAPSHOT_MAX_LOCALS]
-            frame_locals: mutable i64[SNAPSHOT_FRAME_LOCAL_CAPACITY]
-            frame_locals_initialized: mutable bool[SNAPSHOT_FRAME_LOCAL_CAPACITY]
-            globals: mutable i64[SNAPSHOT_MAX_GLOBALS]
-            globals_initialized: mutable bool[SNAPSHOT_MAX_GLOBALS]
-            memory: mutable i64[SNAPSHOT_MAX_MEMORY]
-            memory_initialized: mutable bool[SNAPSHOT_MAX_MEMORY]
+            locals: mutable i64[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS]
+            locals_initialized: mutable bool[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS]
+            frame_locals: mutable i64[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_FRAME_LOCAL_CAPACITY]
+            frame_locals_initialized: mutable bool[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_FRAME_LOCAL_CAPACITY]
+            globals: mutable i64[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_GLOBALS]
+            globals_initialized: mutable bool[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_GLOBALS]
+            memory: mutable i64[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY]
+            memory_initialized: mutable bool[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY]
             heap_next: mutable usize
-            return_stack: mutable u64[SNAPSHOT_MAX_CALL_DEPTH]
+            return_stack: mutable u64[Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH]
             return_stack_pointer: mutable usize
             halted: mutable bool
             faulted: mutable bool
@@ -91,75 +93,75 @@ module DebuggerCheckpoint:
             return machine
 
         def snapshot_shape_is_valid(snapshot: MachineSnapshot) -> bool:
-            return false if snapshot.id.value == SNAPSHOT_INVALID_ID or snapshot.program_counter >= SNAPSHOT_MAX_PROGRAM_COUNTER or snapshot.heap_next > SNAPSHOT_MAX_MEMORY or snapshot.return_stack_pointer > SNAPSHOT_MAX_CALL_DEPTH or snapshot.faulted and not snapshot.halted
-            for index in 0..<SNAPSHOT_MAX_LOCALS:
+            return false if snapshot.id.value == Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_INVALID_ID or snapshot.program_counter >= Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_PROGRAM_COUNTER or snapshot.heap_next > Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY or snapshot.return_stack_pointer > Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH or snapshot.faulted and not snapshot.halted
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS:
                 return false if not snapshot.locals_initialized[index] and snapshot.locals[index] != 0
-            for index in 0..<SNAPSHOT_FRAME_LOCAL_CAPACITY:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_FRAME_LOCAL_CAPACITY:
                 return false if not snapshot.frame_locals_initialized[index] and snapshot.frame_locals[index] != 0
-            for index in 0..<SNAPSHOT_MAX_GLOBALS:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_GLOBALS:
                 return false if not snapshot.globals_initialized[index] and snapshot.globals[index] != 0
-            for index in 0..<SNAPSHOT_MAX_MEMORY:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY:
                 return false if index >= snapshot.heap_next and snapshot.memory_initialized[index]
                 return false if not snapshot.memory_initialized[index] and snapshot.memory[index] != 0
             for stack_index in 0..<snapshot.return_stack_pointer:
-                return false if snapshot.return_stack[stack_index] >= SNAPSHOT_MAX_PROGRAM_COUNTER
-            for depth in snapshot.return_stack_pointer..<SNAPSHOT_MAX_CALL_DEPTH:
-                for local in 0..<SNAPSHOT_MAX_LOCALS:
-                    frame_index: usize = depth * SNAPSHOT_MAX_LOCALS + local
+                return false if snapshot.return_stack[stack_index] >= Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_PROGRAM_COUNTER
+            for depth in snapshot.return_stack_pointer..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH:
+                for local in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS:
+                    frame_index: usize = depth * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS + local
                     return false if snapshot.frame_locals_initialized[frame_index]
             return true
 
         def snapshot_state_hash(snapshot: MachineSnapshot) -> u64:
-            hash: mutable u64 = SNAPSHOT_HASH_OFFSET_BASIS + snapshot.program_counter
-            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.accumulator.u64()
-            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.result.u64()
-            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.return_stack_pointer.u64()
-            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.heap_next.u64()
-            for index in 0..<SNAPSHOT_MAX_LOCALS:
-                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.locals[index].u64()
-                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
-                initialized <- SNAPSHOT_HASH_TRUE if snapshot.locals_initialized[index]
-                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
-            for index in 0..<SNAPSHOT_FRAME_LOCAL_CAPACITY:
-                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.frame_locals[index].u64()
-                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
-                initialized <- SNAPSHOT_HASH_TRUE if snapshot.frame_locals_initialized[index]
-                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
-            for index in 0..<SNAPSHOT_MAX_CALL_DEPTH:
-                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.return_stack[index]
-            for index in 0..<SNAPSHOT_MAX_GLOBALS:
-                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.globals[index].u64()
-                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
-                initialized <- SNAPSHOT_HASH_TRUE if snapshot.globals_initialized[index]
-                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
-            for index in 0..<SNAPSHOT_MAX_MEMORY:
-                hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.memory[index].u64()
-                initialized: mutable u64 = SNAPSHOT_HASH_FALSE
-                initialized <- SNAPSHOT_HASH_TRUE if snapshot.memory_initialized[index]
-                hash <- hash * SNAPSHOT_HASH_PRIME + initialized
-            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.event
-            halted: mutable u64 = SNAPSHOT_HASH_FALSE
-            halted <- SNAPSHOT_HASH_TRUE if snapshot.halted
-            hash <- hash * SNAPSHOT_HASH_PRIME + halted
-            faulted: mutable u64 = SNAPSHOT_HASH_FALSE
-            faulted <- SNAPSHOT_HASH_TRUE if snapshot.faulted
-            hash <- hash * SNAPSHOT_HASH_PRIME + faulted
-            hash <- hash * SNAPSHOT_HASH_PRIME + snapshot.steps
+            hash: mutable u64 = Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_OFFSET_BASIS + snapshot.program_counter
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.accumulator.u64()
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.result.u64()
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.return_stack_pointer.u64()
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.heap_next.u64()
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS:
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.locals[index].u64()
+                initialized: mutable u64 = Snapshot::HASH_FALSE
+                initialized <- Snapshot::HASH_TRUE if snapshot.locals_initialized[index]
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + initialized
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_FRAME_LOCAL_CAPACITY:
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.frame_locals[index].u64()
+                initialized: mutable u64 = Snapshot::HASH_FALSE
+                initialized <- Snapshot::HASH_TRUE if snapshot.frame_locals_initialized[index]
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + initialized
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH:
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.return_stack[index]
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_GLOBALS:
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.globals[index].u64()
+                initialized: mutable u64 = Snapshot::HASH_FALSE
+                initialized <- Snapshot::HASH_TRUE if snapshot.globals_initialized[index]
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + initialized
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY:
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.memory[index].u64()
+                initialized: mutable u64 = Snapshot::HASH_FALSE
+                initialized <- Snapshot::HASH_TRUE if snapshot.memory_initialized[index]
+                hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + initialized
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.event
+            halted: mutable u64 = Snapshot::HASH_FALSE
+            halted <- Snapshot::HASH_TRUE if snapshot.halted
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + halted
+            faulted: mutable u64 = Snapshot::HASH_FALSE
+            faulted <- Snapshot::HASH_TRUE if snapshot.faulted
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + faulted
+            hash <- hash * Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_HASH_PRIME + snapshot.steps
             return hash
 
         def snapshot_matches_machine(snapshot: MachineSnapshot, machine: DebuggerEDIR::Machine) -> bool:
             return false if not snapshot_shape_is_valid(snapshot)
             return false if snapshot.state_hash != snapshot_state_hash(snapshot)
             return false if snapshot.program_counter != machine.program_counter or snapshot.accumulator != machine.accumulator or snapshot.heap_next != machine.heap_next or snapshot.return_stack_pointer != machine.return_stack_pointer or snapshot.halted != machine.halted or snapshot.faulted != machine.faulted or snapshot.steps != machine.steps or snapshot.result != machine.result
-            for index in 0..<SNAPSHOT_MAX_LOCALS:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_LOCALS:
                 return false if snapshot.locals[index] != machine.locals[index]
                 return false if snapshot.locals_initialized[index] != machine.locals_initialized[index]
-            for index in 0..<SNAPSHOT_FRAME_LOCAL_CAPACITY:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_FRAME_LOCAL_CAPACITY:
                 return false if snapshot.frame_locals[index] != machine.frame_locals[index] or snapshot.frame_locals_initialized[index] != machine.frame_locals_initialized[index]
-            for index in 0..<SNAPSHOT_MAX_GLOBALS:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_GLOBALS:
                 return false if snapshot.globals[index] != machine.globals[index] or snapshot.globals_initialized[index] != machine.globals_initialized[index]
-            for index in 0..<SNAPSHOT_MAX_MEMORY:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_MEMORY:
                 return false if snapshot.memory[index] != machine.memory[index] or snapshot.memory_initialized[index] != machine.memory_initialized[index]
-            for index in 0..<SNAPSHOT_MAX_CALL_DEPTH:
+            for index in 0..<Snapshot::REPLAY_CHECKPOINT_SNAPSHOT_MAX_CALL_DEPTH:
                 return false if snapshot.return_stack[index] != machine.return_stack[index]
             return true

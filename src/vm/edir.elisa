@@ -5,56 +5,66 @@
 include "../core/identity.elisa"
 include "../metadata/source.elisa"
 
+const module DebuggerEDIRCapacity:
+    EDIR_SOURCE_FILE_CAPACITY: usize = 16
+    EDIR_FUNCTION_CAPACITY: usize = 64
+    EDIR_FUNCTION_NAME_CAPACITY: usize = 128
+
 module DebuggerEDIR:
     private:
-        const EDIR_PROGRAM_VERSION: u32 = 1
-        const EDIR_OPCODE_MAX: u16 = 19
-        const EDIR_MAX_INSTRUCTIONS: usize = 256
-        const EDIR_MAX_SOURCE_FILES: usize = 16
-        const EDIR_MAX_FUNCTIONS: usize = 64
-        const EDIR_MAX_FUNCTION_NAME_BYTES: usize = 128
-        const EDIR_NO_SOURCE_FILE_ID: u64 = 0
-        const EDIR_NO_SOURCE_LINE: u32 = 0
-        const EDIR_MAX_LOCALS: usize = 32
-        const EDIR_MAX_LOCALS_INDEX: i64 = 32
-        const EDIR_MAX_GLOBALS: usize = 16
-        const EDIR_MAX_GLOBAL_INDEX: i64 = 16
-        const EDIR_MAX_MEMORY: usize = 64
-        const EDIR_MAX_MEMORY_INDEX: i64 = 64
-        const EDIR_MAX_CALL_DEPTH: usize = 16
-        const EDIR_FRAME_LOCAL_CAPACITY: usize = EDIR_MAX_CALL_DEPTH * EDIR_MAX_LOCALS
-        const EDIR_STEP_INCREMENT: u64 = 1
-        const EDIR_MAX_STEP_COUNT: u64 = 18446744073709551615
-        const EDIR_LOCAL_BIT_BASE: u64 = 1
-        const EDIR_I64_MAX: i64 = 9223372036854775807
-        const EDIR_I64_MIN: i64 = -9223372036854775807 - 1
+        const module Edir:
+            VM_EDIR_PROGRAM_VERSION: u32 = 1
+            OPCODE_MAX: u16 = 19
+            MAX_INSTRUCTIONS: usize = 256
+            MAX_SOURCE_FILES: usize = DebuggerEDIRCapacity::EDIR_SOURCE_FILE_CAPACITY
+            MAX_FUNCTIONS: usize = DebuggerEDIRCapacity::EDIR_FUNCTION_CAPACITY
+            VM_EDIR_MAX_FUNCTION_NAME_BYTES: usize = DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY
+            NO_SOURCE_FILE_ID: u64 = 0
+            NO_SOURCE_LINE: u32 = 0
+            VM_EDIR_MAX_LOCALS: usize = 32
+            MAX_LOCALS_INDEX: i64 = 32
+            VM_EDIR_MAX_GLOBALS: usize = 16
+            MAX_GLOBAL_INDEX: i64 = 16
+            VM_EDIR_MAX_MEMORY: usize = 64
+            MAX_MEMORY_INDEX: i64 = 64
+            VM_EDIR_MAX_CALL_DEPTH: usize = 16
+            VM_EDIR_FRAME_LOCAL_CAPACITY: usize = Edir::VM_EDIR_MAX_CALL_DEPTH * Edir::VM_EDIR_MAX_LOCALS
+            STEP_INCREMENT: u64 = 1
+            VM_EDIR_MAX_STEP_COUNT: u64 = 18446744073709551615
+            LOCAL_BIT_BASE: u64 = 1
+            VM_EDIR_I64_MAX: i64 = 9223372036854775807
+            VM_EDIR_I64_MIN: i64 = -9223372036854775807 - 1
+            SOURCE_FILE_CAPACITY: usize = Edir::MAX_SOURCE_FILES
+            FUNCTION_CAPACITY: usize = Edir::MAX_FUNCTIONS
+            VM_EDIR_FUNCTION_NAME_CAPACITY: usize = Edir::VM_EDIR_MAX_FUNCTION_NAME_BYTES
+
 
         def add_overflows(left: i64, right: i64) -> bool:
-            return left > EDIR_I64_MAX - right if right > 0
-            return left < EDIR_I64_MIN - right if right < 0
+            return left > Edir::VM_EDIR_I64_MAX - right if right > 0
+            return left < Edir::VM_EDIR_I64_MIN - right if right < 0
             return false
 
         def subtract_overflows(left: i64, right: i64) -> bool:
-            return left < EDIR_I64_MIN + right if right > 0
-            return left > EDIR_I64_MAX + right if right < 0
+            return left < Edir::VM_EDIR_I64_MIN + right if right > 0
+            return left > Edir::VM_EDIR_I64_MAX + right if right < 0
             return false
 
         def multiply_overflows(left: i64, right: i64) -> bool:
             return false if left == 0 or right == 0
-            return true if left == EDIR_I64_MIN and right == -1
-            return true if right == EDIR_I64_MIN and left == -1
+            return true if left == Edir::VM_EDIR_I64_MIN and right == -1
+            return true if right == Edir::VM_EDIR_I64_MIN and left == -1
             if left > 0:
-                return left > EDIR_I64_MAX / right if right > 0
-                return right < EDIR_I64_MIN / left
+                return left > Edir::VM_EDIR_I64_MAX / right if right > 0
+                return right < Edir::VM_EDIR_I64_MIN / left
             if right > 0:
-                return left < EDIR_I64_MIN / right
-            return right < EDIR_I64_MAX / left
+                return left < Edir::VM_EDIR_I64_MIN / right
+            return right < Edir::VM_EDIR_I64_MAX / left
 
         def negate_overflows(value: i64) -> bool:
-            return value == EDIR_I64_MIN
+            return value == Edir::VM_EDIR_I64_MIN
 
         def divide_overflows(left: i64, right: i64) -> bool:
-            return left == EDIR_I64_MIN and right == -1
+            return left == Edir::VM_EDIR_I64_MIN and right == -1
 
         def source_range_is_valid(source: DebuggerIdentity::SourceSpan) -> bool:
             return false if source.end_byte < source.start_byte or source.end_line < source.start_line
@@ -62,13 +72,13 @@ module DebuggerEDIR:
             return true
 
         def source_file_index(image: ProgramImage, file_id: DebuggerIdentity::DebugId) -> usize:
-            return EDIR_MAX_SOURCE_FILES if image.source_file_count > EDIR_MAX_SOURCE_FILES
+            return Edir::MAX_SOURCE_FILES if image.source_file_count > Edir::MAX_SOURCE_FILES
             for index in 0..<image.source_file_count:
                 return index if image.source_files[index].id.value == file_id.value
-            return EDIR_MAX_SOURCE_FILES
+            return Edir::MAX_SOURCE_FILES
 
         def source_file_table_is_valid(image: ProgramImage) -> bool:
-            return false if image.source_file_count > EDIR_MAX_SOURCE_FILES
+            return false if image.source_file_count > Edir::MAX_SOURCE_FILES
             for index in 0..<image.source_file_count:
                 file: DebuggerMetadata::SourceFile = image.source_files[index]
                 return false if not DebuggerMetadata::source_file_is_valid(file)
@@ -78,28 +88,28 @@ module DebuggerEDIR:
                     return false if DebuggerMetadata::source_file_paths_equal(prior, file)
             for index in 0..<image.program.instruction_count.usize():
                 span: DebuggerIdentity::SourceSpan = image.instructions[index].source
-                continue if span.file.value == EDIR_NO_SOURCE_FILE_ID
+                continue if span.file.value == Edir::NO_SOURCE_FILE_ID
                 file_index: usize = source_file_index(image, span.file)
-                return false if file_index == EDIR_MAX_SOURCE_FILES
+                return false if file_index == Edir::MAX_SOURCE_FILES
                 file: DebuggerMetadata::SourceFile = image.source_files[file_index]
-                return false if span.start_line == EDIR_NO_SOURCE_LINE or span.end_line == EDIR_NO_SOURCE_LINE or span.start_line.u64() > file.line_count or span.end_line.u64() > file.line_count
+                return false if span.start_line == Edir::NO_SOURCE_LINE or span.end_line == Edir::NO_SOURCE_LINE or span.start_line.u64() > file.line_count or span.end_line.u64() > file.line_count
             return true
 
         def function_source_is_valid(image: ProgramImage, source: DebuggerIdentity::SourceSpan) -> bool:
-            return false if not source_range_is_valid(source) or source.file.value == EDIR_NO_SOURCE_FILE_ID
-            return false if source.start_line == EDIR_NO_SOURCE_LINE or source.end_line == EDIR_NO_SOURCE_LINE
+            return false if not source_range_is_valid(source) or source.file.value == Edir::NO_SOURCE_FILE_ID
+            return false if source.start_line == Edir::NO_SOURCE_LINE or source.end_line == Edir::NO_SOURCE_LINE
             file_index: usize = source_file_index(image, source.file)
-            return false if file_index == EDIR_MAX_SOURCE_FILES
+            return false if file_index == Edir::MAX_SOURCE_FILES
             file: DebuggerMetadata::SourceFile = image.source_files[file_index]
             return source.start_line.u64() <= file.line_count and source.end_line.u64() <= file.line_count
 
         def function_table_is_valid(image: ProgramImage) -> bool:
-            return false if image.function_count > EDIR_MAX_FUNCTIONS
+            return false if image.function_count > Edir::MAX_FUNCTIONS
             for index in 0..<image.function_count:
                 function: FunctionDescriptor = image.functions[index]
                 return false if DebuggerIdentity::debug_id_is_zero(function.id)
-                return false if function.name_length == 0 or function.name_length > EDIR_MAX_FUNCTION_NAME_BYTES
-                return false if not DebuggerMetadata::metadata_text_utf8_is_valid(function.name_bytes[0], function.name_length, EDIR_MAX_FUNCTION_NAME_BYTES)
+                return false if function.name_length == 0 or function.name_length > Edir::VM_EDIR_MAX_FUNCTION_NAME_BYTES
+                return false if not DebuggerMetadata::metadata_text_utf8_is_valid(function.name_bytes[0], function.name_length, Edir::VM_EDIR_MAX_FUNCTION_NAME_BYTES)
                 return false if function.entry_instruction >= function.end_instruction_exclusive or function.end_instruction_exclusive > image.program.instruction_count
                 return false if not function_source_is_valid(image, function.source)
                 for previous in 0..<index:
@@ -109,9 +119,6 @@ module DebuggerEDIR:
             return true
 
     public:
-        const EDIR_SOURCE_FILE_CAPACITY: usize = EDIR_MAX_SOURCE_FILES
-        const EDIR_FUNCTION_CAPACITY: usize = EDIR_MAX_FUNCTIONS
-        const EDIR_FUNCTION_NAME_CAPACITY: usize = EDIR_MAX_FUNCTION_NAME_BYTES
 
         enum Opcode:
             Nop
@@ -167,7 +174,7 @@ module DebuggerEDIR:
         # derives them from branch targets or instruction addresses.
         struct FunctionDescriptor:
             id: mutable DebuggerIdentity::DebugId
-            name_bytes: mutable u8[EDIR_MAX_FUNCTION_NAME_BYTES]
+            name_bytes: mutable u8[Edir::VM_EDIR_MAX_FUNCTION_NAME_BYTES]
             name_length: mutable usize
             entry_instruction: mutable u64
             end_instruction_exclusive: mutable u64
@@ -175,11 +182,11 @@ module DebuggerEDIR:
 
         struct ProgramImage:
             program: mutable Program
-            instructions: mutable Instruction[EDIR_MAX_INSTRUCTIONS]
+            instructions: mutable Instruction[Edir::MAX_INSTRUCTIONS]
             source_file_count: mutable usize
-            source_files: mutable DebuggerMetadata::SourceFile[EDIR_MAX_SOURCE_FILES]
+            source_files: mutable DebuggerMetadata::SourceFile[Edir::MAX_SOURCE_FILES]
             function_count: mutable usize
-            functions: mutable FunctionDescriptor[EDIR_MAX_FUNCTIONS]
+            functions: mutable FunctionDescriptor[Edir::MAX_FUNCTIONS]
 
         struct Verification:
             valid: mutable bool
@@ -189,16 +196,16 @@ module DebuggerEDIR:
         struct Machine:
             program_counter: mutable u64
             accumulator: mutable i64
-            locals: mutable i64[EDIR_MAX_LOCALS]
-            locals_initialized: mutable bool[EDIR_MAX_LOCALS]
-            frame_locals: mutable i64[EDIR_FRAME_LOCAL_CAPACITY]
-            frame_locals_initialized: mutable bool[EDIR_FRAME_LOCAL_CAPACITY]
-            globals: mutable i64[EDIR_MAX_GLOBALS]
-            globals_initialized: mutable bool[EDIR_MAX_GLOBALS]
-            memory: mutable i64[EDIR_MAX_MEMORY]
-            memory_initialized: mutable bool[EDIR_MAX_MEMORY]
+            locals: mutable i64[Edir::VM_EDIR_MAX_LOCALS]
+            locals_initialized: mutable bool[Edir::VM_EDIR_MAX_LOCALS]
+            frame_locals: mutable i64[Edir::VM_EDIR_FRAME_LOCAL_CAPACITY]
+            frame_locals_initialized: mutable bool[Edir::VM_EDIR_FRAME_LOCAL_CAPACITY]
+            globals: mutable i64[Edir::VM_EDIR_MAX_GLOBALS]
+            globals_initialized: mutable bool[Edir::VM_EDIR_MAX_GLOBALS]
+            memory: mutable i64[Edir::VM_EDIR_MAX_MEMORY]
+            memory_initialized: mutable bool[Edir::VM_EDIR_MAX_MEMORY]
             heap_next: mutable usize
-            return_stack: mutable u64[EDIR_MAX_CALL_DEPTH]
+            return_stack: mutable u64[Edir::VM_EDIR_MAX_CALL_DEPTH]
             return_stack_pointer: mutable usize
             halted: mutable bool
             faulted: mutable bool
@@ -206,39 +213,39 @@ module DebuggerEDIR:
             result: mutable i64
 
         def frame_local_slot(depth: usize, local: usize) -> usize:
-            return depth * EDIR_MAX_LOCALS + local
+            return depth * Edir::VM_EDIR_MAX_LOCALS + local
 
         def source_file_capacity() -> usize:
-            return EDIR_SOURCE_FILE_CAPACITY
+            return Edir::SOURCE_FILE_CAPACITY
 
         def function_capacity() -> usize:
-            return EDIR_MAX_FUNCTIONS
+            return Edir::MAX_FUNCTIONS
 
         def function_name_capacity() -> usize:
-            return EDIR_MAX_FUNCTION_NAME_BYTES
+            return Edir::VM_EDIR_MAX_FUNCTION_NAME_BYTES
 
         def frame_save(machine: mutable Machine&, depth: usize) -> void:
-            return if depth >= EDIR_MAX_CALL_DEPTH
-            for local in 0..<EDIR_MAX_LOCALS:
+            return if depth >= Edir::VM_EDIR_MAX_CALL_DEPTH
+            for local in 0..<Edir::VM_EDIR_MAX_LOCALS:
                 slot: usize = frame_local_slot(depth, local)
                 machine.frame_locals[slot] <- machine.locals[local]
                 machine.frame_locals_initialized[slot] <- machine.locals_initialized[local]
 
         def frame_restore(machine: mutable Machine&, depth: usize) -> void:
-            return if depth >= EDIR_MAX_CALL_DEPTH
-            for local in 0..<EDIR_MAX_LOCALS:
+            return if depth >= Edir::VM_EDIR_MAX_CALL_DEPTH
+            for local in 0..<Edir::VM_EDIR_MAX_LOCALS:
                 slot: usize = frame_local_slot(depth, local)
                 machine.locals[local] <- machine.frame_locals[slot]
                 machine.locals_initialized[local] <- machine.frame_locals_initialized[slot]
 
         def frame_clear_current(machine: mutable Machine&) -> void:
-            for local in 0..<EDIR_MAX_LOCALS:
+            for local in 0..<Edir::VM_EDIR_MAX_LOCALS:
                 machine.locals[local] <- 0
                 machine.locals_initialized[local] <- false
 
         def frame_clear_saved(machine: mutable Machine&, depth: usize) -> void:
-            return if depth >= EDIR_MAX_CALL_DEPTH
-            for local in 0..<EDIR_MAX_LOCALS:
+            return if depth >= Edir::VM_EDIR_MAX_CALL_DEPTH
+            for local in 0..<Edir::VM_EDIR_MAX_LOCALS:
                 slot: usize = frame_local_slot(depth, local)
                 machine.frame_locals[slot] <- 0
                 machine.frame_locals_initialized[slot] <- false
@@ -248,7 +255,7 @@ module DebuggerEDIR:
             verification.valid <- true
             verification.verification_error <- VerificationError.None
             verification.instruction <- 0
-            if program.version != EDIR_PROGRAM_VERSION:
+            if program.version != Edir::VM_EDIR_PROGRAM_VERSION:
                 verification.valid <- false
                 verification.verification_error <- VerificationError.UnknownVersion
                 return verification
@@ -256,11 +263,11 @@ module DebuggerEDIR:
                 verification.valid <- false
                 verification.verification_error <- VerificationError.MissingReturn
                 return verification
-            if program.instruction_count > EDIR_MAX_INSTRUCTIONS.u64():
+            if program.instruction_count > Edir::MAX_INSTRUCTIONS.u64():
                 verification.valid <- false
                 verification.verification_error <- VerificationError.InvalidTarget
                 return verification
-            if program.local_count > EDIR_MAX_LOCALS_INDEX.u64():
+            if program.local_count > Edir::MAX_LOCALS_INDEX.u64():
                 verification.valid <- false
                 verification.verification_error <- VerificationError.InvalidRegister
                 return verification
@@ -270,7 +277,7 @@ module DebuggerEDIR:
             return Verification{valid: false, verification_error: reason, instruction: instruction}
 
         def verify_instruction_operands(instruction: Instruction, index: u64) -> Verification:
-            return verification_failure(VerificationError.InvalidOpcode, index) if instruction.opcode.u16() > EDIR_OPCODE_MAX
+            return verification_failure(VerificationError.InvalidOpcode, index) if instruction.opcode.u16() > Edir::OPCODE_MAX
             if instruction.opcode == Opcode.Nop or instruction.opcode == Opcode.Return:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.a != 0 or instruction.b != 0
             if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal or instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal or instruction.opcode == Opcode.LoadMemory or instruction.opcode == Opcode.StoreMemory or instruction.opcode == Opcode.Allocate:
@@ -284,11 +291,11 @@ module DebuggerEDIR:
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
         def verify_local_initialization(image: mutable ProgramImage&) -> Verification:
-            return verification_failure(VerificationError.InvalidTarget, image.program.instruction_count) if image.program.instruction_count == 0 or image.program.instruction_count > EDIR_MAX_INSTRUCTIONS.u64()
-            return verification_failure(VerificationError.InvalidRegister, image.program.local_count) if image.program.local_count > EDIR_MAX_LOCALS_INDEX.u64()
+            return verification_failure(VerificationError.InvalidTarget, image.program.instruction_count) if image.program.instruction_count == 0 or image.program.instruction_count > Edir::MAX_INSTRUCTIONS.u64()
+            return verification_failure(VerificationError.InvalidRegister, image.program.local_count) if image.program.local_count > Edir::MAX_LOCALS_INDEX.u64()
             count: usize = image.program.instruction_count.usize()
-            entry_masks: mutable u64[EDIR_MAX_INSTRUCTIONS] = zeroed
-            seen: mutable bool[EDIR_MAX_INSTRUCTIONS] = zeroed
+            entry_masks: mutable u64[Edir::MAX_INSTRUCTIONS] = zeroed
+            seen: mutable bool[Edir::MAX_INSTRUCTIONS] = zeroed
             seen[0] <- true
             changed: mutable bool = true
             while changed:
@@ -301,7 +308,7 @@ module DebuggerEDIR:
                     if instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero or instruction.opcode == Opcode.Call:
                         return verification_failure(VerificationError.InvalidTarget, index.u64()) if instruction.a < 0 or instruction.a >= count.i64()
                     outgoing: mutable u64 = entry_masks[index]
-                    outgoing <- outgoing | (EDIR_LOCAL_BIT_BASE << instruction.a.u64()) if instruction.opcode == Opcode.StoreLocal
+                    outgoing <- outgoing | (Edir::LOCAL_BIT_BASE << instruction.a.u64()) if instruction.opcode == Opcode.StoreLocal
                     if instruction.opcode == Opcode.Return:
                         continue
                     if instruction.opcode == Opcode.Jump:
@@ -319,7 +326,7 @@ module DebuggerEDIR:
                     if instruction.opcode == Opcode.Call:
                         target: usize = instruction.a.usize()
                         callee_entry: mutable u64 = 0
-                        callee_entry <- EDIR_LOCAL_BIT_BASE if image.program.local_count > 0
+                        callee_entry <- Edir::LOCAL_BIT_BASE if image.program.local_count > 0
                         if not seen[target]:
                             seen[target] <- true
                             entry_masks[target] <- callee_entry
@@ -368,7 +375,7 @@ module DebuggerEDIR:
                 instruction: Instruction = image.instructions[index]
                 reachable_return <- true if instruction.opcode == Opcode.Return
                 if instruction.opcode == Opcode.LoadLocal:
-                    bit: u64 = EDIR_LOCAL_BIT_BASE << instruction.a.u64()
+                    bit: u64 = Edir::LOCAL_BIT_BASE << instruction.a.u64()
                     return verification_failure(VerificationError.UninitializedLocal, index.u64()) if (entry_masks[index] & bit) == 0
             return verification_failure(VerificationError.MissingReturn, image.program.instruction_count) if not reachable_return
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
@@ -384,14 +391,14 @@ module DebuggerEDIR:
                 if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal:
                     return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= image.program.local_count.i64()
                 if instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal:
-                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= EDIR_MAX_GLOBAL_INDEX
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= Edir::MAX_GLOBAL_INDEX
                 if instruction.opcode == Opcode.LoadMemory or instruction.opcode == Opcode.StoreMemory:
-                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= EDIR_MAX_MEMORY_INDEX
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a < 0 or instruction.a >= Edir::MAX_MEMORY_INDEX
                 if instruction.opcode == Opcode.Allocate:
-                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a <= 0 or instruction.a > EDIR_MAX_MEMORY_INDEX
+                    return verification_failure(VerificationError.InvalidRegister, index.u64()) if instruction.a <= 0 or instruction.a > Edir::MAX_MEMORY_INDEX
                 if instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero or instruction.opcode == Opcode.Call:
                     return verification_failure(VerificationError.InvalidTarget, index.u64()) if instruction.a < 0 or instruction.a >= image.program.instruction_count.i64()
-                if instruction.opcode == Opcode.Call and instruction.b > EDIR_MAX_CALL_DEPTH.i64():
+                if instruction.opcode == Opcode.Call and instruction.b > Edir::VM_EDIR_MAX_CALL_DEPTH.i64():
                     return verification_failure(VerificationError.InvalidCallDepth, index.u64())
                 return verification_failure(VerificationError.InvalidSourceRange, index.u64()) if not source_range_is_valid(instruction.source)
                 saw_return <- true if instruction.opcode == Opcode.Return
@@ -403,7 +410,7 @@ module DebuggerEDIR:
         def verify_image_with_source_table(image: mutable ProgramImage&) -> Verification:
             verification: Verification = verify_image(image)
             return verification if not verification.valid
-            return verification_failure(VerificationError.InvalidSourceTable, EDIR_NO_SOURCE_FILE_ID) if not source_file_table_is_valid(image)
+            return verification_failure(VerificationError.InvalidSourceTable, Edir::NO_SOURCE_FILE_ID) if not source_file_table_is_valid(image)
             return verification_failure(VerificationError.InvalidFunctionTable, 0) if not function_table_is_valid(image)
             return verification
 
@@ -428,129 +435,129 @@ module DebuggerEDIR:
                 machine.faulted <- true
                 machine.halted <- true
                 return
-            if machine.program_counter >= EDIR_MAX_INSTRUCTIONS.u64() or machine.return_stack_pointer > EDIR_MAX_CALL_DEPTH or machine.heap_next > EDIR_MAX_MEMORY:
+            if machine.program_counter >= Edir::MAX_INSTRUCTIONS.u64() or machine.return_stack_pointer > Edir::VM_EDIR_MAX_CALL_DEPTH or machine.heap_next > Edir::VM_EDIR_MAX_MEMORY:
                 machine.faulted <- true
                 machine.halted <- true
                 return
-            if (instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero or instruction.opcode == Opcode.Call) and (instruction.a < 0 or instruction.a >= EDIR_MAX_INSTRUCTIONS.i64()):
+            if (instruction.opcode == Opcode.Jump or instruction.opcode == Opcode.BranchZero or instruction.opcode == Opcode.Call) and (instruction.a < 0 or instruction.a >= Edir::MAX_INSTRUCTIONS.i64()):
                 machine.faulted <- true
                 machine.halted <- true
                 return
-            if instruction.opcode == Opcode.Call and instruction.b > EDIR_MAX_CALL_DEPTH.i64():
+            if instruction.opcode == Opcode.Call and instruction.b > Edir::VM_EDIR_MAX_CALL_DEPTH.i64():
                 machine.faulted <- true
                 machine.halted <- true
                 return
-            if machine.steps >= EDIR_MAX_STEP_COUNT:
+            if machine.steps >= Edir::VM_EDIR_MAX_STEP_COUNT:
                 machine.faulted <- true
                 machine.halted <- true
                 return
             if instruction.opcode == Opcode.Nop:
-                machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Constant:
                 machine.accumulator <- instruction.a
-                machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Add:
                 if add_overflows(machine.accumulator, instruction.a):
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.accumulator + instruction.a
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Subtract:
                 if subtract_overflows(machine.accumulator, instruction.a):
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.accumulator - instruction.a
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Multiply:
                 if multiply_overflows(machine.accumulator, instruction.a):
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.accumulator * instruction.a
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Divide:
                 if instruction.a == 0 or divide_overflows(machine.accumulator, instruction.a):
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.accumulator / instruction.a
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Negate:
                 if negate_overflows(machine.accumulator):
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- 0 - machine.accumulator
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.CompareEqual:
                 if machine.accumulator == instruction.a:
                     machine.accumulator <- 1
                 else:
                     machine.accumulator <- 0
-                machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.CompareLess:
                 if machine.accumulator < instruction.a:
                     machine.accumulator <- 1
                 else:
                     machine.accumulator <- 0
-                machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.LoadLocal:
-                if instruction.a < 0 or instruction.a >= EDIR_MAX_LOCALS_INDEX or not machine.locals_initialized[instruction.a.usize()]:
+                if instruction.a < 0 or instruction.a >= Edir::MAX_LOCALS_INDEX or not machine.locals_initialized[instruction.a.usize()]:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.locals[instruction.a.usize()]
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.StoreLocal:
-                if instruction.a < 0 or instruction.a >= EDIR_MAX_LOCALS_INDEX:
+                if instruction.a < 0 or instruction.a >= Edir::MAX_LOCALS_INDEX:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.locals[instruction.a.usize()] <- machine.accumulator
                     machine.locals_initialized[instruction.a.usize()] <- true
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.LoadGlobal:
-                if instruction.a < 0 or instruction.a >= EDIR_MAX_GLOBAL_INDEX or not machine.globals_initialized[instruction.a.usize()]:
+                if instruction.a < 0 or instruction.a >= Edir::MAX_GLOBAL_INDEX or not machine.globals_initialized[instruction.a.usize()]:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.globals[instruction.a.usize()]
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.StoreGlobal:
-                if instruction.a < 0 or instruction.a >= EDIR_MAX_GLOBAL_INDEX:
+                if instruction.a < 0 or instruction.a >= Edir::MAX_GLOBAL_INDEX:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.globals[instruction.a.usize()] <- machine.accumulator
                     machine.globals_initialized[instruction.a.usize()] <- true
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.LoadMemory:
-                if instruction.a < 0 or instruction.a >= EDIR_MAX_MEMORY_INDEX or instruction.a >= machine.heap_next.i64() or not machine.memory_initialized[instruction.a.usize()]:
+                if instruction.a < 0 or instruction.a >= Edir::MAX_MEMORY_INDEX or instruction.a >= machine.heap_next.i64() or not machine.memory_initialized[instruction.a.usize()]:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.memory[instruction.a.usize()]
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.StoreMemory:
-                if instruction.a < 0 or instruction.a >= EDIR_MAX_MEMORY_INDEX or instruction.a >= machine.heap_next.i64():
+                if instruction.a < 0 or instruction.a >= Edir::MAX_MEMORY_INDEX or instruction.a >= machine.heap_next.i64():
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.memory[instruction.a.usize()] <- machine.accumulator
                     machine.memory_initialized[instruction.a.usize()] <- true
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Allocate:
                 requested: mutable usize = 0
                 requested <- instruction.a.usize() if instruction.a > 0
-                if instruction.a <= 0 or instruction.a > EDIR_MAX_MEMORY_INDEX or machine.heap_next > EDIR_MAX_MEMORY - requested:
+                if instruction.a <= 0 or instruction.a > Edir::MAX_MEMORY_INDEX or machine.heap_next > Edir::VM_EDIR_MAX_MEMORY - requested:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
                     machine.accumulator <- machine.heap_next.i64()
                     machine.heap_next <- machine.heap_next + requested
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Jump:
                 if instruction.a < 0:
                     machine.faulted <- true
@@ -565,21 +572,21 @@ module DebuggerEDIR:
                     else:
                         machine.program_counter <- instruction.a.u64()
                 else:
-                    machine.program_counter <- machine.program_counter + EDIR_STEP_INCREMENT
+                    machine.program_counter <- machine.program_counter + Edir::STEP_INCREMENT
             if instruction.opcode == Opcode.Call:
                 if instruction.a < 0:
                     machine.faulted <- true
                     machine.halted <- true
                 else:
-                    if machine.return_stack_pointer >= EDIR_MAX_CALL_DEPTH:
+                    if machine.return_stack_pointer >= Edir::VM_EDIR_MAX_CALL_DEPTH:
                         machine.faulted <- true
                         machine.halted <- true
                     else:
-                        machine.return_stack[machine.return_stack_pointer] <- machine.program_counter + EDIR_STEP_INCREMENT
+                        machine.return_stack[machine.return_stack_pointer] <- machine.program_counter + Edir::STEP_INCREMENT
                         frame_save(machine, machine.return_stack_pointer)
                         machine.return_stack_pointer <- machine.return_stack_pointer + 1
                         frame_clear_current(machine)
-                        if EDIR_MAX_LOCALS > 0:
+                        if Edir::VM_EDIR_MAX_LOCALS > 0:
                             machine.locals[0] <- machine.accumulator
                             machine.locals_initialized[0] <- true
                         machine.program_counter <- instruction.a.u64()
@@ -594,13 +601,13 @@ module DebuggerEDIR:
                     frame_clear_saved(machine, machine.return_stack_pointer)
                     machine.accumulator <- returned_value
                     machine.program_counter <- machine.return_stack[machine.return_stack_pointer]
-            machine.steps <- machine.steps + EDIR_STEP_INCREMENT
+            machine.steps <- machine.steps + Edir::STEP_INCREMENT
             return
 
         def machine_run(image: mutable ProgramImage&, machine: Machine, max_steps: u64) -> Machine:
             updated: mutable Machine = machine
             start_steps: u64 = updated.steps
-            if updated.program_counter >= EDIR_MAX_INSTRUCTIONS.u64() or updated.return_stack_pointer > EDIR_MAX_CALL_DEPTH or updated.heap_next > EDIR_MAX_MEMORY:
+            if updated.program_counter >= Edir::MAX_INSTRUCTIONS.u64() or updated.return_stack_pointer > Edir::VM_EDIR_MAX_CALL_DEPTH or updated.heap_next > Edir::VM_EDIR_MAX_MEMORY:
                 updated.faulted <- true
                 updated.halted <- true
                 return updated

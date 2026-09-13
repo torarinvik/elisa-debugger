@@ -6,20 +6,26 @@ include "../core/errors.elisa"
 
 module DebuggerRemoteArtifact:
     private:
-        const TRANSFER_CAPACITY: usize = 4096
-        const TRANSFER_CHUNK_CAPACITY: usize = 256
-        const HASH_OFFSET_BASIS: u64 = 1469598103934665603
-        const HASH_PRIME: u64 = 1099511628211
-        const DETAIL_OFFSET: u32 = 1
-        const DETAIL_SIZE: u32 = 2
-        const DETAIL_CHECKSUM: u32 = 3
-        const DETAIL_STATE: u32 = 4
+
+        const module Checksum:
+            PROTOCOL_REMOTE_ARTIFACT_CHECKSUM_HASH_OFFSET_BASIS: u64 = 1469598103934665603
+            PROTOCOL_REMOTE_ARTIFACT_CHECKSUM_HASH_PRIME: u64 = 1099511628211
+
+        const module ErrorDetail:
+            DETAIL_OFFSET: u32 = 1
+            PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE: u32 = 2
+            PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_CHECKSUM: u32 = 3
+            PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_STATE: u32 = 4
+
+        const module TransferLimits:
+            TRANSFER_CAPACITY: usize = 4096
+            TRANSFER_CHUNK_CAPACITY: usize = 256
 
         def transfer_payload_checksum_matches(transfer: ArtifactTransfer) -> bool:
-            return false if transfer.received > TRANSFER_CAPACITY
-            checksum: mutable u64 = HASH_OFFSET_BASIS
+            return false if transfer.received > TransferLimits::TRANSFER_CAPACITY
+            checksum: mutable u64 = Checksum::PROTOCOL_REMOTE_ARTIFACT_CHECKSUM_HASH_OFFSET_BASIS
             for index in 0..<transfer.received:
-                checksum <- (checksum ^ transfer.bytes[index].u64()) * HASH_PRIME
+                checksum <- (checksum ^ transfer.bytes[index].u64()) * Checksum::PROTOCOL_REMOTE_ARTIFACT_CHECKSUM_HASH_PRIME
             return checksum == transfer.checksum and checksum == transfer.expected_checksum
 
     public:
@@ -34,7 +40,7 @@ module DebuggerRemoteArtifact:
             expected_checksum: mutable u64
             received: mutable usize
             checksum: mutable u64
-            bytes: mutable u8[TRANSFER_CAPACITY]
+            bytes: mutable u8[TransferLimits::TRANSFER_CAPACITY]
             state: mutable TransferState
             last_error: mutable DebuggerErrors::DebuggerError
 
@@ -42,13 +48,13 @@ module DebuggerRemoteArtifact:
             transfer: mutable ArtifactTransfer = zeroed
             transfer.expected_size <- expected_size
             transfer.expected_checksum <- expected_checksum
-            transfer.checksum <- HASH_OFFSET_BASIS
+            transfer.checksum <- Checksum::PROTOCOL_REMOTE_ARTIFACT_CHECKSUM_HASH_OFFSET_BASIS
             transfer.state <- TransferState.Receiving
             transfer.last_error <- DebuggerErrors::no_error()
             transfer.state <- TransferState.Corrupt if expected_size == 0
-            transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SIZE) if expected_size == 0
-            transfer.state <- TransferState.QuotaExceeded if expected_size > TRANSFER_CAPACITY
-            transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE) if expected_size > TRANSFER_CAPACITY
+            transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE) if expected_size == 0
+            transfer.state <- TransferState.QuotaExceeded if expected_size > TransferLimits::TRANSFER_CAPACITY
+            transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE) if expected_size > TransferLimits::TRANSFER_CAPACITY
             return transfer
 
         def transfer_fail(transfer: mutable ArtifactTransfer&, state: TransferState, failure: DebuggerErrors::DebuggerError) -> DebuggerErrors::DebuggerError:
@@ -57,39 +63,39 @@ module DebuggerRemoteArtifact:
             return failure
 
         def transfer_accept(transfer: mutable ArtifactTransfer&, offset: usize, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE) if transfer.state == TransferState.Complete
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_STATE) if transfer.state == TransferState.Complete
             return transfer.last_error if transfer.state != TransferState.Receiving
-            return transfer_fail(transfer, TransferState.Corrupt, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OFFSET)) if offset != transfer.received
-            return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)) if length == 0 or length > TRANSFER_CHUNK_CAPACITY
-            if transfer.received > transfer.expected_size or transfer.received > TRANSFER_CAPACITY:
-                return transfer_fail(transfer, TransferState.Corrupt, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SIZE))
+            return transfer_fail(transfer, TransferState.Corrupt, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_OFFSET)) if offset != transfer.received
+            return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE)) if length == 0 or length > TransferLimits::TRANSFER_CHUNK_CAPACITY
+            if transfer.received > transfer.expected_size or transfer.received > TransferLimits::TRANSFER_CAPACITY:
+                return transfer_fail(transfer, TransferState.Corrupt, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE))
             if length > transfer.expected_size - transfer.received:
-                return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE))
-            return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_SIZE)) if length > TRANSFER_CAPACITY - transfer.received
+                return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE))
+            return transfer_fail(transfer, TransferState.QuotaExceeded, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE)) if length > TransferLimits::TRANSFER_CAPACITY - transfer.received
             for index in 0..<length:
                 value: u8 = bytes[index]
                 transfer.bytes[transfer.received + index] <- value
-                transfer.checksum <- (transfer.checksum ^ value.u64()) * HASH_PRIME
+                transfer.checksum <- (transfer.checksum ^ value.u64()) * Checksum::PROTOCOL_REMOTE_ARTIFACT_CHECKSUM_HASH_PRIME
             transfer.received <- transfer.received + length
             return DebuggerErrors::no_error()
 
         def transfer_finish(transfer: mutable ArtifactTransfer&) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE) if transfer.state == TransferState.Complete
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_STATE) if transfer.state == TransferState.Complete
             return transfer.last_error if transfer.state == TransferState.Corrupt or transfer.state == TransferState.QuotaExceeded
             if transfer.received != transfer.expected_size:
                 transfer.state <- TransferState.Corrupt
-                transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_SIZE)
+                transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_SIZE)
                 return transfer.last_error
             if not transfer_payload_checksum_matches(transfer):
                 transfer.state <- TransferState.Corrupt
-                transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CHECKSUM)
+                transfer.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::PROTOCOL_REMOTE_ARTIFACT_ERROR_DETAIL_DETAIL_CHECKSUM)
                 return transfer.last_error
             transfer.state <- TransferState.Complete
             transfer.last_error <- DebuggerErrors::no_error()
             return DebuggerErrors::no_error()
 
         def transfer_is_complete(transfer: ArtifactTransfer) -> bool:
-            return transfer.state == TransferState.Complete and DebuggerErrors::error_is_ok(transfer.last_error) and transfer.expected_size <= TRANSFER_CAPACITY and transfer.received == transfer.expected_size and transfer_payload_checksum_matches(transfer)
+            return transfer.state == TransferState.Complete and DebuggerErrors::error_is_ok(transfer.last_error) and transfer.expected_size <= TransferLimits::TRANSFER_CAPACITY and transfer.received == transfer.expected_size and transfer_payload_checksum_matches(transfer)
 
         def transfer_bytes_received(transfer: ArtifactTransfer) -> usize:
             return transfer.received

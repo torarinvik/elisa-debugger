@@ -13,48 +13,56 @@ include "./provenance.elisa"
 module DebuggerEDIRProvenance:
     private:
         # Reserve the final EDIR_MEMORY_SLOT_CAPACITY identifiers for slots.
-        const MEMORY_BINDING_ID_BASE: u64 = 18446744073709551552
-        const EDIR_MEMORY_SLOT_CAPACITY: u64 = 64
-        const EDIR_PROVENANCE_HISTORY_CAPACITY: usize = 64
-        const MEMORY_ALLOCATION_ID_OFFSET: u64 = 1
-        const MEMORY_ALLOCATION_GENERATION: u64 = 1
-        const PROVENANCE_MAX_U64: u64 = 18446744073709551615
-        const INVALID_ALLOCATION_SIZE: i64 = 0
-        const INVALID_ALLOCATION_ID: u64 = 0
+        const module Edir:
+            MEMORY_SLOT_CAPACITY: u64 = 64
+            PROVENANCE_HISTORY_CAPACITY: usize = 64
+
+        const module Memory:
+            BINDING_ID_BASE: u64 = 18446744073709551552
+            ALLOCATION_ID_OFFSET: u64 = 1
+            ALLOCATION_GENERATION: u64 = 1
+
+        const module Provenance:
+            QUERY_EDIR_PROVENANCE_MAX_U64: u64 = 18446744073709551615
+
+        const module Sentinel:
+            ALLOCATION_SIZE: i64 = 0
+            QUERY_EDIR_PROVENANCE_SENTINEL_ALLOCATION_ID: u64 = 0
+
 
     public:
         def edir_provenance_binding(allocation: DebuggerIdentity::AllocationIdentity, slot: u64) -> DebuggerIdentity::BindingIdentity:
-            return zeroed if slot >= EDIR_MEMORY_SLOT_CAPACITY
-            return zeroed if allocation.allocation.value == INVALID_ALLOCATION_ID
+            return zeroed if slot >= Edir::MEMORY_SLOT_CAPACITY
+            return zeroed if allocation.allocation.value == Sentinel::QUERY_EDIR_PROVENANCE_SENTINEL_ALLOCATION_ID
             return DebuggerIdentity::BindingIdentity{
-                declaration: DebuggerIdentity::debug_id(MEMORY_BINDING_ID_BASE + slot),
+                declaration: DebuggerIdentity::debug_id(Memory::BINDING_ID_BASE + slot),
                 incarnation: allocation.allocation.value
             }
 
     private:
         def edir_provenance_allocation_at(engine: mutable DebuggerReplayEngine::ReplayEngine&, event: u64, slot: u64) -> DebuggerIdentity::AllocationIdentity:
             result: mutable DebuggerIdentity::AllocationIdentity = zeroed
-            return result if event > engine.event_count.u64() or engine.event_count > EDIR_PROVENANCE_HISTORY_CAPACITY
+            return result if event > engine.event_count.u64() or engine.event_count > Edir::PROVENANCE_HISTORY_CAPACITY
             return result if not DebuggerEDIR::verify_image(engine.image).valid
             for candidate_event in 0..<event.usize():
                 snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[candidate_event]
                 continue if snapshot.program_counter >= engine.image.program.instruction_count
                 instruction: DebuggerEDIR::Instruction = engine.image.instructions[snapshot.program_counter.usize()]
-                continue if instruction.opcode != DebuggerEDIR::Opcode.Allocate or instruction.a <= INVALID_ALLOCATION_SIZE
+                continue if instruction.opcode != DebuggerEDIR::Opcode.Allocate or instruction.a <= Sentinel::ALLOCATION_SIZE
                 allocation_start: u64 = snapshot.heap_next.u64()
                 allocation_size: u64 = instruction.a.u64()
-                return result if allocation_size > PROVENANCE_MAX_U64 - allocation_start
+                return result if allocation_size > Provenance::QUERY_EDIR_PROVENANCE_MAX_U64 - allocation_start
                 allocation_end: u64 = allocation_start + allocation_size
                 if slot >= allocation_start and slot < allocation_end:
                     result <- DebuggerIdentity::AllocationIdentity{
-                        allocation: DebuggerIdentity::debug_id(candidate_event.u64() + MEMORY_ALLOCATION_ID_OFFSET),
-                        generation: MEMORY_ALLOCATION_GENERATION,
+                        allocation: DebuggerIdentity::debug_id(candidate_event.u64() + Memory::ALLOCATION_ID_OFFSET),
+                        generation: Memory::ALLOCATION_GENERATION,
                         offset: slot - allocation_start
                     }
             return result
 
         def edir_provenance_event_is_valid(engine: mutable DebuggerReplayEngine::ReplayEngine&, event: usize) -> bool:
-            return false if event >= engine.event_count or engine.event_count > EDIR_PROVENANCE_HISTORY_CAPACITY
+            return false if event >= engine.event_count or engine.event_count > Edir::PROVENANCE_HISTORY_CAPACITY
             snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[event]
             return false if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(engine, event, snapshot)
             return false if snapshot.program_counter >= engine.image.program.instruction_count
@@ -70,7 +78,7 @@ module DebuggerEDIRProvenance:
 
     public:
         def edir_provenance_memory_slot_is_valid(slot: u64) -> bool:
-            return slot < EDIR_MEMORY_SLOT_CAPACITY
+            return slot < Edir::MEMORY_SLOT_CAPACITY
 
         def edir_provenance_memory_binding(engine: mutable DebuggerReplayEngine::ReplayEngine&, slot: u64) -> DebuggerIdentity::BindingIdentity:
             allocation: DebuggerIdentity::AllocationIdentity = edir_provenance_allocation_at(engine, engine.event_count.u64(), slot)
@@ -78,7 +86,7 @@ module DebuggerEDIRProvenance:
 
         def edir_provenance_from_engine(engine: mutable DebuggerReplayEngine::ReplayEngine&) -> DebuggerProvenance::ProvenanceIndex:
             index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
-            if engine.event_count > EDIR_PROVENANCE_HISTORY_CAPACITY:
+            if engine.event_count > Edir::PROVENANCE_HISTORY_CAPACITY:
                 index.overflowed <- true
                 return index
             if not DebuggerEDIR::verify_image(engine.image).valid:
@@ -96,7 +104,7 @@ module DebuggerEDIRProvenance:
                 continue if machine.faulted
                 slot: u64 = instruction.a.u64()
                 allocation: DebuggerIdentity::AllocationIdentity = edir_provenance_allocation_at(engine, event.u64(), slot)
-                if allocation.allocation.value == INVALID_ALLOCATION_ID:
+                if allocation.allocation.value == Sentinel::QUERY_EDIR_PROVENANCE_SENTINEL_ALLOCATION_ID:
                     index.overflowed <- true
                     return index
                 # Event is the zero-based instruction ordinal. The EDIR
@@ -117,6 +125,6 @@ module DebuggerEDIRProvenance:
             index: DebuggerProvenance::ProvenanceIndex = edir_provenance_from_engine(engine)
             return result if not DebuggerProvenance::provenance_is_complete(index)
             allocation: DebuggerIdentity::AllocationIdentity = edir_provenance_allocation_at(engine, before_event, slot)
-            return result if allocation.allocation.value == INVALID_ALLOCATION_ID
+            return result if allocation.allocation.value == Sentinel::QUERY_EDIR_PROVENANCE_SENTINEL_ALLOCATION_ID
             binding: DebuggerIdentity::BindingIdentity = edir_provenance_binding(allocation, slot)
             return DebuggerProvenance::provenance_last_write(index, binding, before_event)

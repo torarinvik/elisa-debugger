@@ -7,38 +7,44 @@ include "../core/errors.elisa"
 
 module DebuggerEvaluate:
     private:
-        const MAX_EXPRESSION_BYTES: usize = 256
-        const MAX_OPERAND_COUNT: usize = 8
-        const EVALUATION_COST_LITERAL: usize = 1
-        const EVALUATION_COST_BINARY: usize = 2
-        const EVALUATION_FALSE: i64 = 0
-        const EVALUATION_TRUE: i64 = 1
-        const EVALUATION_I64_MIN: i64 = -9223372036854775807 - 1
-        const EVALUATION_I64_MAX: i64 = 9223372036854775807
-        const EVALUATION_NEGATIVE_ONE: i64 = -1
-        const EVALUATION_KIND_MAX: u16 = 12
-        const DETAIL_BUDGET: u32 = 1
-        const DETAIL_OVERFLOW: u32 = 2
-        const DETAIL_KIND: u32 = 3
+        const module Bounds:
+            MAX_EXPRESSION_BYTES: usize = 256
+            MAX_OPERAND_COUNT: usize = 8
+
+        const module Detail:
+            BUDGET: u32 = 1
+            OVERFLOW: u32 = 2
+            KIND: u32 = 3
+
+        const module EvaluationLimits:
+            INSPECT_EVALUATE_EVALUATION_LIMITS_COST_LITERAL: usize = 1
+            COST_BINARY: usize = 2
+            INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE: i64 = 0
+            INSPECT_EVALUATE_EVALUATION_LIMITS_TRUE: i64 = 1
+            INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN: i64 = -9223372036854775807 - 1
+            INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MAX: i64 = 9223372036854775807
+            NEGATIVE_ONE: i64 = -1
+            INSPECT_EVALUATE_EVALUATION_LIMITS_KIND_MAX: u16 = 12
+
 
         def add_overflows(left: i64, right: i64) -> bool:
-            return left > EVALUATION_I64_MAX - right if right > 0
-            return left < EVALUATION_I64_MIN - right if right < 0
+            return left > EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MAX - right if right > 0
+            return left < EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN - right if right < 0
             return false
 
         def subtract_overflows(left: i64, right: i64) -> bool:
-            return left < EVALUATION_I64_MIN + right if right > 0
-            return left > EVALUATION_I64_MAX + right if right < 0
+            return left < EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN + right if right > 0
+            return left > EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MAX + right if right < 0
             return false
 
         def multiply_overflows(left: i64, right: i64) -> bool:
             return false if left == 0 or right == 0
-            return true if left == EVALUATION_I64_MIN and right == EVALUATION_NEGATIVE_ONE
-            return true if right == EVALUATION_I64_MIN and left == EVALUATION_NEGATIVE_ONE
-            return left > EVALUATION_I64_MAX / right if left > 0 and right > 0
-            return right < EVALUATION_I64_MIN / left if left > 0 and right < 0
-            return left < EVALUATION_I64_MIN / right if left < 0 and right > 0
-            return left < EVALUATION_I64_MAX / right if left < 0 and right < 0
+            return true if left == EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN and right == EvaluationLimits::NEGATIVE_ONE
+            return true if right == EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN and left == EvaluationLimits::NEGATIVE_ONE
+            return left > EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MAX / right if left > 0 and right > 0
+            return right < EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN / left if left > 0 and right < 0
+            return left < EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN / right if left < 0 and right > 0
+            return left < EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MAX / right if left < 0 and right < 0
             return false
 
     public:
@@ -69,45 +75,45 @@ module DebuggerEvaluate:
             consumed: mutable usize
 
         def evaluate_literal(value: i64) -> Evaluation:
-            return Evaluation{value: value, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_LITERAL}
+            return Evaluation{value: value, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_COST_LITERAL}
 
 
         def evaluate_expression(expression: Expression, budget: usize) -> Evaluation:
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_BUDGET), consumed: budget} if budget == 0
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_KIND), consumed: 0} if expression.kind.u16() > EVALUATION_KIND_MAX
+            return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::BUDGET), consumed: budget} if budget == 0
+            return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::KIND), consumed: 0} if expression.kind.u16() > EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_KIND_MAX
             if expression.kind == EvaluationKind.Literal:
                 return evaluate_literal(expression.left)
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_BUDGET), consumed: 0} if budget < EVALUATION_COST_BINARY
+            return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::BUDGET), consumed: 0} if budget < EvaluationLimits::COST_BINARY
             if expression.kind == EvaluationKind.Add:
-                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OVERFLOW), consumed: EVALUATION_COST_BINARY} if add_overflows(expression.left, expression.right)
-                return Evaluation{value: expression.left + expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::OVERFLOW), consumed: EvaluationLimits::COST_BINARY} if add_overflows(expression.left, expression.right)
+                return Evaluation{value: expression.left + expression.right, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.Subtract:
-                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OVERFLOW), consumed: EVALUATION_COST_BINARY} if subtract_overflows(expression.left, expression.right)
-                return Evaluation{value: expression.left - expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::OVERFLOW), consumed: EvaluationLimits::COST_BINARY} if subtract_overflows(expression.left, expression.right)
+                return Evaluation{value: expression.left - expression.right, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.Multiply:
-                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OVERFLOW), consumed: EVALUATION_COST_BINARY} if multiply_overflows(expression.left, expression.right)
-                return Evaluation{value: expression.left * expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::OVERFLOW), consumed: EvaluationLimits::COST_BINARY} if multiply_overflows(expression.left, expression.right)
+                return Evaluation{value: expression.left * expression.right, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.Divide:
-                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EVALUATION_COST_BINARY.u32()), consumed: EVALUATION_COST_BINARY} if expression.right == 0
-                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EVALUATION_COST_BINARY.u32()), consumed: EVALUATION_COST_BINARY} if expression.left == EVALUATION_I64_MIN and expression.right == EVALUATION_NEGATIVE_ONE
-                return Evaluation{value: expression.left / expression.right, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EvaluationLimits::COST_BINARY.u32()), consumed: EvaluationLimits::COST_BINARY} if expression.right == 0
+                return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EvaluationLimits::COST_BINARY.u32()), consumed: EvaluationLimits::COST_BINARY} if expression.left == EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN and expression.right == EvaluationLimits::NEGATIVE_ONE
+                return Evaluation{value: expression.left / expression.right, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.Negate:
-                return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EVALUATION_COST_BINARY.u32()), consumed: EVALUATION_COST_BINARY} if expression.left == EVALUATION_I64_MIN
-                return Evaluation{value: 0 - expression.left, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, EvaluationLimits::COST_BINARY.u32()), consumed: EvaluationLimits::COST_BINARY} if expression.left == EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_I64_MIN
+                return Evaluation{value: 0 - expression.left, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.CompareEqual:
-                result: mutable i64 = EVALUATION_FALSE
-                result <- EVALUATION_TRUE if expression.left == expression.right
-                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                result: mutable i64 = EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE
+                result <- EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_TRUE if expression.left == expression.right
+                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.CompareLess:
-                result: mutable i64 = EVALUATION_FALSE
-                result <- EVALUATION_TRUE if expression.left < expression.right
-                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                result: mutable i64 = EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE
+                result <- EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_TRUE if expression.left < expression.right
+                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.BooleanAnd:
-                result: mutable i64 = EVALUATION_FALSE
-                result <- EVALUATION_TRUE if expression.left != EVALUATION_FALSE and expression.right != EVALUATION_FALSE
-                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
+                result: mutable i64 = EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE
+                result <- EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_TRUE if expression.left != EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE and expression.right != EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE
+                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
             if expression.kind == EvaluationKind.BooleanOr:
-                result: mutable i64 = EVALUATION_FALSE
-                result <- EVALUATION_TRUE if expression.left != EVALUATION_FALSE or expression.right != EVALUATION_FALSE
-                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_BINARY}
-            return Evaluation{value: EVALUATION_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_KIND), consumed: 0}
+                result: mutable i64 = EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE
+                result <- EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_TRUE if expression.left != EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE or expression.right != EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE
+                return Evaluation{value: result, failure: DebuggerErrors::no_error(), consumed: EvaluationLimits::COST_BINARY}
+            return Evaluation{value: EvaluationLimits::INSPECT_EVALUATE_EVALUATION_LIMITS_FALSE, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::KIND), consumed: 0}

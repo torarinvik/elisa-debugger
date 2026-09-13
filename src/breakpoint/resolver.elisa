@@ -8,17 +8,21 @@ include "../vm/edir.elisa"
 
 module DebuggerBreakpointResolver:
     private:
-        const RESOLUTION_CAPACITY: usize = 512
-        const RESOLUTION_LOCATION_CAPACITY: usize = RESOLUTION_CAPACITY
+        const module ResolutionLimits:
+            BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY: usize = 512
+            LOCATION_CAPACITY: usize = ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY
+
+        const module Sentinel:
+            INSTRUCTION: u64 = 18446744073709551615
+
         # EDIR instruction zero is the valid entry instruction. Keep the
         # sentinel outside the verifier's addressable range so the first
         # source instruction can still receive a breakpoint.
-        const NO_INSTRUCTION: u64 = 18446744073709551615
 
         def function_descriptor_is_resolvable(image: DebuggerEDIR::ProgramImage&, function: DebuggerEDIR::FunctionDescriptor) -> bool:
             return false if function.id.value == 0
-            return false if function.name_length == 0 or function.name_length > DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY
-            return false if not DebuggerMetadata::metadata_text_utf8_is_valid(function.name_bytes[0], function.name_length, DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY)
+            return false if function.name_length == 0 or function.name_length > DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY
+            return false if not DebuggerMetadata::metadata_text_utf8_is_valid(function.name_bytes[0], function.name_length, DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY)
             return false if function.entry_instruction >= function.end_instruction_exclusive
             return false if function.end_instruction_exclusive > image.program.instruction_count
             return true
@@ -37,21 +41,21 @@ module DebuggerBreakpointResolver:
             instruction: mutable u64
 
         struct Resolver:
-            candidates: mutable Candidate[RESOLUTION_CAPACITY]
+            candidates: mutable Candidate[ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY]
             count: mutable usize
 
         struct Resolution:
             status: mutable DebuggerMetadata::BreakpointResolution
             instruction: mutable u64
             matched: mutable usize
-            instructions: mutable u64[RESOLUTION_LOCATION_CAPACITY]
+            instructions: mutable u64[ResolutionLimits::LOCATION_CAPACITY]
 
         def resolver_new() -> Resolver:
             return zeroed
 
         def resolver_add(resolver: mutable Resolver&, candidate: Candidate) -> bool:
-            return false if resolver.count >= RESOLUTION_CAPACITY
-            return false if candidate.id.value == 0 or candidate.function.value == 0 or candidate.instruction == NO_INSTRUCTION or not DebuggerMetadata::source_span_is_valid(candidate.source)
+            return false if resolver.count >= ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY
+            return false if candidate.id.value == 0 or candidate.function.value == 0 or candidate.instruction == Sentinel::INSTRUCTION or not DebuggerMetadata::source_span_is_valid(candidate.source)
             resolver.candidates[resolver.count] <- candidate
             resolver.count <- resolver.count + 1
             return true
@@ -59,16 +63,16 @@ module DebuggerBreakpointResolver:
         def resolver_source(resolver: mutable Resolver&, location: DebuggerMetadata::SourceLocation) -> Resolution:
             result: mutable Resolution = zeroed
             result.status <- DebuggerMetadata::BreakpointResolution.Unresolved
-            result.instruction <- NO_INSTRUCTION
-            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if resolver.count > RESOLUTION_CAPACITY
+            result.instruction <- Sentinel::INSTRUCTION
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if resolver.count > ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY
             result.status <- DebuggerMetadata::BreakpointResolution.Invalid if not DebuggerMetadata::source_location_is_valid(location)
-            return result if resolver.count > RESOLUTION_CAPACITY
+            return result if resolver.count > ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY
             return result if result.status == DebuggerMetadata::BreakpointResolution.Invalid
             for index in 0..<resolver.count:
                 if DebuggerMetadata::source_span_contains(resolver.candidates[index].source, location):
                     result.instruction <- resolver.candidates[index].instruction if result.matched == 0
                     result.matched <- result.matched + 1
-                    result.instructions[result.matched - 1] <- resolver.candidates[index].instruction if result.matched <= RESOLUTION_LOCATION_CAPACITY
+                    result.instructions[result.matched - 1] <- resolver.candidates[index].instruction if result.matched <= ResolutionLimits::LOCATION_CAPACITY
             result.status <- DebuggerMetadata::BreakpointResolution.Resolved if result.matched == 1
             result.status <- DebuggerMetadata::BreakpointResolution.PartiallyResolved if result.matched > 1
             return result
@@ -76,16 +80,16 @@ module DebuggerBreakpointResolver:
         def resolver_function(resolver: mutable Resolver&, function: DebuggerIdentity::DebugId) -> Resolution:
             result: mutable Resolution = zeroed
             result.status <- DebuggerMetadata::BreakpointResolution.Unresolved
-            result.instruction <- NO_INSTRUCTION
-            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if resolver.count > RESOLUTION_CAPACITY
+            result.instruction <- Sentinel::INSTRUCTION
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if resolver.count > ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY
             result.status <- DebuggerMetadata::BreakpointResolution.Invalid if function.value == 0
-            return result if resolver.count > RESOLUTION_CAPACITY
+            return result if resolver.count > ResolutionLimits::BREAKPOINT_RESOLVER_RESOLUTION_LIMITS_CAPACITY
             return result if result.status == DebuggerMetadata::BreakpointResolution.Invalid
             for index in 0..<resolver.count:
                 if resolver.candidates[index].function.value == function.value:
                     result.instruction <- resolver.candidates[index].instruction if result.matched == 0
                     result.matched <- result.matched + 1
-                    result.instructions[result.matched - 1] <- resolver.candidates[index].instruction if result.matched <= RESOLUTION_LOCATION_CAPACITY
+                    result.instructions[result.matched - 1] <- resolver.candidates[index].instruction if result.matched <= ResolutionLimits::LOCATION_CAPACITY
             result.status <- DebuggerMetadata::BreakpointResolution.Resolved if result.matched == 1
             result.status <- DebuggerMetadata::BreakpointResolution.PartiallyResolved if result.matched > 1
             return result
@@ -96,10 +100,10 @@ module DebuggerBreakpointResolver:
         def resolver_edir_function_name(image: DebuggerEDIR::ProgramImage&, name_bytes: u8&, name_length: usize) -> Resolution:
             result: mutable Resolution = zeroed
             result.status <- DebuggerMetadata::BreakpointResolution.Unresolved
-            result.instruction <- NO_INSTRUCTION
-            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if name_length == 0 or name_length > DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY
-            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if not DebuggerMetadata::metadata_text_utf8_is_valid(name_bytes, name_length, DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY)
-            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if image.function_count > DebuggerEDIR::EDIR_FUNCTION_CAPACITY
+            result.instruction <- Sentinel::INSTRUCTION
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if name_length == 0 or name_length > DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if not DebuggerMetadata::metadata_text_utf8_is_valid(name_bytes, name_length, DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY)
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if image.function_count > DebuggerEDIRCapacity::EDIR_FUNCTION_CAPACITY
             return result if result.status == DebuggerMetadata::BreakpointResolution.Invalid
             for index in 0..<image.function_count:
                 function: DebuggerEDIR::FunctionDescriptor = image.functions[index]
@@ -121,5 +125,5 @@ module DebuggerBreakpointResolver:
             return result
 
         def resolution_instruction_at(resolution: Resolution, index: usize) -> u64:
-            return NO_INSTRUCTION if index >= resolution.matched or index >= RESOLUTION_LOCATION_CAPACITY
+            return Sentinel::INSTRUCTION if index >= resolution.matched or index >= ResolutionLimits::LOCATION_CAPACITY
             return resolution.instructions[index]

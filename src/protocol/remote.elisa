@@ -8,26 +8,34 @@ include "./artifacts.elisa"
 
 module DebuggerRemote:
     private:
-        const REMOTE_PROTOCOL_MAJOR: u32 = 1
-        const REMOTE_PROTOCOL_MINOR: u32 = 0
-        const REMOTE_ENGINE_MANAGED: u32 = 1
-        const REMOTE_TRACE_SCHEMA: u32 = 1
-        const REMOTE_HEARTBEAT_LIMIT: u64 = 3
-        const REMOTE_MAX_AUTH_ATTEMPTS: u32 = 3
-        const REMOTE_OPERATION_MAX: u16 = 4
-        const REMOTE_NO_CREDENTIAL: u64 = 0
-        const DETAIL_PROTOCOL: u32 = 1
-        const DETAIL_AUTHENTICATION: u32 = 2
-        const DETAIL_QUOTA: u32 = 3
-        const DETAIL_STATE: u32 = 4
-        const DETAIL_AUTH_ATTEMPTS: u32 = 5
-        const DETAIL_INSPECT_PERMISSION: u32 = 6
-        const DETAIL_CONTROL_PERMISSION: u32 = 7
-        const DETAIL_MUTATION_PERMISSION: u32 = 8
-        const DETAIL_EXTERNAL_EXECUTION_PERMISSION: u32 = 9
-        const DETAIL_ARTIFACT_PERMISSION: u32 = 10
-        const DETAIL_REMOTE_TRANSPORT: u32 = 11
-        const DETAIL_INVALID_OPERATION: u32 = 12
+
+        const module ErrorDetail:
+            PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_PROTOCOL: u32 = 1
+            DETAIL_AUTHENTICATION: u32 = 2
+            DETAIL_QUOTA: u32 = 3
+            PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE: u32 = 4
+            DETAIL_AUTH_ATTEMPTS: u32 = 5
+            DETAIL_INSPECT_PERMISSION: u32 = 6
+            DETAIL_CONTROL_PERMISSION: u32 = 7
+            DETAIL_MUTATION_PERMISSION: u32 = 8
+            DETAIL_EXTERNAL_EXECUTION_PERMISSION: u32 = 9
+            DETAIL_ARTIFACT_PERMISSION: u32 = 10
+            DETAIL_REMOTE_TRANSPORT: u32 = 11
+            DETAIL_INVALID_OPERATION: u32 = 12
+
+        const module RemoteLimits:
+            REMOTE_HEARTBEAT_LIMIT: u64 = 3
+            REMOTE_MAX_AUTH_ATTEMPTS: u32 = 3
+            REMOTE_OPERATION_MAX: u16 = 4
+
+        const module RemoteMetadata:
+            REMOTE_PROTOCOL_MAJOR: u32 = 1
+            REMOTE_PROTOCOL_MINOR: u32 = 0
+            REMOTE_ENGINE_MANAGED: u32 = 1
+            REMOTE_TRACE_SCHEMA: u32 = 1
+
+        const module Sentinels:
+            REMOTE_NO_CREDENTIAL: u64 = 0
 
     public:
         enum RemoteState:
@@ -81,7 +89,7 @@ module DebuggerRemote:
         def remote_begin(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.state != RemoteState.Disconnected
-            return updated if channel.auth_attempts >= REMOTE_MAX_AUTH_ATTEMPTS
+            return updated if channel.auth_attempts >= RemoteLimits::REMOTE_MAX_AUTH_ATTEMPTS
             updated.state <- RemoteState.Authenticating
             updated.handshake.protocol_major <- 0
             updated.handshake.protocol_minor <- 0
@@ -97,34 +105,34 @@ module DebuggerRemote:
         def remote_authenticate(channel: RemoteChannel, presented: u64, expected: u64) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             if channel.state != RemoteState.Authenticating:
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
                 return updated
-            if expected != REMOTE_NO_CREDENTIAL and presented == expected:
+            if expected != Sentinels::REMOTE_NO_CREDENTIAL and presented == expected:
                 updated.handshake.authenticated <- true
                 updated.auth_attempts <- 0
                 updated.last_error <- DebuggerErrors::no_error()
                 return updated
             updated.handshake.authenticated <- false
-            updated.auth_attempts <- channel.auth_attempts + 1 if channel.auth_attempts < REMOTE_MAX_AUTH_ATTEMPTS
-            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, true, DETAIL_AUTH_ATTEMPTS)
-            if updated.auth_attempts >= REMOTE_MAX_AUTH_ATTEMPTS:
+            updated.auth_attempts <- channel.auth_attempts + 1 if channel.auth_attempts < RemoteLimits::REMOTE_MAX_AUTH_ATTEMPTS
+            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, true, ErrorDetail::DETAIL_AUTH_ATTEMPTS)
+            if updated.auth_attempts >= RemoteLimits::REMOTE_MAX_AUTH_ATTEMPTS:
                 updated.state <- RemoteState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, DETAIL_AUTH_ATTEMPTS)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::DETAIL_AUTH_ATTEMPTS)
             return updated
 
         def remote_accept_handshake(channel: RemoteChannel, handshake: RemoteHandshake) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             if channel.state != RemoteState.Authenticating:
                 updated.state <- RemoteState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
                 return updated
-            if handshake.protocol_major != REMOTE_PROTOCOL_MAJOR or handshake.protocol_minor > REMOTE_PROTOCOL_MINOR or handshake.engine != REMOTE_ENGINE_MANAGED or handshake.trace_schema != REMOTE_TRACE_SCHEMA:
+            if handshake.protocol_major != RemoteMetadata::REMOTE_PROTOCOL_MAJOR or handshake.protocol_minor > RemoteMetadata::REMOTE_PROTOCOL_MINOR or handshake.engine != RemoteMetadata::REMOTE_ENGINE_MANAGED or handshake.trace_schema != RemoteMetadata::REMOTE_TRACE_SCHEMA:
                 updated.state <- RemoteState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_PROTOCOL)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_PROTOCOL)
                 return updated
             if not handshake.authenticated or not channel.handshake.authenticated:
                 updated.state <- RemoteState.Failed
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, DETAIL_AUTHENTICATION)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::DETAIL_AUTHENTICATION)
                 return updated
             updated.handshake <- handshake
             updated.state <- RemoteState.Connected
@@ -141,12 +149,12 @@ module DebuggerRemote:
             if bytes > channel.policy.quotas.remote_payload_bytes:
                 updated.quota_exceeded <- true
                 updated.state <- RemoteState.Draining
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_QUOTA)
                 return updated
             if channel.bytes_received > channel.policy.quotas.remote_payload_bytes - bytes:
                 updated.quota_exceeded <- true
                 updated.state <- RemoteState.Draining
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_QUOTA)
                 return updated
             updated.bytes_received <- channel.bytes_received + bytes
             updated.missed_heartbeats <- 0
@@ -159,12 +167,12 @@ module DebuggerRemote:
                 updated.last_error <- authorization
                 return updated
             if DebuggerRemoteArtifacts::transfer_is_receiving(channel.artifact):
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
                 return updated
             if size.u64() > channel.policy.quotas.remote_payload_bytes or channel.bytes_received > channel.policy.quotas.remote_payload_bytes - size.u64():
                 updated.quota_exceeded <- true
                 updated.state <- RemoteState.Draining
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_QUOTA)
                 return updated
             updated.artifact <- DebuggerRemoteArtifacts::transfer_begin(channel.artifact, size, checksum)
             updated.last_error <- updated.artifact.last_error
@@ -195,14 +203,14 @@ module DebuggerRemote:
         def remote_heartbeat_missed(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.state != RemoteState.Connected
-            if channel.missed_heartbeats >= REMOTE_HEARTBEAT_LIMIT:
+            if channel.missed_heartbeats >= RemoteLimits::REMOTE_HEARTBEAT_LIMIT:
                 updated.state <- RemoteState.Draining
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, DETAIL_STATE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
                 return updated
             updated.missed_heartbeats <- channel.missed_heartbeats + 1
-            if updated.missed_heartbeats >= REMOTE_HEARTBEAT_LIMIT:
+            if updated.missed_heartbeats >= RemoteLimits::REMOTE_HEARTBEAT_LIMIT:
                 updated.state <- RemoteState.Draining
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, DETAIL_STATE)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
             return updated
 
         def remote_disconnect(channel: RemoteChannel) -> RemoteChannel:
@@ -225,14 +233,14 @@ module DebuggerRemote:
             # disconnect. A successful authentication clears the counter;
             # creating a new channel starts a fresh attempt budget.
             updated.auth_attempts <- channel.auth_attempts
-            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA) if channel.quota_exceeded
+            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_QUOTA) if channel.quota_exceeded
             updated.last_error <- DebuggerErrors::no_error() if not channel.quota_exceeded
             return updated
 
         def remote_reconnect(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
             return updated if channel.quota_exceeded
-            return updated if channel.auth_attempts >= REMOTE_MAX_AUTH_ATTEMPTS
+            return updated if channel.auth_attempts >= RemoteLimits::REMOTE_MAX_AUTH_ATTEMPTS
             return updated if channel.state != RemoteState.Disconnected and channel.state != RemoteState.Draining and channel.state != RemoteState.Failed
             updated.state <- RemoteState.Authenticating
             updated.handshake.protocol_major <- 0
@@ -259,23 +267,23 @@ module DebuggerRemote:
             return DebuggerSecurity::Permission.ExportTrace
 
         def remote_operation_detail(operation: RemoteOperation) -> u32:
-            return DETAIL_INSPECT_PERMISSION if operation == RemoteOperation.Inspect
-            return DETAIL_CONTROL_PERMISSION if operation == RemoteOperation.Control
-            return DETAIL_MUTATION_PERMISSION if operation == RemoteOperation.Mutate
-            return DETAIL_EXTERNAL_EXECUTION_PERMISSION if operation == RemoteOperation.ExternalExecution
-            return DETAIL_ARTIFACT_PERMISSION
+            return ErrorDetail::DETAIL_INSPECT_PERMISSION if operation == RemoteOperation.Inspect
+            return ErrorDetail::DETAIL_CONTROL_PERMISSION if operation == RemoteOperation.Control
+            return ErrorDetail::DETAIL_MUTATION_PERMISSION if operation == RemoteOperation.Mutate
+            return ErrorDetail::DETAIL_EXTERNAL_EXECUTION_PERMISSION if operation == RemoteOperation.ExternalExecution
+            return ErrorDetail::DETAIL_ARTIFACT_PERMISSION
 
     public:
         # This gate is the single point remote adapters should call before
         # exposing an operation. A verified tunnel alone is not permission to
         # inspect, control, mutate, spawn a process, or export an artifact.
         def remote_authorize(channel: RemoteChannel, operation: RemoteOperation) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION) if operation.u16() > REMOTE_OPERATION_MAX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_OPERATION) if operation.u16() > RemoteLimits::REMOTE_OPERATION_MAX
             if channel.quota_exceeded:
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_QUOTA)
-            if channel.state != RemoteState.Connected or not channel.handshake.authenticated or channel.missed_heartbeats >= REMOTE_HEARTBEAT_LIMIT:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_QUOTA)
+            if channel.state != RemoteState.Connected or not channel.handshake.authenticated or channel.missed_heartbeats >= RemoteLimits::REMOTE_HEARTBEAT_LIMIT:
                 return channel.last_error if not DebuggerErrors::error_is_ok(channel.last_error)
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, DETAIL_REMOTE_TRANSPORT)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, true, ErrorDetail::DETAIL_REMOTE_TRANSPORT)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, remote_operation_detail(operation)) if not DebuggerSecurity::policy_allows(channel.policy, remote_operation_permission(operation))
             return DebuggerErrors::no_error()
 
@@ -294,7 +302,7 @@ module DebuggerRemote:
             return 0
 
         def remote_is_connected(channel: RemoteChannel) -> bool:
-            return channel.state == RemoteState.Connected and channel.handshake.authenticated and not channel.quota_exceeded and channel.missed_heartbeats < REMOTE_HEARTBEAT_LIMIT
+            return channel.state == RemoteState.Connected and channel.handshake.authenticated and not channel.quota_exceeded and channel.missed_heartbeats < RemoteLimits::REMOTE_HEARTBEAT_LIMIT
 
         def remote_authentication_attempts(channel: RemoteChannel) -> u32:
             return channel.auth_attempts

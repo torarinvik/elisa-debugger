@@ -7,35 +7,41 @@ include "../trace/binary.elisa"
 
 module DebuggerEDIRCodec:
     private:
-        const EDIR_CODEC_SCHEMA: u32 = 3
-        const EDIR_CODEC_LEGACY_SCHEMA: u32 = 2
-        const EDIR_CODEC_MAX_INSTRUCTIONS: usize = 128
-        const EDIR_CODEC_MAX_SOURCE_FILES: usize = DebuggerEDIR::EDIR_SOURCE_FILE_CAPACITY
-        const EDIR_CODEC_MAX_FUNCTIONS: usize = DebuggerEDIR::EDIR_FUNCTION_CAPACITY
-        const EDIR_CODEC_FUNCTION_NAME_CAPACITY: usize = DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY
+        const module Boolean:
+            VM_EDIR_CODEC_BOOLEAN_FALSE: u8 = 0
+            VM_EDIR_CODEC_BOOLEAN_TRUE: u8 = 1
+
+        const module Edir:
+            CODEC_SCHEMA: u32 = 3
+            CODEC_LEGACY_SCHEMA: u32 = 2
+            CODEC_MAX_INSTRUCTIONS: usize = 128
+            CODEC_MAX_SOURCE_FILES: usize = DebuggerEDIRCapacity::EDIR_SOURCE_FILE_CAPACITY
+            CODEC_MAX_FUNCTIONS: usize = DebuggerEDIRCapacity::EDIR_FUNCTION_CAPACITY
+            CODEC_FUNCTION_NAME_CAPACITY: usize = DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY
+            CODEC_U8_FIELD_BYTES: usize = 1
+            CODEC_U16_FIELD_BYTES: usize = 2
+            CODEC_U64_FIELD_BYTES: usize = 8
+            CODEC_U32_FIELD_BYTES: usize = 4
+            CODEC_SOURCE_FILE_FIXED_BYTES: usize = Edir::CODEC_U64_FIELD_BYTES * 4 + Edir::CODEC_U32_FIELD_BYTES
+            CODEC_SOURCE_SPAN_BYTES: usize = Edir::CODEC_U64_FIELD_BYTES * 3 + Edir::CODEC_U32_FIELD_BYTES * 5
+            CODEC_INSTRUCTION_BYTES: usize = Edir::CODEC_U16_FIELD_BYTES + Edir::CODEC_U64_FIELD_BYTES * 2 + Edir::CODEC_SOURCE_SPAN_BYTES
+            CODEC_SOURCE_PATH_CAPACITY: usize = DebuggerMetadataSourcePath::SOURCE_PATH_CAPACITY
+            CODEC_HEADER_BYTES: usize = Edir::CODEC_U32_FIELD_BYTES * 3 + Edir::CODEC_U64_FIELD_BYTES * 2 + Edir::CODEC_U8_FIELD_BYTES
+            CODEC_MAX_SOURCE_FILE_BYTES: usize = Edir::CODEC_SOURCE_FILE_FIXED_BYTES + Edir::CODEC_SOURCE_PATH_CAPACITY
+            CODEC_FUNCTION_FIXED_BYTES: usize = Edir::CODEC_U64_FIELD_BYTES * 3 + Edir::CODEC_SOURCE_SPAN_BYTES + Edir::CODEC_U32_FIELD_BYTES
+            CODEC_MAX_FUNCTION_BYTES: usize = Edir::CODEC_U32_FIELD_BYTES + Edir::CODEC_MAX_FUNCTIONS * (Edir::CODEC_FUNCTION_FIXED_BYTES + Edir::CODEC_FUNCTION_NAME_CAPACITY)
+            CODEC_MAX_BYTES: usize = Edir::CODEC_HEADER_BYTES + Edir::CODEC_MAX_INSTRUCTIONS * Edir::CODEC_INSTRUCTION_BYTES + Edir::CODEC_MAX_SOURCE_FILES * Edir::CODEC_MAX_SOURCE_FILE_BYTES + Edir::CODEC_MAX_FUNCTION_BYTES
+
+        const module Opcode:
+            VM_EDIR_CODEC_OPCODE_MAX: u16 = 19
+
         # Each instruction stores opcode (2), two i64 operands (16), and a
         # SourceSpan containing three u64 values plus five u32 values (44).
         # Keep this derived layout size in sync with put_source above so the
         # advertised artifact bound accepts every encodable image.
-        const EDIR_CODEC_U8_FIELD_BYTES: usize = 1
-        const EDIR_CODEC_U16_FIELD_BYTES: usize = 2
-        const EDIR_CODEC_U64_FIELD_BYTES: usize = 8
-        const EDIR_CODEC_U32_FIELD_BYTES: usize = 4
-        const EDIR_CODEC_SOURCE_FILE_FIXED_BYTES: usize = EDIR_CODEC_U64_FIELD_BYTES * 4 + EDIR_CODEC_U32_FIELD_BYTES
-        const EDIR_CODEC_SOURCE_SPAN_BYTES: usize = EDIR_CODEC_U64_FIELD_BYTES * 3 + EDIR_CODEC_U32_FIELD_BYTES * 5
-        const EDIR_CODEC_INSTRUCTION_BYTES: usize = EDIR_CODEC_U16_FIELD_BYTES + EDIR_CODEC_U64_FIELD_BYTES * 2 + EDIR_CODEC_SOURCE_SPAN_BYTES
-        const EDIR_CODEC_SOURCE_PATH_CAPACITY: usize = DebuggerMetadata::SOURCE_PATH_CAPACITY
-        const EDIR_CODEC_HEADER_BYTES: usize = EDIR_CODEC_U32_FIELD_BYTES * 3 + EDIR_CODEC_U64_FIELD_BYTES * 2 + EDIR_CODEC_U8_FIELD_BYTES
-        const EDIR_CODEC_MAX_SOURCE_FILE_BYTES: usize = EDIR_CODEC_SOURCE_FILE_FIXED_BYTES + EDIR_CODEC_SOURCE_PATH_CAPACITY
-        const EDIR_CODEC_FUNCTION_FIXED_BYTES: usize = EDIR_CODEC_U64_FIELD_BYTES * 3 + EDIR_CODEC_SOURCE_SPAN_BYTES + EDIR_CODEC_U32_FIELD_BYTES
-        const EDIR_CODEC_MAX_FUNCTION_BYTES: usize = EDIR_CODEC_U32_FIELD_BYTES + EDIR_CODEC_MAX_FUNCTIONS * (EDIR_CODEC_FUNCTION_FIXED_BYTES + EDIR_CODEC_FUNCTION_NAME_CAPACITY)
-        const EDIR_CODEC_MAX_BYTES: usize = EDIR_CODEC_HEADER_BYTES + EDIR_CODEC_MAX_INSTRUCTIONS * EDIR_CODEC_INSTRUCTION_BYTES + EDIR_CODEC_MAX_SOURCE_FILES * EDIR_CODEC_MAX_SOURCE_FILE_BYTES + EDIR_CODEC_MAX_FUNCTION_BYTES
-        const BOOLEAN_FALSE: u8 = 0
-        const BOOLEAN_TRUE: u8 = 1
-        const OPCODE_MAX: u16 = 19
 
         def opcode_from_u16(value: u16, valid: mutable bool&) -> DebuggerEDIR::Opcode:
-            valid <- false if value > OPCODE_MAX
+            valid <- false if value > Opcode::VM_EDIR_CODEC_OPCODE_MAX
             return DebuggerEDIR::Opcode.Nop if value == 0
             return DebuggerEDIR::Opcode.Constant if value == 1
             return DebuggerEDIR::Opcode.Add if value == 2
@@ -100,8 +106,8 @@ module DebuggerEDIRCodec:
             file.content <- DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(reader))
             file.line_count <- DebuggerTraceBinary::reader_take_u64(reader)
             path_length: u32 = DebuggerTraceBinary::reader_take_u32(reader)
-            valid <- false if path_length == 0 or path_length.usize() > EDIR_CODEC_SOURCE_PATH_CAPACITY
-            if path_length.usize() <= EDIR_CODEC_SOURCE_PATH_CAPACITY:
+            valid <- false if path_length == 0 or path_length.usize() > Edir::CODEC_SOURCE_PATH_CAPACITY
+            if path_length.usize() <= Edir::CODEC_SOURCE_PATH_CAPACITY:
                 file.path_length <- path_length.usize()
                 for index in 0..<file.path_length:
                     file.path_bytes[index] <- DebuggerTraceBinary::reader_take_byte(reader)
@@ -125,8 +131,8 @@ module DebuggerEDIRCodec:
             function.end_instruction_exclusive <- DebuggerTraceBinary::reader_take_u64(reader)
             function.source <- take_source(reader)
             name_length: u32 = DebuggerTraceBinary::reader_take_u32(reader)
-            valid <- false if name_length == 0 or name_length.usize() > EDIR_CODEC_FUNCTION_NAME_CAPACITY
-            if name_length.usize() <= EDIR_CODEC_FUNCTION_NAME_CAPACITY:
+            valid <- false if name_length == 0 or name_length.usize() > Edir::CODEC_FUNCTION_NAME_CAPACITY
+            if name_length.usize() <= Edir::CODEC_FUNCTION_NAME_CAPACITY:
                 function.name_length <- name_length.usize()
                 for index in 0..<function.name_length:
                     function.name_bytes[index] <- DebuggerTraceBinary::reader_take_byte(reader)
@@ -138,35 +144,35 @@ module DebuggerEDIRCodec:
             valid: mutable bool
 
         def artifact_max_instruction_count() -> usize:
-            return EDIR_CODEC_MAX_INSTRUCTIONS
+            return Edir::CODEC_MAX_INSTRUCTIONS
 
         def artifact_max_source_file_count() -> usize:
-            return EDIR_CODEC_MAX_SOURCE_FILES
+            return Edir::CODEC_MAX_SOURCE_FILES
 
         def artifact_max_function_count() -> usize:
-            return EDIR_CODEC_MAX_FUNCTIONS
+            return Edir::CODEC_MAX_FUNCTIONS
 
         def artifact_function_name_capacity() -> usize:
-            return EDIR_CODEC_FUNCTION_NAME_CAPACITY
+            return Edir::CODEC_FUNCTION_NAME_CAPACITY
 
         def artifact_source_path_capacity() -> usize:
-            return EDIR_CODEC_SOURCE_PATH_CAPACITY
+            return Edir::CODEC_SOURCE_PATH_CAPACITY
 
         def artifact_max_bytes() -> usize:
-            return EDIR_CODEC_MAX_BYTES
+            return Edir::CODEC_MAX_BYTES
 
         def artifact_encode(image: mutable DebuggerEDIR::ProgramImage&) -> DebuggerTraceBinary::ByteWriter:
             writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
             verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image_with_source_table(image)
-            if not verification.valid or image.program.instruction_count > EDIR_CODEC_MAX_INSTRUCTIONS.u64():
+            if not verification.valid or image.program.instruction_count > Edir::CODEC_MAX_INSTRUCTIONS.u64():
                 writer.failed <- true
                 return writer
-            writer <- DebuggerTraceBinary::writer_put_u32(writer, EDIR_CODEC_SCHEMA)
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, Edir::CODEC_SCHEMA)
             writer <- DebuggerTraceBinary::writer_put_u32(writer, image.program.version)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, image.program.instruction_count)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, image.program.local_count)
-            has_return: mutable u8 = BOOLEAN_FALSE
-            has_return <- BOOLEAN_TRUE if image.program.has_return
+            has_return: mutable u8 = Boolean::VM_EDIR_CODEC_BOOLEAN_FALSE
+            has_return <- Boolean::VM_EDIR_CODEC_BOOLEAN_TRUE if image.program.has_return
             writer <- DebuggerTraceBinary::writer_put_byte(writer, has_return)
             writer <- DebuggerTraceBinary::writer_put_u32(writer, image.source_file_count.u32())
             for index in 0..<image.source_file_count:
@@ -189,11 +195,11 @@ module DebuggerEDIRCodec:
             result.image.program.instruction_count <- DebuggerTraceBinary::reader_take_u64(reader)
             result.image.program.local_count <- DebuggerTraceBinary::reader_take_u64(reader)
             has_return: u8 = DebuggerTraceBinary::reader_take_byte(reader)
-            result.image.program.has_return <- has_return == BOOLEAN_TRUE
+            result.image.program.has_return <- has_return == Boolean::VM_EDIR_CODEC_BOOLEAN_TRUE
             source_file_count: u32 = DebuggerTraceBinary::reader_take_u32(reader)
-            decode_valid: mutable bool = (schema == EDIR_CODEC_SCHEMA or schema == EDIR_CODEC_LEGACY_SCHEMA) and has_return <= BOOLEAN_TRUE
-            decode_valid <- false if result.image.program.instruction_count > EDIR_CODEC_MAX_INSTRUCTIONS.u64()
-            decode_valid <- false if source_file_count.usize() > EDIR_CODEC_MAX_SOURCE_FILES
+            decode_valid: mutable bool = (schema == Edir::CODEC_SCHEMA or schema == Edir::CODEC_LEGACY_SCHEMA) and has_return <= Boolean::VM_EDIR_CODEC_BOOLEAN_TRUE
+            decode_valid <- false if result.image.program.instruction_count > Edir::CODEC_MAX_INSTRUCTIONS.u64()
+            decode_valid <- false if source_file_count.usize() > Edir::CODEC_MAX_SOURCE_FILES
             if decode_valid:
                 result.image.source_file_count <- source_file_count.usize()
                 for index in 0..<result.image.source_file_count:
@@ -208,9 +214,9 @@ module DebuggerEDIRCodec:
                         source: take_source(reader)
                     }
                     decode_valid <- false if not opcode_valid
-                if schema == EDIR_CODEC_SCHEMA:
+                if schema == Edir::CODEC_SCHEMA:
                     function_count: u32 = DebuggerTraceBinary::reader_take_u32(reader)
-                    decode_valid <- false if function_count.usize() > EDIR_CODEC_MAX_FUNCTIONS
+                    decode_valid <- false if function_count.usize() > Edir::CODEC_MAX_FUNCTIONS
                     if decode_valid:
                         result.image.function_count <- function_count.usize()
                         for index in 0..<result.image.function_count:
@@ -222,7 +228,7 @@ module DebuggerEDIRCodec:
             return result
 
         def artifact_is_valid(reader: DebuggerTraceBinary::ByteReader) -> bool:
-            return false if reader.length < EDIR_CODEC_HEADER_BYTES or reader.length > EDIR_CODEC_MAX_BYTES
+            return false if reader.length < Edir::CODEC_HEADER_BYTES or reader.length > Edir::CODEC_MAX_BYTES
             copy: mutable DebuggerTraceBinary::ByteReader = reader
             decoded: DecodeResult = artifact_decode(copy)
             return decoded.valid

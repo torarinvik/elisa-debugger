@@ -9,17 +9,25 @@ include "../core/cancellation.elisa"
 
 module DebuggerCoordinator:
     private:
-        const NO_EXPECTED_GENERATION: u64 = 0
-        const NO_REQUEST: u64 = 0
-        const DETAIL_INVALID_OPERATION: u32 = 1
-        const DETAIL_STALE_GENERATION: u32 = 2
-        const DETAIL_BUSY: u32 = 3
-        const DETAIL_UNSUPPORTED: u32 = 4
-        const DETAIL_CAPABILITY: u32 = 5
-        const OPERATION_MAX: u16 = 28
+        const module CoordinatorLimits:
+            ENGINE_COORDINATOR_LIMITS_INITIAL_TICK: u64 = 1
+
+        const module Detail:
+            INVALID_OPERATION: u32 = 1
+            ENGINE_COORDINATOR_DETAIL_STALE_GENERATION: u32 = 2
+            BUSY: u32 = 3
+            ENGINE_COORDINATOR_DETAIL_UNSUPPORTED: u32 = 4
+            ENGINE_COORDINATOR_DETAIL_CAPABILITY: u32 = 5
+
+        const module OperationLimits:
+            ENGINE_COORDINATOR_OPERATION_LIMITS_MAX: u16 = 28
+
+        const module Sentinel:
+            ENGINE_COORDINATOR_SENTINEL_EXPECTED_GENERATION: u64 = 0
+            ENGINE_COORDINATOR_SENTINEL_REQUEST: u64 = 0
+
         # Coordinator work begins at logical tick one.  Checking at zero
         # makes every positive deadline appear unexpired indefinitely.
-        const COORDINATOR_INITIAL_TICK: u64 = 1
 
     public:
         enum Operation:
@@ -69,39 +77,39 @@ module DebuggerCoordinator:
             failure: mutable DebuggerErrors::DebuggerError
 
         def coordinator_new(session: DebuggerSession::Session) -> Coordinator:
-            return Coordinator{session: session, busy: false, active_request: NO_REQUEST, last_request: NO_REQUEST, last_error: DebuggerErrors::no_error()}
+            return Coordinator{session: session, busy: false, active_request: Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST, last_request: Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST, last_error: DebuggerErrors::no_error()}
 
         def result_error(coordinator: Coordinator, operation: Operation, request_id: u64, failure: DebuggerErrors::DebuggerError) -> Result:
             updated: mutable Coordinator = coordinator
-            updated.active_request <- NO_REQUEST if not updated.busy
+            updated.active_request <- Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST if not updated.busy
             updated.last_error <- failure
             return Result{coordinator: updated, operation: operation, request_id: request_id, accepted: false, stop_generation: updated.session.stop_generation, failure: failure}
 
         def result_ok(coordinator: Coordinator, operation: Operation, request_id: u64) -> Result:
             updated: mutable Coordinator = coordinator
-            updated.active_request <- NO_REQUEST
+            updated.active_request <- Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST
             updated.last_error <- DebuggerErrors::no_error()
             return Result{coordinator: updated, operation: operation, request_id: request_id, accepted: true, stop_generation: updated.session.stop_generation, failure: DebuggerErrors::no_error()}
 
         def map_session_error(failure: DebuggerSession::SessionError) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_INVALID_OPERATION) if failure == DebuggerSession::SessionError.InvalidTransition
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION) if failure == DebuggerSession::SessionError.StaleGeneration
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.Unsupported
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.ReplayDiverged
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.HistoryUnavailable
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.TraceCorrupt
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.ArtifactMismatch
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.Cancelled
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::INVALID_OPERATION) if failure == DebuggerSession::SessionError.InvalidTransition
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::ENGINE_COORDINATOR_DETAIL_STALE_GENERATION) if failure == DebuggerSession::SessionError.StaleGeneration
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.ReplayDiverged
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.HistoryUnavailable
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.TraceCorrupt
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.ArtifactMismatch
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED) if failure == DebuggerSession::SessionError.Cancelled
             return DebuggerErrors::no_error()
 
         def coordinator_execute(coordinator: Coordinator, request_id: u64, operation: Operation, expected_generation: u64, token: DebuggerCancellation::CancellationToken) -> Result:
             updated: mutable Coordinator = coordinator
-            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if request_id == NO_REQUEST and operation != Operation.Discover
-            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if operation.u16() > OPERATION_MAX
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INVALID_OPERATION)) if request_id == Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST and operation != Operation.Discover
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INVALID_OPERATION)) if operation.u16() > OperationLimits::ENGINE_COORDINATOR_OPERATION_LIMITS_MAX
             return coordinator_cancel(coordinator, request_id) if operation == Operation.Cancel
-            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, true, DETAIL_BUSY)) if coordinator.busy
-            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_INVALID_OPERATION)) if DebuggerCancellation::cancellation_is_requested(token, COORDINATOR_INITIAL_TICK)
-            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)) if expected_generation != NO_EXPECTED_GENERATION and expected_generation != coordinator.session.stop_generation
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, true, Detail::BUSY)) if coordinator.busy
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, Detail::INVALID_OPERATION)) if DebuggerCancellation::cancellation_is_requested(token, CoordinatorLimits::ENGINE_COORDINATOR_LIMITS_INITIAL_TICK)
+            return result_error(updated, operation, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::ENGINE_COORDINATOR_DETAIL_STALE_GENERATION)) if expected_generation != Sentinel::ENGINE_COORDINATOR_SENTINEL_EXPECTED_GENERATION and expected_generation != coordinator.session.stop_generation
             updated.busy <- true
             updated.active_request <- request_id
             updated.last_request <- request_id
@@ -138,68 +146,68 @@ module DebuggerCoordinator:
             if operation == Operation.Threads or operation == Operation.Stack or operation == Operation.Scopes or operation == Operation.Variables or operation == Operation.Evaluate:
                 if not DebuggerSession::session_can_inspect(coordinator.session):
                     updated.busy <- false
-                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                     return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Threads or operation == Operation.Stack or operation == Operation.Scopes or operation == Operation.Variables:
                 if not coordinator.session.capabilities.typed_values:
                     updated.busy <- false
-                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                     return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Evaluate and not coordinator.session.capabilities.expression_evaluation:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.TraceVerify and not coordinator.session.capabilities.trace_verification:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.TraceExport and not coordinator.session.capabilities.trace_export:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.TraceVerify or operation == Operation.TraceExport:
                 if not DebuggerSession::session_can_inspect(coordinator.session):
                     updated.busy <- false
-                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                     return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.SetBreakpoints and not coordinator.session.capabilities.source_breakpoints:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.SetDataBreakpoints and not coordinator.session.capabilities.data_breakpoints:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Checkpoint and (not coordinator.session.capabilities.checkpoints or not DebuggerSession::session_can_inspect(coordinator.session)):
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Branch and (not coordinator.session.capabilities.branches or not DebuggerSession::session_can_inspect(coordinator.session)):
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Compare and (not coordinator.session.capabilities.provenance or not DebuggerSession::session_can_inspect(coordinator.session)):
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Memory and (not coordinator.session.capabilities.memory_read or not DebuggerSession::session_can_inspect(coordinator.session)):
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.ReverseStep and not coordinator.session.capabilities.reverse_execution:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ENGINE_COORDINATOR_DETAIL_CAPABILITY)
                 return result_error(updated, operation, request_id, updated.last_error)
             # The provider-neutral dispatcher has no operands or result payloads
             # for inspection and artifact operations. Leave those to the typed
             # provider APIs instead of acknowledging work that was not done.
             if operation == Operation.Threads or operation == Operation.Stack or operation == Operation.Scopes or operation == Operation.Variables or operation == Operation.Evaluate or operation == Operation.SetBreakpoints or operation == Operation.SetDataBreakpoints or operation == Operation.Checkpoint or operation == Operation.Branch or operation == Operation.Compare or operation == Operation.TraceVerify or operation == Operation.TraceExport or operation == Operation.Memory:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED)
                 return result_error(updated, operation, request_id, updated.last_error)
             if operation == Operation.Seek:
                 updated.busy <- false
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_COORDINATOR_DETAIL_UNSUPPORTED)
                 return result_error(updated, operation, request_id, updated.last_error)
             if updated.session.last_error != DebuggerSession::SessionError.None:
                 updated.busy <- false
@@ -215,10 +223,10 @@ module DebuggerCoordinator:
         # point instead of overloading the ordinary operation request.
         def coordinator_seek(coordinator: Coordinator, request_id: u64, expected_generation: u64, target_event: u64, token: DebuggerCancellation::CancellationToken) -> Result:
             updated: mutable Coordinator = coordinator
-            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if request_id == NO_REQUEST
-            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, true, DETAIL_BUSY)) if coordinator.busy
-            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_INVALID_OPERATION)) if DebuggerCancellation::cancellation_is_requested(token, COORDINATOR_INITIAL_TICK)
-            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)) if expected_generation != NO_EXPECTED_GENERATION and expected_generation != coordinator.session.stop_generation
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INVALID_OPERATION)) if request_id == Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, true, Detail::BUSY)) if coordinator.busy
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, Detail::INVALID_OPERATION)) if DebuggerCancellation::cancellation_is_requested(token, CoordinatorLimits::ENGINE_COORDINATOR_LIMITS_INITIAL_TICK)
+            return result_error(updated, Operation.Seek, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::ENGINE_COORDINATOR_DETAIL_STALE_GENERATION)) if expected_generation != Sentinel::ENGINE_COORDINATOR_SENTINEL_EXPECTED_GENERATION and expected_generation != coordinator.session.stop_generation
             updated.busy <- true
             updated.active_request <- request_id
             updated.last_request <- request_id
@@ -229,10 +237,10 @@ module DebuggerCoordinator:
 
         def coordinator_cancel(coordinator: Coordinator, request_id: u64) -> Result:
             updated: mutable Coordinator = coordinator
-            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if request_id == NO_REQUEST
-            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_INVALID_OPERATION)) if not coordinator.busy
-            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_OPERATION)) if coordinator.active_request != NO_REQUEST and coordinator.active_request != request_id
+            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INVALID_OPERATION)) if request_id == Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST
+            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::INVALID_OPERATION)) if not coordinator.busy
+            return result_error(updated, Operation.Cancel, request_id, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INVALID_OPERATION)) if coordinator.active_request != Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST and coordinator.active_request != request_id
             updated.busy <- false
-            updated.active_request <- NO_REQUEST
-            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_INVALID_OPERATION)
+            updated.active_request <- Sentinel::ENGINE_COORDINATOR_SENTINEL_REQUEST
+            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, Detail::INVALID_OPERATION)
             return result_error(updated, Operation.Cancel, request_id, updated.last_error)

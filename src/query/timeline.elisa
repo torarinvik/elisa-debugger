@@ -7,15 +7,25 @@ include "../core/errors.elisa"
 
 module DebuggerTimeline:
     private:
-        const BOOKMARK_CAPACITY: usize = 128
-        const FIRST_BOOKMARK_ID: u64 = 1
-        const MAX_BOOKMARK_ID: u64 = 18446744073709551615
-        const NO_BOOKMARK_ID: u64 = 0
-        const NO_EVENT: u64 = 0
-        const DETAIL_RANGE: u32 = 1
-        const DETAIL_CAPABILITY: u32 = 2
-        const DETAIL_CAPACITY: u32 = 3
-        const DETAIL_BOOKMARK: u32 = 4
+        const module BookmarkLimits:
+            QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY: usize = 128
+
+        const module Bounds:
+            MAX_BOOKMARK_ID: u64 = 18446744073709551615
+
+        const module Detail:
+            QUERY_TIMELINE_DETAIL_RANGE: u32 = 1
+            QUERY_TIMELINE_DETAIL_CAPABILITY: u32 = 2
+            QUERY_TIMELINE_DETAIL_CAPACITY: u32 = 3
+            BOOKMARK: u32 = 4
+
+        const module First:
+            QUERY_TIMELINE_FIRST_BOOKMARK_ID: u64 = 1
+
+        const module Sentinel:
+            QUERY_TIMELINE_SENTINEL_BOOKMARK_ID: u64 = 0
+            QUERY_TIMELINE_SENTINEL_EVENT: u64 = 0
+
 
     public:
         struct HistoryBounds:
@@ -38,7 +48,7 @@ module DebuggerTimeline:
             position: mutable DebuggerIdentity::Position
             bounds: mutable HistoryBounds
             capabilities: mutable DebuggerCapabilities::CapabilitySet
-            bookmarks: mutable Bookmark[BOOKMARK_CAPACITY]
+            bookmarks: mutable Bookmark[BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY]
             bookmark_count: mutable usize
             next_bookmark_id: mutable u64
 
@@ -55,29 +65,29 @@ module DebuggerTimeline:
             return false if bounds.has_exact and (not bounds.has_retained or bounds.exact_last < bounds.exact_first)
             return false if bounds.has_exact and (bounds.exact_first < bounds.retained_first or bounds.exact_last > bounds.retained_last)
             return false if bounds.has_retained and (bounds.current < bounds.retained_first or bounds.current > bounds.retained_last)
-            return bounds.has_retained or bounds.current == NO_EVENT
+            return bounds.has_retained or bounds.current == Sentinel::QUERY_TIMELINE_SENTINEL_EVENT
 
         def timeline_new(position: DebuggerIdentity::Position, capabilities: DebuggerCapabilities::CapabilitySet) -> Timeline:
             bounds: mutable HistoryBounds = history_bounds_new(position.event)
             bounds.has_exact <- capabilities.history == DebuggerCapabilities::HistoryKind.Exact
             bounds.exact_first <- position.event
             bounds.exact_last <- position.event
-            return Timeline{position: position, bounds: bounds, capabilities: capabilities, bookmarks: zeroed, bookmark_count: 0, next_bookmark_id: FIRST_BOOKMARK_ID}
+            return Timeline{position: position, bounds: bounds, capabilities: capabilities, bookmarks: zeroed, bookmark_count: 0, next_bookmark_id: First::QUERY_TIMELINE_FIRST_BOOKMARK_ID}
 
         def timeline_set_bounds(timeline: Timeline, bounds: HistoryBounds) -> TimelineResult:
             updated: mutable Timeline = timeline
             if not history_bounds_is_valid(bounds):
-                return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_RANGE)}
+                return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)}
             if bounds.has_exact and timeline.capabilities.history != DebuggerCapabilities::HistoryKind.Exact:
-                return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY)}
+                return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)}
             updated.bounds <- bounds
             updated.position.event <- bounds.current
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_set_capabilities(timeline: Timeline, capabilities: DebuggerCapabilities::CapabilitySet) -> TimelineResult:
             updated: mutable Timeline = timeline
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CAPABILITY)} if not DebuggerCapabilities::capabilities_is_valid(capabilities)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)} if not DebuggerCapabilities::capabilities_is_valid(capabilities)
             updated.capabilities <- capabilities
             if capabilities.history == DebuggerCapabilities::HistoryKind.Exact and not updated.bounds.has_exact:
                 updated.bounds.has_exact <- true
@@ -96,50 +106,50 @@ module DebuggerTimeline:
 
         def timeline_seek(timeline: Timeline, event: u64) -> TimelineResult:
             updated: mutable Timeline = timeline
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RANGE)} if not timeline_position_is_retained(timeline, event)
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY)} if event != timeline.bounds.current and not timeline_position_is_exact(timeline, event)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not timeline_position_is_retained(timeline, event)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)} if event != timeline.bounds.current and not timeline_position_is_exact(timeline, event)
             updated.bounds.current <- event
             updated.position.event <- event
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_reverse(timeline: Timeline) -> TimelineResult:
-            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
-            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RANGE)} if timeline.bounds.current == NO_EVENT
+            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
+            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if timeline.bounds.current == Sentinel::QUERY_TIMELINE_SENTINEL_EVENT
             return timeline_seek(timeline, timeline.bounds.current - 1)
 
         def timeline_add_bookmark(timeline: Timeline, label: DebuggerIdentity::DebugId, note: DebuggerIdentity::DebugId, pinned: bool) -> TimelineResult:
             updated: mutable Timeline = timeline
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY)} if timeline.bookmark_count > BOOKMARK_CAPACITY
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_CAPACITY)} if timeline.bookmark_count >= BOOKMARK_CAPACITY or timeline.next_bookmark_id == NO_BOOKMARK_ID or timeline.next_bookmark_id == MAX_BOOKMARK_ID
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_BOOKMARK)} if not timeline_position_is_retained(timeline, timeline.bounds.current)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_CAPACITY)} if timeline.bookmark_count > BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::QUERY_TIMELINE_DETAIL_CAPACITY)} if timeline.bookmark_count >= BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY or timeline.next_bookmark_id == Sentinel::QUERY_TIMELINE_SENTINEL_BOOKMARK_ID or timeline.next_bookmark_id == Bounds::MAX_BOOKMARK_ID
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::BOOKMARK)} if not timeline_position_is_retained(timeline, timeline.bounds.current)
             for index in 0..<timeline.bookmark_count:
-                return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_BOOKMARK)} if timeline.bookmarks[index].id.value == timeline.next_bookmark_id
+                return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::BOOKMARK)} if timeline.bookmarks[index].id.value == timeline.next_bookmark_id
             index: usize = timeline.bookmark_count
             updated.bookmarks[index] <- Bookmark{id: DebuggerIdentity::debug_id(timeline.next_bookmark_id), position: timeline.position, label: label, note: note, pinned: pinned}
             updated.bookmarks[index].position.event <- timeline.bounds.current
             updated.bookmark_count <- timeline.bookmark_count + 1
-            updated.next_bookmark_id <- timeline.next_bookmark_id + FIRST_BOOKMARK_ID
+            updated.next_bookmark_id <- timeline.next_bookmark_id + First::QUERY_TIMELINE_FIRST_BOOKMARK_ID
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_find_bookmark(timeline: Timeline, id: DebuggerIdentity::DebugId) -> Bookmark:
             result: mutable Bookmark = zeroed
-            return result if timeline.bookmark_count > BOOKMARK_CAPACITY
+            return result if timeline.bookmark_count > BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
             for index in 0..<timeline.bookmark_count:
                 return timeline.bookmarks[index] if timeline.bookmarks[index].id.value == id.value
             return result
 
         def timeline_seek_bookmark(timeline: Timeline, id: DebuggerIdentity::DebugId) -> TimelineResult:
             bookmark: Bookmark = timeline_find_bookmark(timeline, id)
-            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_BOOKMARK)} if bookmark.id.value == NO_BOOKMARK_ID
+            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::BOOKMARK)} if bookmark.id.value == Sentinel::QUERY_TIMELINE_SENTINEL_BOOKMARK_ID
             return timeline_seek(timeline, bookmark.position.event)
 
         def timeline_remove_bookmark(timeline: Timeline, id: DebuggerIdentity::DebugId) -> TimelineResult:
             updated: mutable Timeline = timeline
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY)} if timeline.bookmark_count > BOOKMARK_CAPACITY
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_CAPACITY)} if timeline.bookmark_count > BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
             for index in 0..<timeline.bookmark_count:
                 if timeline.bookmarks[index].id.value == id.value:
                     updated.bookmarks[index] <- timeline.bookmarks[timeline.bookmark_count - 1]
                     updated.bookmark_count <- timeline.bookmark_count - 1
                     return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_BOOKMARK)}
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::BOOKMARK)}

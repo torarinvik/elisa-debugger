@@ -11,12 +11,18 @@ include "./request.elisa"
 
 module DebuggerProtocolDispatcher:
     private:
-        const NO_EXPECTED_GENERATION: u64 = 0
-        const DETAIL_INVALID_REQUEST: u32 = 1
-        const DETAIL_STALE_GENERATION: u32 = 2
-        const DETAIL_UNSUPPORTED_OPERATION: u32 = 3
-        const DETAIL_CAPABILITY_UNAVAILABLE: u32 = 4
-        const REQUEST_METHOD_MAX: u16 = 29
+
+        const module ErrorDetail:
+            DETAIL_INVALID_REQUEST: u32 = 1
+            PROTOCOL_DISPATCHER_ERROR_DETAIL_DETAIL_STALE_GENERATION: u32 = 2
+            DETAIL_UNSUPPORTED_OPERATION: u32 = 3
+            DETAIL_CAPABILITY_UNAVAILABLE: u32 = 4
+
+        const module GenerationState:
+            PROTOCOL_DISPATCHER_GENERATION_STATE_NO_EXPECTED_GENERATION: u64 = 0
+
+        const module RequestLimits:
+            PROTOCOL_DISPATCHER_REQUEST_LIMITS_REQUEST_METHOD_MAX: u16 = 29
 
     public:
         struct DispatchResult:
@@ -33,14 +39,14 @@ module DebuggerProtocolDispatcher:
             return DispatchResult{session: session, method: method, accepted: true, stop_generation: session.stop_generation, failure: DebuggerErrors::no_error()}
 
         def map_session_error(failure: DebuggerSession::SessionError) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_INVALID_REQUEST) if failure == DebuggerSession::SessionError.InvalidTransition
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION) if failure == DebuggerSession::SessionError.StaleGeneration
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.Unsupported
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.ReplayDiverged
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.HistoryUnavailable
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.TraceCorrupt
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.ArtifactMismatch
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.Cancelled
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_INVALID_REQUEST) if failure == DebuggerSession::SessionError.InvalidTransition
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_DISPATCHER_ERROR_DETAIL_DETAIL_STALE_GENERATION) if failure == DebuggerSession::SessionError.StaleGeneration
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, ErrorDetail::DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.ReplayDiverged
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.HistoryUnavailable
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.TraceCorrupt
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, ErrorDetail::DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.ArtifactMismatch
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, ErrorDetail::DETAIL_UNSUPPORTED_OPERATION) if failure == DebuggerSession::SessionError.Cancelled
             return DebuggerErrors::no_error()
 
         def operation_for_method(method: DebuggerProtocolRequest::RequestMethod) -> DebuggerCoordinator::Operation:
@@ -76,18 +82,18 @@ module DebuggerProtocolDispatcher:
 
         def dispatch_request(session: DebuggerSession::Session, request: DebuggerProtocolRequest::Request, expected_generation: u64) -> DispatchResult:
             requested_generation: mutable u64 = expected_generation
-            requested_generation <- request.expected_generation if expected_generation == NO_EXPECTED_GENERATION
-            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_REQUEST)) if not request.valid or request.method == DebuggerProtocolRequest::RequestMethod.Unknown or request.method.u16() > REQUEST_METHOD_MAX
+            requested_generation <- request.expected_generation if expected_generation == GenerationState::PROTOCOL_DISPATCHER_GENERATION_STATE_NO_EXPECTED_GENERATION
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_REQUEST)) if not request.valid or request.method == DebuggerProtocolRequest::RequestMethod.Unknown or request.method.u16() > RequestLimits::PROTOCOL_DISPATCHER_REQUEST_LIMITS_REQUEST_METHOD_MAX
             coordinator: DebuggerCoordinator::Coordinator = DebuggerCoordinator::coordinator_new(session)
             token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
             result: DebuggerCoordinator::Result = DebuggerCoordinator::coordinator_execute(coordinator, request.id, operation_for_method(request.method), requested_generation, token)
             return DispatchResult{session: result.coordinator.session, method: request.method, accepted: result.accepted, stop_generation: result.stop_generation, failure: result.failure}
 
         def dispatch_seek(session: DebuggerSession::Session, request: DebuggerProtocolRequest::Request, expected_generation: u64) -> DispatchResult:
-            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_REQUEST)) if not request.valid or request.method == DebuggerProtocolRequest::RequestMethod.Unknown or request.method.u16() > REQUEST_METHOD_MAX
-            requested_generation: u64 = request.expected_generation if expected_generation == NO_EXPECTED_GENERATION else expected_generation
-            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)) if requested_generation != NO_EXPECTED_GENERATION and requested_generation != session.stop_generation
-            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_CAPABILITY_UNAVAILABLE)) if not DebuggerSession::session_can_inspect(session) or session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_REQUEST)) if not request.valid or request.method == DebuggerProtocolRequest::RequestMethod.Unknown or request.method.u16() > RequestLimits::PROTOCOL_DISPATCHER_REQUEST_LIMITS_REQUEST_METHOD_MAX
+            requested_generation: u64 = request.expected_generation if expected_generation == GenerationState::PROTOCOL_DISPATCHER_GENERATION_STATE_NO_EXPECTED_GENERATION else expected_generation
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_DISPATCHER_ERROR_DETAIL_DETAIL_STALE_GENERATION)) if requested_generation != GenerationState::PROTOCOL_DISPATCHER_GENERATION_STATE_NO_EXPECTED_GENERATION and requested_generation != session.stop_generation
+            return dispatch_error(session, request.method, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_CAPABILITY_UNAVAILABLE)) if not DebuggerSession::session_can_inspect(session) or session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             updated: DebuggerSession::Session = DebuggerSession::session_seek(session, request.target_event)
             return dispatch_error(updated, request.method, map_session_error(updated.last_error)) if updated.last_error != DebuggerSession::SessionError.None
             return dispatch_ok(updated, request.method)

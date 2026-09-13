@@ -31,26 +31,36 @@ static elif ELISA_TARGET_OS_LINUX:
 
 module DebuggerHostProcess:
     private:
-        const PROCESS_OUTPUT_CAPACITY: usize = 4096
-        const PROCESS_READ_CHUNK_BYTES: usize = 512
-        const PROCESS_DESCRIPTOR_COUNT: usize = 2
-        const PROCESS_READ_DESCRIPTOR_INDEX: usize = 0
-        const PROCESS_WRITE_DESCRIPTOR_INDEX: usize = 1
-        const PROCESS_STDOUT_FD: i32 = 1
-        const PROCESS_STDERR_FD: i32 = 2
-        const PROCESS_WAIT_OPTIONS: i32 = 0
-        const PROCESS_WAIT_EXITED_MASK: i32 = 127
-        const PROCESS_WAIT_SIGNALED_STOPPED: i32 = 127
-        const PROCESS_WAIT_EXIT_CODE_SHIFT: i32 = 8
-        const PROCESS_WAIT_EXIT_CODE_MASK: i32 = 255
-        const PROCESS_INTERRUPTED_ERROR_CODE: i32 = 4
-        const PROCESS_SYSCALL_FAILURE: i32 = -1
-        const PROCESS_INITIAL_CHILD_PID: i32 = 0
-        const PROCESS_INITIAL_WAIT_STATUS: i32 = 0
-        const PROCESS_READ_EOF: isize = 0
-        const PROCESS_OUTPUT_LENGTH_INCREMENT: usize = 1
-        const PROCESS_NO_SIGNAL: i32 = 0
-        const PROCESS_STATUS_SUCCESS: i32 = 0
+        const module Capture:
+            PROCESS_OUTPUT_CAPACITY: usize = 4096
+            PROCESS_READ_CHUNK_BYTES: usize = 512
+            PROCESS_OUTPUT_LENGTH_INCREMENT: usize = 1
+
+        const module Descriptor:
+            PROCESS_DESCRIPTOR_COUNT: usize = 2
+            PROCESS_READ_DESCRIPTOR_INDEX: usize = 0
+            PROCESS_WRITE_DESCRIPTOR_INDEX: usize = 1
+
+        const module Stream:
+            PROCESS_STDOUT_FD: i32 = 1
+            PROCESS_STDERR_FD: i32 = 2
+
+        const module Wait:
+            PROCESS_WAIT_OPTIONS: i32 = 0
+            PROCESS_WAIT_EXITED_MASK: i32 = 127
+            PROCESS_WAIT_SIGNALED_STOPPED: i32 = 127
+            PROCESS_WAIT_EXIT_CODE_SHIFT: i32 = 8
+            PROCESS_WAIT_EXIT_CODE_MASK: i32 = 255
+            PROCESS_INTERRUPTED_ERROR_CODE: i32 = 4
+
+        const module Status:
+            PROCESS_SYSCALL_FAILURE: i32 = -1
+            PROCESS_INITIAL_CHILD_PID: i32 = 0
+            PROCESS_INITIAL_WAIT_STATUS: i32 = 0
+            PROCESS_READ_EOF: isize = 0
+            PROCESS_NO_SIGNAL: i32 = 0
+            PROCESS_STATUS_SUCCESS: i32 = 0
+
 
     public:
         enum SpawnFailure:
@@ -76,7 +86,7 @@ module DebuggerHostProcess:
             failure: mutable SpawnFailure
 
         def spawn_output_capacity() -> usize:
-            return PROCESS_OUTPUT_CAPACITY
+            return Capture::PROCESS_OUTPUT_CAPACITY
 
         def process_last_error() -> i32 can[Unsafe.PointerCast]:
             return debugger_process_errno_location()[0]
@@ -88,21 +98,21 @@ module DebuggerHostProcess:
         def spawn_capture(path: cstr, argv: mutable cstr&&, output: mutable u8&, output_capacity: usize) -> SpawnResult can[Blocking.IO, Unsafe.PointerCast]:
             result: mutable SpawnResult = zeroed
             result.failure <- SpawnFailure.None
-            result.exit_code <- PROCESS_STATUS_SUCCESS
-            result.signal_number <- PROCESS_NO_SIGNAL
-            if path[0].u8() == 0 or output_capacity > PROCESS_OUTPUT_CAPACITY:
+            result.exit_code <- Status::PROCESS_STATUS_SUCCESS
+            result.signal_number <- Status::PROCESS_NO_SIGNAL
+            if path[0].u8() == 0 or output_capacity > Capture::PROCESS_OUTPUT_CAPACITY:
                 result.failure <- SpawnFailure.InvalidArgument
                 return result
 
-            descriptors: mutable i32[PROCESS_DESCRIPTOR_COUNT] = zeroed
-            pipe_status: i32 = debugger_pipe(&descriptors[PROCESS_READ_DESCRIPTOR_INDEX]) can Blocking.IO
-            if pipe_status != PROCESS_STATUS_SUCCESS:
+            descriptors: mutable i32[Descriptor::PROCESS_DESCRIPTOR_COUNT] = zeroed
+            pipe_status: i32 = debugger_pipe(&descriptors[Descriptor::PROCESS_READ_DESCRIPTOR_INDEX]) can Blocking.IO
+            if pipe_status != Status::PROCESS_STATUS_SUCCESS:
                 result.failure <- SpawnFailure.PipeCreation
                 result.system_error <- process_last_error() can Unsafe.PointerCast
                 return result
-            read_fd: i32 = descriptors[PROCESS_READ_DESCRIPTOR_INDEX]
-            write_fd: i32 = descriptors[PROCESS_WRITE_DESCRIPTOR_INDEX]
-            if read_fd <= PROCESS_STDERR_FD or write_fd <= PROCESS_STDERR_FD:
+            read_fd: i32 = descriptors[Descriptor::PROCESS_READ_DESCRIPTOR_INDEX]
+            write_fd: i32 = descriptors[Descriptor::PROCESS_WRITE_DESCRIPTOR_INDEX]
+            if read_fd <= Stream::PROCESS_STDERR_FD or write_fd <= Stream::PROCESS_STDERR_FD:
                 result.failure <- SpawnFailure.DescriptorUnavailable
                 _ = debugger_close(read_fd) can Blocking.IO
                 _ = debugger_close(write_fd) can Blocking.IO
@@ -111,43 +121,43 @@ module DebuggerHostProcess:
             actions: mutable void&? = null
             actions_pointer: mutable void&&? = (&actions).cast[mutable void&&?] can Unsafe.PointerCast
             action_status: mutable i32 = debugger_posix_spawn_actions_init(actions_pointer) can Unsafe.PointerCast
-            if action_status != PROCESS_STATUS_SUCCESS:
+            if action_status != Status::PROCESS_STATUS_SUCCESS:
                 result.failure <- SpawnFailure.FileActions
                 result.system_error <- action_status
                 _ = debugger_close(read_fd) can Blocking.IO
                 _ = debugger_close(write_fd) can Blocking.IO
                 return result
-            action_status <- debugger_posix_spawn_actions_adddup2(actions_pointer, write_fd, PROCESS_STDOUT_FD) can Unsafe.PointerCast
-            action_status <- debugger_posix_spawn_actions_adddup2(actions_pointer, write_fd, PROCESS_STDERR_FD) can Unsafe.PointerCast if action_status == PROCESS_STATUS_SUCCESS
-            action_status <- debugger_posix_spawn_actions_addclose(actions_pointer, read_fd) can Unsafe.PointerCast if action_status == PROCESS_STATUS_SUCCESS
-            action_status <- debugger_posix_spawn_actions_addclose(actions_pointer, write_fd) can Unsafe.PointerCast if action_status == PROCESS_STATUS_SUCCESS
-            if action_status != PROCESS_STATUS_SUCCESS:
+            action_status <- debugger_posix_spawn_actions_adddup2(actions_pointer, write_fd, Stream::PROCESS_STDOUT_FD) can Unsafe.PointerCast
+            action_status <- debugger_posix_spawn_actions_adddup2(actions_pointer, write_fd, Stream::PROCESS_STDERR_FD) can Unsafe.PointerCast if action_status == Status::PROCESS_STATUS_SUCCESS
+            action_status <- debugger_posix_spawn_actions_addclose(actions_pointer, read_fd) can Unsafe.PointerCast if action_status == Status::PROCESS_STATUS_SUCCESS
+            action_status <- debugger_posix_spawn_actions_addclose(actions_pointer, write_fd) can Unsafe.PointerCast if action_status == Status::PROCESS_STATUS_SUCCESS
+            if action_status != Status::PROCESS_STATUS_SUCCESS:
                 result.failure <- SpawnFailure.FileActions
                 result.system_error <- action_status
                 _ = debugger_posix_spawn_actions_destroy(actions_pointer) can Unsafe.PointerCast
                 _ = debugger_close(read_fd) can Blocking.IO
                 _ = debugger_close(write_fd) can Blocking.IO
                 return result
-            child_pid: mutable i32 = PROCESS_INITIAL_CHILD_PID
+            child_pid: mutable i32 = Status::PROCESS_INITIAL_CHILD_PID
             spawn_status: i32 = debugger_posix_spawn(&child_pid, path, actions_pointer, null, argv, debugger_environ) can Blocking.IO, Unsafe.PointerCast
             _ = debugger_posix_spawn_actions_destroy(actions_pointer) can Unsafe.PointerCast
             _ = debugger_close(write_fd) can Blocking.IO
-            if spawn_status != PROCESS_STATUS_SUCCESS:
+            if spawn_status != Status::PROCESS_STATUS_SUCCESS:
                 result.failure <- SpawnFailure.SpawnRejected
                 result.system_error <- spawn_status
                 _ = debugger_close(read_fd) can Blocking.IO
                 return result
 
             result.child_spawned <- true
-            read_buffer: mutable u8[PROCESS_READ_CHUNK_BYTES] = zeroed
+            read_buffer: mutable u8[Capture::PROCESS_READ_CHUNK_BYTES] = zeroed
             capture_open: mutable bool = true
             while capture_open:
-                read_count: isize = debugger_read(read_fd, (&read_buffer[0]).cast[void&], PROCESS_READ_CHUNK_BYTES) can Blocking.IO
-                if read_count == PROCESS_READ_EOF:
+                read_count: isize = debugger_read(read_fd, (&read_buffer[0]).cast[void&], Capture::PROCESS_READ_CHUNK_BYTES) can Blocking.IO
+                if read_count == Status::PROCESS_READ_EOF:
                     capture_open <- false
                 elif read_count < 0.isize():
                     read_error: i32 = process_last_error() can Unsafe.PointerCast
-                    if read_error != PROCESS_INTERRUPTED_ERROR_CODE:
+                    if read_error != Wait::PROCESS_INTERRUPTED_ERROR_CODE:
                         result.failure <- SpawnFailure.OutputRead
                         result.system_error <- read_error
                         capture_open <- false
@@ -156,16 +166,16 @@ module DebuggerHostProcess:
                     for index in 0..<received:
                         if result.output_length < output_capacity:
                             output[result.output_length] <- read_buffer[index]
-                            result.output_length <- result.output_length + PROCESS_OUTPUT_LENGTH_INCREMENT
+                            result.output_length <- result.output_length + Capture::PROCESS_OUTPUT_LENGTH_INCREMENT
                         else:
                             result.output_truncated <- true
             _ = debugger_close(read_fd) can Blocking.IO
 
-            raw_status: mutable i32 = PROCESS_INITIAL_WAIT_STATUS
-            waited_pid: mutable i32 = PROCESS_SYSCALL_FAILURE
+            raw_status: mutable i32 = Status::PROCESS_INITIAL_WAIT_STATUS
+            waited_pid: mutable i32 = Status::PROCESS_SYSCALL_FAILURE
             wait_open: mutable bool = true
             while wait_open:
-                waited_pid <- debugger_waitpid(child_pid, &raw_status, PROCESS_WAIT_OPTIONS) can Blocking.IO
+                waited_pid <- debugger_waitpid(child_pid, &raw_status, Wait::PROCESS_WAIT_OPTIONS) can Blocking.IO
                 if waited_pid == child_pid:
                     wait_open <- false
                 elif waited_pid >= 0:
@@ -173,7 +183,7 @@ module DebuggerHostProcess:
                     wait_open <- false
                 else:
                     wait_error: i32 = process_last_error() can Unsafe.PointerCast
-                    if wait_error != PROCESS_INTERRUPTED_ERROR_CODE:
+                    if wait_error != Wait::PROCESS_INTERRUPTED_ERROR_CODE:
                         result.failure <- SpawnFailure.WaitFailed
                         result.system_error <- wait_error
                         wait_open <- false
@@ -181,10 +191,10 @@ module DebuggerHostProcess:
                 return result
             result.child_reaped <- true
             result.wait_status <- raw_status
-            terminating_signal: i32 = raw_status & PROCESS_WAIT_EXITED_MASK
-            if terminating_signal == PROCESS_NO_SIGNAL:
-                result.exit_code <- (raw_status >> PROCESS_WAIT_EXIT_CODE_SHIFT) & PROCESS_WAIT_EXIT_CODE_MASK
-            elif terminating_signal != PROCESS_WAIT_SIGNALED_STOPPED:
+            terminating_signal: i32 = raw_status & Wait::PROCESS_WAIT_EXITED_MASK
+            if terminating_signal == Status::PROCESS_NO_SIGNAL:
+                result.exit_code <- (raw_status >> Wait::PROCESS_WAIT_EXIT_CODE_SHIFT) & Wait::PROCESS_WAIT_EXIT_CODE_MASK
+            elif terminating_signal != Wait::PROCESS_WAIT_SIGNALED_STOPPED:
                 result.terminated_by_signal <- true
                 result.signal_number <- terminating_signal
             else:

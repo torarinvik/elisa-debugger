@@ -6,17 +6,21 @@ include "../core/errors.elisa"
 
 module DebuggerMemory:
     private:
-        const MEMORY_CELL_CAPACITY: usize = 64
-        const MEMORY_CELL_BYTES: usize = 8
-        const MEMORY_CALL_DEPTH_CAPACITY: usize = 16
-        const MEMORY_READ_CAPACITY: usize = 64
-        const MEMORY_MAX_BYTES: u64 = MEMORY_CELL_CAPACITY.u64() * MEMORY_CELL_BYTES.u64()
-        const MEMORY_BYTE_BITS: u64 = 8
-        const MEMORY_BYTE_MASK: u64 = 255
-        const DETAIL_ADDRESS: u32 = 1
-        const DETAIL_LENGTH: u32 = 2
-        const DETAIL_UNINITIALIZED: u32 = 3
-        const DETAIL_MACHINE: u32 = 4
+        const module Detail:
+            ADDRESS: u32 = 1
+            LENGTH: u32 = 2
+            UNINITIALIZED: u32 = 3
+            INSPECT_MEMORY_DETAIL_MACHINE: u32 = 4
+
+        const module Memory:
+            CELL_CAPACITY: usize = 64
+            CELL_BYTES: usize = 8
+            INSPECT_MEMORY_CALL_DEPTH_CAPACITY: usize = 16
+            READ_CAPACITY: usize = 64
+            MAX_BYTES: u64 = Memory::CELL_CAPACITY.u64() * Memory::CELL_BYTES.u64()
+            INSPECT_MEMORY_BYTE_BITS: u64 = 8
+            INSPECT_MEMORY_BYTE_MASK: u64 = 255
+
 
     public:
         enum MemoryState:
@@ -26,7 +30,7 @@ module DebuggerMemory:
 
         struct MemoryRead:
             address: mutable u64
-            bytes: mutable u8[MEMORY_READ_CAPACITY]
+            bytes: mutable u8[Memory::READ_CAPACITY]
             length: mutable usize
             state: mutable MemoryState
             failure: mutable DebuggerErrors::DebuggerError
@@ -35,23 +39,23 @@ module DebuggerMemory:
             return MemoryRead{address: address, bytes: zeroed, length: 0, state: state, failure: failure}
 
         def memory_read_managed(machine: DebuggerEDIR::Machine, address: u64, length: usize) -> MemoryRead:
-            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, DETAIL_LENGTH)) if length > MEMORY_READ_CAPACITY
-            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ADDRESS)) if address > MEMORY_MAX_BYTES
-            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_ADDRESS)) if length.u64() > MEMORY_MAX_BYTES - address
-            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_MACHINE)) if machine.heap_next > MEMORY_CELL_CAPACITY or machine.return_stack_pointer > MEMORY_CALL_DEPTH_CAPACITY
-            allocated_bytes: u64 = machine.heap_next.u64() * MEMORY_CELL_BYTES.u64()
-            return memory_read_invalid(address, MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_ADDRESS)) if address > allocated_bytes or length.u64() > allocated_bytes - address
+            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::LENGTH)) if length > Memory::READ_CAPACITY
+            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ADDRESS)) if address > Memory::MAX_BYTES
+            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ADDRESS)) if length.u64() > Memory::MAX_BYTES - address
+            return memory_read_invalid(address, MemoryState.Invalid, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INSPECT_MEMORY_DETAIL_MACHINE)) if machine.heap_next > Memory::CELL_CAPACITY or machine.return_stack_pointer > Memory::INSPECT_MEMORY_CALL_DEPTH_CAPACITY
+            allocated_bytes: u64 = machine.heap_next.u64() * Memory::CELL_BYTES.u64()
+            return memory_read_invalid(address, MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::ADDRESS)) if address > allocated_bytes or length.u64() > allocated_bytes - address
             for offset in 0..<length:
                 absolute: u64 = address + offset.u64()
-                cell: usize = (absolute / MEMORY_CELL_BYTES.u64()).usize()
-                return memory_read_invalid(address, MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNINITIALIZED)) if not machine.memory_initialized[cell]
+                cell: usize = (absolute / Memory::CELL_BYTES.u64()).usize()
+                return memory_read_invalid(address, MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::UNINITIALIZED)) if not machine.memory_initialized[cell]
             result: mutable MemoryRead = MemoryRead{address: address, bytes: zeroed, length: length, state: MemoryState.Available, failure: DebuggerErrors::no_error()}
             for offset in 0..<length:
                 absolute: u64 = address + offset.u64()
-                cell: usize = (absolute / MEMORY_CELL_BYTES.u64()).usize()
-                shift: u64 = (absolute % MEMORY_CELL_BYTES.u64()) * MEMORY_BYTE_BITS
-                result.bytes[offset] <- ((machine.memory[cell].u64() >> shift) & MEMORY_BYTE_MASK).u8()
+                cell: usize = (absolute / Memory::CELL_BYTES.u64()).usize()
+                shift: u64 = (absolute % Memory::CELL_BYTES.u64()) * Memory::INSPECT_MEMORY_BYTE_BITS
+                result.bytes[offset] <- ((machine.memory[cell].u64() >> shift) & Memory::INSPECT_MEMORY_BYTE_MASK).u8()
             return result
 
         def memory_read_is_available(read: MemoryRead) -> bool:
-            return read.state == MemoryState.Available and read.length <= MEMORY_READ_CAPACITY and DebuggerErrors::error_is_ok(read.failure)
+            return read.state == MemoryState.Available and read.length <= Memory::READ_CAPACITY and DebuggerErrors::error_is_ok(read.failure)

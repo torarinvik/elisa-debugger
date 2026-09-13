@@ -6,12 +6,16 @@ include "../core/errors.elisa"
 
 module DebuggerTraceRetention:
     private:
-        const RETENTION_CHUNK_CAPACITY: usize = 128
-        const RETENTION_PIN_CAPACITY: usize = 64
-        const RETENTION_MAX_REFCOUNT: u64 = 18446744073709551615
-        const DETAIL_CAPACITY: u32 = 1
-        const DETAIL_REFERENCE: u32 = 2
-        const DETAIL_PIN: u32 = 3
+        const module Detail:
+            TRACE_RETENTION_DETAIL_CAPACITY: u32 = 1
+            REFERENCE: u32 = 2
+            PIN: u32 = 3
+
+        const module Retention:
+            TRACE_RETENTION_CHUNK_CAPACITY: usize = 128
+            PIN_CAPACITY: usize = 64
+            MAX_REFCOUNT: u64 = 18446744073709551615
+
 
         def collection_plan_contains(plan: CollectionPlan, sequence: u64) -> bool:
             for index in 0..<plan.count:
@@ -27,14 +31,14 @@ module DebuggerTraceRetention:
             live: mutable bool
 
         struct RetentionStore:
-            chunks: mutable ChunkReference[RETENTION_CHUNK_CAPACITY]
+            chunks: mutable ChunkReference[Retention::TRACE_RETENTION_CHUNK_CAPACITY]
             count: mutable usize
-            pins: mutable u64[RETENTION_PIN_CAPACITY]
+            pins: mutable u64[Retention::PIN_CAPACITY]
             pin_count: mutable usize
             last_error: mutable DebuggerErrors::DebuggerError
 
         struct CollectionPlan:
-            sequences: mutable u64[RETENTION_CHUNK_CAPACITY]
+            sequences: mutable u64[Retention::TRACE_RETENTION_CHUNK_CAPACITY]
             count: mutable usize
             complete: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
@@ -43,14 +47,14 @@ module DebuggerTraceRetention:
             return RetentionStore{chunks: zeroed, count: 0, pins: zeroed, pin_count: 0, last_error: DebuggerErrors::no_error()}
 
         def retention_find(store: RetentionStore, sequence: u64) -> usize:
-            return RETENTION_CHUNK_CAPACITY if store.count > RETENTION_CHUNK_CAPACITY
+            return Retention::TRACE_RETENTION_CHUNK_CAPACITY if store.count > Retention::TRACE_RETENTION_CHUNK_CAPACITY
             for index in 0..<store.count:
                 return index if store.chunks[index].sequence == sequence
-            return RETENTION_CHUNK_CAPACITY
+            return Retention::TRACE_RETENTION_CHUNK_CAPACITY
 
         def retention_add_chunk(store: RetentionStore, sequence: u64, parent: u64) -> RetentionStore:
             updated: mutable RetentionStore = store
-            return updated if store.count >= RETENTION_CHUNK_CAPACITY or sequence == 0 or (parent != 0 and retention_find(store, parent) >= RETENTION_CHUNK_CAPACITY)
+            return updated if store.count >= Retention::TRACE_RETENTION_CHUNK_CAPACITY or sequence == 0 or (parent != 0 and retention_find(store, parent) >= Retention::TRACE_RETENTION_CHUNK_CAPACITY)
             return updated if parent != 0 and not retention_chain_is_valid(store, parent)
             for index in 0..<store.count:
                 return updated if store.chunks[index].sequence == sequence
@@ -63,7 +67,7 @@ module DebuggerTraceRetention:
             steps: mutable usize = 0
             while current != 0:
                 index: usize = retention_find(store, current)
-                return false if index >= RETENTION_CHUNK_CAPACITY
+                return false if index >= Retention::TRACE_RETENTION_CHUNK_CAPACITY
                 return false if not store.chunks[index].live
                 steps <- steps + 1
                 return false if steps > store.count
@@ -76,14 +80,14 @@ module DebuggerTraceRetention:
             current: mutable u64 = sequence
             while current != 0:
                 index: usize = retention_find(updated, current)
-                return store if index >= RETENTION_CHUNK_CAPACITY
+                return store if index >= Retention::TRACE_RETENTION_CHUNK_CAPACITY
                 # A collected chunk is no longer part of the live dependency
                 # graph.  Rejecting a new reference here prevents callers from
                 # resurrecting bookkeeping for storage that has already been
                 # collected.
                 return store if not updated.chunks[index].live
                 if increase:
-                    return store if updated.chunks[index].references == RETENTION_MAX_REFCOUNT
+                    return store if updated.chunks[index].references == Retention::MAX_REFCOUNT
                     updated.chunks[index].references <- updated.chunks[index].references + 1
                 else:
                     return store if updated.chunks[index].references == 0
@@ -100,7 +104,7 @@ module DebuggerTraceRetention:
         def retention_pin(store: RetentionStore, sequence: u64) -> RetentionStore:
             updated: mutable RetentionStore = store
             index: usize = retention_find(store, sequence)
-            return updated if index >= RETENTION_CHUNK_CAPACITY or store.pin_count >= RETENTION_PIN_CAPACITY
+            return updated if index >= Retention::TRACE_RETENTION_CHUNK_CAPACITY or store.pin_count >= Retention::PIN_CAPACITY
             for pin in 0..<store.pin_count:
                 return updated if store.pins[pin] == sequence
             return updated if store.chunks[index].pinned
@@ -113,9 +117,9 @@ module DebuggerTraceRetention:
 
         def retention_unpin(store: RetentionStore, sequence: u64) -> RetentionStore:
             updated: mutable RetentionStore = store
-            return updated if store.count > RETENTION_CHUNK_CAPACITY or store.pin_count > RETENTION_PIN_CAPACITY
+            return updated if store.count > Retention::TRACE_RETENTION_CHUNK_CAPACITY or store.pin_count > Retention::PIN_CAPACITY
             index: usize = retention_find(store, sequence)
-            return updated if index >= RETENTION_CHUNK_CAPACITY or not store.chunks[index].pinned
+            return updated if index >= Retention::TRACE_RETENTION_CHUNK_CAPACITY or not store.chunks[index].pinned
             found: mutable bool = false
             for pin in 0..<store.pin_count:
                 found <- true if store.pins[pin] == sequence
@@ -133,20 +137,20 @@ module DebuggerTraceRetention:
         def retention_plan_collection(store: RetentionStore) -> CollectionPlan:
             plan: mutable CollectionPlan = zeroed
             plan.complete <- true
-            return CollectionPlan{sequences: plan.sequences, count: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_CAPACITY)} if store.count > RETENTION_CHUNK_CAPACITY or store.pin_count > RETENTION_PIN_CAPACITY
+            return CollectionPlan{sequences: plan.sequences, count: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::TRACE_RETENTION_DETAIL_CAPACITY)} if store.count > Retention::TRACE_RETENTION_CHUNK_CAPACITY or store.pin_count > Retention::PIN_CAPACITY
             for index in 0..<store.count:
                 chunk: ChunkReference = store.chunks[index]
                 continue if not chunk.live or chunk.pinned or chunk.references != 0
-                return CollectionPlan{sequences: plan.sequences, count: plan.count, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_CAPACITY)} if plan.count >= RETENTION_CHUNK_CAPACITY
+                return CollectionPlan{sequences: plan.sequences, count: plan.count, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::TRACE_RETENTION_DETAIL_CAPACITY)} if plan.count >= Retention::TRACE_RETENTION_CHUNK_CAPACITY
                 plan.sequences[plan.count] <- chunk.sequence
                 plan.count <- plan.count + 1
             return plan
 
         def retention_apply_collection(store: RetentionStore, plan: CollectionPlan) -> RetentionStore:
             updated: mutable RetentionStore = store
-            return updated if store.count > RETENTION_CHUNK_CAPACITY or store.pin_count > RETENTION_PIN_CAPACITY
-            return updated if not plan.complete or plan.count > RETENTION_CHUNK_CAPACITY
-            collectible: mutable bool[RETENTION_CHUNK_CAPACITY] = zeroed
+            return updated if store.count > Retention::TRACE_RETENTION_CHUNK_CAPACITY or store.pin_count > Retention::PIN_CAPACITY
+            return updated if not plan.complete or plan.count > Retention::TRACE_RETENTION_CHUNK_CAPACITY
+            collectible: mutable bool[Retention::TRACE_RETENTION_CHUNK_CAPACITY] = zeroed
             for index in 0..<updated.count:
                 chunk: ChunkReference = updated.chunks[index]
                 collectible[index] <- true if collection_plan_contains(plan, chunk.sequence) and chunk.live and not chunk.pinned and chunk.references == 0
@@ -155,7 +159,7 @@ module DebuggerTraceRetention:
             # cannot be left pointing at a collected parent. Pruning until
             # stable also keeps ancestors live when a planned child became
             # pinned or referenced after the snapshot.
-            for iteration in 0..<RETENTION_CHUNK_CAPACITY:
+            for iteration in 0..<Retention::TRACE_RETENTION_CHUNK_CAPACITY:
                 changed: mutable bool = false
                 for candidate in 0..<updated.count:
                     continue if not collectible[candidate]

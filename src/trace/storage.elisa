@@ -7,53 +7,58 @@ include "./manifest.elisa"
 include "../replay/checkpoint_codec.elisa"
 include "../replay/full_checkpoint_codec.elisa"
 
+const module DebuggerTraceStorageCapacity:
+    TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::FULL_CHECKPOINT_CODEC_CAPACITY
+
 extern write(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
 
 module DebuggerTraceStorage:
     private:
-        const TRACE_MAGIC_0: u8 = 69
-        const TRACE_MAGIC_1: u8 = 76
-        const TRACE_MAGIC_2: u8 = 84
-        const TRACE_MAGIC_3: u8 = 82
-        const TRACE_CHUNK_MAGIC_BYTES: usize = 4
-        const TRACE_FORMAT_VERSION: u16 = 1
-        const TRACE_FOOTER_MAGIC: u32 = 1380270920
-        const TRACE_HEADER_BYTES: usize = 48
-        const TRACE_FOOTER_BYTES: usize = 20
+        const module Trace:
+            MAGIC_0: u8 = 69
+            MAGIC_1: u8 = 76
+            MAGIC_2: u8 = 84
+            MAGIC_3: u8 = 82
+            CHUNK_MAGIC_BYTES: usize = 4
+            FORMAT_VERSION: u16 = 1
+            FOOTER_MAGIC: u32 = 1380270920
+            HEADER_BYTES: usize = 48
+            FOOTER_BYTES: usize = 20
+            TRACE_STORAGE_EVENT_CHUNK_CAPACITY: u64 = 8
+            TRACE_STORAGE_MANIFEST_CHUNK_COUNT: u64 = 1
+            STORAGE_CHUNK_CAPACITY: u64 = Trace::TRACE_STORAGE_EVENT_CHUNK_CAPACITY + Trace::TRACE_STORAGE_MANIFEST_CHUNK_COUNT
+            STORAGE_MAX_BYTES: usize = (Trace::HEADER_BYTES + Trace::STORAGE_PAYLOAD_CAPACITY) * Trace::STORAGE_CHUNK_CAPACITY.usize() + Trace::FOOTER_BYTES
+            TRACE_STORAGE_MAX_SEQUENCE: u64 = 18446744073709551615
+            TRACE_STORAGE_KIND_MAX: u16 = 5
+            MANIFEST_KIND: u16 = 0
+            METADATA_KIND: u16 = 1
+            EVENTS_KIND: u16 = 2
+            CHECKPOINT_KIND: u16 = 3
+            RESOURCE_KIND: u16 = 4
+            INDEX_KIND: u16 = 5
+            TRACE_STORAGE_EVENT_SCHEMA_BYTES: usize = 4
+            TRACE_STORAGE_EVENT_ORDINAL_BYTES: usize = 8
+            TRACE_STORAGE_EVENT_ID_BYTES: usize = 8
+            TRACE_STORAGE_EVENT_MICROSTEP_BYTES: usize = 4
+            TRACE_STORAGE_EVENT_ENUM_BYTES: usize = 2
+            TRACE_STORAGE_EVENT_PAYLOAD_BYTES: usize = 8
+            TRACE_STORAGE_EVENT_ENCODED_BYTES: usize = Trace::TRACE_STORAGE_EVENT_SCHEMA_BYTES + Trace::TRACE_STORAGE_EVENT_ORDINAL_BYTES + Trace::TRACE_STORAGE_EVENT_ID_BYTES * 7 + Trace::TRACE_STORAGE_EVENT_MICROSTEP_BYTES + Trace::TRACE_STORAGE_EVENT_ENUM_BYTES * 2 + Trace::TRACE_STORAGE_EVENT_PAYLOAD_BYTES
+            TRACE_STORAGE_EVENT_QUALITY_OFFSET: usize = Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES - Trace::TRACE_STORAGE_EVENT_PAYLOAD_BYTES - Trace::TRACE_STORAGE_EVENT_ENUM_BYTES
+            TRACE_STORAGE_EVENT_QUALITY_HIGH_BYTE_OFFSET: usize = 1
+            EVENT_QUALITY_EXACT_CODE: u16 = 0
+            TRACE_STORAGE_BYTE_BITS: u64 = 8
+            TRACE_STORAGE_EVENT_KIND_MAX: u16 = 20
+            EVENT_QUALITY_MAX: u16 = 4
+            EVENT_CORRUPT_QUALITY: u16 = 4
+            TRACE_STORAGE_MAX_EVENT: u64 = 18446744073709551615
+            NO_RECORDING_ID: u64 = 0
+            STORAGE_ROOT_BRANCH: u64 = 0
+            TRACE_STORAGE_EVENT_BRANCH_OFFSET: usize = Trace::TRACE_STORAGE_EVENT_SCHEMA_BYTES + Trace::TRACE_STORAGE_EVENT_ORDINAL_BYTES + Trace::TRACE_STORAGE_EVENT_ID_BYTES * 2
+            STORAGE_PAYLOAD_CAPACITY: usize = DebuggerTraceStorageCapacity::TRACE_STORAGE_PAYLOAD_CAPACITY
+
         # Recorder chunks exclude the manifest; storage counts both.
-        const TRACE_EVENT_CHUNK_CAPACITY: u64 = 8
-        const TRACE_MANIFEST_CHUNK_COUNT: u64 = 1
-        const TRACE_STORAGE_CHUNK_CAPACITY: u64 = TRACE_EVENT_CHUNK_CAPACITY + TRACE_MANIFEST_CHUNK_COUNT
-        const TRACE_STORAGE_MAX_BYTES: usize = (TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY) * TRACE_STORAGE_CHUNK_CAPACITY.usize() + TRACE_FOOTER_BYTES
-        const TRACE_MAX_SEQUENCE: u64 = 18446744073709551615
-        const TRACE_KIND_MAX: u16 = 5
-        const TRACE_MANIFEST_KIND: u16 = 0
-        const TRACE_METADATA_KIND: u16 = 1
-        const TRACE_EVENTS_KIND: u16 = 2
-        const TRACE_CHECKPOINT_KIND: u16 = 3
-        const TRACE_RESOURCE_KIND: u16 = 4
-        const TRACE_INDEX_KIND: u16 = 5
-        const TRACE_EVENT_SCHEMA_BYTES: usize = 4
-        const TRACE_EVENT_ORDINAL_BYTES: usize = 8
-        const TRACE_EVENT_ID_BYTES: usize = 8
-        const TRACE_EVENT_MICROSTEP_BYTES: usize = 4
-        const TRACE_EVENT_ENUM_BYTES: usize = 2
-        const TRACE_EVENT_PAYLOAD_BYTES: usize = 8
-        const TRACE_EVENT_ENCODED_BYTES: usize = TRACE_EVENT_SCHEMA_BYTES + TRACE_EVENT_ORDINAL_BYTES + TRACE_EVENT_ID_BYTES * 7 + TRACE_EVENT_MICROSTEP_BYTES + TRACE_EVENT_ENUM_BYTES * 2 + TRACE_EVENT_PAYLOAD_BYTES
-        const TRACE_EVENT_QUALITY_OFFSET: usize = TRACE_EVENT_ENCODED_BYTES - TRACE_EVENT_PAYLOAD_BYTES - TRACE_EVENT_ENUM_BYTES
-        const TRACE_EVENT_QUALITY_HIGH_BYTE_OFFSET: usize = 1
-        const TRACE_EVENT_QUALITY_EXACT_CODE: u16 = 0
-        const TRACE_BYTE_BITS: u64 = 8
-        const TRACE_EVENT_KIND_MAX: u16 = 20
-        const TRACE_EVENT_QUALITY_MAX: u16 = 4
-        const TRACE_EVENT_CORRUPT_QUALITY: u16 = 4
-        const TRACE_MAX_EVENT: u64 = 18446744073709551615
-        const TRACE_NO_RECORDING_ID: u64 = 0
-        const TRACE_STORAGE_ROOT_BRANCH: u64 = 0
-        const TRACE_EVENT_BRANCH_OFFSET: usize = TRACE_EVENT_SCHEMA_BYTES + TRACE_EVENT_ORDINAL_BYTES + TRACE_EVENT_ID_BYTES * 2
 
     public:
-        const TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY
 
         enum StorageStatus:
             Ready
@@ -64,7 +69,7 @@ module DebuggerTraceStorage:
 
         struct StoredChunk:
             header: mutable DebuggerTrace::ChunkHeader
-            payload: mutable u8[TRACE_STORAGE_PAYLOAD_CAPACITY]
+            payload: mutable u8[Trace::STORAGE_PAYLOAD_CAPACITY]
             payload_length: mutable usize
             checksum: mutable u64
 
@@ -108,8 +113,8 @@ module DebuggerTraceStorage:
 
     private:
         def storage_has_chunk_magic_prefix(bytes: u8&, offset: usize, available: usize) -> bool:
-            return false if available < TRACE_CHUNK_MAGIC_BYTES
-            return bytes[offset] == TRACE_MAGIC_0 and bytes[offset + 1] == TRACE_MAGIC_1 and bytes[offset + 2] == TRACE_MAGIC_2 and bytes[offset + 3] == TRACE_MAGIC_3
+            return false if available < Trace::CHUNK_MAGIC_BYTES
+            return bytes[offset] == Trace::MAGIC_0 and bytes[offset + 1] == Trace::MAGIC_1 and bytes[offset + 2] == Trace::MAGIC_2 and bytes[offset + 3] == Trace::MAGIC_3
 
         def storage_payload_checksum(bytes: u8&, length: usize) -> u64:
             return DebuggerTraceBinary::bytes_checksum(bytes, length)
@@ -118,9 +123,9 @@ module DebuggerTraceStorage:
             return DebuggerTraceBinary::bytes_checksum_matches(bytes, length, expected)
 
         def storage_event_payload_is_valid_with_recording(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64, recording_id: mutable u64&) -> bool:
-            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
-            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
-            return false if event_count == 0 or first_event > TRACE_MAX_EVENT - (event_count - 1).u64()
+            return false if payload_length == 0 or payload_length % Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES != 0
+            event_count: usize = payload_length / Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES
+            return false if event_count == 0 or first_event > Trace::TRACE_STORAGE_MAX_EVENT - (event_count - 1).u64()
             return false if last_event != first_event + (event_count - 1).u64()
             reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
             for index in 0..<event_count:
@@ -137,13 +142,13 @@ module DebuggerTraceStorage:
                 kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
                 quality: u16 = DebuggerTraceBinary::reader_take_u16(reader)
                 _ = DebuggerTraceBinary::reader_take_u64(reader)
-                recording_id <- event_recording if recording_id == TRACE_NO_RECORDING_ID
-                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == TRACE_NO_RECORDING_ID or event_recording != recording_id or task != position_task or kind > TRACE_EVENT_KIND_MAX or quality > TRACE_EVENT_QUALITY_MAX or quality == TRACE_EVENT_CORRUPT_QUALITY
+                recording_id <- event_recording if recording_id == Trace::NO_RECORDING_ID
+                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == Trace::NO_RECORDING_ID or event_recording != recording_id or task != position_task or kind > Trace::TRACE_STORAGE_EVENT_KIND_MAX or quality > Trace::EVENT_QUALITY_MAX or quality == Trace::EVENT_CORRUPT_QUALITY
             return DebuggerTraceBinary::reader_is_valid(reader) and reader.offset == reader.length
 
     public:
         def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
-            recording_id: mutable u64 = TRACE_NO_RECORDING_ID
+            recording_id: mutable u64 = Trace::NO_RECORDING_ID
             return storage_event_payload_is_valid_with_recording(bytes, payload_offset, payload_length, schema, first_event, last_event, recording_id)
 
         # Decode one complete canonical chunk. The result is invalid unless
@@ -152,32 +157,32 @@ module DebuggerTraceStorage:
         # valid prefix while leaving trailing bytes to be interpreted as a
         # second message.
         def storage_event_payload_is_exact(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
-            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
-            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
+            return false if payload_length == 0 or payload_length % Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES != 0
+            event_count: usize = payload_length / Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES
             for index in 0..<event_count:
-                event_offset: usize = payload_offset + index * TRACE_EVENT_ENCODED_BYTES
-                quality_offset: usize = event_offset + TRACE_EVENT_QUALITY_OFFSET
+                event_offset: usize = payload_offset + index * Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES
+                quality_offset: usize = event_offset + Trace::TRACE_STORAGE_EVENT_QUALITY_OFFSET
                 quality_low: u64 = bytes[quality_offset].u64()
-                quality_high: u64 = bytes[quality_offset + TRACE_EVENT_QUALITY_HIGH_BYTE_OFFSET].u64()
-                quality: u16 = (quality_low | (quality_high << TRACE_BYTE_BITS)).u16()
-                return false if quality != TRACE_EVENT_QUALITY_EXACT_CODE
+                quality_high: u64 = bytes[quality_offset + Trace::TRACE_STORAGE_EVENT_QUALITY_HIGH_BYTE_OFFSET].u64()
+                quality: u16 = (quality_low | (quality_high << Trace::TRACE_STORAGE_BYTE_BITS)).u16()
+                return false if quality != Trace::EVENT_QUALITY_EXACT_CODE
             return true
 
         def storage_event_payload_has_root_branches(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
-            return false if payload_length == 0 or payload_length % TRACE_EVENT_ENCODED_BYTES != 0
-            event_count: usize = payload_length / TRACE_EVENT_ENCODED_BYTES
+            return false if payload_length == 0 or payload_length % Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES != 0
+            event_count: usize = payload_length / Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES
             for index in 0..<event_count:
-                event_offset: usize = payload_offset + index * TRACE_EVENT_ENCODED_BYTES
-                branch_offset: usize = event_offset + TRACE_EVENT_BRANCH_OFFSET
+                event_offset: usize = payload_offset + index * Trace::TRACE_STORAGE_EVENT_ENCODED_BYTES
+                branch_offset: usize = event_offset + Trace::TRACE_STORAGE_EVENT_BRANCH_OFFSET
                 branch: mutable u64 = 0
-                for byte_index in 0..<TRACE_EVENT_ID_BYTES:
-                    branch <- branch | (bytes[branch_offset + byte_index].u64() << (byte_index.u64() * TRACE_BYTE_BITS))
-                return false if branch != TRACE_STORAGE_ROOT_BRANCH
+                for byte_index in 0..<Trace::TRACE_STORAGE_EVENT_ID_BYTES:
+                    branch <- branch | (bytes[branch_offset + byte_index].u64() << (byte_index.u64() * Trace::TRACE_STORAGE_BYTE_BITS))
+                return false if branch != Trace::STORAGE_ROOT_BRANCH
             return true
 
         def storage_checkpoint_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, first_event: u64, last_event: u64) -> bool:
             return false if first_event != last_event
-            if payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES:
+            if payload_length == DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES:
                 checkpoint_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
                 return false if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(checkpoint_reader)
                 decoded_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[payload_offset], payload_length)
@@ -187,26 +192,26 @@ module DebuggerTraceStorage:
             return full_checkpoint.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and full_checkpoint.checkpoint.event == first_event
 
         def storage_checkpoint_payload_has_root_branch(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
-            return true if payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+            return true if payload_length == DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES
             full_checkpoint: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(bytes[payload_offset], payload_length)
-            return full_checkpoint.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and full_checkpoint.checkpoint.branch.value == TRACE_STORAGE_ROOT_BRANCH
+            return full_checkpoint.status == DebuggerFullCheckpointCodec::DecodeStatus.Ready and full_checkpoint.checkpoint.branch.value == Trace::STORAGE_ROOT_BRANCH
 
         def storage_checkpoint_chunk_is_valid(chunk: StoredChunk) -> bool:
             return false if chunk.header.kind != DebuggerTrace::ChunkKind.Checkpoint
-            return false if chunk.header.schema != TRACE_FORMAT_VERSION.u32()
+            return false if chunk.header.schema != Trace::FORMAT_VERSION.u32()
             return false if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
             return false if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
-            return false if chunk.payload_length == 0 or chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY
+            return false if chunk.payload_length == 0 or chunk.payload_length > Trace::STORAGE_PAYLOAD_CAPACITY
             return false if not storage_payload_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum)
             return storage_checkpoint_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.first_event, chunk.header.last_event)
 
         def storage_checkpoint_chunk_new(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint, sequence: u64) -> CheckpointChunkEncoding:
             return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Invalid} if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
             encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
-            return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Oversized} if encoded.failed or encoded.length == 0 or encoded.length > TRACE_STORAGE_PAYLOAD_CAPACITY
+            return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Oversized} if encoded.failed or encoded.length == 0 or encoded.length > Trace::STORAGE_PAYLOAD_CAPACITY
             checksum: u64 = storage_payload_checksum(encoded.bytes[0], encoded.length)
             chunk: mutable StoredChunk = zeroed
-            chunk.header <- DebuggerTrace::ChunkHeader{schema: TRACE_FORMAT_VERSION.u32(), kind: DebuggerTrace::ChunkKind.Checkpoint, sequence: sequence, first_event: checkpoint.event, last_event: checkpoint.event, payload_length: encoded.length.u64(), checksum: checksum}
+            chunk.header <- DebuggerTrace::ChunkHeader{schema: Trace::FORMAT_VERSION.u32(), kind: DebuggerTrace::ChunkKind.Checkpoint, sequence: sequence, first_event: checkpoint.event, last_event: checkpoint.event, payload_length: encoded.length.u64(), checksum: checksum}
             chunk.payload_length <- encoded.length
             chunk.checksum <- checksum
             for index in 0..<encoded.length:
@@ -215,21 +220,21 @@ module DebuggerTraceStorage:
 
         def storage_checkpoint_chunk_decode(chunk: StoredChunk) -> DebuggerFullCheckpointCodec::DecodedCheckpoint:
             invalid: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::DecodedCheckpoint{checkpoint: zeroed, status: DebuggerFullCheckpointCodec::DecodeStatus.Invalid}
-            return invalid if not storage_checkpoint_chunk_is_valid(chunk) or chunk.payload_length == DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES
+            return invalid if not storage_checkpoint_chunk_is_valid(chunk) or chunk.payload_length == DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES
             return DebuggerFullCheckpointCodec::full_checkpoint_decode(chunk.payload[0], chunk.payload_length)
 
         def storage_checkpoint_event_is_within_trace(event: u64, first_event: u64, last_event: u64) -> bool:
             return false if event < first_event
             return true if event <= last_event
-            return last_event != TRACE_MAX_EVENT and event == last_event + 1
+            return last_event != Trace::TRACE_STORAGE_MAX_EVENT and event == last_event + 1
 
         def storage_decode_chunk(bytes: u8&, length: usize) -> ChunkDecode:
             result: mutable ChunkDecode = zeroed
-            result.status <- StorageStatus.Truncated if length < TRACE_HEADER_BYTES
-            return result if length < TRACE_HEADER_BYTES
-            result.status <- StorageStatus.Oversized if length > TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY
-            return result if length > TRACE_HEADER_BYTES + TRACE_STORAGE_PAYLOAD_CAPACITY
-            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], TRACE_HEADER_BYTES)
+            result.status <- StorageStatus.Truncated if length < Trace::HEADER_BYTES
+            return result if length < Trace::HEADER_BYTES
+            result.status <- StorageStatus.Oversized if length > Trace::HEADER_BYTES + Trace::STORAGE_PAYLOAD_CAPACITY
+            return result if length > Trace::HEADER_BYTES + Trace::STORAGE_PAYLOAD_CAPACITY
+            reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], Trace::HEADER_BYTES)
             magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
             magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
             magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
@@ -242,36 +247,36 @@ module DebuggerTraceStorage:
             payload_length: u64 = DebuggerTraceBinary::reader_take_u64(reader)
             checksum: u64 = DebuggerTraceBinary::reader_take_u64(reader)
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader)
-            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if magic0 != TRACE_MAGIC_0 or magic1 != TRACE_MAGIC_1 or magic2 != TRACE_MAGIC_2 or magic3 != TRACE_MAGIC_3 or schema != TRACE_FORMAT_VERSION or kind > TRACE_KIND_MAX or last_event < first_event
-            return ChunkDecode{chunk: zeroed, status: StorageStatus.Oversized} if payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY.u64()
-            declared_length: usize = TRACE_HEADER_BYTES + payload_length.usize()
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if magic0 != Trace::MAGIC_0 or magic1 != Trace::MAGIC_1 or magic2 != Trace::MAGIC_2 or magic3 != Trace::MAGIC_3 or schema != Trace::FORMAT_VERSION or kind > Trace::TRACE_STORAGE_KIND_MAX or last_event < first_event
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Oversized} if payload_length > Trace::STORAGE_PAYLOAD_CAPACITY.u64()
+            declared_length: usize = Trace::HEADER_BYTES + payload_length.usize()
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if declared_length > length
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if declared_length != length
-            result.chunk.header <- DebuggerTrace::ChunkHeader{schema: schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest if kind == TRACE_MANIFEST_KIND else DebuggerTrace::ChunkKind.Metadata if kind == TRACE_METADATA_KIND else DebuggerTrace::ChunkKind.Events if kind == TRACE_EVENTS_KIND else DebuggerTrace::ChunkKind.Checkpoint if kind == TRACE_CHECKPOINT_KIND else DebuggerTrace::ChunkKind.Resource if kind == TRACE_RESOURCE_KIND else DebuggerTrace::ChunkKind.Index, sequence: sequence, first_event: first_event, last_event: last_event, payload_length: payload_length, checksum: checksum}
+            result.chunk.header <- DebuggerTrace::ChunkHeader{schema: schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest if kind == Trace::MANIFEST_KIND else DebuggerTrace::ChunkKind.Metadata if kind == Trace::METADATA_KIND else DebuggerTrace::ChunkKind.Events if kind == Trace::EVENTS_KIND else DebuggerTrace::ChunkKind.Checkpoint if kind == Trace::CHECKPOINT_KIND else DebuggerTrace::ChunkKind.Resource if kind == Trace::RESOURCE_KIND else DebuggerTrace::ChunkKind.Index, sequence: sequence, first_event: first_event, last_event: last_event, payload_length: payload_length, checksum: checksum}
             result.chunk.payload_length <- payload_length.usize()
             result.chunk.checksum <- checksum
-            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != TRACE_HEADER_BYTES
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Truncated} if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != Trace::HEADER_BYTES
             for index in 0..<result.chunk.payload_length:
-                result.chunk.payload[index] <- bytes[TRACE_HEADER_BYTES + index]
+                result.chunk.payload[index] <- bytes[Trace::HEADER_BYTES + index]
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if not DebuggerTrace::trace_chunk_range_valid(result.chunk.header)
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if not storage_payload_checksum_matches(result.chunk.payload[0], result.chunk.payload_length, checksum)
             return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and result.chunk.payload_length == 0
             # Chunk decoding is also a public validation boundary; do not let a
             # checksummed payload bypass the event-record invariants enforced by
             # the full storage scanner.
-            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and not storage_event_payload_is_valid(bytes, TRACE_HEADER_BYTES, result.chunk.payload_length, schema.u32(), first_event, last_event)
-            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not storage_checkpoint_payload_is_valid(bytes, TRACE_HEADER_BYTES, result.chunk.payload_length, first_event, last_event)
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Events and not storage_event_payload_is_valid(bytes, Trace::HEADER_BYTES, result.chunk.payload_length, schema.u32(), first_event, last_event)
+            return ChunkDecode{chunk: zeroed, status: StorageStatus.Invalid} if result.chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not storage_checkpoint_payload_is_valid(bytes, Trace::HEADER_BYTES, result.chunk.payload_length, first_event, last_event)
             result.status <- StorageStatus.Ready
             return result
 
         def storage_decode_footer(bytes: u8&, length: usize) -> FooterDecode:
-            return FooterDecode{footer: zeroed, status: StorageStatus.Truncated} if length < TRACE_FOOTER_BYTES
-            return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if length != TRACE_FOOTER_BYTES
+            return FooterDecode{footer: zeroed, status: StorageStatus.Truncated} if length < Trace::FOOTER_BYTES
+            return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if length != Trace::FOOTER_BYTES
             reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[0], length)
             magic: u32 = DebuggerTraceBinary::reader_take_u32(reader)
             next_sequence: u64 = DebuggerTraceBinary::reader_take_u64(reader)
             verified_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-            return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if magic != TRACE_FOOTER_MAGIC or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
+            return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if magic != Trace::FOOTER_MAGIC or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
             return FooterDecode{footer: Footer{next_sequence: next_sequence, verified_event: verified_event}, status: StorageStatus.Ready}
 
         def storage_encode_chunk(chunk: StoredChunk) -> DebuggerTraceBinary::ByteWriter:
@@ -279,10 +284,10 @@ module DebuggerTraceStorage:
             if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum:
                 writer.failed <- true
                 return writer
-            if chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY:
+            if chunk.payload_length > Trace::STORAGE_PAYLOAD_CAPACITY:
                 writer.failed <- true
                 return writer
-            if chunk.header.schema != TRACE_FORMAT_VERSION.u32() or chunk.header.kind.u16() > TRACE_KIND_MAX or not DebuggerTrace::trace_chunk_range_valid(chunk.header):
+            if chunk.header.schema != Trace::FORMAT_VERSION.u32() or chunk.header.kind.u16() > Trace::TRACE_STORAGE_KIND_MAX or not DebuggerTrace::trace_chunk_range_valid(chunk.header):
                 writer.failed <- true
                 return writer
             computed: u64 = storage_payload_checksum(chunk.payload[0], chunk.payload_length)
@@ -292,11 +297,11 @@ module DebuggerTraceStorage:
             if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not storage_checkpoint_chunk_is_valid(chunk):
                 writer.failed <- true
                 return writer
-            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_0)
-            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_1)
-            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_2)
-            writer <- DebuggerTraceBinary::writer_put_byte(writer, TRACE_MAGIC_3)
-            writer <- DebuggerTraceBinary::writer_put_u16(writer, TRACE_FORMAT_VERSION)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, Trace::MAGIC_0)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, Trace::MAGIC_1)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, Trace::MAGIC_2)
+            writer <- DebuggerTraceBinary::writer_put_byte(writer, Trace::MAGIC_3)
+            writer <- DebuggerTraceBinary::writer_put_u16(writer, Trace::FORMAT_VERSION)
             writer <- DebuggerTraceBinary::writer_put_u16(writer, chunk.header.kind.u16())
             writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.header.sequence)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, chunk.header.first_event)
@@ -309,18 +314,18 @@ module DebuggerTraceStorage:
 
         def storage_event_chunk_is_valid(chunk: StoredChunk) -> bool:
             return false if chunk.header.kind != DebuggerTrace::ChunkKind.Events
-            return false if chunk.payload_length == 0 or chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY
+            return false if chunk.payload_length == 0 or chunk.payload_length > Trace::STORAGE_PAYLOAD_CAPACITY
             return storage_event_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.schema, chunk.header.first_event, chunk.header.last_event)
 
         def storage_write_chunk(fd: int, chunk: StoredChunk) -> StorageStatus can[Blocking.IO]:
             writer: DebuggerTraceBinary::ByteWriter = storage_encode_chunk(chunk)
-            return StorageStatus.Oversized if chunk.payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY
+            return StorageStatus.Oversized if chunk.payload_length > Trace::STORAGE_PAYLOAD_CAPACITY
             return StorageStatus.Invalid if not DebuggerTraceBinary::writer_is_valid(writer)
             return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
 
         def storage_encode_footer(next_sequence: u64, verified_event: u64) -> DebuggerTraceBinary::ByteWriter:
             writer: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
-            writer <- DebuggerTraceBinary::writer_put_u32(writer, TRACE_FOOTER_MAGIC)
+            writer <- DebuggerTraceBinary::writer_put_u32(writer, Trace::FOOTER_MAGIC)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, next_sequence)
             writer <- DebuggerTraceBinary::writer_put_u64(writer, verified_event)
             return writer
@@ -340,12 +345,12 @@ module DebuggerTraceStorage:
             manifest_first_event: mutable u64 = 0
             manifest_last_event: mutable u64 = 0
             expected_event: mutable u64 = 0
-            recording_id: mutable u64 = TRACE_NO_RECORDING_ID
+            recording_id: mutable u64 = Trace::NO_RECORDING_ID
             event_exhausted: mutable bool = false
             event_seen: mutable bool = false
             checkpoint_chunk_count: mutable u64 = 0
             manifest_checkpoint_count: mutable u64 = 0
-            return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if length > TRACE_STORAGE_MAX_BYTES
+            return StorageScan{status: StorageStatus.Oversized, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if length > Trace::STORAGE_MAX_BYTES
             return StorageScan{status: StorageStatus.Invalid, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if length == 0
             offset: mutable usize = 0
             while offset < length:
@@ -355,20 +360,20 @@ module DebuggerTraceStorage:
                 # chunk magic prefix is stronger evidence of a torn chunk than
                 # of a footer, so preserve the verified trace prefix as
                 # Truncated instead of treating those bytes as footer damage.
-                if remaining == TRACE_FOOTER_BYTES and not storage_has_chunk_magic_prefix(bytes, offset, remaining):
-                    footer: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_FOOTER_BYTES)
+                if remaining == Trace::FOOTER_BYTES and not storage_has_chunk_magic_prefix(bytes, offset, remaining):
+                    footer: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], Trace::FOOTER_BYTES)
                     footer_magic: u32 = DebuggerTraceBinary::reader_take_u32(footer)
                     footer_sequence: u64 = DebuggerTraceBinary::reader_take_u64(footer)
                     footer_event: u64 = DebuggerTraceBinary::reader_take_u64(footer)
-                    if footer_magic != TRACE_FOOTER_MAGIC or footer_sequence != scan.next_sequence or footer_event != scan.verified_event or not scan.manifest_seen or not scan.event_chunk_seen or manifest_last_event != scan.verified_event or manifest_checkpoint_count != checkpoint_chunk_count:
+                    if footer_magic != Trace::FOOTER_MAGIC or footer_sequence != scan.next_sequence or footer_event != scan.verified_event or not scan.manifest_seen or not scan.event_chunk_seen or manifest_last_event != scan.verified_event or manifest_checkpoint_count != checkpoint_chunk_count:
                         scan.status <- StorageStatus.Invalid
                     else:
                         scan.footer_verified <- true
                     return scan
-                if remaining < TRACE_HEADER_BYTES:
+                if remaining < Trace::HEADER_BYTES:
                     scan.status <- StorageStatus.Truncated
                     return scan
-                reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], TRACE_HEADER_BYTES)
+                reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset], Trace::HEADER_BYTES)
                 return StorageScan{status: StorageStatus.Truncated, verified_chunks: 0, verified_event: 0, next_sequence: 0, footer_verified: false, manifest_seen: false, manifest_exact: false, event_chunk_seen: false, event_qualities_exact: false, event_branches_root: false, checkpoint_branches_root: false} if not DebuggerTraceBinary::reader_is_valid(reader)
                 magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
@@ -381,26 +386,26 @@ module DebuggerTraceStorage:
                 last_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 payload_length: u64 = DebuggerTraceBinary::reader_take_u64(reader)
                 checksum: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                if magic0 != TRACE_MAGIC_0 or magic1 != TRACE_MAGIC_1 or magic2 != TRACE_MAGIC_2 or magic3 != TRACE_MAGIC_3 or version != TRACE_FORMAT_VERSION or kind > TRACE_KIND_MAX or sequence != scan.next_sequence or last_event < first_event or (kind == TRACE_EVENTS_KIND and payload_length == 0):
+                if magic0 != Trace::MAGIC_0 or magic1 != Trace::MAGIC_1 or magic2 != Trace::MAGIC_2 or magic3 != Trace::MAGIC_3 or version != Trace::FORMAT_VERSION or kind > Trace::TRACE_STORAGE_KIND_MAX or sequence != scan.next_sequence or last_event < first_event or (kind == Trace::EVENTS_KIND and payload_length == 0):
                     scan.status <- StorageStatus.Invalid
                     return scan
-                if payload_length > TRACE_STORAGE_PAYLOAD_CAPACITY.u64():
+                if payload_length > Trace::STORAGE_PAYLOAD_CAPACITY.u64():
                     scan.status <- StorageStatus.Oversized
                     return scan
-                if payload_length > (length - offset - TRACE_HEADER_BYTES).u64():
+                if payload_length > (length - offset - Trace::HEADER_BYTES).u64():
                     scan.status <- StorageStatus.Truncated
                     return scan
-                if not storage_payload_checksum_matches(bytes[offset + TRACE_HEADER_BYTES], payload_length.usize(), checksum):
+                if not storage_payload_checksum_matches(bytes[offset + Trace::HEADER_BYTES], payload_length.usize(), checksum):
                     scan.status <- StorageStatus.Invalid
                     return scan
-                if scan.verified_chunks >= TRACE_STORAGE_CHUNK_CAPACITY:
+                if scan.verified_chunks >= Trace::STORAGE_CHUNK_CAPACITY:
                     scan.status <- StorageStatus.Oversized
                     return scan
-                if kind == TRACE_MANIFEST_KIND:
+                if kind == Trace::MANIFEST_KIND:
                     if scan.manifest_seen or scan.verified_chunks != 0 or payload_length == 0:
                         scan.status <- StorageStatus.Invalid
                         return scan
-                    manifest_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset + TRACE_HEADER_BYTES], payload_length.usize())
+                    manifest_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(bytes[offset + Trace::HEADER_BYTES], payload_length.usize())
                     manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_decode(manifest_reader)
                     if not DebuggerTraceBinary::reader_is_valid(manifest_reader) or manifest_reader.offset != manifest_reader.length or not DebuggerTraceManifest::manifest_is_well_formed(manifest) or manifest.schema != version or manifest.first_event != first_event or manifest.last_event != last_event:
                         scan.status <- StorageStatus.Invalid
@@ -408,36 +413,36 @@ module DebuggerTraceStorage:
                     scan.manifest_seen <- true
                     scan.manifest_exact <- manifest.status == DebuggerTraceManifest::ManifestStatus.Exact
                     manifest_checkpoint_count <- manifest.checkpoint_count
-                if kind == TRACE_EVENTS_KIND:
-                    if event_exhausted or (scan.manifest_seen and not event_seen and first_event != manifest_first_event) or (event_seen and first_event != expected_event) or not storage_event_payload_is_valid_with_recording(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), version.u32(), first_event, last_event, recording_id):
+                if kind == Trace::EVENTS_KIND:
+                    if event_exhausted or (scan.manifest_seen and not event_seen and first_event != manifest_first_event) or (event_seen and first_event != expected_event) or not storage_event_payload_is_valid_with_recording(bytes, offset + Trace::HEADER_BYTES, payload_length.usize(), version.u32(), first_event, last_event, recording_id):
                         scan.status <- StorageStatus.Invalid
                         return scan
-                    scan.event_qualities_exact <- false if not storage_event_payload_is_exact(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize())
-                    scan.event_branches_root <- false if not storage_event_payload_has_root_branches(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize())
+                    scan.event_qualities_exact <- false if not storage_event_payload_is_exact(bytes, offset + Trace::HEADER_BYTES, payload_length.usize())
+                    scan.event_branches_root <- false if not storage_event_payload_has_root_branches(bytes, offset + Trace::HEADER_BYTES, payload_length.usize())
                     event_seen <- true
                     scan.event_chunk_seen <- true
                     scan.verified_event <- last_event
-                    event_exhausted <- last_event == TRACE_MAX_EVENT
+                    event_exhausted <- last_event == Trace::TRACE_STORAGE_MAX_EVENT
                     expected_event <- 0 if event_exhausted else last_event + 1
-                if kind == TRACE_CHECKPOINT_KIND and not storage_checkpoint_payload_is_valid(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize(), first_event, last_event):
+                if kind == Trace::CHECKPOINT_KIND and not storage_checkpoint_payload_is_valid(bytes, offset + Trace::HEADER_BYTES, payload_length.usize(), first_event, last_event):
                     scan.status <- StorageStatus.Invalid
                     return scan
-                if kind == TRACE_CHECKPOINT_KIND and not storage_checkpoint_payload_has_root_branch(bytes, offset + TRACE_HEADER_BYTES, payload_length.usize()):
+                if kind == Trace::CHECKPOINT_KIND and not storage_checkpoint_payload_has_root_branch(bytes, offset + Trace::HEADER_BYTES, payload_length.usize()):
                     scan.checkpoint_branches_root <- false
-                if kind == TRACE_CHECKPOINT_KIND and scan.manifest_seen and not storage_checkpoint_event_is_within_trace(first_event, manifest_first_event, manifest_last_event):
+                if kind == Trace::CHECKPOINT_KIND and scan.manifest_seen and not storage_checkpoint_event_is_within_trace(first_event, manifest_first_event, manifest_last_event):
                     scan.status <- StorageStatus.Invalid
                     return scan
-                checkpoint_chunk_count <- checkpoint_chunk_count + 1 if kind == TRACE_CHECKPOINT_KIND
-                if kind == TRACE_MANIFEST_KIND:
+                checkpoint_chunk_count <- checkpoint_chunk_count + 1 if kind == Trace::CHECKPOINT_KIND
+                if kind == Trace::MANIFEST_KIND:
                     manifest_first_event <- first_event
                     manifest_last_event <- last_event
                 scan.verified_chunks <- scan.verified_chunks + 1
-                if scan.next_sequence == TRACE_MAX_SEQUENCE:
+                if scan.next_sequence == Trace::TRACE_STORAGE_MAX_SEQUENCE:
                     scan.status <- StorageStatus.Oversized
                     return scan
                 scan.next_sequence <- scan.next_sequence + 1
-                offset <- offset + TRACE_HEADER_BYTES + payload_length.usize()
+                offset <- offset + Trace::HEADER_BYTES + payload_length.usize()
             return scan
 
         def storage_footer_magic() -> u32:
-            return TRACE_FOOTER_MAGIC
+            return Trace::FOOTER_MAGIC

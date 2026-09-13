@@ -12,17 +12,23 @@ include "../engine/default_image.elisa"
 
 module DebuggerSessionService:
     private:
-        const NO_EXPECTED_STOP_GENERATION: u64 = 0
-        const DETAIL_INVALID_MESSAGE_KIND: u32 = 1
-        const DETAIL_SESSION_MISMATCH: u32 = 2
-        const DETAIL_REQUEST_ID: u32 = 3
-        const DETAIL_STALE_GENERATION: u32 = 4
-        const NO_SESSION_ID: u64 = 0
-        const NO_REQUEST_ID: u64 = 0
-        const DISCOVERY_FALLBACK_RESPONSE_ID: u64 = 1
+
+        const module ErrorDetail:
+            DETAIL_INVALID_MESSAGE_KIND: u32 = 1
+            DETAIL_SESSION_MISMATCH: u32 = 2
+            PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_REQUEST_ID: u32 = 3
+            PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_STALE_GENERATION: u32 = 4
+
+        const module ResponseIdentifiers:
+            DISCOVERY_FALLBACK_RESPONSE_ID: u64 = 1
+
+        const module SessionState:
+            NO_EXPECTED_STOP_GENERATION: u64 = 0
+            NO_SESSION_ID: u64 = 0
+            PROTOCOL_SESSION_SERVICE_STATE_NO_REQUEST_ID: u64 = 0
 
         def response_id(request: DebuggerProtocol::RequestEnvelope) -> u64:
-            return DISCOVERY_FALLBACK_RESPONSE_ID if request.request_id == NO_REQUEST_ID and request.method == DebuggerProtocol::Method.Discover
+            return ResponseIdentifiers::DISCOVERY_FALLBACK_RESPONSE_ID if request.request_id == SessionState::PROTOCOL_SESSION_SERVICE_STATE_NO_REQUEST_ID and request.method == DebuggerProtocol::Method.Discover
             return request.request_id
 
     public:
@@ -34,14 +40,14 @@ module DebuggerSessionService:
             return Service{session: session, protocol: DebuggerProtocol::protocol_version()}
 
         def service_validate(service: Service, request: DebuggerProtocol::RequestEnvelope) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_REQUEST_ID) if request.request_id == NO_REQUEST_ID and request.method != DebuggerProtocol::Method.Discover
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION_MISMATCH) if request.session_id != NO_SESSION_ID and request.session_id != service.session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_MESSAGE_KIND) if not DebuggerProtocol::message_kind_is_valid(request.kind) or request.kind != DebuggerProtocol::MessageKind.Request
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_MESSAGE_KIND) if not DebuggerProtocol::method_is_valid(request.method)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_REQUEST_ID) if request.request_id == SessionState::PROTOCOL_SESSION_SERVICE_STATE_NO_REQUEST_ID and request.method != DebuggerProtocol::Method.Discover
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_SESSION_MISMATCH) if request.session_id != SessionState::NO_SESSION_ID and request.session_id != service.session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_MESSAGE_KIND) if not DebuggerProtocol::message_kind_is_valid(request.kind) or request.kind != DebuggerProtocol::MessageKind.Request
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_MESSAGE_KIND) if not DebuggerProtocol::method_is_valid(request.method)
             # RequestEnvelope has no target-request field, so cancellation must
             # use CancelRequest and cannot be dispatched through this facade.
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_REQUEST_ID) if request.method == DebuggerProtocol::Method.Cancel
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION) if request.expected_stop_generation != NO_EXPECTED_STOP_GENERATION and request.expected_stop_generation != service.session.stop_generation
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_REQUEST_ID) if request.method == DebuggerProtocol::Method.Cancel
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_STALE_GENERATION) if request.expected_stop_generation != SessionState::NO_EXPECTED_STOP_GENERATION and request.expected_stop_generation != service.session.stop_generation
             return DebuggerErrors::no_error()
 
         def service_response(service: Service, request: DebuggerProtocol::RequestEnvelope) -> DebuggerProtocol::ResponseEnvelope:
@@ -100,11 +106,11 @@ module DebuggerSessionService:
         def service_handle_managed(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocol::RequestEnvelope) -> DebuggerProtocol::ResponseEnvelope:
             session: DebuggerSession::Session = service.controller.session
             validation: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
-            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_REQUEST_ID) if request.request_id == NO_REQUEST_ID and request.method != DebuggerProtocol::Method.Discover
-            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION_MISMATCH) if DebuggerErrors::error_is_ok(validation) and request.session_id != NO_SESSION_ID and request.session_id != session.id.value
-            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_MESSAGE_KIND) if DebuggerErrors::error_is_ok(validation) and (not DebuggerProtocol::message_kind_is_valid(request.kind) or request.kind != DebuggerProtocol::MessageKind.Request)
-            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_MESSAGE_KIND) if DebuggerErrors::error_is_ok(validation) and not DebuggerProtocol::method_is_valid(request.method)
-            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION) if DebuggerErrors::error_is_ok(validation) and request.expected_stop_generation != NO_EXPECTED_STOP_GENERATION and request.expected_stop_generation != session.stop_generation
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_REQUEST_ID) if request.request_id == SessionState::PROTOCOL_SESSION_SERVICE_STATE_NO_REQUEST_ID and request.method != DebuggerProtocol::Method.Discover
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_SESSION_MISMATCH) if DebuggerErrors::error_is_ok(validation) and request.session_id != SessionState::NO_SESSION_ID and request.session_id != session.id.value
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_MESSAGE_KIND) if DebuggerErrors::error_is_ok(validation) and (not DebuggerProtocol::message_kind_is_valid(request.kind) or request.kind != DebuggerProtocol::MessageKind.Request)
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_MESSAGE_KIND) if DebuggerErrors::error_is_ok(validation) and not DebuggerProtocol::method_is_valid(request.method)
+            validation <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_SESSION_SERVICE_ERROR_DETAIL_DETAIL_STALE_GENERATION) if DebuggerErrors::error_is_ok(validation) and request.expected_stop_generation != SessionState::NO_EXPECTED_STOP_GENERATION and request.expected_stop_generation != session.stop_generation
             return DebuggerProtocol::response_error(response_id(request), validation, session.stop_generation) if not DebuggerErrors::error_is_ok(validation)
             typed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: request_method(request.method), id: response_id(request), has_id: true, expected_generation: request.expected_stop_generation, target_event: request.target_event, valid: true}
             result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, typed)

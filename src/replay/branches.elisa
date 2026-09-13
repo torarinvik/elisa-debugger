@@ -6,12 +6,16 @@ include "../core/errors.elisa"
 
 module DebuggerBranches:
     private:
-        const BRANCH_CAPACITY: usize = 32
-        const INTERVENTION_CAPACITY: usize = 16
-        const INTERVENTION_NO_TARGET: u64 = 0
-        const INTERVENTION_KIND_MAX: u16 = 3
-        const BRANCH_FIRST_ID: u64 = 1
-        const BRANCH_MAX_ID: u64 = 18446744073709551615
+        const module Branch:
+            REPLAY_BRANCHES_BRANCH_CAPACITY: usize = 32
+            REPLAY_BRANCHES_BRANCH_FIRST_ID: u64 = 1
+            REPLAY_BRANCHES_BRANCH_MAX_ID: u64 = 18446744073709551615
+
+        const module InterventionLimits:
+            REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY: usize = 16
+            NO_TARGET: u64 = 0
+            REPLAY_BRANCHES_INTERVENTION_LIMITS_KIND_MAX: u16 = 3
+
 
     public:
         enum InterventionKind:
@@ -32,43 +36,43 @@ module DebuggerBranches:
             fork_event: mutable u64
             state_hash: mutable u64
             intervention_count: mutable usize
-            interventions: mutable Intervention[INTERVENTION_CAPACITY]
+            interventions: mutable Intervention[InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY]
 
         struct BranchStore:
-            branches: mutable BranchRecord[BRANCH_CAPACITY]
+            branches: mutable BranchRecord[Branch::REPLAY_BRANCHES_BRANCH_CAPACITY]
             count: mutable usize
             next_id: mutable u64
 
         def branches_new() -> BranchStore:
             store: mutable BranchStore = zeroed
-            store.next_id <- BRANCH_FIRST_ID
+            store.next_id <- Branch::REPLAY_BRANCHES_BRANCH_FIRST_ID
             return store
 
         def branches_parent_exists(store: BranchStore, parent: DebuggerIdentity::DebugId) -> bool:
             return true if parent.value == 0
-            return false if store.count > BRANCH_CAPACITY
+            return false if store.count > Branch::REPLAY_BRANCHES_BRANCH_CAPACITY
             for index in 0..<store.count:
                 return true if store.branches[index].id.value == parent.value
             return false
 
         def branches_parent_event_is_valid(store: BranchStore, parent: DebuggerIdentity::DebugId, event: u64) -> bool:
             return true if parent.value == 0
-            return false if store.count > BRANCH_CAPACITY
+            return false if store.count > Branch::REPLAY_BRANCHES_BRANCH_CAPACITY
             for index in 0..<store.count:
                 return event >= store.branches[index].fork_event if store.branches[index].id.value == parent.value
             return false
 
         def branches_parent_chain_is_valid(store: BranchStore, start: DebuggerIdentity::DebugId) -> bool:
-            visited: mutable bool[BRANCH_CAPACITY] = zeroed
+            visited: mutable bool[Branch::REPLAY_BRANCHES_BRANCH_CAPACITY] = zeroed
             current: mutable DebuggerIdentity::DebugId = start
-            for hop in 0..<BRANCH_CAPACITY:
+            for hop in 0..<Branch::REPLAY_BRANCHES_BRANCH_CAPACITY:
                 return true if current.value == 0
-                index: mutable usize = BRANCH_CAPACITY
+                index: mutable usize = Branch::REPLAY_BRANCHES_BRANCH_CAPACITY
                 for candidate in 0..<store.count:
                     if store.branches[candidate].id.value == current.value:
                         index <- candidate
                         break
-                return false if index == BRANCH_CAPACITY or visited[index]
+                return false if index == Branch::REPLAY_BRANCHES_BRANCH_CAPACITY or visited[index]
                 visited[index] <- true
                 current <- store.branches[index].parent
             return false
@@ -76,7 +80,7 @@ module DebuggerBranches:
         def branches_fork(store: BranchStore, parent: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> BranchStore:
             updated: mutable BranchStore = store
             return updated if not branches_is_valid(store)
-            return updated if store.count >= BRANCH_CAPACITY or store.next_id == 0 or store.next_id == BRANCH_MAX_ID or not branches_parent_exists(store, parent) or not branches_parent_event_is_valid(store, parent, event) or not branches_parent_chain_is_valid(store, parent)
+            return updated if store.count >= Branch::REPLAY_BRANCHES_BRANCH_CAPACITY or store.next_id == 0 or store.next_id == Branch::REPLAY_BRANCHES_BRANCH_MAX_ID or not branches_parent_exists(store, parent) or not branches_parent_event_is_valid(store, parent, event) or not branches_parent_chain_is_valid(store, parent)
             for index in 0..<store.count:
                 return updated if store.branches[index].id.value == store.next_id
             updated.branches[store.count].id <- DebuggerIdentity::debug_id(store.next_id)
@@ -90,10 +94,10 @@ module DebuggerBranches:
 
         def branches_add_intervention(store: BranchStore, branch: DebuggerIdentity::DebugId, intervention: Intervention) -> BranchStore:
             updated: mutable BranchStore = store
-            return updated if store.count > BRANCH_CAPACITY
+            return updated if store.count > Branch::REPLAY_BRANCHES_BRANCH_CAPACITY
             for index in 0..<store.count:
                 if store.branches[index].id.value == branch.value:
-                    return updated if store.branches[index].intervention_count >= INTERVENTION_CAPACITY
+                    return updated if store.branches[index].intervention_count >= InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY
                     return updated if not branches_intervention_is_valid(store.branches[index], intervention)
                     if store.branches[index].intervention_count > 0:
                         last: Intervention = store.branches[index].interventions[store.branches[index].intervention_count - 1]
@@ -104,16 +108,16 @@ module DebuggerBranches:
             return updated
 
         def branches_intervention_is_valid(branch: BranchRecord, intervention: Intervention) -> bool:
-            return intervention.event >= branch.fork_event and intervention.kind.u16() <= INTERVENTION_KIND_MAX and intervention.target.value != INTERVENTION_NO_TARGET and branch.intervention_count < INTERVENTION_CAPACITY
+            return intervention.event >= branch.fork_event and intervention.kind.u16() <= InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_KIND_MAX and intervention.target.value != InterventionLimits::NO_TARGET and branch.intervention_count < InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY
 
         def branches_first_divergence(left: BranchRecord, right: BranchRecord) -> u64:
             return left.fork_event if left.parent.value != right.parent.value or left.fork_event != right.fork_event
             return left.fork_event if left.state_hash != right.state_hash
-            return left.fork_event if left.intervention_count > INTERVENTION_CAPACITY or right.intervention_count > INTERVENTION_CAPACITY
+            return left.fork_event if left.intervention_count > InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY or right.intervention_count > InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY
             limit: usize = left.intervention_count if left.intervention_count < right.intervention_count else right.intervention_count
             for index in 0..<limit:
                 return left.interventions[index].event if left.interventions[index].event != right.interventions[index].event or left.interventions[index].kind != right.interventions[index].kind or left.interventions[index].target.value != right.interventions[index].target.value or left.interventions[index].value_hash != right.interventions[index].value_hash
-            return BRANCH_MAX_ID if left.intervention_count == right.intervention_count
+            return Branch::REPLAY_BRANCHES_BRANCH_MAX_ID if left.intervention_count == right.intervention_count
             return left.interventions[limit].event if left.intervention_count > limit
             return right.interventions[limit].event
 
@@ -121,12 +125,12 @@ module DebuggerBranches:
         # interventions to replay.  Branch APIs return values, so callers may
         # receive stores reconstructed from untrusted trace data.
         def branches_is_valid(store: BranchStore) -> bool:
-            return false if store.count > BRANCH_CAPACITY or store.next_id == 0
-            return false if store.next_id != store.count.u64() + BRANCH_FIRST_ID
+            return false if store.count > Branch::REPLAY_BRANCHES_BRANCH_CAPACITY or store.next_id == 0
+            return false if store.next_id != store.count.u64() + Branch::REPLAY_BRANCHES_BRANCH_FIRST_ID
             for index in 0..<store.count:
                 branch: BranchRecord = store.branches[index]
                 return false if branch.id.value == 0 or branch.id.value >= store.next_id
-                return false if branch.intervention_count > INTERVENTION_CAPACITY
+                return false if branch.intervention_count > InterventionLimits::REPLAY_BRANCHES_INTERVENTION_LIMITS_CAPACITY
                 return false if not branches_parent_exists(store, branch.parent)
                 return false if not branches_parent_event_is_valid(store, branch.parent, branch.fork_event)
                 return false if not branches_parent_chain_is_valid(store, branch.parent)

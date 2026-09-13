@@ -9,20 +9,34 @@ include "../core/identity.elisa"
 
 module DebuggerConcurrencyRuntime:
     private:
-        const TASK_RUNTIME_CAPACITY: usize = 64
-        const WAIT_EDGE_CAPACITY: usize = 128
-        const FIRST_TASK_ID: u64 = 1
-        const MAX_TASK_ID: u64 = 18446744073709551615
-        const MAX_LOGICAL_TIME: u64 = 18446744073709551615
-        const ROOT_TASK_ID: u64 = 0
-        const NO_TASK_INDEX: usize = TASK_RUNTIME_CAPACITY
-        const NO_WAIT_EDGE_INDEX: usize = WAIT_EDGE_CAPACITY
-        const SYNCHRONIZATION_KIND_MAX: u16 = 4
-        const TASK_STATE_MAX: u16 = 5
+        const module Bounds:
+            MAX_TASK_ID: u64 = 18446744073709551615
+            MAX_LOGICAL_TIME: u64 = 18446744073709551615
+
+        const module First:
+            CONCURRENCY_RUNTIME_FIRST_TASK_ID: u64 = 1
+
+        const module Root:
+            CONCURRENCY_RUNTIME_ROOT_TASK_ID: u64 = 0
+
+        const module Sentinel:
+            TASK_INDEX: usize = Task::RUNTIME_CAPACITY
+            WAIT_EDGE_INDEX: usize = Wait::EDGE_CAPACITY
+
+        const module Synchronization:
+            CONCURRENCY_RUNTIME_SYNCHRONIZATION_KIND_MAX: u16 = 4
+
+        const module Task:
+            RUNTIME_CAPACITY: usize = 64
+            CONCURRENCY_RUNTIME_TASK_STATE_MAX: u16 = 5
+
+        const module Wait:
+            EDGE_CAPACITY: usize = 128
+
 
         def next_logical_time(current: u64) -> u64:
-            return MAX_LOGICAL_TIME if current == MAX_LOGICAL_TIME
-            return current + FIRST_TASK_ID
+            return Bounds::MAX_LOGICAL_TIME if current == Bounds::MAX_LOGICAL_TIME
+            return current + First::CONCURRENCY_RUNTIME_FIRST_TASK_ID
 
         def transition_allowed(current: DebuggerConcurrency::TaskState, next: DebuggerConcurrency::TaskState) -> bool:
             return next == DebuggerConcurrency::TaskState.Runnable or next == DebuggerConcurrency::TaskState.Cancelled if current == DebuggerConcurrency::TaskState.Created
@@ -40,37 +54,37 @@ module DebuggerConcurrencyRuntime:
             Diverged
 
         struct TaskRuntime:
-            tasks: mutable DebuggerConcurrency::TaskInfo[TASK_RUNTIME_CAPACITY]
+            tasks: mutable DebuggerConcurrency::TaskInfo[Task::RUNTIME_CAPACITY]
             task_count: mutable usize
             next_id: mutable u64
             current: mutable DebuggerIdentity::DebugId
-            waits: mutable DebuggerConcurrency::WaitEdge[WAIT_EDGE_CAPACITY]
+            waits: mutable DebuggerConcurrency::WaitEdge[Wait::EDGE_CAPACITY]
             wait_count: mutable usize
             scheduler: mutable DebuggerScheduler::DeterministicScheduler
             status: mutable RuntimeStatus
 
         def runtime_new(replaying: bool) -> TaskRuntime:
             runtime: mutable TaskRuntime = zeroed
-            runtime.next_id <- FIRST_TASK_ID
+            runtime.next_id <- First::CONCURRENCY_RUNTIME_FIRST_TASK_ID
             runtime.scheduler <- DebuggerScheduler::scheduler_new(replaying)
             runtime.status <- RuntimeStatus.Ready
             return runtime
 
         def runtime_spawn(runtime: mutable TaskRuntime&, parent: DebuggerIdentity::DebugId) -> DebuggerIdentity::DebugId:
-            return DebuggerIdentity::debug_id(ROOT_TASK_ID) if runtime.scheduler.diverged
-            return DebuggerIdentity::debug_id(ROOT_TASK_ID) if runtime.task_count >= TASK_RUNTIME_CAPACITY or runtime.next_id == 0 or runtime.next_id == MAX_TASK_ID
+            return DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID) if runtime.scheduler.diverged
+            return DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID) if runtime.task_count >= Task::RUNTIME_CAPACITY or runtime.next_id == 0 or runtime.next_id == Bounds::MAX_TASK_ID
             for index in 0..<runtime.task_count:
-                return DebuggerIdentity::debug_id(ROOT_TASK_ID) if runtime.tasks[index].id.value == runtime.next_id
-            if parent.value != ROOT_TASK_ID:
+                return DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID) if runtime.tasks[index].id.value == runtime.next_id
+            if parent.value != Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID:
                 parent_index: usize = runtime_find_index(runtime, parent)
-                return DebuggerIdentity::debug_id(ROOT_TASK_ID) if parent_index == NO_TASK_INDEX
-                return DebuggerIdentity::debug_id(ROOT_TASK_ID) if runtime.tasks[parent_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[parent_index].state == DebuggerConcurrency::TaskState.Cancelled
+                return DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID) if parent_index == Sentinel::TASK_INDEX
+                return DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID) if runtime.tasks[parent_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[parent_index].state == DebuggerConcurrency::TaskState.Cancelled
             index: usize = runtime.task_count
             id: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(runtime.next_id)
             runtime.tasks[index] <- DebuggerConcurrency::TaskInfo{id: id, parent: parent, state: DebuggerConcurrency::TaskState.Runnable, logical_time: 0, os_thread: 0}
             runtime.task_count <- runtime.task_count + 1
-            runtime.next_id <- runtime.next_id + FIRST_TASK_ID
-            if runtime.current.value == ROOT_TASK_ID:
+            runtime.next_id <- runtime.next_id + First::CONCURRENCY_RUNTIME_FIRST_TASK_ID
+            if runtime.current.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID:
                 runtime.current <- id
             if runtime.scheduler.diverged:
                 runtime.status <- RuntimeStatus.Diverged
@@ -83,28 +97,28 @@ module DebuggerConcurrencyRuntime:
             return id
 
         def runtime_find_index(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId) -> usize:
-            return NO_TASK_INDEX if runtime.task_count > TASK_RUNTIME_CAPACITY
+            return Sentinel::TASK_INDEX if runtime.task_count > Task::RUNTIME_CAPACITY
             for index in 0..<runtime.task_count:
                 return index if runtime.tasks[index].id.value == id.value
-            return NO_TASK_INDEX
+            return Sentinel::TASK_INDEX
 
         def runtime_parent_chain_is_valid(runtime: mutable TaskRuntime&, start: DebuggerIdentity::DebugId) -> bool:
-            visited: mutable bool[TASK_RUNTIME_CAPACITY] = zeroed
+            visited: mutable bool[Task::RUNTIME_CAPACITY] = zeroed
             current: mutable DebuggerIdentity::DebugId = start
-            for hop in 0..<TASK_RUNTIME_CAPACITY:
-                return true if current.value == ROOT_TASK_ID
+            for hop in 0..<Task::RUNTIME_CAPACITY:
+                return true if current.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID
                 index: usize = runtime_find_index(runtime, current)
-                return false if index == NO_TASK_INDEX or visited[index]
+                return false if index == Sentinel::TASK_INDEX or visited[index]
                 visited[index] <- true
                 current <- runtime.tasks[index].parent
             return false
 
         def runtime_transition(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, state: DebuggerConcurrency::TaskState) -> bool:
-            return false if runtime.scheduler.diverged or runtime.wait_count > WAIT_EDGE_CAPACITY
+            return false if runtime.scheduler.diverged or runtime.wait_count > Wait::EDGE_CAPACITY
             index: usize = runtime_find_index(runtime, id)
-            return false if index == NO_TASK_INDEX
+            return false if index == Sentinel::TASK_INDEX
             return false if not transition_allowed(runtime.tasks[index].state, state)
-            waiter_edge_index: mutable usize = NO_WAIT_EDGE_INDEX
+            waiter_edge_index: mutable usize = Sentinel::WAIT_EDGE_INDEX
             if runtime.tasks[index].state == DebuggerConcurrency::TaskState.Blocked and (state == DebuggerConcurrency::TaskState.Runnable or state == DebuggerConcurrency::TaskState.Cancelled):
                 for edge_index in 0..<runtime.wait_count:
                     if runtime.waits[edge_index].waiter.value == id.value:
@@ -118,11 +132,11 @@ module DebuggerConcurrencyRuntime:
                     return false if runtime.waits[edge_index].owner.value == id.value and edge_index != waiter_edge_index
             runtime.tasks[index].state <- state
             runtime.tasks[index].logical_time <- next_logical_time(runtime.tasks[index].logical_time)
-            if waiter_edge_index != NO_WAIT_EDGE_INDEX:
+            if waiter_edge_index != Sentinel::WAIT_EDGE_INDEX:
                 runtime.waits[waiter_edge_index] <- runtime.waits[runtime.wait_count - 1]
                 runtime.wait_count <- runtime.wait_count - 1
             if runtime.current.value == id.value and (state == DebuggerConcurrency::TaskState.Blocked or state == DebuggerConcurrency::TaskState.Completed or state == DebuggerConcurrency::TaskState.Cancelled):
-                runtime.current <- DebuggerIdentity::debug_id(ROOT_TASK_ID)
+                runtime.current <- DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID)
                 for candidate_index in 0..<runtime.task_count:
                     candidate: DebuggerConcurrency::TaskInfo = runtime.tasks[candidate_index]
                     if candidate.state == DebuggerConcurrency::TaskState.Running or candidate.state == DebuggerConcurrency::TaskState.Runnable:
@@ -148,7 +162,7 @@ module DebuggerConcurrencyRuntime:
         # time; the following state transition accounts for that separately.
         def runtime_record_sync(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, kind: DebuggerScheduler::ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> bool:
             index: usize = runtime_find_index(runtime, id)
-            return false if index == NO_TASK_INDEX
+            return false if index == Sentinel::TASK_INDEX
             runtime.scheduler <- DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
             if runtime.scheduler.diverged:
                 runtime.status <- RuntimeStatus.Diverged
@@ -157,7 +171,7 @@ module DebuggerConcurrencyRuntime:
 
         def runtime_schedule(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, kind: DebuggerScheduler::ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> bool:
             index: usize = runtime_find_index(runtime, id)
-            return false if index == NO_TASK_INDEX
+            return false if index == Sentinel::TASK_INDEX
             return false if runtime.tasks[index].state != DebuggerConcurrency::TaskState.Runnable and runtime.tasks[index].state != DebuggerConcurrency::TaskState.Running
             runtime.scheduler <- DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
             if runtime.scheduler.diverged:
@@ -169,11 +183,11 @@ module DebuggerConcurrencyRuntime:
 
         def runtime_wait(runtime: mutable TaskRuntime&, waiter: DebuggerIdentity::DebugId, owner: DebuggerIdentity::DebugId, resource: DebuggerIdentity::DebugId, kind: DebuggerConcurrency::SynchronizationKind) -> bool:
             return false if runtime.scheduler.diverged
-            return false if runtime.wait_count >= WAIT_EDGE_CAPACITY
-            return false if resource.value == ROOT_TASK_ID or kind.u16() > SYNCHRONIZATION_KIND_MAX
+            return false if runtime.wait_count >= Wait::EDGE_CAPACITY
+            return false if resource.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID or kind.u16() > Synchronization::CONCURRENCY_RUNTIME_SYNCHRONIZATION_KIND_MAX
             waiter_index: usize = runtime_find_index(runtime, waiter)
             owner_index: usize = runtime_find_index(runtime, owner)
-            return false if waiter_index == NO_TASK_INDEX or owner_index == NO_TASK_INDEX
+            return false if waiter_index == Sentinel::TASK_INDEX or owner_index == Sentinel::TASK_INDEX
             return false if runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Cancelled
             return false if runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Runnable and runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Running
             for edge_index in 0..<runtime.wait_count:
@@ -183,7 +197,7 @@ module DebuggerConcurrencyRuntime:
             runtime.waits[runtime.wait_count] <- DebuggerConcurrency::WaitEdge{waiter: waiter, owner: owner, resource: resource, kind: kind}
             runtime.wait_count <- runtime.wait_count + 1
             if runtime.current.value == waiter.value:
-                runtime.current <- DebuggerIdentity::debug_id(ROOT_TASK_ID)
+                runtime.current <- DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID)
                 for candidate_index in 0..<runtime.task_count:
                     candidate: DebuggerConcurrency::TaskInfo = runtime.tasks[candidate_index]
                     if candidate.state == DebuggerConcurrency::TaskState.Running or candidate.state == DebuggerConcurrency::TaskState.Runnable:
@@ -193,32 +207,32 @@ module DebuggerConcurrencyRuntime:
 
         def runtime_wake(runtime: mutable TaskRuntime&, waiter: DebuggerIdentity::DebugId) -> bool:
             return false if runtime.scheduler.diverged
-            return false if runtime.wait_count > WAIT_EDGE_CAPACITY
+            return false if runtime.wait_count > Wait::EDGE_CAPACITY
             index: usize = runtime_find_index(runtime, waiter)
-            return false if index == NO_TASK_INDEX
+            return false if index == Sentinel::TASK_INDEX
             return false if runtime.tasks[index].state != DebuggerConcurrency::TaskState.Blocked
-            edge_index: mutable usize = NO_WAIT_EDGE_INDEX
+            edge_index: mutable usize = Sentinel::WAIT_EDGE_INDEX
             for candidate in 0..<runtime.wait_count:
                 if runtime.waits[candidate].waiter.value == waiter.value:
                     edge_index <- candidate
                     break
-            return false if edge_index == NO_WAIT_EDGE_INDEX
+            return false if edge_index == Sentinel::WAIT_EDGE_INDEX
             resource: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(runtime.waits[edge_index].resource.value)
             return false if not runtime_record_sync(runtime, waiter, DebuggerScheduler::ScheduleKind.Wake, resource)
             return false if not runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Runnable)
             return true
 
         def runtime_has_deadlock(runtime: mutable TaskRuntime&) -> bool:
-            return false if runtime.wait_count > WAIT_EDGE_CAPACITY or runtime.task_count > TASK_RUNTIME_CAPACITY
+            return false if runtime.wait_count > Wait::EDGE_CAPACITY or runtime.task_count > Task::RUNTIME_CAPACITY
             graph: mutable DebuggerConcurrencyAnalysis::WaitGraph = DebuggerConcurrencyAnalysis::wait_graph_new()
             for edge_index in 0..<runtime.wait_count:
                 edge: DebuggerConcurrency::WaitEdge = runtime.waits[edge_index]
                 waiter_index: usize = runtime_find_index(runtime, edge.waiter)
                 owner_index: usize = runtime_find_index(runtime, edge.owner)
-                continue if waiter_index == NO_TASK_INDEX or owner_index == NO_TASK_INDEX
+                continue if waiter_index == Sentinel::TASK_INDEX or owner_index == Sentinel::TASK_INDEX
                 continue if runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Blocked
                 continue if runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Cancelled
-                return false if graph.count >= WAIT_EDGE_CAPACITY
+                return false if graph.count >= Wait::EDGE_CAPACITY
                 graph.edges[graph.count] <- edge
                 graph.count <- graph.count + 1
             for index in 0..<runtime.task_count:
@@ -229,14 +243,14 @@ module DebuggerConcurrencyRuntime:
             return runtime.task_count
 
         def runtime_status_is_consistent(runtime: TaskRuntime) -> bool:
-            return false if runtime.task_count > TASK_RUNTIME_CAPACITY
+            return false if runtime.task_count > Task::RUNTIME_CAPACITY
             has_runnable: mutable bool = false
             has_running: mutable bool = false
             has_blocked: mutable bool = false
             has_live: mutable bool = false
             for index in 0..<runtime.task_count:
                 state: DebuggerConcurrency::TaskState = runtime.tasks[index].state
-                return false if state.u16() > TASK_STATE_MAX
+                return false if state.u16() > Task::CONCURRENCY_RUNTIME_TASK_STATE_MAX
                 has_runnable <- true if state == DebuggerConcurrency::TaskState.Runnable
                 has_running <- true if state == DebuggerConcurrency::TaskState.Running
                 has_blocked <- true if state == DebuggerConcurrency::TaskState.Blocked
@@ -250,36 +264,36 @@ module DebuggerConcurrencyRuntime:
             return runtime.status == RuntimeStatus.Diverged
 
         def runtime_is_valid(runtime: mutable TaskRuntime&) -> bool:
-            return false if runtime.task_count > TASK_RUNTIME_CAPACITY or runtime.wait_count > WAIT_EDGE_CAPACITY
+            return false if runtime.task_count > Task::RUNTIME_CAPACITY or runtime.wait_count > Wait::EDGE_CAPACITY
             return false if not DebuggerScheduler::scheduler_state_is_valid(runtime.scheduler)
-            return false if runtime.next_id == ROOT_TASK_ID or runtime.status.u16() > RuntimeStatus.Diverged.u16()
-            return false if runtime.next_id != runtime.task_count.u64() + FIRST_TASK_ID
+            return false if runtime.next_id == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID or runtime.status.u16() > RuntimeStatus.Diverged.u16()
+            return false if runtime.next_id != runtime.task_count.u64() + First::CONCURRENCY_RUNTIME_FIRST_TASK_ID
             return false if runtime.status == RuntimeStatus.Diverged and not runtime.scheduler.diverged
             return false if runtime.scheduler.diverged and runtime.status != RuntimeStatus.Diverged
             return false if not runtime_status_is_consistent(runtime)
-            if runtime.current.value != ROOT_TASK_ID:
+            if runtime.current.value != Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID:
                 current_index: usize = runtime_find_index(runtime, runtime.current)
-                return false if current_index == NO_TASK_INDEX or (runtime.tasks[current_index].state != DebuggerConcurrency::TaskState.Running and runtime.tasks[current_index].state != DebuggerConcurrency::TaskState.Runnable)
+                return false if current_index == Sentinel::TASK_INDEX or (runtime.tasks[current_index].state != DebuggerConcurrency::TaskState.Running and runtime.tasks[current_index].state != DebuggerConcurrency::TaskState.Runnable)
             scheduler_history_count: mutable usize = runtime.scheduler.count
             scheduler_history_count <- runtime.scheduler.cursor if runtime.scheduler.replaying
             for decision_index in 0..<scheduler_history_count:
                 decision: DebuggerScheduler::ScheduleDecision = runtime.scheduler.decisions[decision_index]
                 task_index: usize = runtime_find_index(runtime, decision.task.id)
-                return false if task_index == NO_TASK_INDEX or not DebuggerScheduler::scheduler_decision_matches_task(decision, runtime.tasks[task_index])
+                return false if task_index == Sentinel::TASK_INDEX or not DebuggerScheduler::scheduler_decision_matches_task(decision, runtime.tasks[task_index])
             for index in 0..<runtime.task_count:
                 task: DebuggerConcurrency::TaskInfo = runtime.tasks[index]
-                return false if task.id.value == ROOT_TASK_ID or task.state.u16() > TASK_STATE_MAX
+                return false if task.id.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID or task.state.u16() > Task::CONCURRENCY_RUNTIME_TASK_STATE_MAX
                 return false if task.id.value >= runtime.next_id
-                return false if task.parent.value != ROOT_TASK_ID and runtime_find_index(runtime, task.parent) == NO_TASK_INDEX
+                return false if task.parent.value != Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID and runtime_find_index(runtime, task.parent) == Sentinel::TASK_INDEX
                 return false if not runtime_parent_chain_is_valid(runtime, task.parent)
                 for previous in 0..<index:
                     return false if runtime.tasks[previous].id.value == task.id.value
             for index in 0..<runtime.wait_count:
                 edge: DebuggerConcurrency::WaitEdge = runtime.waits[index]
-                return false if edge.waiter.value == ROOT_TASK_ID or edge.owner.value == ROOT_TASK_ID or edge.resource.value == ROOT_TASK_ID or edge.kind.u16() > SYNCHRONIZATION_KIND_MAX
+                return false if edge.waiter.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID or edge.owner.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID or edge.resource.value == Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID or edge.kind.u16() > Synchronization::CONCURRENCY_RUNTIME_SYNCHRONIZATION_KIND_MAX
                 waiter_index: usize = runtime_find_index(runtime, edge.waiter)
                 owner_index: usize = runtime_find_index(runtime, edge.owner)
-                return false if waiter_index == NO_TASK_INDEX or owner_index == NO_TASK_INDEX or runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Blocked
+                return false if waiter_index == Sentinel::TASK_INDEX or owner_index == Sentinel::TASK_INDEX or runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Blocked
                 return false if runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Completed or runtime.tasks[owner_index].state == DebuggerConcurrency::TaskState.Cancelled
                 for previous in 0..<index:
                     return false if runtime.waits[previous].waiter.value == edge.waiter.value

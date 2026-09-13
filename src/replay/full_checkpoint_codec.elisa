@@ -6,76 +6,117 @@ include "./full_checkpoint.elisa"
 include "./checkpoint_codec.elisa"
 include "../trace/binary.elisa"
 
+const module DebuggerFullCheckpointCodecCapacity:
+    U16_BYTES: usize = 2
+    U32_BYTES: usize = 4
+    U64_BYTES: usize = 8
+    BOOL_BYTES: usize = 1
+    TASK_CAPACITY: usize = 64
+    WAIT_CAPACITY: usize = 128
+    SCHEDULE_CAPACITY: usize = 512
+    EFFECT_CAPACITY: usize = 256
+    RESOURCE_CAPACITY: usize = 16
+    RESOURCE_DATA_CAPACITY: usize = 256
+    ADAPTER_SAMPLE_CAPACITY: usize = 128
+    CONSOLE_RECORD_CAPACITY: usize = 64
+    CONSOLE_DATA_CAPACITY: usize = 256
+    TASK_INFO_BYTES: usize = U64_BYTES * 4 + U16_BYTES
+    WAIT_EDGE_BYTES: usize = U64_BYTES * 3 + U16_BYTES
+    SCHEDULE_DECISION_BYTES: usize = U64_BYTES * 2 + TASK_INFO_BYTES + U16_BYTES
+    EFFECT_RECORD_BYTES: usize = U64_BYTES * 4 + U16_BYTES + BOOL_BYTES
+    RESOURCE_FILE_HEADER_BYTES: usize = U64_BYTES * 5 + BOOL_BYTES
+    OUTER_FIXED_BYTES: usize = U32_BYTES * 3 + U64_BYTES * 4
+    TASK_FIXED_BYTES: usize = U64_BYTES * 6 + U16_BYTES + BOOL_BYTES * 3
+    EFFECT_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES * 4 + BOOL_BYTES * 2 + U32_BYTES
+    RESOURCE_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES
+    ADAPTER_SAMPLE_BYTES: usize = U64_BYTES * 3
+    ADAPTER_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES + BOOL_BYTES + U16_BYTES * 2 + BOOL_BYTES + U32_BYTES
+    CONSOLE_RECORD_HEADER_BYTES: usize = U64_BYTES * 3 + U16_BYTES * 2 + BOOL_BYTES
+    CONSOLE_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES + BOOL_BYTES * 2 + U16_BYTES * 2 + BOOL_BYTES + U32_BYTES
+    CHECKSUM_BYTES: usize = U64_BYTES
+    MAX_TASK_BYTES: usize = TASK_FIXED_BYTES + TASK_CAPACITY * TASK_INFO_BYTES + WAIT_CAPACITY * WAIT_EDGE_BYTES + SCHEDULE_CAPACITY * SCHEDULE_DECISION_BYTES
+    MAX_EFFECT_BYTES: usize = EFFECT_FIXED_BYTES + EFFECT_CAPACITY * EFFECT_RECORD_BYTES
+    MAX_RESOURCE_BYTES: usize = RESOURCE_FIXED_BYTES + RESOURCE_CAPACITY * (RESOURCE_FILE_HEADER_BYTES + RESOURCE_DATA_CAPACITY)
+    MAX_CLOCK_BYTES: usize = ADAPTER_FIXED_BYTES + ADAPTER_SAMPLE_CAPACITY * ADAPTER_SAMPLE_BYTES
+    MAX_RANDOM_BYTES: usize = ADAPTER_FIXED_BYTES + ADAPTER_SAMPLE_CAPACITY * ADAPTER_SAMPLE_BYTES
+    MAX_CONSOLE_BYTES: usize = CONSOLE_FIXED_BYTES + CONSOLE_RECORD_CAPACITY * (CONSOLE_RECORD_HEADER_BYTES + CONSOLE_DATA_CAPACITY)
+    MAX_ADAPTER_BYTES: usize = MAX_CLOCK_BYTES + MAX_RANDOM_BYTES + MAX_CONSOLE_BYTES
+    FULL_CHECKPOINT_CODEC_CAPACITY: usize = OUTER_FIXED_BYTES + DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES + MAX_TASK_BYTES + MAX_EFFECT_BYTES + MAX_RESOURCE_BYTES + MAX_ADAPTER_BYTES + CHECKSUM_BYTES
+
 module DebuggerFullCheckpointCodec:
     private:
-        const CODEC_MAGIC: u32 = 1263022918
-        const CODEC_SCHEMA: u32 = 2
-        const CODEC_BYTE_BITS: u64 = 8
-        const CODEC_BYTE_MASK: u64 = 255
-        const CODEC_FIRST_INDEX: usize = 0
-        const CODEC_FALSE: u8 = 0
-        const CODEC_TRUE: u8 = 1
-        const CODEC_TASK_CAPACITY: usize = 64
-        const CODEC_WAIT_CAPACITY: usize = 128
-        const CODEC_SCHEDULE_CAPACITY: usize = 512
-        const CODEC_EFFECT_CAPACITY: usize = 256
-        const CODEC_RESOURCE_CAPACITY: usize = 16
-        const CODEC_RESOURCE_DATA_CAPACITY: usize = 256
-        const CODEC_ADAPTER_SAMPLE_CAPACITY: usize = 128
-        const CODEC_CONSOLE_RECORD_CAPACITY: usize = 64
-        const CODEC_CONSOLE_DATA_CAPACITY: usize = 256
-        const CODEC_TASK_STATE_MAX: u16 = 5
-        const CODEC_SYNC_KIND_MAX: u16 = 4
-        const CODEC_RUNTIME_STATUS_MAX: u16 = 4
-        const CODEC_SCHEDULE_KIND_MAX: u16 = 6
-        const CODEC_EFFECT_KIND_MAX: u16 = 9
-        const CODEC_EFFECT_MODE_MAX: u16 = 4
-        const CODEC_EFFECT_EXACTNESS_MAX: u16 = 3
-        const CODEC_RESOURCE_MODE_MAX: u16 = 2
-        const CODEC_ERROR_CODE_MAX: u16 = 12
-        const CODEC_ERROR_SEVERITY_MAX: u16 = 2
-        const CODEC_ENUM_ZERO: u16 = 0
-        const CODEC_ENUM_ONE: u16 = 1
-        const CODEC_ENUM_TWO: u16 = 2
-        const CODEC_ENUM_THREE: u16 = 3
-        const CODEC_ENUM_FOUR: u16 = 4
-        const CODEC_ENUM_FIVE: u16 = 5
-        const CODEC_ENUM_SIX: u16 = 6
-        const CODEC_ENUM_SEVEN: u16 = 7
-        const CODEC_ENUM_EIGHT: u16 = 8
-        const CODEC_ENUM_NINE: u16 = 9
-        const CODEC_ENUM_TEN: u16 = 10
-        const CODEC_ENUM_ELEVEN: u16 = 11
-        const CODEC_ENUM_TWELVE: u16 = 12
-        const CODEC_U16_BYTES: usize = 2
-        const CODEC_U32_BYTES: usize = 4
-        const CODEC_U64_BYTES: usize = 8
-        const CODEC_BOOL_BYTES: usize = 1
-        const CODEC_TASK_INFO_BYTES: usize = CODEC_U64_BYTES * 4 + CODEC_U16_BYTES
-        const CODEC_WAIT_EDGE_BYTES: usize = CODEC_U64_BYTES * 3 + CODEC_U16_BYTES
-        const CODEC_SCHEDULE_DECISION_BYTES: usize = CODEC_U64_BYTES * 2 + CODEC_TASK_INFO_BYTES + CODEC_U16_BYTES
-        const CODEC_EFFECT_RECORD_BYTES: usize = CODEC_U64_BYTES * 4 + CODEC_U16_BYTES + CODEC_BOOL_BYTES
-        const CODEC_RESOURCE_FILE_HEADER_BYTES: usize = CODEC_U64_BYTES * 5 + CODEC_BOOL_BYTES
-        const CODEC_OUTER_FIXED_BYTES: usize = CODEC_U32_BYTES * 3 + CODEC_U64_BYTES * 4
-        const CODEC_TASK_FIXED_BYTES: usize = CODEC_U64_BYTES * 6 + CODEC_U16_BYTES + CODEC_BOOL_BYTES * 3
-        const CODEC_EFFECT_FIXED_BYTES: usize = CODEC_U64_BYTES * 2 + CODEC_U16_BYTES * 4 + CODEC_BOOL_BYTES * 2 + CODEC_U32_BYTES
-        const CODEC_RESOURCE_FIXED_BYTES: usize = CODEC_U64_BYTES * 2 + CODEC_U16_BYTES
-        const CODEC_ADAPTER_SAMPLE_BYTES: usize = CODEC_U64_BYTES * 3
-        const CODEC_ADAPTER_FIXED_BYTES: usize = CODEC_U64_BYTES * 2 + CODEC_U16_BYTES + CODEC_BOOL_BYTES + CODEC_U16_BYTES * 2 + CODEC_BOOL_BYTES + CODEC_U32_BYTES
-        const CODEC_CONSOLE_RECORD_HEADER_BYTES: usize = CODEC_U64_BYTES * 3 + CODEC_U16_BYTES * 2 + CODEC_BOOL_BYTES
-        const CODEC_CONSOLE_FIXED_BYTES: usize = CODEC_U64_BYTES * 2 + CODEC_U16_BYTES + CODEC_BOOL_BYTES * 2 + CODEC_U16_BYTES * 2 + CODEC_BOOL_BYTES + CODEC_U32_BYTES
-        const CODEC_CHECKSUM_BYTES: usize = CODEC_U64_BYTES
-        const CODEC_MAX_TASK_BYTES: usize = CODEC_TASK_FIXED_BYTES + CODEC_TASK_CAPACITY * CODEC_TASK_INFO_BYTES + CODEC_WAIT_CAPACITY * CODEC_WAIT_EDGE_BYTES + CODEC_SCHEDULE_CAPACITY * CODEC_SCHEDULE_DECISION_BYTES
-        const CODEC_MAX_EFFECT_BYTES: usize = CODEC_EFFECT_FIXED_BYTES + CODEC_EFFECT_CAPACITY * CODEC_EFFECT_RECORD_BYTES
-        const CODEC_MAX_RESOURCE_BYTES: usize = CODEC_RESOURCE_FIXED_BYTES + CODEC_RESOURCE_CAPACITY * (CODEC_RESOURCE_FILE_HEADER_BYTES + CODEC_RESOURCE_DATA_CAPACITY)
-        const CODEC_MAX_CLOCK_BYTES: usize = CODEC_ADAPTER_FIXED_BYTES + CODEC_ADAPTER_SAMPLE_CAPACITY * CODEC_ADAPTER_SAMPLE_BYTES
-        const CODEC_MAX_RANDOM_BYTES: usize = CODEC_ADAPTER_FIXED_BYTES + CODEC_ADAPTER_SAMPLE_CAPACITY * CODEC_ADAPTER_SAMPLE_BYTES
-        const CODEC_MAX_CONSOLE_BYTES: usize = CODEC_CONSOLE_FIXED_BYTES + CODEC_CONSOLE_RECORD_CAPACITY * (CODEC_CONSOLE_RECORD_HEADER_BYTES + CODEC_CONSOLE_DATA_CAPACITY)
-        const CODEC_MAX_ADAPTER_BYTES: usize = CODEC_MAX_CLOCK_BYTES + CODEC_MAX_RANDOM_BYTES + CODEC_MAX_CONSOLE_BYTES
-        const CODEC_MAX_PAYLOAD_BYTES: usize = CODEC_OUTER_FIXED_BYTES + DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES + CODEC_MAX_TASK_BYTES + CODEC_MAX_EFFECT_BYTES + CODEC_MAX_RESOURCE_BYTES + CODEC_MAX_ADAPTER_BYTES + CODEC_CHECKSUM_BYTES
+        const module Codec:
+            REPLAY_FULL_CHECKPOINT_CODEC_MAGIC: u32 = 1263022918
+            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 2
+            REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS: u64 = 8
+            REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK: u64 = 255
+            FIRST_INDEX: usize = 0
+            REPLAY_FULL_CHECKPOINT_CODEC_FALSE: u8 = 0
+            REPLAY_FULL_CHECKPOINT_CODEC_TRUE: u8 = 1
+            REPLAY_FULL_CHECKPOINT_CODEC_TASK_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::TASK_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_WAIT_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::WAIT_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_SCHEDULE_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::SCHEDULE_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::EFFECT_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_DATA_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::ADAPTER_SAMPLE_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_RECORD_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::CONSOLE_RECORD_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_DATA_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::CONSOLE_DATA_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_TASK_STATE_MAX: u16 = 5
+            SYNC_KIND_MAX: u16 = 4
+            RUNTIME_STATUS_MAX: u16 = 4
+            SCHEDULE_KIND_MAX: u16 = 6
+            EFFECT_KIND_MAX: u16 = 9
+            EFFECT_MODE_MAX: u16 = 4
+            EFFECT_EXACTNESS_MAX: u16 = 3
+            RESOURCE_MODE_MAX: u16 = 2
+            REPLAY_FULL_CHECKPOINT_CODEC_ERROR_CODE_MAX: u16 = 12
+            REPLAY_FULL_CHECKPOINT_CODEC_ERROR_SEVERITY_MAX: u16 = 2
+            ENUM_ZERO: u16 = 0
+            ENUM_ONE: u16 = 1
+            ENUM_TWO: u16 = 2
+            ENUM_THREE: u16 = 3
+            ENUM_FOUR: u16 = 4
+            ENUM_FIVE: u16 = 5
+            ENUM_SIX: u16 = 6
+            ENUM_SEVEN: u16 = 7
+            ENUM_EIGHT: u16 = 8
+            ENUM_NINE: u16 = 9
+            ENUM_TEN: u16 = 10
+            ENUM_ELEVEN: u16 = 11
+            ENUM_TWELVE: u16 = 12
+            REPLAY_FULL_CHECKPOINT_CODEC_U16_BYTES: usize = DebuggerFullCheckpointCodecCapacity::U16_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_U32_BYTES: usize = DebuggerFullCheckpointCodecCapacity::U32_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_U64_BYTES: usize = DebuggerFullCheckpointCodecCapacity::U64_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_BOOL_BYTES: usize = DebuggerFullCheckpointCodecCapacity::BOOL_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_TASK_INFO_BYTES: usize = DebuggerFullCheckpointCodecCapacity::TASK_INFO_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_WAIT_EDGE_BYTES: usize = DebuggerFullCheckpointCodecCapacity::WAIT_EDGE_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_SCHEDULE_DECISION_BYTES: usize = DebuggerFullCheckpointCodecCapacity::SCHEDULE_DECISION_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_RECORD_BYTES: usize = DebuggerFullCheckpointCodecCapacity::EFFECT_RECORD_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_FILE_HEADER_BYTES: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_FILE_HEADER_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_OUTER_FIXED_BYTES: usize = DebuggerFullCheckpointCodecCapacity::OUTER_FIXED_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_TASK_FIXED_BYTES: usize = DebuggerFullCheckpointCodecCapacity::TASK_FIXED_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_FIXED_BYTES: usize = DebuggerFullCheckpointCodecCapacity::EFFECT_FIXED_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_FIXED_BYTES: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_FIXED_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_BYTES: usize = DebuggerFullCheckpointCodecCapacity::ADAPTER_SAMPLE_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_FIXED_BYTES: usize = DebuggerFullCheckpointCodecCapacity::ADAPTER_FIXED_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_RECORD_HEADER_BYTES: usize = DebuggerFullCheckpointCodecCapacity::CONSOLE_RECORD_HEADER_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_FIXED_BYTES: usize = DebuggerFullCheckpointCodecCapacity::CONSOLE_FIXED_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_CHECKSUM_BYTES: usize = DebuggerFullCheckpointCodecCapacity::CHECKSUM_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_TASK_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_TASK_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_EFFECT_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_EFFECT_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_RESOURCE_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_RESOURCE_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_CLOCK_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_CLOCK_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_RANDOM_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_RANDOM_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_CONSOLE_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_CONSOLE_BYTES
+            REPLAY_FULL_CHECKPOINT_CODEC_MAX_ADAPTER_BYTES: usize = DebuggerFullCheckpointCodecCapacity::MAX_ADAPTER_BYTES
+            MAX_PAYLOAD_BYTES: usize = DebuggerFullCheckpointCodecCapacity::FULL_CHECKPOINT_CODEC_CAPACITY
+
+        const module Full:
+            CHECKPOINT_CODEC_CAPACITY: usize = Codec::MAX_PAYLOAD_BYTES
+
 
     public:
-        const FULL_CHECKPOINT_CODEC_CAPACITY: usize = CODEC_MAX_PAYLOAD_BYTES
 
         enum DecodeStatus:
             Ready
@@ -84,7 +125,7 @@ module DebuggerFullCheckpointCodec:
             Oversized
 
         struct EncodedCheckpoint:
-            bytes: mutable u8[CODEC_MAX_PAYLOAD_BYTES]
+            bytes: mutable u8[Codec::MAX_PAYLOAD_BYTES]
             length: mutable usize
             failed: mutable bool
 
@@ -94,38 +135,38 @@ module DebuggerFullCheckpointCodec:
 
     private:
         struct CheckpointWriter:
-            bytes: mutable u8[CODEC_MAX_PAYLOAD_BYTES]
+            bytes: mutable u8[Codec::MAX_PAYLOAD_BYTES]
             length: mutable usize
             failed: mutable bool
 
         struct CheckpointReader:
-            bytes: mutable u8[CODEC_MAX_PAYLOAD_BYTES]
+            bytes: mutable u8[Codec::MAX_PAYLOAD_BYTES]
             length: mutable usize
             offset: mutable usize
             failed: mutable bool
             truncated: mutable bool
 
         def writer_put_byte(writer: mutable CheckpointWriter&, value: u8) -> void:
-            if writer.failed or writer.length >= CODEC_MAX_PAYLOAD_BYTES:
+            if writer.failed or writer.length >= Codec::MAX_PAYLOAD_BYTES:
                 writer.failed <- true
                 return
             writer.bytes[writer.length] <- value
             writer.length <- writer.length + 1
 
         def writer_put_u16(writer: mutable CheckpointWriter&, value: u16) -> void:
-            writer_put_byte(writer, (value.u64() & CODEC_BYTE_MASK).u8())
-            writer_put_byte(writer, ((value.u64() >> CODEC_BYTE_BITS) & CODEC_BYTE_MASK).u8())
+            writer_put_byte(writer, (value.u64() & Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK).u8())
+            writer_put_byte(writer, ((value.u64() >> Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS) & Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK).u8())
 
         def writer_put_u32(writer: mutable CheckpointWriter&, value: u32) -> void:
-            for shift in CODEC_FIRST_INDEX..<CODEC_U32_BYTES:
-                writer_put_byte(writer, ((value.u64() >> (CODEC_BYTE_BITS * shift.u64())) & CODEC_BYTE_MASK).u8())
+            for shift in Codec::FIRST_INDEX..<Codec::REPLAY_FULL_CHECKPOINT_CODEC_U32_BYTES:
+                writer_put_byte(writer, ((value.u64() >> (Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS * shift.u64())) & Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK).u8())
 
         def writer_put_u64(writer: mutable CheckpointWriter&, value: u64) -> void:
-            for shift in CODEC_FIRST_INDEX..<CODEC_U64_BYTES:
-                writer_put_byte(writer, ((value >> (CODEC_BYTE_BITS * shift.u64())) & CODEC_BYTE_MASK).u8())
+            for shift in Codec::FIRST_INDEX..<Codec::REPLAY_FULL_CHECKPOINT_CODEC_U64_BYTES:
+                writer_put_byte(writer, ((value >> (Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS * shift.u64())) & Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK).u8())
 
         def writer_put_bool(writer: mutable CheckpointWriter&, value: bool) -> void:
-            writer_put_byte(writer, CODEC_TRUE if value else CODEC_FALSE)
+            writer_put_byte(writer, Codec::REPLAY_FULL_CHECKPOINT_CODEC_TRUE if value else Codec::REPLAY_FULL_CHECKPOINT_CODEC_FALSE)
 
         def writer_put_task_info(writer: mutable CheckpointWriter&, task: DebuggerConcurrency::TaskInfo) -> void:
             writer_put_u64(writer, task.id.value)
@@ -171,7 +212,7 @@ module DebuggerFullCheckpointCodec:
             writer_put_u16(writer, clock.mode.u16())
             writer_put_bool(writer, clock.exact)
             writer_put_adapter_error(writer, clock.last_error)
-            for index in CODEC_FIRST_INDEX..<clock.count:
+            for index in Codec::FIRST_INDEX..<clock.count:
                 writer_put_adapter_sample(writer, clock.samples[index])
 
         def writer_put_random(writer: mutable CheckpointWriter&, random: DebuggerReplayAdapters::Random) -> void:
@@ -180,7 +221,7 @@ module DebuggerFullCheckpointCodec:
             writer_put_u16(writer, random.mode.u16())
             writer_put_bool(writer, random.exact)
             writer_put_adapter_error(writer, random.last_error)
-            for index in CODEC_FIRST_INDEX..<random.count:
+            for index in Codec::FIRST_INDEX..<random.count:
                 writer_put_adapter_sample(writer, random.samples[index])
 
         def writer_put_console(writer: mutable CheckpointWriter&, console: DebuggerReplayAdapters::Console) -> void:
@@ -190,7 +231,7 @@ module DebuggerFullCheckpointCodec:
             writer_put_bool(writer, console.exact)
             writer_put_bool(writer, console.output_suppressed)
             writer_put_adapter_error(writer, console.last_error)
-            for index in CODEC_FIRST_INDEX..<console.count:
+            for index in Codec::FIRST_INDEX..<console.count:
                 record: DebuggerReplayAdapters::ConsoleRecord = console.records[index]
                 writer_put_u64(writer, record.sequence)
                 writer_put_u16(writer, record.channel.u16())
@@ -198,7 +239,7 @@ module DebuggerFullCheckpointCodec:
                 writer_put_u64(writer, record.requested.u64())
                 writer_put_u64(writer, record.length.u64())
                 writer_put_bool(writer, record.eof)
-                for byte_index in CODEC_FIRST_INDEX..<record.length:
+                for byte_index in Codec::FIRST_INDEX..<record.length:
                     writer_put_byte(writer, record.bytes[byte_index])
 
         def writer_put_adapter_snapshot(writer: mutable CheckpointWriter&, snapshot: DebuggerReplayAdapters::AdapterSnapshot) -> void:
@@ -217,11 +258,11 @@ module DebuggerFullCheckpointCodec:
             writer_put_bool(writer, snapshot.scheduler_replaying)
             writer_put_bool(writer, snapshot.scheduler_diverged)
             writer_put_bool(writer, snapshot.scheduler_overflowed)
-            for index in CODEC_FIRST_INDEX..<snapshot.task_count:
+            for index in Codec::FIRST_INDEX..<snapshot.task_count:
                 writer_put_task_info(writer, snapshot.tasks[index])
-            for index in CODEC_FIRST_INDEX..<snapshot.wait_count:
+            for index in Codec::FIRST_INDEX..<snapshot.wait_count:
                 writer_put_wait_edge(writer, snapshot.waits[index])
-            for index in CODEC_FIRST_INDEX..<snapshot.scheduler_count:
+            for index in Codec::FIRST_INDEX..<snapshot.scheduler_count:
                 writer_put_schedule_decision(writer, snapshot.scheduler_decisions[index])
 
         def writer_put_effect_oracle(writer: mutable CheckpointWriter&, oracle: DebuggerEffects::EffectOracle) -> void:
@@ -234,14 +275,14 @@ module DebuggerFullCheckpointCodec:
             writer_put_u16(writer, oracle.last_error.severity.u16())
             writer_put_bool(writer, oracle.last_error.retryable)
             writer_put_u32(writer, oracle.last_error.detail)
-            for index in CODEC_FIRST_INDEX..<oracle.count:
+            for index in Codec::FIRST_INDEX..<oracle.count:
                 writer_put_effect_record(writer, oracle.records[index])
 
         def writer_put_resource_store(writer: mutable CheckpointWriter&, resources: DebuggerVirtualResources::ResourceStore) -> void:
             writer_put_u64(writer, resources.count.u64())
             writer_put_u64(writer, resources.next_handle)
             writer_put_u16(writer, resources.mode.u16())
-            for index in CODEC_FIRST_INDEX..<resources.count:
+            for index in Codec::FIRST_INDEX..<resources.count:
                 file: DebuggerVirtualResources::VirtualFile = resources.files[index]
                 writer_put_u64(writer, file.handle.value)
                 writer_put_u64(writer, file.path.value)
@@ -249,24 +290,24 @@ module DebuggerFullCheckpointCodec:
                 writer_put_u64(writer, file.cursor.u64())
                 writer_put_bool(writer, file.writable)
                 writer_put_u64(writer, file.generation)
-                for byte_index in CODEC_FIRST_INDEX..<file.length:
+                for byte_index in Codec::FIRST_INDEX..<file.length:
                     writer_put_byte(writer, file.bytes[byte_index])
 
         def reader_from_bytes(bytes: u8&, length: usize) -> CheckpointReader:
             reader: mutable CheckpointReader = zeroed
-            if length > CODEC_MAX_PAYLOAD_BYTES:
+            if length > Codec::MAX_PAYLOAD_BYTES:
                 reader.failed <- true
                 return reader
             reader.length <- length
             reader.offset <- 0
             reader.failed <- false
             reader.truncated <- false
-            for index in CODEC_FIRST_INDEX..<length:
+            for index in Codec::FIRST_INDEX..<length:
                 reader.bytes[index] <- bytes[index]
             return reader
 
         def reader_take_byte(reader: mutable CheckpointReader&) -> u8:
-            if reader.failed or reader.length > CODEC_MAX_PAYLOAD_BYTES or reader.offset >= reader.length:
+            if reader.failed or reader.length > Codec::MAX_PAYLOAD_BYTES or reader.offset >= reader.length:
                 reader.failed <- true
                 reader.truncated <- true
                 return 0
@@ -277,24 +318,24 @@ module DebuggerFullCheckpointCodec:
         def reader_take_u16(reader: mutable CheckpointReader&) -> u16:
             low: u64 = reader_take_byte(reader).u64()
             high: u64 = reader_take_byte(reader).u64()
-            return (low | (high << CODEC_BYTE_BITS)).u16()
+            return (low | (high << Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS)).u16()
 
         def reader_take_u32(reader: mutable CheckpointReader&) -> u32:
             value: mutable u64 = 0
-            for shift in CODEC_FIRST_INDEX..<CODEC_U32_BYTES:
-                value <- value | (reader_take_byte(reader).u64() << (CODEC_BYTE_BITS * shift.u64()))
+            for shift in Codec::FIRST_INDEX..<Codec::REPLAY_FULL_CHECKPOINT_CODEC_U32_BYTES:
+                value <- value | (reader_take_byte(reader).u64() << (Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS * shift.u64()))
             return value.u32()
 
         def reader_take_u64(reader: mutable CheckpointReader&) -> u64:
             value: mutable u64 = 0
-            for shift in CODEC_FIRST_INDEX..<CODEC_U64_BYTES:
-                value <- value | (reader_take_byte(reader).u64() << (CODEC_BYTE_BITS * shift.u64()))
+            for shift in Codec::FIRST_INDEX..<Codec::REPLAY_FULL_CHECKPOINT_CODEC_U64_BYTES:
+                value <- value | (reader_take_byte(reader).u64() << (Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS * shift.u64()))
             return value
 
         def reader_take_bool(reader: mutable CheckpointReader&) -> bool:
             value: u8 = reader_take_byte(reader)
-            reader.failed <- true if value > CODEC_TRUE
-            return value == CODEC_TRUE
+            reader.failed <- true if value > Codec::REPLAY_FULL_CHECKPOINT_CODEC_TRUE
+            return value == Codec::REPLAY_FULL_CHECKPOINT_CODEC_TRUE
 
         def reader_take_count(reader: mutable CheckpointReader&, maximum: usize) -> usize:
             count: u64 = reader_take_u64(reader)
@@ -305,147 +346,147 @@ module DebuggerFullCheckpointCodec:
 
         def reader_take_task_state(reader: mutable CheckpointReader&) -> DebuggerConcurrency::TaskState:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_TASK_STATE_MAX
-            return DebuggerConcurrency::TaskState.Created if code == CODEC_ENUM_ZERO
-            return DebuggerConcurrency::TaskState.Runnable if code == CODEC_ENUM_ONE
-            return DebuggerConcurrency::TaskState.Running if code == CODEC_ENUM_TWO
-            return DebuggerConcurrency::TaskState.Blocked if code == CODEC_ENUM_THREE
-            return DebuggerConcurrency::TaskState.Completed if code == CODEC_ENUM_FOUR
-            return DebuggerConcurrency::TaskState.Cancelled if code == CODEC_ENUM_FIVE
+            reader.failed <- true if code > Codec::REPLAY_FULL_CHECKPOINT_CODEC_TASK_STATE_MAX
+            return DebuggerConcurrency::TaskState.Created if code == Codec::ENUM_ZERO
+            return DebuggerConcurrency::TaskState.Runnable if code == Codec::ENUM_ONE
+            return DebuggerConcurrency::TaskState.Running if code == Codec::ENUM_TWO
+            return DebuggerConcurrency::TaskState.Blocked if code == Codec::ENUM_THREE
+            return DebuggerConcurrency::TaskState.Completed if code == Codec::ENUM_FOUR
+            return DebuggerConcurrency::TaskState.Cancelled if code == Codec::ENUM_FIVE
             reader.failed <- true
             return DebuggerConcurrency::TaskState.Created
 
         def reader_take_sync_kind(reader: mutable CheckpointReader&) -> DebuggerConcurrency::SynchronizationKind:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_SYNC_KIND_MAX
-            return DebuggerConcurrency::SynchronizationKind.Mutex if code == CODEC_ENUM_ZERO
-            return DebuggerConcurrency::SynchronizationKind.Condition if code == CODEC_ENUM_ONE
-            return DebuggerConcurrency::SynchronizationKind.Join if code == CODEC_ENUM_TWO
-            return DebuggerConcurrency::SynchronizationKind.Channel if code == CODEC_ENUM_THREE
-            return DebuggerConcurrency::SynchronizationKind.Atomic if code == CODEC_ENUM_FOUR
+            reader.failed <- true if code > Codec::SYNC_KIND_MAX
+            return DebuggerConcurrency::SynchronizationKind.Mutex if code == Codec::ENUM_ZERO
+            return DebuggerConcurrency::SynchronizationKind.Condition if code == Codec::ENUM_ONE
+            return DebuggerConcurrency::SynchronizationKind.Join if code == Codec::ENUM_TWO
+            return DebuggerConcurrency::SynchronizationKind.Channel if code == Codec::ENUM_THREE
+            return DebuggerConcurrency::SynchronizationKind.Atomic if code == Codec::ENUM_FOUR
             reader.failed <- true
             return DebuggerConcurrency::SynchronizationKind.Mutex
 
         def reader_take_runtime_status(reader: mutable CheckpointReader&) -> DebuggerConcurrencyRuntime::RuntimeStatus:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_RUNTIME_STATUS_MAX
-            return DebuggerConcurrencyRuntime::RuntimeStatus.Ready if code == CODEC_ENUM_ZERO
-            return DebuggerConcurrencyRuntime::RuntimeStatus.Running if code == CODEC_ENUM_ONE
-            return DebuggerConcurrencyRuntime::RuntimeStatus.Blocked if code == CODEC_ENUM_TWO
-            return DebuggerConcurrencyRuntime::RuntimeStatus.Completed if code == CODEC_ENUM_THREE
-            return DebuggerConcurrencyRuntime::RuntimeStatus.Diverged if code == CODEC_ENUM_FOUR
+            reader.failed <- true if code > Codec::RUNTIME_STATUS_MAX
+            return DebuggerConcurrencyRuntime::RuntimeStatus.Ready if code == Codec::ENUM_ZERO
+            return DebuggerConcurrencyRuntime::RuntimeStatus.Running if code == Codec::ENUM_ONE
+            return DebuggerConcurrencyRuntime::RuntimeStatus.Blocked if code == Codec::ENUM_TWO
+            return DebuggerConcurrencyRuntime::RuntimeStatus.Completed if code == Codec::ENUM_THREE
+            return DebuggerConcurrencyRuntime::RuntimeStatus.Diverged if code == Codec::ENUM_FOUR
             reader.failed <- true
             return DebuggerConcurrencyRuntime::RuntimeStatus.Ready
 
         def reader_take_schedule_kind(reader: mutable CheckpointReader&) -> DebuggerScheduler::ScheduleKind:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_SCHEDULE_KIND_MAX
-            return DebuggerScheduler::ScheduleKind.Run if code == CODEC_ENUM_ZERO
-            return DebuggerScheduler::ScheduleKind.Yield if code == CODEC_ENUM_ONE
-            return DebuggerScheduler::ScheduleKind.LockAcquire if code == CODEC_ENUM_TWO
-            return DebuggerScheduler::ScheduleKind.LockRelease if code == CODEC_ENUM_THREE
-            return DebuggerScheduler::ScheduleKind.Wait if code == CODEC_ENUM_FOUR
-            return DebuggerScheduler::ScheduleKind.Wake if code == CODEC_ENUM_FIVE
-            return DebuggerScheduler::ScheduleKind.Join if code == CODEC_ENUM_SIX
+            reader.failed <- true if code > Codec::SCHEDULE_KIND_MAX
+            return DebuggerScheduler::ScheduleKind.Run if code == Codec::ENUM_ZERO
+            return DebuggerScheduler::ScheduleKind.Yield if code == Codec::ENUM_ONE
+            return DebuggerScheduler::ScheduleKind.LockAcquire if code == Codec::ENUM_TWO
+            return DebuggerScheduler::ScheduleKind.LockRelease if code == Codec::ENUM_THREE
+            return DebuggerScheduler::ScheduleKind.Wait if code == Codec::ENUM_FOUR
+            return DebuggerScheduler::ScheduleKind.Wake if code == Codec::ENUM_FIVE
+            return DebuggerScheduler::ScheduleKind.Join if code == Codec::ENUM_SIX
             reader.failed <- true
             return DebuggerScheduler::ScheduleKind.Run
 
         def reader_take_effect_kind(reader: mutable CheckpointReader&) -> DebuggerEffects::EffectKind:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_EFFECT_KIND_MAX
-            return DebuggerEffects::EffectKind.Clock if code == CODEC_ENUM_ZERO
-            return DebuggerEffects::EffectKind.Random if code == CODEC_ENUM_ONE
-            return DebuggerEffects::EffectKind.ConsoleInput if code == CODEC_ENUM_TWO
-            return DebuggerEffects::EffectKind.ConsoleOutput if code == CODEC_ENUM_THREE
-            return DebuggerEffects::EffectKind.FileRead if code == CODEC_ENUM_FOUR
-            return DebuggerEffects::EffectKind.FileWrite if code == CODEC_ENUM_FIVE
-            return DebuggerEffects::EffectKind.NetworkRead if code == CODEC_ENUM_SIX
-            return DebuggerEffects::EffectKind.NetworkWrite if code == CODEC_ENUM_SEVEN
-            return DebuggerEffects::EffectKind.Process if code == CODEC_ENUM_EIGHT
-            return DebuggerEffects::EffectKind.Foreign if code == CODEC_ENUM_NINE
+            reader.failed <- true if code > Codec::EFFECT_KIND_MAX
+            return DebuggerEffects::EffectKind.Clock if code == Codec::ENUM_ZERO
+            return DebuggerEffects::EffectKind.Random if code == Codec::ENUM_ONE
+            return DebuggerEffects::EffectKind.ConsoleInput if code == Codec::ENUM_TWO
+            return DebuggerEffects::EffectKind.ConsoleOutput if code == Codec::ENUM_THREE
+            return DebuggerEffects::EffectKind.FileRead if code == Codec::ENUM_FOUR
+            return DebuggerEffects::EffectKind.FileWrite if code == Codec::ENUM_FIVE
+            return DebuggerEffects::EffectKind.NetworkRead if code == Codec::ENUM_SIX
+            return DebuggerEffects::EffectKind.NetworkWrite if code == Codec::ENUM_SEVEN
+            return DebuggerEffects::EffectKind.Process if code == Codec::ENUM_EIGHT
+            return DebuggerEffects::EffectKind.Foreign if code == Codec::ENUM_NINE
             reader.failed <- true
             return DebuggerEffects::EffectKind.Clock
 
         def reader_take_effect_mode(reader: mutable CheckpointReader&) -> DebuggerEffects::EffectMode:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_EFFECT_MODE_MAX
-            return DebuggerEffects::EffectMode.Live if code == CODEC_ENUM_ZERO
-            return DebuggerEffects::EffectMode.Recording if code == CODEC_ENUM_ONE
-            return DebuggerEffects::EffectMode.Replaying if code == CODEC_ENUM_TWO
-            return DebuggerEffects::EffectMode.Virtualized if code == CODEC_ENUM_THREE
-            return DebuggerEffects::EffectMode.Barrier if code == CODEC_ENUM_FOUR
+            reader.failed <- true if code > Codec::EFFECT_MODE_MAX
+            return DebuggerEffects::EffectMode.Live if code == Codec::ENUM_ZERO
+            return DebuggerEffects::EffectMode.Recording if code == Codec::ENUM_ONE
+            return DebuggerEffects::EffectMode.Replaying if code == Codec::ENUM_TWO
+            return DebuggerEffects::EffectMode.Virtualized if code == Codec::ENUM_THREE
+            return DebuggerEffects::EffectMode.Barrier if code == Codec::ENUM_FOUR
             reader.failed <- true
             return DebuggerEffects::EffectMode.Live
 
         def reader_take_effect_exactness(reader: mutable CheckpointReader&) -> DebuggerEffects::Exactness:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_EFFECT_EXACTNESS_MAX
-            return DebuggerEffects::Exactness.Exact if code == CODEC_ENUM_ZERO
-            return DebuggerEffects::Exactness.Observational if code == CODEC_ENUM_ONE
-            return DebuggerEffects::Exactness.Incomplete if code == CODEC_ENUM_TWO
-            return DebuggerEffects::Exactness.Diverged if code == CODEC_ENUM_THREE
+            reader.failed <- true if code > Codec::EFFECT_EXACTNESS_MAX
+            return DebuggerEffects::Exactness.Exact if code == Codec::ENUM_ZERO
+            return DebuggerEffects::Exactness.Observational if code == Codec::ENUM_ONE
+            return DebuggerEffects::Exactness.Incomplete if code == Codec::ENUM_TWO
+            return DebuggerEffects::Exactness.Diverged if code == Codec::ENUM_THREE
             reader.failed <- true
             return DebuggerEffects::Exactness.Diverged
 
         def reader_take_error_code(reader: mutable CheckpointReader&) -> DebuggerErrors::ErrorCode:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_ERROR_CODE_MAX
-            return DebuggerErrors::ErrorCode.None if code == CODEC_ENUM_ZERO
-            return DebuggerErrors::ErrorCode.InvalidArgument if code == CODEC_ENUM_ONE
-            return DebuggerErrors::ErrorCode.InvalidState if code == CODEC_ENUM_TWO
-            return DebuggerErrors::ErrorCode.StaleGeneration if code == CODEC_ENUM_THREE
-            return DebuggerErrors::ErrorCode.Unsupported if code == CODEC_ENUM_FOUR
-            return DebuggerErrors::ErrorCode.Unavailable if code == CODEC_ENUM_FIVE
-            return DebuggerErrors::ErrorCode.Corrupt if code == CODEC_ENUM_SIX
-            return DebuggerErrors::ErrorCode.Diverged if code == CODEC_ENUM_SEVEN
-            return DebuggerErrors::ErrorCode.Cancelled if code == CODEC_ENUM_EIGHT
-            return DebuggerErrors::ErrorCode.ResourceLimit if code == CODEC_ENUM_NINE
-            return DebuggerErrors::ErrorCode.PermissionDenied if code == CODEC_ENUM_TEN
-            return DebuggerErrors::ErrorCode.Transport if code == CODEC_ENUM_ELEVEN
-            return DebuggerErrors::ErrorCode.Internal if code == CODEC_ENUM_TWELVE
+            reader.failed <- true if code > Codec::REPLAY_FULL_CHECKPOINT_CODEC_ERROR_CODE_MAX
+            return DebuggerErrors::ErrorCode.None if code == Codec::ENUM_ZERO
+            return DebuggerErrors::ErrorCode.InvalidArgument if code == Codec::ENUM_ONE
+            return DebuggerErrors::ErrorCode.InvalidState if code == Codec::ENUM_TWO
+            return DebuggerErrors::ErrorCode.StaleGeneration if code == Codec::ENUM_THREE
+            return DebuggerErrors::ErrorCode.Unsupported if code == Codec::ENUM_FOUR
+            return DebuggerErrors::ErrorCode.Unavailable if code == Codec::ENUM_FIVE
+            return DebuggerErrors::ErrorCode.Corrupt if code == Codec::ENUM_SIX
+            return DebuggerErrors::ErrorCode.Diverged if code == Codec::ENUM_SEVEN
+            return DebuggerErrors::ErrorCode.Cancelled if code == Codec::ENUM_EIGHT
+            return DebuggerErrors::ErrorCode.ResourceLimit if code == Codec::ENUM_NINE
+            return DebuggerErrors::ErrorCode.PermissionDenied if code == Codec::ENUM_TEN
+            return DebuggerErrors::ErrorCode.Transport if code == Codec::ENUM_ELEVEN
+            return DebuggerErrors::ErrorCode.Internal if code == Codec::ENUM_TWELVE
             reader.failed <- true
             return DebuggerErrors::ErrorCode.None
 
         def reader_take_error_severity(reader: mutable CheckpointReader&) -> DebuggerErrors::ErrorSeverity:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_ERROR_SEVERITY_MAX
-            return DebuggerErrors::ErrorSeverity.Info if code == CODEC_ENUM_ZERO
-            return DebuggerErrors::ErrorSeverity.Warning if code == CODEC_ENUM_ONE
-            return DebuggerErrors::ErrorSeverity.Failure if code == CODEC_ENUM_TWO
+            reader.failed <- true if code > Codec::REPLAY_FULL_CHECKPOINT_CODEC_ERROR_SEVERITY_MAX
+            return DebuggerErrors::ErrorSeverity.Info if code == Codec::ENUM_ZERO
+            return DebuggerErrors::ErrorSeverity.Warning if code == Codec::ENUM_ONE
+            return DebuggerErrors::ErrorSeverity.Failure if code == Codec::ENUM_TWO
             reader.failed <- true
             return DebuggerErrors::ErrorSeverity.Info
 
         def reader_take_resource_mode(reader: mutable CheckpointReader&) -> DebuggerVirtualResources::ResourceMode:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_RESOURCE_MODE_MAX
-            return DebuggerVirtualResources::ResourceMode.Recording if code == CODEC_ENUM_ZERO
-            return DebuggerVirtualResources::ResourceMode.Replaying if code == CODEC_ENUM_ONE
-            return DebuggerVirtualResources::ResourceMode.Branch if code == CODEC_ENUM_TWO
+            reader.failed <- true if code > Codec::RESOURCE_MODE_MAX
+            return DebuggerVirtualResources::ResourceMode.Recording if code == Codec::ENUM_ZERO
+            return DebuggerVirtualResources::ResourceMode.Replaying if code == Codec::ENUM_ONE
+            return DebuggerVirtualResources::ResourceMode.Branch if code == Codec::ENUM_TWO
             reader.failed <- true
             return DebuggerVirtualResources::ResourceMode.Recording
 
         def reader_take_adapter_mode(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::AdapterMode:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_ENUM_TWO
-            return DebuggerReplayAdapters::AdapterMode.Recording if code == CODEC_ENUM_ZERO
-            return DebuggerReplayAdapters::AdapterMode.Replaying if code == CODEC_ENUM_ONE
-            return DebuggerReplayAdapters::AdapterMode.Branch if code == CODEC_ENUM_TWO
+            reader.failed <- true if code > Codec::ENUM_TWO
+            return DebuggerReplayAdapters::AdapterMode.Recording if code == Codec::ENUM_ZERO
+            return DebuggerReplayAdapters::AdapterMode.Replaying if code == Codec::ENUM_ONE
+            return DebuggerReplayAdapters::AdapterMode.Branch if code == Codec::ENUM_TWO
             reader.failed <- true
             return DebuggerReplayAdapters::AdapterMode.Recording
 
         def reader_take_console_channel(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::ConsoleChannel:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_ENUM_ONE
-            return DebuggerReplayAdapters::ConsoleChannel.Stdout if code == CODEC_ENUM_ZERO
-            return DebuggerReplayAdapters::ConsoleChannel.Stderr if code == CODEC_ENUM_ONE
+            reader.failed <- true if code > Codec::ENUM_ONE
+            return DebuggerReplayAdapters::ConsoleChannel.Stdout if code == Codec::ENUM_ZERO
+            return DebuggerReplayAdapters::ConsoleChannel.Stderr if code == Codec::ENUM_ONE
             reader.failed <- true
             return DebuggerReplayAdapters::ConsoleChannel.Stdout
 
         def reader_take_console_record_kind(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::ConsoleRecordKind:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > CODEC_ENUM_ONE
-            return DebuggerReplayAdapters::ConsoleRecordKind.Input if code == CODEC_ENUM_ZERO
-            return DebuggerReplayAdapters::ConsoleRecordKind.Output if code == CODEC_ENUM_ONE
+            reader.failed <- true if code > Codec::ENUM_ONE
+            return DebuggerReplayAdapters::ConsoleRecordKind.Input if code == Codec::ENUM_ZERO
+            return DebuggerReplayAdapters::ConsoleRecordKind.Output if code == Codec::ENUM_ONE
             reader.failed <- true
             return DebuggerReplayAdapters::ConsoleRecordKind.Input
 
@@ -486,13 +527,13 @@ module DebuggerFullCheckpointCodec:
 
         def reader_take_task_snapshot(reader: mutable CheckpointReader&) -> DebuggerConcurrencyCheckpoint::TaskSnapshot:
             snapshot: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = zeroed
-            snapshot.task_count <- reader_take_count(reader, CODEC_TASK_CAPACITY)
+            snapshot.task_count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_TASK_CAPACITY)
             snapshot.next_id <- reader_take_u64(reader)
             snapshot.status <- reader_take_runtime_status(reader)
             snapshot.current <- DebuggerIdentity::debug_id(reader_take_u64(reader))
-            snapshot.wait_count <- reader_take_count(reader, CODEC_WAIT_CAPACITY)
-            snapshot.scheduler_cursor <- reader_take_count(reader, CODEC_SCHEDULE_CAPACITY)
-            snapshot.scheduler_count <- reader_take_count(reader, CODEC_SCHEDULE_CAPACITY)
+            snapshot.wait_count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_WAIT_CAPACITY)
+            snapshot.scheduler_cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEDULE_CAPACITY)
+            snapshot.scheduler_count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEDULE_CAPACITY)
             snapshot.scheduler_replaying <- reader_take_bool(reader)
             snapshot.scheduler_diverged <- reader_take_bool(reader)
             snapshot.scheduler_overflowed <- reader_take_bool(reader)
@@ -500,18 +541,18 @@ module DebuggerFullCheckpointCodec:
             if snapshot.scheduler_cursor > snapshot.scheduler_count:
                 reader.failed <- true
                 return snapshot
-            for index in CODEC_FIRST_INDEX..<snapshot.task_count:
+            for index in Codec::FIRST_INDEX..<snapshot.task_count:
                 snapshot.tasks[index] <- reader_take_task_info(reader)
-            for index in CODEC_FIRST_INDEX..<snapshot.wait_count:
+            for index in Codec::FIRST_INDEX..<snapshot.wait_count:
                 snapshot.waits[index] <- reader_take_wait_edge(reader)
-            for index in CODEC_FIRST_INDEX..<snapshot.scheduler_count:
+            for index in Codec::FIRST_INDEX..<snapshot.scheduler_count:
                 snapshot.scheduler_decisions[index] <- reader_take_schedule_decision(reader)
             return snapshot
 
         def reader_take_effect_oracle(reader: mutable CheckpointReader&) -> DebuggerEffects::EffectOracle:
             oracle: mutable DebuggerEffects::EffectOracle = zeroed
-            oracle.count <- reader_take_count(reader, CODEC_EFFECT_CAPACITY)
-            oracle.cursor <- reader_take_count(reader, CODEC_EFFECT_CAPACITY)
+            oracle.count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_CAPACITY)
+            oracle.cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_CAPACITY)
             oracle.mode <- reader_take_effect_mode(reader)
             oracle.exactness <- reader_take_effect_exactness(reader)
             oracle.overflowed <- reader_take_bool(reader)
@@ -521,28 +562,28 @@ module DebuggerFullCheckpointCodec:
             oracle.last_error.detail <- reader_take_u32(reader)
             return oracle if reader.failed
             return oracle if oracle.cursor > oracle.count
-            for index in CODEC_FIRST_INDEX..<oracle.count:
+            for index in Codec::FIRST_INDEX..<oracle.count:
                 oracle.records[index] <- reader_take_effect_record(reader)
             return oracle
 
         def reader_take_resource_store(reader: mutable CheckpointReader&) -> DebuggerVirtualResources::ResourceStore:
             resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
-            resources.count <- reader_take_count(reader, CODEC_RESOURCE_CAPACITY)
+            resources.count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_CAPACITY)
             resources.next_handle <- reader_take_u64(reader)
             resources.mode <- reader_take_resource_mode(reader)
             return resources if reader.failed
             for index in 0..<resources.count:
                 resources.files[index].handle <- DebuggerIdentity::debug_id(reader_take_u64(reader))
                 resources.files[index].path <- DebuggerIdentity::debug_id(reader_take_u64(reader))
-                resources.files[index].length <- reader_take_count(reader, CODEC_RESOURCE_DATA_CAPACITY)
-                resources.files[index].cursor <- reader_take_count(reader, CODEC_RESOURCE_DATA_CAPACITY)
+                resources.files[index].length <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
+                resources.files[index].cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
                 resources.files[index].writable <- reader_take_bool(reader)
                 resources.files[index].generation <- reader_take_u64(reader)
                 return resources if reader.failed
                 if resources.files[index].cursor > resources.files[index].length:
                     reader.failed <- true
                     return resources
-                for byte_index in CODEC_FIRST_INDEX..<resources.files[index].length:
+                for byte_index in Codec::FIRST_INDEX..<resources.files[index].length:
                     resources.files[index].bytes[byte_index] <- reader_take_byte(reader)
             return resources
 
@@ -563,48 +604,48 @@ module DebuggerFullCheckpointCodec:
 
         def reader_take_clock(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::Clock:
             clock: mutable DebuggerReplayAdapters::Clock = zeroed
-            clock.count <- reader_take_count(reader, CODEC_ADAPTER_SAMPLE_CAPACITY)
-            clock.cursor <- reader_take_count(reader, CODEC_ADAPTER_SAMPLE_CAPACITY)
+            clock.count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_CAPACITY)
+            clock.cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_CAPACITY)
             clock.mode <- reader_take_adapter_mode(reader)
             clock.exact <- reader_take_bool(reader)
             clock.last_error <- reader_take_adapter_error(reader)
             return clock if reader.failed or clock.cursor > clock.count
-            for index in CODEC_FIRST_INDEX..<clock.count:
+            for index in Codec::FIRST_INDEX..<clock.count:
                 clock.samples[index] <- reader_take_adapter_sample(reader)
             return clock
 
         def reader_take_random(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::Random:
             random: mutable DebuggerReplayAdapters::Random = zeroed
-            random.count <- reader_take_count(reader, CODEC_ADAPTER_SAMPLE_CAPACITY)
-            random.cursor <- reader_take_count(reader, CODEC_ADAPTER_SAMPLE_CAPACITY)
+            random.count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_CAPACITY)
+            random.cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_CAPACITY)
             random.mode <- reader_take_adapter_mode(reader)
             random.exact <- reader_take_bool(reader)
             random.last_error <- reader_take_adapter_error(reader)
             return random if reader.failed or random.cursor > random.count
-            for index in CODEC_FIRST_INDEX..<random.count:
+            for index in Codec::FIRST_INDEX..<random.count:
                 random.samples[index] <- reader_take_adapter_sample(reader)
             return random
 
         def reader_take_console(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::Console:
             console: mutable DebuggerReplayAdapters::Console = zeroed
-            console.count <- reader_take_count(reader, CODEC_CONSOLE_RECORD_CAPACITY)
-            console.cursor <- reader_take_count(reader, CODEC_CONSOLE_RECORD_CAPACITY)
+            console.count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_RECORD_CAPACITY)
+            console.cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_RECORD_CAPACITY)
             console.mode <- reader_take_adapter_mode(reader)
             console.exact <- reader_take_bool(reader)
             console.output_suppressed <- reader_take_bool(reader)
             console.last_error <- reader_take_adapter_error(reader)
             return console if reader.failed or console.cursor > console.count
-            for index in CODEC_FIRST_INDEX..<console.count:
+            for index in Codec::FIRST_INDEX..<console.count:
                 console.records[index].sequence <- reader_take_u64(reader)
                 console.records[index].channel <- reader_take_console_channel(reader)
                 console.records[index].kind <- reader_take_console_record_kind(reader)
-                console.records[index].requested <- reader_take_count(reader, CODEC_CONSOLE_DATA_CAPACITY)
-                console.records[index].length <- reader_take_count(reader, CODEC_CONSOLE_DATA_CAPACITY)
+                console.records[index].requested <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_DATA_CAPACITY)
+                console.records[index].length <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_DATA_CAPACITY)
                 console.records[index].eof <- reader_take_bool(reader)
                 if reader.failed or console.records[index].length > console.records[index].requested:
                     reader.failed <- true
                     return console
-                for byte_index in CODEC_FIRST_INDEX..<console.records[index].length:
+                for byte_index in Codec::FIRST_INDEX..<console.records[index].length:
                     console.records[index].bytes[byte_index] <- reader_take_byte(reader)
             return console
 
@@ -631,18 +672,18 @@ module DebuggerFullCheckpointCodec:
                 encoded.failed <- true
                 return encoded
             writer: mutable CheckpointWriter = zeroed
-            writer_put_u32(writer, CODEC_MAGIC)
-            writer_put_u32(writer, CODEC_SCHEMA)
+            writer_put_u32(writer, Codec::REPLAY_FULL_CHECKPOINT_CODEC_MAGIC)
+            writer_put_u32(writer, Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA)
             writer_put_u32(writer, checkpoint.schema)
             writer_put_u64(writer, checkpoint.recording.value)
             writer_put_u64(writer, checkpoint.branch.value)
             writer_put_u64(writer, checkpoint.event)
             writer_put_u64(writer, checkpoint.state_hash)
             machine_bytes: DebuggerTraceBinary::ByteWriter = DebuggerCheckpointCodec::checkpoint_encode(checkpoint.machine)
-            if not DebuggerTraceBinary::writer_is_valid(machine_bytes) or machine_bytes.length != DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES:
+            if not DebuggerTraceBinary::writer_is_valid(machine_bytes) or machine_bytes.length != DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES:
                 encoded.failed <- true
                 return encoded
-            for index in CODEC_FIRST_INDEX..<machine_bytes.length:
+            for index in Codec::FIRST_INDEX..<machine_bytes.length:
                 writer_put_byte(writer, machine_bytes.bytes[index])
             writer_put_task_snapshot(writer, checkpoint.tasks)
             writer_put_effect_oracle(writer, checkpoint.effects)
@@ -653,7 +694,7 @@ module DebuggerFullCheckpointCodec:
                 return encoded
             checksum: u64 = checkpoint_checksum(writer.bytes[0], writer.length)
             writer_put_u64(writer, checksum)
-            if writer.failed or writer.length > CODEC_MAX_PAYLOAD_BYTES:
+            if writer.failed or writer.length > Codec::MAX_PAYLOAD_BYTES:
                 encoded.failed <- true
                 return encoded
             encoded.bytes <- writer.bytes
@@ -662,8 +703,8 @@ module DebuggerFullCheckpointCodec:
             return encoded
 
         def full_checkpoint_decode(bytes: u8&, length: usize) -> DecodedCheckpoint:
-            return decode_failure(DecodeStatus.Oversized) if length > CODEC_MAX_PAYLOAD_BYTES
-            minimum_length: usize = CODEC_OUTER_FIXED_BYTES + DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES + CODEC_TASK_FIXED_BYTES + CODEC_EFFECT_FIXED_BYTES + CODEC_RESOURCE_FIXED_BYTES + CODEC_ADAPTER_FIXED_BYTES * 2 + CODEC_CONSOLE_FIXED_BYTES + CODEC_CHECKSUM_BYTES
+            return decode_failure(DecodeStatus.Oversized) if length > Codec::MAX_PAYLOAD_BYTES
+            minimum_length: usize = Codec::REPLAY_FULL_CHECKPOINT_CODEC_OUTER_FIXED_BYTES + DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_TASK_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_FIXED_BYTES * 2 + Codec::REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_CHECKSUM_BYTES
             return decode_failure(DecodeStatus.Truncated) if length < minimum_length
             reader: mutable CheckpointReader = reader_from_bytes(bytes, length)
             return decode_failure(DecodeStatus.Oversized) if reader.failed
@@ -675,17 +716,17 @@ module DebuggerFullCheckpointCodec:
             checkpoint.branch <- DebuggerIdentity::debug_id(reader_take_u64(reader))
             checkpoint.event <- reader_take_u64(reader)
             checkpoint.state_hash <- reader_take_u64(reader)
-            if reader.failed or magic != CODEC_MAGIC or codec_schema != CODEC_SCHEMA:
+            if reader.failed or magic != Codec::REPLAY_FULL_CHECKPOINT_CODEC_MAGIC or codec_schema != Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA:
                 return decode_failure(DecodeStatus.Invalid)
-            machine_bytes: mutable u8[DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES] = zeroed
-            for index in CODEC_FIRST_INDEX..<DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES:
+            machine_bytes: mutable u8[DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES] = zeroed
+            for index in Codec::FIRST_INDEX..<DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES:
                 machine_bytes[index] <- reader_take_byte(reader)
             if reader.failed:
                 return decode_failure(DecodeStatus.Truncated)
-            machine_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(machine_bytes[0], DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES)
+            machine_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(machine_bytes[0], DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES)
             if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(machine_reader):
                 return decode_failure(DecodeStatus.Invalid)
-            machine_reader <- DebuggerTraceBinary::reader_new(machine_bytes[0], DebuggerCheckpointCodec::CHECKPOINT_PAYLOAD_BYTES)
+            machine_reader <- DebuggerTraceBinary::reader_new(machine_bytes[0], DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES)
             checkpoint.machine <- DebuggerCheckpointCodec::checkpoint_decode(machine_reader)
             checkpoint.tasks <- reader_take_task_snapshot(reader)
             checkpoint.effects <- reader_take_effect_oracle(reader)
@@ -694,8 +735,8 @@ module DebuggerFullCheckpointCodec:
             if reader.failed:
                 return decode_failure(DecodeStatus.Invalid if not reader.truncated else DecodeStatus.Truncated)
             checksum_offset: usize = reader.offset
-            return decode_failure(DecodeStatus.Truncated) if reader.length - checksum_offset < CODEC_CHECKSUM_BYTES
-            return decode_failure(DecodeStatus.Invalid) if reader.length - checksum_offset > CODEC_CHECKSUM_BYTES
+            return decode_failure(DecodeStatus.Truncated) if reader.length - checksum_offset < Codec::REPLAY_FULL_CHECKPOINT_CODEC_CHECKSUM_BYTES
+            return decode_failure(DecodeStatus.Invalid) if reader.length - checksum_offset > Codec::REPLAY_FULL_CHECKPOINT_CODEC_CHECKSUM_BYTES
             stored_checksum: u64 = reader_take_u64(reader)
             return decode_failure(DecodeStatus.Truncated) if reader.truncated
             return decode_failure(DecodeStatus.Invalid) if reader.failed or reader.offset != reader.length

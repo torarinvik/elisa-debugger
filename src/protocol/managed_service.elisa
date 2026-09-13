@@ -20,23 +20,35 @@ include "../core/cancellation.elisa"
 
 module DebuggerManagedService:
     private:
-        const DEFAULT_CONTINUE_STEPS: u64 = 64
-        const DETAIL_UNSUPPORTED: u32 = 1
-        const DETAIL_STALE_GENERATION: u32 = 2
-        const NO_EXPECTED_GENERATION: u64 = 0
-        const NO_REQUEST_ID: u64 = 0
-        const DETAIL_REQUEST_ID: u32 = 4
-        const DETAIL_METHOD: u32 = 5
-        const DETAIL_MEMORY_HISTORY_UNAVAILABLE: u32 = 6
-        const DETAIL_MEMORY_HISTORY_RANGE: u32 = 7
-        const DETAIL_MEMORY_HISTORY_SLOT: u32 = 8
-        const DETAIL_MEMORY_HISTORY_CORRUPT: u32 = 9
-        const REQUEST_METHOD_MAX: u16 = 29
-        const MAX_SEEK_EVENT: u64 = 64
-        const MAX_SOURCE_BREAKPOINTS: usize = 256
-        const SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
-        const ROOT_RECORDING_BRANCH: u64 = 0
-        const DETAIL_RECORDING_DIVERGED: u32 = 10
+
+        const module ErrorDetail:
+            DETAIL_UNSUPPORTED: u32 = 1
+            PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_STALE_GENERATION: u32 = 2
+            PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_REQUEST_ID: u32 = 4
+            PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_METHOD: u32 = 5
+            DETAIL_MEMORY_HISTORY_UNAVAILABLE: u32 = 6
+            DETAIL_MEMORY_HISTORY_RANGE: u32 = 7
+            DETAIL_MEMORY_HISTORY_SLOT: u32 = 8
+            DETAIL_MEMORY_HISTORY_CORRUPT: u32 = 9
+            DETAIL_RECORDING_DIVERGED: u32 = 10
+
+        const module EventCapture:
+            SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
+
+        const module ExecutionDefaults:
+            DEFAULT_CONTINUE_STEPS: u64 = 64
+
+        const module HistoryLimits:
+            MAX_SEEK_EVENT: u64 = 64
+            MAX_SOURCE_BREAKPOINTS: usize = 256
+
+        const module RecordingState:
+            ROOT_RECORDING_BRANCH: u64 = 0
+
+        const module RequestState:
+            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_EXPECTED_GENERATION: u64 = 0
+            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_REQUEST_ID: u64 = 0
+            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX: u16 = 29
 
         def memory_history_error(window: DebuggerHistory::QueryWindow, failure: DebuggerErrors::DebuggerError) -> DebuggerQueryEngine::QueryExecution:
             result: mutable DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_execution_new(window)
@@ -46,7 +58,7 @@ module DebuggerManagedService:
     public:
         struct Service:
             controller: mutable DebuggerManagedEngine::ManagedController
-            recorded_events: mutable DebuggerEvents::EventEnvelope[SERVICE_EVENT_CAPTURE_CAPACITY]
+            recorded_events: mutable DebuggerEvents::EventEnvelope[EventCapture::SERVICE_EVENT_CAPTURE_CAPACITY]
             recorded_event_count: mutable usize
             trace_partial: mutable bool
             trace_failure: mutable DebuggerErrors::DebuggerError
@@ -76,20 +88,20 @@ module DebuggerManagedService:
             # execution resumes through that prefix, compare it with the
             # capture and downgrade only when the new execution differs.
             return if current_event_count < service.recorded_event_count
-            if current_event_count > SERVICE_EVENT_CAPTURE_CAPACITY:
-                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_RECORDING_DIVERGED)
+            if current_event_count > EventCapture::SERVICE_EVENT_CAPTURE_CAPACITY:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_RECORDING_DIVERGED)
                 service_recording_mark_partial(service, failure)
                 return
             index: mutable usize = 0
             while index < current_event_count:
                 event: DebuggerEvents::EventEnvelope = service.controller.engine.events[index]
-                if event.position.branch.value != ROOT_RECORDING_BRANCH or event.ordinal != index.u64():
-                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
+                if event.position.branch.value != RecordingState::ROOT_RECORDING_BRANCH or event.ordinal != index.u64():
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_RECORDING_DIVERGED)
                     service_recording_mark_partial(service, failure)
                     return
                 if index < service.recorded_event_count:
                     if not service_recorded_event_matches(service.recorded_events[index], event):
-                        failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_RECORDING_DIVERGED)
+                        failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_RECORDING_DIVERGED)
                         service_recording_mark_partial(service, failure)
                         return
                 else:
@@ -114,7 +126,7 @@ module DebuggerManagedService:
 
         struct SourceBreakpointResult:
             accepted: mutable bool
-            points: mutable SourceBreakpointEntry[MAX_SOURCE_BREAKPOINTS]
+            points: mutable SourceBreakpointEntry[HistoryLimits::MAX_SOURCE_BREAKPOINTS]
             count: mutable usize
             failure: mutable DebuggerErrors::DebuggerError
 
@@ -171,19 +183,19 @@ module DebuggerManagedService:
         def service_dispatch(service: mutable Service&, request: DebuggerProtocolRequest::Request) -> Result:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if not request.valid:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_UNSUPPORTED)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_UNSUPPORTED)
                 service.last_error <- failure
                 return result_error(failure)
-            if not request.has_id or request.id == NO_REQUEST_ID:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_REQUEST_ID)
+            if not request.has_id or request.id == RequestState::PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_REQUEST_ID:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_REQUEST_ID)
                 service.last_error <- failure
                 return result_error(failure)
-            if request.method == DebuggerProtocolRequest::RequestMethod.Unknown or request.method.u16() > REQUEST_METHOD_MAX:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_METHOD)
+            if request.method == DebuggerProtocolRequest::RequestMethod.Unknown or request.method.u16() > RequestState::PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_METHOD)
                 service.last_error <- failure
                 return result_error(failure)
-            if request.expected_generation != NO_EXPECTED_GENERATION and request.expected_generation != service.controller.session.stop_generation:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_GENERATION)
+            if request.expected_generation != RequestState::PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_EXPECTED_GENERATION and request.expected_generation != service.controller.session.stop_generation:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_STALE_GENERATION)
             service.last_error <- failure
             return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
             if request.method == DebuggerProtocolRequest::RequestMethod.Launch:
@@ -194,46 +206,46 @@ module DebuggerManagedService:
                 failure <- DebuggerErrors::no_error()
             if request.method == DebuggerProtocolRequest::RequestMethod.CreateSession:
                 service.controller.session <- DebuggerSession::session_configure(service.controller.session)
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
             # These lifecycle methods require a trace operand that the compact
             # request envelope does not carry. Do not report that trace I/O or
             # replay started after changing only the session state.
             if request.method == DebuggerProtocolRequest::RequestMethod.OpenTrace or request.method == DebuggerProtocolRequest::RequestMethod.Replay:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED)
             if request.method == DebuggerProtocolRequest::RequestMethod.Pause:
                 failure <- DebuggerManagedEngine::managed_pause(service.controller)
             if request.method == DebuggerProtocolRequest::RequestMethod.Continue:
-                failure <- DebuggerManagedEngine::managed_continue(service.controller, DEFAULT_CONTINUE_STEPS)
+                failure <- DebuggerManagedEngine::managed_continue(service.controller, ExecutionDefaults::DEFAULT_CONTINUE_STEPS)
             if request.method == DebuggerProtocolRequest::RequestMethod.Step:
                 failure <- DebuggerManagedEngine::managed_step(service.controller)
             if request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep:
                 failure <- DebuggerManagedEngine::managed_reverse_step(service.controller)
             if request.method == DebuggerProtocolRequest::RequestMethod.Seek:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if request.target_event > MAX_SEEK_EVENT
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if request.target_event > HistoryLimits::MAX_SEEK_EVENT
                 failure <- DebuggerManagedEngine::managed_seek(service.controller, request.target_event.usize()) if DebuggerErrors::error_is_ok(failure)
             if request.method == DebuggerProtocolRequest::RequestMethod.Memory:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.memory_read
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.memory_read
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
             if request.method == DebuggerProtocolRequest::RequestMethod.Threads:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if not service_main_thread_is_available(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if not service_main_thread_is_available(service.controller.session)
             if request.method == DebuggerProtocolRequest::RequestMethod.Stack or request.method == DebuggerProtocolRequest::RequestMethod.Scopes or request.method == DebuggerProtocolRequest::RequestMethod.Variables or request.method == DebuggerProtocolRequest::RequestMethod.Evaluate:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if (request.method == DebuggerProtocolRequest::RequestMethod.Stack or request.method == DebuggerProtocolRequest::RequestMethod.Scopes or request.method == DebuggerProtocolRequest::RequestMethod.Variables) and not service.controller.session.capabilities.typed_values
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.Evaluate and not service.controller.session.capabilities.expression_evaluation
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if (request.method == DebuggerProtocolRequest::RequestMethod.Stack or request.method == DebuggerProtocolRequest::RequestMethod.Scopes or request.method == DebuggerProtocolRequest::RequestMethod.Variables) and not service.controller.session.capabilities.typed_values
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.Evaluate and not service.controller.session.capabilities.expression_evaluation
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
             if request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.source_breakpoints
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.source_breakpoints
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
             if request.method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.data_breakpoints
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.data_breakpoints
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
             # The generic request envelope has no expression or breakpoint
             # operands. Do not report success for operations it cannot apply;
             # typed callers use the dedicated evaluation and breakpoint APIs.
             if (request.method == DebuggerProtocolRequest::RequestMethod.Evaluate or request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints or request.method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints) and DebuggerErrors::error_is_ok(failure):
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED)
             if request.method == DebuggerProtocolRequest::RequestMethod.Checkpoint:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.checkpoints
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.checkpoints
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
                 if DebuggerErrors::error_is_ok(failure):
                     checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
                     failure <- DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
@@ -242,37 +254,37 @@ module DebuggerManagedService:
                         service.last_checkpoint_hash <- checkpoint.state_hash
                         service.has_checkpoint <- true
             if request.method == DebuggerProtocolRequest::RequestMethod.Branch:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.branches
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.branches
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
                 if DebuggerErrors::error_is_ok(failure):
                     branch: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_create_branch(service.controller)
-                    failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_UNSUPPORTED) if branch.value == 0
+                    failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_UNSUPPORTED) if branch.value == 0
                     service.last_branch <- branch if DebuggerErrors::error_is_ok(failure)
             if request.method == DebuggerProtocolRequest::RequestMethod.Compare or request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify or request.method == DebuggerProtocolRequest::RequestMethod.TraceExport:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.Compare and not service.controller.session.capabilities.provenance
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify and not service.controller.session.capabilities.trace_verification
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.TraceExport and not service.controller.session.capabilities.trace_export
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.Compare and not service.controller.session.capabilities.provenance
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify and not service.controller.session.capabilities.trace_verification
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method == DebuggerProtocolRequest::RequestMethod.TraceExport and not service.controller.session.capabilities.trace_export
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
                 # These operations require typed bundle/engine operands that
                 # the compact lifecycle request does not carry. Prevent a
                 # false success; callers use service_compare/trace APIs with
                 # their validated operands.
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_METHOD) if DebuggerErrors::error_is_ok(failure)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_METHOD) if DebuggerErrors::error_is_ok(failure)
             # Cancellation requires a token owned by the transport layer. This
             # facade does not carry one, so never report a false success.
             if request.method == DebuggerProtocolRequest::RequestMethod.Cancel:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED)
             if request.method == DebuggerProtocolRequest::RequestMethod.Detach:
                 service.controller.session <- DebuggerSession::session_detach(service.controller.session)
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
             if request.method == DebuggerProtocolRequest::RequestMethod.Terminate:
                 service.controller.session <- DebuggerSession::session_terminate(service.controller.session)
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
             if request.method == DebuggerProtocolRequest::RequestMethod.Close:
                 service.controller.session <- DebuggerSession::session_close(service.controller.session)
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
             if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Memory and request.method != DebuggerProtocolRequest::RequestMethod.Threads and request.method != DebuggerProtocolRequest::RequestMethod.Stack and request.method != DebuggerProtocolRequest::RequestMethod.Scopes and request.method != DebuggerProtocolRequest::RequestMethod.Variables and request.method != DebuggerProtocolRequest::RequestMethod.Evaluate and request.method != DebuggerProtocolRequest::RequestMethod.SetBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.Checkpoint and request.method != DebuggerProtocolRequest::RequestMethod.Branch and request.method != DebuggerProtocolRequest::RequestMethod.Compare and request.method != DebuggerProtocolRequest::RequestMethod.TraceVerify and request.method != DebuggerProtocolRequest::RequestMethod.TraceExport:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED) if request.method != DebuggerProtocolRequest::RequestMethod.Discover and request.method != DebuggerProtocolRequest::RequestMethod.Initialize and request.method != DebuggerProtocolRequest::RequestMethod.CreateSession and request.method != DebuggerProtocolRequest::RequestMethod.OpenTrace and request.method != DebuggerProtocolRequest::RequestMethod.Replay and request.method != DebuggerProtocolRequest::RequestMethod.Detach and request.method != DebuggerProtocolRequest::RequestMethod.Terminate and request.method != DebuggerProtocolRequest::RequestMethod.Close
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method != DebuggerProtocolRequest::RequestMethod.Discover and request.method != DebuggerProtocolRequest::RequestMethod.Initialize and request.method != DebuggerProtocolRequest::RequestMethod.CreateSession and request.method != DebuggerProtocolRequest::RequestMethod.OpenTrace and request.method != DebuggerProtocolRequest::RequestMethod.Replay and request.method != DebuggerProtocolRequest::RequestMethod.Detach and request.method != DebuggerProtocolRequest::RequestMethod.Terminate and request.method != DebuggerProtocolRequest::RequestMethod.Close
             service.last_error <- failure
             service_sync_timeline(service)
             return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
@@ -328,29 +340,29 @@ module DebuggerManagedService:
 
         def service_replace_source_breakpoints(service: mutable Service&, source: DebuggerIdentity::DebugId, lines: u32&, requested_count: usize) -> SourceBreakpointResult:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
-            if source.value == 0 or requested_count > MAX_SOURCE_BREAKPOINTS:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_UNSUPPORTED)
+            if source.value == 0 or requested_count > HistoryLimits::MAX_SOURCE_BREAKPOINTS:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_UNSUPPORTED)
                 service.last_error <- failure
                 return source_breakpoint_result_error(failure)
             for index in 0..<requested_count:
                 if lines[index] == 0:
-                    failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_UNSUPPORTED)
+                    failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_UNSUPPORTED)
                     service.last_error <- failure
                     return source_breakpoint_result_error(failure)
             if not service.controller.session.capabilities.source_breakpoints:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_UNSUPPORTED)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED)
             if service.controller.session.state == DebuggerSession::SessionState.Created or service.controller.session.state == DebuggerSession::SessionState.Configuring or service.controller.session.state == DebuggerSession::SessionState.Launching:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
             if service.controller.session.state == DebuggerSession::SessionState.Exited or service.controller.session.state == DebuggerSession::SessionState.Detached or service.controller.session.state == DebuggerSession::SessionState.Failed or service.controller.session.state == DebuggerSession::SessionState.Closed:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
             if service.controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or service.controller.engine.machine.faulted:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
             service.last_error <- failure
             return source_breakpoint_result_error(failure) if not DebuggerErrors::error_is_ok(failure)
             replacement: DebuggerBreakpointManager::BreakpointReplacement = DebuggerManagedEngine::managed_replace_source_breakpoints(service.controller, source, lines, requested_count)
             if not replacement.accepted:
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_UNSUPPORTED) if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints)
-                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_UNSUPPORTED) if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
                 service.last_error <- failure
                 return source_breakpoint_result_error(failure)
             service.last_error <- DebuggerErrors::no_error()
@@ -443,7 +455,7 @@ module DebuggerManagedService:
 
         def service_memory(service: mutable Service&, address: u64, length: usize) -> DebuggerMemory::MemoryRead:
             return DebuggerMemory::memory_read_managed(service.controller.engine.machine, address, length) if DebuggerSession::session_can_inspect(service.controller.session)
-            return DebuggerMemory::memory_read_invalid(address, DebuggerMemory::MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_UNSUPPORTED))
+            return DebuggerMemory::memory_read_invalid(address, DebuggerMemory::MemoryState.Unavailable, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED))
 
         # Typed local-service API. The compact JSON request and editor discovery
         # surfaces do not carry query operands, so their provenance and
@@ -455,15 +467,15 @@ module DebuggerManagedService:
             if not DebuggerHistory::query_window_is_valid(window):
                 return DebuggerQueryEngine::query_find_writes(empty_index, empty_binding, window, token)
             if not DebuggerSession::session_can_inspect(service.controller.session):
-                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_MEMORY_HISTORY_UNAVAILABLE))
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_MEMORY_HISTORY_UNAVAILABLE))
             if service.controller.session.capabilities.engine != DebuggerCapabilities::EngineKind.Managed or service.controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact:
-                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_MEMORY_HISTORY_UNAVAILABLE))
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_MEMORY_HISTORY_UNAVAILABLE))
             if not DebuggerEDIRProvenance::edir_provenance_memory_slot_is_valid(slot):
-                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MEMORY_HISTORY_SLOT))
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_MEMORY_HISTORY_SLOT))
             if window.last_event >= service.controller.engine.event_count.u64():
-                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_MEMORY_HISTORY_RANGE))
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_MEMORY_HISTORY_RANGE))
             index: DebuggerProvenance::ProvenanceIndex = DebuggerEDIRProvenance::edir_provenance_from_engine(service.controller.engine)
             if not DebuggerProvenance::provenance_is_complete(index):
-                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_MEMORY_HISTORY_CORRUPT))
+                return memory_history_error(window, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_MEMORY_HISTORY_CORRUPT))
             binding: DebuggerIdentity::BindingIdentity = DebuggerEDIRProvenance::edir_provenance_memory_binding(service.controller.engine, slot)
             return DebuggerQueryEngine::query_find_writes(index, binding, window, token)

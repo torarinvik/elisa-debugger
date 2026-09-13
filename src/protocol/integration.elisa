@@ -9,21 +9,29 @@ include "../core/errors.elisa"
 
 module DebuggerProtocolIntegration:
     private:
-        const TRACE_SCHEMA_VERSION: u32 = 1
-        const DEFAULT_MAX_PAGE_SIZE: u64 = 256
-        const DEFAULT_MAX_TRACE_EVENTS: u64 = 1024
-        const DEFAULT_MAX_QUERY_STEPS: u64 = 1000000
-        const DEFAULT_MAX_PAYLOAD_BYTES: u64 = 65536
-        const NO_ID: u64 = 0
-        const DETAIL_PRODUCT: u32 = 1
-        const DETAIL_SESSION: u32 = 2
-        const DETAIL_GENERATION: u32 = 3
-        const DETAIL_METHOD: u32 = 4
-        const DETAIL_OWNER: u32 = 5
-        const DETAIL_TARGET: u32 = 6
-        const DETAIL_CAPABILITY: u32 = 7
-        const DETAIL_LIMIT: u32 = 8
-        const DETAIL_CLIENT: u32 = 9
+
+        const module ErrorDetail:
+            DETAIL_PRODUCT: u32 = 1
+            DETAIL_SESSION: u32 = 2
+            PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_GENERATION: u32 = 3
+            PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_METHOD: u32 = 4
+            DETAIL_OWNER: u32 = 5
+            DETAIL_TARGET: u32 = 6
+            PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_CAPABILITY: u32 = 7
+            DETAIL_LIMIT: u32 = 8
+            DETAIL_CLIENT: u32 = 9
+
+        const module Identity:
+            PROTOCOL_INTEGRATION_IDENTITY_NO_ID: u64 = 0
+
+        const module NegotiatedLimits:
+            DEFAULT_MAX_PAGE_SIZE: u64 = 256
+            DEFAULT_MAX_TRACE_EVENTS: u64 = 1024
+            DEFAULT_MAX_QUERY_STEPS: u64 = 1000000
+            DEFAULT_MAX_PAYLOAD_BYTES: u64 = 65536
+
+        const module ProductMetadata:
+            TRACE_SCHEMA_VERSION: u32 = 1
 
     public:
         enum OutputChannel:
@@ -99,14 +107,14 @@ module DebuggerProtocolIntegration:
             expected_generation: mutable u64
 
         def integration_limits_default() -> IntegrationLimits:
-            return IntegrationLimits{max_page_size: DEFAULT_MAX_PAGE_SIZE, max_trace_events: DEFAULT_MAX_TRACE_EVENTS, max_query_steps: DEFAULT_MAX_QUERY_STEPS, max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES}
+            return IntegrationLimits{max_page_size: NegotiatedLimits::DEFAULT_MAX_PAGE_SIZE, max_trace_events: NegotiatedLimits::DEFAULT_MAX_TRACE_EVENTS, max_query_steps: NegotiatedLimits::DEFAULT_MAX_QUERY_STEPS, max_payload_bytes: NegotiatedLimits::DEFAULT_MAX_PAYLOAD_BYTES}
 
         def discovery_new(session: DebuggerSession::Session, product: DebuggerIdentity::DebugId, installation: InstallationStatus) -> DiscoveryDocument:
-            return DiscoveryDocument{product: product, product_major: 0, product_minor: 1, product_patch: 0, protocol: DebuggerProtocol::protocol_version(), trace_schema: TRACE_SCHEMA_VERSION, session: session.id, capabilities: session.capabilities, limits: integration_limits_default(), installation: installation}
+            return DiscoveryDocument{product: product, product_major: 0, product_minor: 1, product_patch: 0, protocol: DebuggerProtocol::protocol_version(), trace_schema: ProductMetadata::TRACE_SCHEMA_VERSION, session: session.id, capabilities: session.capabilities, limits: integration_limits_default(), installation: installation}
 
         def discovery_document_is_valid(document: DiscoveryDocument) -> bool:
-            return false if document.product.value == NO_ID or document.session.value == NO_ID
-            return false if not DebuggerProtocol::protocol_compatible(document.protocol) or document.trace_schema != TRACE_SCHEMA_VERSION
+            return false if document.product.value == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID or document.session.value == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID
+            return false if not DebuggerProtocol::protocol_compatible(document.protocol) or document.trace_schema != ProductMetadata::TRACE_SCHEMA_VERSION
             return false if not DebuggerCapabilities::capabilities_is_valid(document.capabilities)
             return false if document.limits.max_page_size == 0 or document.limits.max_trace_events == 0 or document.limits.max_query_steps == 0 or document.limits.max_payload_bytes == 0
             return true
@@ -116,7 +124,7 @@ module DebuggerProtocolIntegration:
             return false
 
         def client_identity_is_valid(client: ClientIdentity) -> bool:
-            return client.name.value != NO_ID and client.version.value != NO_ID and client.instance.value != NO_ID
+            return client.name.value != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID and client.version.value != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID and client.instance.value != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID
 
         def retry_is_safe(method: DebuggerProtocol::Method) -> bool:
             return method == DebuggerProtocol::Method.Discover or method == DebuggerProtocol::Method.Initialize or method == DebuggerProtocol::Method.Threads or method == DebuggerProtocol::Method.Stack or method == DebuggerProtocol::Method.Scopes or method == DebuggerProtocol::Method.Variables or method == DebuggerProtocol::Method.Evaluate or method == DebuggerProtocol::Method.Memory or method == DebuggerProtocol::Method.Compare or method == DebuggerProtocol::Method.TraceVerify or method == DebuggerProtocol::Method.TraceExport
@@ -159,28 +167,28 @@ module DebuggerProtocolIntegration:
         # The transport supplies the token it issued to the current session
         # owner. A non-zero token in the request alone is not authorization.
         def session_request_validate(request: SessionRequest, session: DebuggerSession::Session, document: DiscoveryDocument, expected_owner_token: u64) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PRODUCT) if not discovery_document_is_valid(document)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CLIENT) if not client_identity_is_valid(request.client)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if document.session.value != session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CAPABILITY) if not integration_capabilities_match(document.capabilities, session.capabilities)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if request.request_id == NO_ID or request.session_id != NO_ID and request.session_id != session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if integration_method_is_mutating(request.method) and (expected_owner_token == NO_ID or request.owner_token != expected_owner_token)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_METHOD) if not DebuggerProtocol::method_is_valid(request.method)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if not integration_method_supported(request.method, session.capabilities)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_GENERATION) if request.expected_generation != NO_ID and request.expected_generation != session.stop_generation
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_LIMIT) if request.page_size > document.limits.max_page_size
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_TARGET) if request.target_event > document.limits.max_trace_events
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceExport and not session.capabilities.trace_export
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceVerify and not session.capabilities.trace_verification
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_PRODUCT) if not discovery_document_is_valid(document)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_CLIENT) if not client_identity_is_valid(request.client)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_SESSION) if document.session.value != session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_CAPABILITY) if not integration_capabilities_match(document.capabilities, session.capabilities)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_SESSION) if request.request_id == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID or request.session_id != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID and request.session_id != session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_OWNER) if integration_method_is_mutating(request.method) and (expected_owner_token == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID or request.owner_token != expected_owner_token)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_METHOD) if not DebuggerProtocol::method_is_valid(request.method)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_CAPABILITY) if not integration_method_supported(request.method, session.capabilities)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_GENERATION) if request.expected_generation != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID and request.expected_generation != session.stop_generation
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_LIMIT) if request.page_size > document.limits.max_page_size
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_TARGET) if request.target_event > document.limits.max_trace_events
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceExport and not session.capabilities.trace_export
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_CAPABILITY) if request.method == DebuggerProtocol::Method.TraceVerify and not session.capabilities.trace_verification
             return DebuggerErrors::no_error()
 
         def cancel_request_validate(request: CancelRequest, session: DebuggerSession::Session, document: DiscoveryDocument, expected_owner_token: u64) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_PRODUCT) if not discovery_document_is_valid(document)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_CLIENT) if not client_identity_is_valid(request.client)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if document.session.value != session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SESSION) if request.request_id == NO_ID or request.target_request_id == NO_ID or request.target_request_id == request.request_id or request.session_id != NO_ID and request.session_id != session.id.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_OWNER) if expected_owner_token == NO_ID or request.owner_token != expected_owner_token
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_GENERATION) if request.expected_generation != NO_ID and request.expected_generation != session.stop_generation
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_PRODUCT) if not discovery_document_is_valid(document)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_CLIENT) if not client_identity_is_valid(request.client)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_SESSION) if document.session.value != session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_SESSION) if request.request_id == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID or request.target_request_id == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID or request.target_request_id == request.request_id or request.session_id != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID and request.session_id != session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_OWNER) if expected_owner_token == Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID or request.owner_token != expected_owner_token
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_INTEGRATION_ERROR_DETAIL_DETAIL_GENERATION) if request.expected_generation != Identity::PROTOCOL_INTEGRATION_IDENTITY_NO_ID and request.expected_generation != session.stop_generation
             return DebuggerErrors::no_error()
 
         def response_ok(request: SessionRequest, session: DebuggerSession::Session, next_page: u64) -> SessionResponse:

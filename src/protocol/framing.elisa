@@ -2,15 +2,21 @@
 
 module DebuggerProtocolFraming:
     private:
-        const FRAME_MAX_PAYLOAD: usize = 65536
-        const FRAME_MAX_HEADER_DIGITS: usize = 10
-        const FRAME_HEADER_SUFFIX_BYTES: usize = 2
-        const FRAME_OUTPUT_CAPACITY: usize = FRAME_MAX_HEADER_DIGITS + FRAME_HEADER_SUFFIX_BYTES + FRAME_MAX_PAYLOAD
-        const ASCII_ZERO: u8 = 48
-        const ASCII_NINE: u8 = 57
-        const ASCII_SPACE: u8 = 32
-        const ASCII_NEWLINE: u8 = 10
-        const DECIMAL_BASE: usize = 10
+
+        const module Character:
+            PROTOCOL_FRAMING_CHARACTER_ASCII_ZERO: u8 = 48
+            PROTOCOL_FRAMING_CHARACTER_ASCII_NINE: u8 = 57
+            PROTOCOL_FRAMING_CHARACTER_ASCII_SPACE: u8 = 32
+            PROTOCOL_FRAMING_CHARACTER_ASCII_NEWLINE: u8 = 10
+
+        const module FrameLimits:
+            FRAME_MAX_PAYLOAD: usize = 65536
+            FRAME_MAX_HEADER_DIGITS: usize = 10
+            FRAME_HEADER_SUFFIX_BYTES: usize = 2
+            FRAME_OUTPUT_CAPACITY: usize = FrameLimits::FRAME_MAX_HEADER_DIGITS + FrameLimits::FRAME_HEADER_SUFFIX_BYTES + FrameLimits::FRAME_MAX_PAYLOAD
+
+        const module NumberFormat:
+            PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE: usize = 10
 
     public:
         enum FrameDecoderState:
@@ -21,13 +27,13 @@ module DebuggerProtocolFraming:
             Failed
 
         struct FrameBuffer:
-            bytes: mutable u8[FRAME_OUTPUT_CAPACITY]
+            bytes: mutable u8[FrameLimits::FRAME_OUTPUT_CAPACITY]
             length: mutable usize
             failed: mutable bool
 
         struct FrameDecoder:
             state: mutable FrameDecoderState
-            payload: mutable u8[FRAME_MAX_PAYLOAD]
+            payload: mutable u8[FrameLimits::FRAME_MAX_PAYLOAD]
             payload_length: mutable usize
             payload_received: mutable usize
             header_value: mutable usize
@@ -49,7 +55,7 @@ module DebuggerProtocolFraming:
             return FrameBuffer{bytes: zeroed, length: 0, failed: false}
 
         def frame_buffer_put_byte(buffer: mutable FrameBuffer&, byte: u8) -> void:
-            if buffer.failed or buffer.length >= FRAME_OUTPUT_CAPACITY:
+            if buffer.failed or buffer.length >= FrameLimits::FRAME_OUTPUT_CAPACITY:
                 buffer.failed <- true
                 return
             buffer.bytes[buffer.length] <- byte
@@ -60,46 +66,46 @@ module DebuggerProtocolFraming:
         # so adapters can write a frame without exposing internal buffers.
         def frame_encode(payload: u8&, length: usize) -> FrameBuffer:
             buffer: mutable FrameBuffer = frame_buffer_new()
-            if length > FRAME_MAX_PAYLOAD:
+            if length > FrameLimits::FRAME_MAX_PAYLOAD:
                 buffer.failed <- true
                 return buffer
-            digits: mutable u8[FRAME_MAX_HEADER_DIGITS] = zeroed
+            digits: mutable u8[FrameLimits::FRAME_MAX_HEADER_DIGITS] = zeroed
             digit_count: mutable usize = 0
             remaining: mutable usize = length
             if remaining == 0:
-                digits[0] <- ASCII_ZERO
+                digits[0] <- Character::PROTOCOL_FRAMING_CHARACTER_ASCII_ZERO
                 digit_count <- 1
             else:
                 while remaining > 0:
-                    if digit_count >= FRAME_MAX_HEADER_DIGITS:
+                    if digit_count >= FrameLimits::FRAME_MAX_HEADER_DIGITS:
                         buffer.failed <- true
                         return buffer
-                    digits[digit_count] <- (remaining % DECIMAL_BASE).u8() + ASCII_ZERO
+                    digits[digit_count] <- (remaining % NumberFormat::PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE).u8() + Character::PROTOCOL_FRAMING_CHARACTER_ASCII_ZERO
                     digit_count <- digit_count + 1
-                    remaining <- remaining / DECIMAL_BASE
+                    remaining <- remaining / NumberFormat::PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE
             for index in 0..<digit_count:
                 frame_buffer_put_byte(buffer, digits[digit_count - index - 1])
-            frame_buffer_put_byte(buffer, ASCII_SPACE)
+            frame_buffer_put_byte(buffer, Character::PROTOCOL_FRAMING_CHARACTER_ASCII_SPACE)
             for index in 0..<length:
                 frame_buffer_put_byte(buffer, payload[index])
-            frame_buffer_put_byte(buffer, ASCII_NEWLINE)
+            frame_buffer_put_byte(buffer, Character::PROTOCOL_FRAMING_CHARACTER_ASCII_NEWLINE)
             return buffer
 
         def frame_decoder_accept(decoder: mutable FrameDecoder&, byte: u8) -> bool:
             return false if decoder.state == FrameDecoderState.Failed
             if decoder.state == FrameDecoderState.Header:
-                if byte >= ASCII_ZERO and byte <= ASCII_NINE:
-                    if decoder.header_digits >= FRAME_MAX_HEADER_DIGITS:
+                if byte >= Character::PROTOCOL_FRAMING_CHARACTER_ASCII_ZERO and byte <= Character::PROTOCOL_FRAMING_CHARACTER_ASCII_NINE:
+                    if decoder.header_digits >= FrameLimits::FRAME_MAX_HEADER_DIGITS:
                         decoder.state <- FrameDecoderState.Failed
                         return false
-                    digit: usize = (byte - ASCII_ZERO).usize()
-                    if decoder.header_value > (FRAME_MAX_PAYLOAD - digit) / DECIMAL_BASE:
+                    digit: usize = (byte - Character::PROTOCOL_FRAMING_CHARACTER_ASCII_ZERO).usize()
+                    if decoder.header_value > (FrameLimits::FRAME_MAX_PAYLOAD - digit) / NumberFormat::PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE:
                         decoder.state <- FrameDecoderState.Failed
                         return false
-                    decoder.header_value <- decoder.header_value * DECIMAL_BASE + digit
+                    decoder.header_value <- decoder.header_value * NumberFormat::PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE + digit
                     decoder.header_digits <- decoder.header_digits + 1
                     return false
-                if byte == ASCII_SPACE and decoder.header_digits > 0:
+                if byte == Character::PROTOCOL_FRAMING_CHARACTER_ASCII_SPACE and decoder.header_digits > 0:
                     decoder.payload_length <- decoder.header_value
                     decoder.payload_received <- 0
                     decoder.state <- FrameDecoderState.Payload if decoder.payload_length > 0 else FrameDecoderState.Trailer
@@ -113,7 +119,7 @@ module DebuggerProtocolFraming:
                 decoder.state <- FrameDecoderState.Trailer if decoder.payload_received == decoder.payload_length
                 return false
             if decoder.state == FrameDecoderState.Trailer:
-                if byte == ASCII_NEWLINE:
+                if byte == Character::PROTOCOL_FRAMING_CHARACTER_ASCII_NEWLINE:
                     decoder.state <- FrameDecoderState.Complete
                     return true
                 decoder.state <- FrameDecoderState.Failed
@@ -133,4 +139,4 @@ module DebuggerProtocolFraming:
             return decoder.state == FrameDecoderState.Complete
 
         def frame_buffer_is_valid(buffer: FrameBuffer) -> bool:
-            return not buffer.failed and buffer.length <= FRAME_OUTPUT_CAPACITY
+            return not buffer.failed and buffer.length <= FrameLimits::FRAME_OUTPUT_CAPACITY

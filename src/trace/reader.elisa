@@ -245,6 +245,17 @@ module DebuggerTraceReader:
                 reader.state <- ReaderState.Corrupt
                 reader.last_error <- failure
                 return failure
+            previous_manifest: DebuggerTraceManifest::BundleManifest = reader.manifest
+            previous_event_count: usize = reader.event_count
+            previous_full_checkpoint_count: usize = reader.full_checkpoint_count
+            previous_next_sequence: u64 = reader.next_sequence
+            previous_next_event: u64 = reader.next_event
+            previous_event_exhausted: bool = reader.event_exhausted
+            previous_recording: DebuggerIdentity::DebugId = reader.recording
+            previous_recording_seen: bool = reader.recording_seen
+            previous_manifest_seen: bool = reader.manifest_seen
+            previous_event_chunk_count: usize = reader.event_chunk_count
+            previous_checkpoint_chunk_count: usize = reader.checkpoint_chunk_count
             result: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if chunk.header.kind == DebuggerTrace::ChunkKind.Manifest:
                 result <- reader_ingest_manifest(reader, chunk)
@@ -253,6 +264,24 @@ module DebuggerTraceReader:
             if chunk.header.kind != DebuggerTrace::ChunkKind.Manifest and chunk.header.kind != DebuggerTrace::ChunkKind.Events:
                 result <- reader_ingest_opaque(reader, chunk)
             if not DebuggerErrors::error_is_ok(result):
+                # Chunk validation can fail after decoding earlier records in
+                # the same chunk. Roll back all prefix metadata so callers see
+                # only complete, verified chunks after the reader is poisoned.
+                for index in previous_event_count..<reader.event_count:
+                    reader.events[index] <- zeroed
+                for index in previous_full_checkpoint_count..<reader.full_checkpoint_count:
+                    reader.full_checkpoints[index] <- zeroed
+                reader.manifest <- previous_manifest
+                reader.event_count <- previous_event_count
+                reader.full_checkpoint_count <- previous_full_checkpoint_count
+                reader.next_sequence <- previous_next_sequence
+                reader.next_event <- previous_next_event
+                reader.event_exhausted <- previous_event_exhausted
+                reader.recording <- previous_recording
+                reader.recording_seen <- previous_recording_seen
+                reader.manifest_seen <- previous_manifest_seen
+                reader.event_chunk_count <- previous_event_chunk_count
+                reader.checkpoint_chunk_count <- previous_checkpoint_chunk_count
                 reader.state <- ReaderState.Corrupt
                 reader.last_error <- result
                 return result

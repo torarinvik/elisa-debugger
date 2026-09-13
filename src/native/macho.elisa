@@ -24,6 +24,7 @@ module DebuggerNativeMachO:
             MACHO_SUBTYPE_ARM64E: u32 = 2
             MACHO_FILE_EXECUTE: u32 = 2
             MACHO_FILE_DYLIB: u32 = 6
+            MACHO_FILE_DSYM: u32 = 10
             MACHO_BYTE_BITS: u32 = 8
 
         const module LoadCommand:
@@ -32,6 +33,26 @@ module DebuggerNativeMachO:
             MACHO_COMMAND_HEADER_BYTES: usize = 8
             MACHO_COMMAND_KIND_OFFSET: usize = 0
             MACHO_COMMAND_SIZE_OFFSET: usize = 4
+            MACHO_SEGMENT_64_KIND: u32 = 25
+
+        const module Segment:
+            MACHO_SEGMENT_64_COMMAND_BYTES: usize = 72
+            MACHO_SEGMENT_64_SECTION_COUNT_OFFSET: usize = 64
+
+        const module Section:
+            MACHO_SECTION_64_BYTES: usize = 80
+            MACHO_SECTION_64_NAME_OFFSET: usize = 0
+            MACHO_SECTION_64_SEGMENT_NAME_OFFSET: usize = 16
+            MACHO_SECTION_64_ADDRESS_OFFSET: usize = 32
+            MACHO_SECTION_64_SIZE_OFFSET: usize = 40
+            MACHO_SECTION_64_FILE_OFFSET: usize = 48
+            MACHO_SECTION_64_FLAGS_OFFSET: usize = 64
+            MACHO_SECTION_NAME_BYTES: usize = 16
+            MACHO_SECTION_KIND_MASK: u32 = 255
+            MACHO_SECTION_ZERO_FILL: u32 = 1
+            MACHO_SECTION_GB_ZERO_FILL: u32 = 12
+            MACHO_SECTION_THREAD_ZERO_FILL: u32 = 18
+            MAX_U64: u64 = 18446744073709551615
 
         const module Uuid:
             MACHO_UUID_COMMAND_KIND: u32 = 27
@@ -65,6 +86,7 @@ module DebuggerNativeMachO:
         struct MachOHeader:
             valid: mutable bool
             executable: mutable bool
+            debug_symbols: mutable bool
             machine: mutable MachOMachine
             command_count: mutable u32
             command_bytes: mutable u32
@@ -94,6 +116,17 @@ module DebuggerNativeMachO:
             length: mutable usize
             bytes: mutable u8[Symbol::MACHO_SYMBOL_NAME_CAPACITY]
 
+        struct MachOSection:
+            valid: mutable bool
+            file_backed: mutable bool
+            name: mutable u8[Section::MACHO_SECTION_NAME_BYTES]
+            segment_name: mutable u8[Section::MACHO_SECTION_NAME_BYTES]
+            address: mutable u64
+            size: mutable u64
+            file_offset: mutable u32
+            flags: mutable u32
+
+    private:
         def read_u32(bytes: u8&, offset: usize) -> u32:
             return bytes[offset].u32() | (bytes[offset + 1].u32() << Format::MACHO_BYTE_BITS) | (bytes[offset + 2].u32() << (Format::MACHO_BYTE_BITS * 2)) | (bytes[offset + 3].u32() << (Format::MACHO_BYTE_BITS * 3))
 
@@ -106,6 +139,7 @@ module DebuggerNativeMachO:
                 value <- value | (bytes[offset + index].u64() << (index.u64() * Format::MACHO_BYTE_BITS.u64()))
             return value
 
+    public:
         def macho_parse(bytes: u8&, length: usize) -> MachOHeader:
             result: mutable MachOHeader = zeroed
             return result if length < Header::MACHO_HEADER_BYTES
@@ -119,13 +153,14 @@ module DebuggerNativeMachO:
             return result if cpu != Format::MACHO_CPU_X86_64 and cpu != Format::MACHO_CPU_ARM64
             return result if cpu == Format::MACHO_CPU_X86_64 and subtype != Format::MACHO_SUBTYPE_X86_64_ALL
             return result if cpu == Format::MACHO_CPU_ARM64 and subtype != Format::MACHO_SUBTYPE_ARM64_ALL and subtype != Format::MACHO_SUBTYPE_ARM64E
-            return result if file_type != Format::MACHO_FILE_EXECUTE and file_type != Format::MACHO_FILE_DYLIB
+            return result if file_type != Format::MACHO_FILE_EXECUTE and file_type != Format::MACHO_FILE_DYLIB and file_type != Format::MACHO_FILE_DSYM
             return result if command_count == 0 and command_bytes != 0
             return result if command_count > 0 and command_bytes.usize() < command_count.usize() * LoadCommand::MACHO_MIN_COMMAND_BYTES
             return result if command_bytes.usize() > LoadCommand::MACHO_MAX_COMMAND_BYTES or command_bytes.usize() > length - Header::MACHO_HEADER_BYTES
             return result if reserved != 0
             result.valid <- true
             result.executable <- file_type == Format::MACHO_FILE_EXECUTE
+            result.debug_symbols <- file_type == Format::MACHO_FILE_DSYM
             result.machine <- MachOMachine.X86_64 if cpu == Format::MACHO_CPU_X86_64 else MachOMachine.AArch64
             result.command_count <- command_count
             result.command_bytes <- command_bytes
@@ -161,6 +196,86 @@ module DebuggerNativeMachO:
                     result.size <- command_size.u32()
                     result.offset <- cursor
                     return result
+                cursor <- cursor + command_size
+            return result
+
+    private:
+        def macho_segments_are_valid(header: MachOHeader, bytes: u8&, length: usize) -> bool:
+            return false if not header.valid or not macho_commands_are_valid(header, bytes, length)
+            cursor: mutable usize = Header::MACHO_HEADER_BYTES
+            for command_index in 0..<header.command_count.usize():
+                command_size: usize = read_u32(bytes, cursor + LoadCommand::MACHO_COMMAND_SIZE_OFFSET).usize()
+                command_kind: u32 = read_u32(bytes, cursor + LoadCommand::MACHO_COMMAND_KIND_OFFSET)
+                if command_kind == LoadCommand::MACHO_SEGMENT_64_KIND:
+                    return false if command_size < Segment::MACHO_SEGMENT_64_COMMAND_BYTES
+                    section_count: usize = read_u32(bytes, cursor + Segment::MACHO_SEGMENT_64_SECTION_COUNT_OFFSET).usize()
+                    return false if section_count > (command_size - Segment::MACHO_SEGMENT_64_COMMAND_BYTES) / Section::MACHO_SECTION_64_BYTES
+                    return false if Segment::MACHO_SEGMENT_64_COMMAND_BYTES + section_count * Section::MACHO_SECTION_64_BYTES != command_size
+                cursor <- cursor + command_size
+            return true
+
+        def macho_section_from_bytes(bytes: u8&, length: usize, section_offset: usize) -> MachOSection:
+            result: mutable MachOSection = zeroed
+            return result if section_offset > length or length - section_offset < Section::MACHO_SECTION_64_BYTES
+            for index in 0..<Section::MACHO_SECTION_NAME_BYTES:
+                result.name[index] <- bytes[section_offset + Section::MACHO_SECTION_64_NAME_OFFSET + index]
+                result.segment_name[index] <- bytes[section_offset + Section::MACHO_SECTION_64_SEGMENT_NAME_OFFSET + index]
+            result.address <- read_u64(bytes, section_offset + Section::MACHO_SECTION_64_ADDRESS_OFFSET)
+            result.size <- read_u64(bytes, section_offset + Section::MACHO_SECTION_64_SIZE_OFFSET)
+            result.file_offset <- read_u32(bytes, section_offset + Section::MACHO_SECTION_64_FILE_OFFSET)
+            result.flags <- read_u32(bytes, section_offset + Section::MACHO_SECTION_64_FLAGS_OFFSET)
+            return result if result.address > Section::MAX_U64 - result.size
+            section_kind: u32 = result.flags & Section::MACHO_SECTION_KIND_MASK
+            result.file_backed <- section_kind != Section::MACHO_SECTION_ZERO_FILL and section_kind != Section::MACHO_SECTION_GB_ZERO_FILL and section_kind != Section::MACHO_SECTION_THREAD_ZERO_FILL
+            if result.file_backed:
+                return result if result.file_offset.usize() > length
+                return result if result.size > (length - result.file_offset.usize()).u64()
+            result.valid <- true
+            return result
+
+        def macho_section_name_matches(section: MachOSection, expected_name: u8&, expected_length: usize) -> bool:
+            return false if not section.valid or expected_length == 0 or expected_length > Section::MACHO_SECTION_NAME_BYTES
+            for index in 0..<expected_length:
+                return false if section.name[index] != expected_name[index]
+            return true if expected_length == Section::MACHO_SECTION_NAME_BYTES
+            return section.name[expected_length] == 0
+
+    public:
+        def macho_section(header: MachOHeader, bytes: u8&, length: usize, section_index: usize) -> MachOSection:
+            result: MachOSection = zeroed
+            return result if not macho_segments_are_valid(header, bytes, length)
+            cursor: mutable usize = Header::MACHO_HEADER_BYTES
+            current_section: mutable usize = 0
+            for command_index in 0..<header.command_count.usize():
+                command_size: usize = read_u32(bytes, cursor + LoadCommand::MACHO_COMMAND_SIZE_OFFSET).usize()
+                command_kind: u32 = read_u32(bytes, cursor + LoadCommand::MACHO_COMMAND_KIND_OFFSET)
+                if command_kind == LoadCommand::MACHO_SEGMENT_64_KIND:
+                    section_count: usize = read_u32(bytes, cursor + Segment::MACHO_SEGMENT_64_SECTION_COUNT_OFFSET).usize()
+                    for local_index in 0..<section_count:
+                        if current_section == section_index:
+                            section_offset: usize = cursor + Segment::MACHO_SEGMENT_64_COMMAND_BYTES + local_index * Section::MACHO_SECTION_64_BYTES
+                            return macho_section_from_bytes(bytes, length, section_offset)
+                        current_section <- current_section + 1
+                cursor <- cursor + command_size
+            return result
+
+        def macho_find_section(header: MachOHeader, bytes: u8&, length: usize, expected_name: u8&, expected_length: usize) -> MachOSection:
+            result: mutable MachOSection = zeroed
+            return result if expected_length == 0 or expected_length > Section::MACHO_SECTION_NAME_BYTES or not macho_segments_are_valid(header, bytes, length)
+            cursor: mutable usize = Header::MACHO_HEADER_BYTES
+            found: mutable bool = false
+            for command_index in 0..<header.command_count.usize():
+                command_size: usize = read_u32(bytes, cursor + LoadCommand::MACHO_COMMAND_SIZE_OFFSET).usize()
+                command_kind: u32 = read_u32(bytes, cursor + LoadCommand::MACHO_COMMAND_KIND_OFFSET)
+                if command_kind == LoadCommand::MACHO_SEGMENT_64_KIND:
+                    section_count: usize = read_u32(bytes, cursor + Segment::MACHO_SEGMENT_64_SECTION_COUNT_OFFSET).usize()
+                    for local_index in 0..<section_count:
+                        section_offset: usize = cursor + Segment::MACHO_SEGMENT_64_COMMAND_BYTES + local_index * Section::MACHO_SECTION_64_BYTES
+                        section: MachOSection = macho_section_from_bytes(bytes, length, section_offset)
+                        return zeroed if not section.valid
+                        if not found and macho_section_name_matches(section, expected_name, expected_length):
+                            result <- section
+                            found <- true
                 cursor <- cursor + command_size
             return result
 

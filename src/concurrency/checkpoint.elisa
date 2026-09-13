@@ -20,18 +20,11 @@ module DebuggerConcurrencyCheckpoint:
                 return true if snapshot.tasks[index].id.value == id.value
             return false
 
-        def scheduler_decision_task_state_is_valid(decision: DebuggerScheduler::ScheduleDecision) -> bool:
-            candidate: DebuggerConcurrency::TaskInfo = decision.task
-            return candidate.state == DebuggerConcurrency::TaskState.Blocked if decision.kind == DebuggerScheduler::ScheduleKind.Wake
-            return candidate.state == DebuggerConcurrency::TaskState.Runnable or candidate.state == DebuggerConcurrency::TaskState.Running
-
         def snapshot_task_matches(snapshot: TaskSnapshot, decision: DebuggerScheduler::ScheduleDecision) -> bool:
-            candidate: DebuggerConcurrency::TaskInfo = decision.task
             for index in 0..<snapshot.task_count:
                 task: DebuggerConcurrency::TaskInfo = snapshot.tasks[index]
-                if task.id.value == candidate.id.value:
-                    return false if not scheduler_decision_task_state_is_valid(decision)
-                    return task.parent.value == candidate.parent.value and candidate.logical_time <= task.logical_time
+                if task.id.value == decision.task.id.value:
+                    return DebuggerScheduler::scheduler_decision_matches_task(decision, task)
             return false
 
         def snapshot_task_is_blocked(snapshot: TaskSnapshot, id: DebuggerIdentity::DebugId) -> bool:
@@ -133,9 +126,12 @@ module DebuggerConcurrencyCheckpoint:
                 return false if not snapshot_task_is_blocked(snapshot, edge.waiter) or not snapshot_task_is_active(snapshot, edge.owner)
                 for previous in 0..<index:
                     return false if snapshot.waits[previous].waiter.value == edge.waiter.value
+            scheduler_relation_count: mutable usize = snapshot.scheduler_count
+            scheduler_relation_count <- snapshot.scheduler_cursor if snapshot.scheduler_replaying
             for index in 0..<snapshot.scheduler_count:
                 decision: DebuggerScheduler::ScheduleDecision = snapshot.scheduler_decisions[index]
-                return false if decision.ordinal != index.u64() or not DebuggerScheduler::scheduler_decision_is_valid(decision) or decision.kind.u16() > SCHEDULE_KIND_MAX or decision.task.id.value == NO_TASK_ID or decision.task.state.u16() > TASK_STATE_MAX or not snapshot_task_matches(snapshot, decision)
+                return false if decision.ordinal != index.u64() or not DebuggerScheduler::scheduler_decision_is_valid(decision) or decision.kind.u16() > SCHEDULE_KIND_MAX or decision.task.id.value == NO_TASK_ID or decision.task.state.u16() > TASK_STATE_MAX
+                return false if index < scheduler_relation_count and not snapshot_task_matches(snapshot, decision)
             return true
 
         def task_snapshot_restore(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, snapshot: TaskSnapshot) -> void:

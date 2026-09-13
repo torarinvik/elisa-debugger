@@ -16,6 +16,19 @@ const RETENTION_CHUNK_CAPACITY: usize = 128
 const RETENTION_PIN_CAPACITY: usize = 64
 const RETENTION_INVALID_CHUNK_COUNT: usize = RETENTION_CHUNK_CAPACITY + 1
 const RETENTION_INVALID_PIN_COUNT: usize = RETENTION_PIN_CAPACITY + 1
+const HEALTH_FIRST_FAILURE_EVENT: u64 = EVENT + 1
+const HEALTH_LATER_FAILURE_EVENT: u64 = EVENT + 2
+const HEALTH_FIRST_FAILURE_DETAIL: u32 = 1
+const HEALTH_LATER_FAILURE_DETAIL: u32 = 2
+const HEALTH_FAILURE_RESULT: i64 = 19
+const HEALTH_EARLIER_FAILURE_DETAIL: u32 = 3
+const HEALTH_EARLIER_FAILURE_RESULT: i64 = 20
+const FIRST_TRACE_EVENT: u64 = 0
+const HEALTH_EXPECTED_CLAMPED_EVENT: u64 = EVENT - 1
+const HEALTH_UNVERIFIED_REPLAY_RESULT: i64 = 21
+const HEALTH_VERIFIED_FIRST_EVENT_RESULT: i64 = 22
+const HEALTH_ZERO_FAILURE_BOUNDARY_RESULT: i64 = 23
+const HEALTH_FAILURE_PREFIX_RESULT: i64 = 24
 
 def main() -> i64:
     store: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_new()
@@ -62,12 +75,23 @@ def main() -> i64:
     stale_dependency_store <- DebuggerTraceRetention::retention_add_chunk(stale_dependency_store, LATE_CHILD_CHUNK, FIRST_CHUNK)
     stale_dependency_store <- DebuggerTraceRetention::retention_apply_collection(stale_dependency_store, stale_dependency_plan)
     return STALE_DEPENDENCY_RESULT if not stale_dependency_store.chunks[0].live or not DebuggerTraceRetention::retention_chain_is_valid(stale_dependency_store, LATE_CHILD_CHUNK)
+    unverified_health: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_exact()
+    return HEALTH_UNVERIFIED_REPLAY_RESULT if DebuggerTraceHealth::health_can_replay(unverified_health, FIRST_TRACE_EVENT)
+    verified_first_event: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_verify(unverified_health, FIRST_TRACE_EVENT)
+    return HEALTH_VERIFIED_FIRST_EVENT_RESULT if not DebuggerTraceHealth::health_can_replay(verified_first_event, FIRST_TRACE_EVENT)
+    zero_failure: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_downgrade(verified_first_event, DebuggerTraceHealth::HealthState.Partial, FIRST_TRACE_EVENT, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, HEALTH_FIRST_FAILURE_DETAIL))
+    return HEALTH_ZERO_FAILURE_BOUNDARY_RESULT if zero_failure.has_verified_event
     health: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_verify(DebuggerTraceHealth::health_exact(), EVENT)
     return 3 if not DebuggerTraceHealth::health_can_replay(health, EVENT)
-    degraded: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_downgrade(health, DebuggerTraceHealth::HealthState.Partial, EVENT + 1, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, 1))
-    return 4 if DebuggerTraceHealth::health_can_replay(degraded, EVENT + 1)
+    degraded: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_downgrade(health, DebuggerTraceHealth::HealthState.Partial, HEALTH_FIRST_FAILURE_EVENT, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, HEALTH_FIRST_FAILURE_DETAIL))
+    return 4 if DebuggerTraceHealth::health_can_replay(degraded, HEALTH_FIRST_FAILURE_EVENT)
     verified_after_failure: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_verify(degraded, EVENT + 2)
-    return 11 if verified_after_failure.last_verified_event != EVENT or verified_after_failure.failure_event != EVENT + 1
+    return 11 if verified_after_failure.last_verified_event != EVENT or verified_after_failure.failure_event != HEALTH_FIRST_FAILURE_EVENT
+    diverged: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_downgrade(degraded, DebuggerTraceHealth::HealthState.Diverged, HEALTH_LATER_FAILURE_EVENT, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, HEALTH_LATER_FAILURE_DETAIL))
+    return HEALTH_FAILURE_RESULT if diverged.state != DebuggerTraceHealth::HealthState.Diverged or diverged.failure_event != HEALTH_FIRST_FAILURE_EVENT or diverged.failure.code != DebuggerErrors::ErrorCode.Unavailable or diverged.failure.detail != HEALTH_FIRST_FAILURE_DETAIL
+    earlier_partial: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_downgrade(diverged, DebuggerTraceHealth::HealthState.Partial, EVENT, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, HEALTH_EARLIER_FAILURE_DETAIL))
+    return HEALTH_EARLIER_FAILURE_RESULT if earlier_partial.state != DebuggerTraceHealth::HealthState.Diverged or earlier_partial.failure_event != EVENT or earlier_partial.failure.code != DebuggerErrors::ErrorCode.InvalidArgument or earlier_partial.failure.detail != HEALTH_EARLIER_FAILURE_DETAIL
+    return HEALTH_FAILURE_PREFIX_RESULT if not earlier_partial.has_verified_event or earlier_partial.last_verified_event != HEALTH_EXPECTED_CLAMPED_EVENT
     malformed_count: mutable DebuggerTraceRetention::RetentionStore = store
     malformed_count.count <- RETENTION_CHUNK_CAPACITY + 1
     return 12 if DebuggerTraceRetention::retention_find(malformed_count, FIRST_CHUNK) != RETENTION_CHUNK_CAPACITY

@@ -9,6 +9,8 @@ module DebuggerTraceHealth:
         const TRACE_DETAIL_BOUNDARY: u32 = 1
         const TRACE_DETAIL_REASON: u32 = 2
         const HEALTH_STATE_MAX: u16 = 4
+        const TRACE_FIRST_EVENT: u64 = 0
+        const TRACE_EVENT_STEP: u64 = 1
 
     public:
         enum HealthState:
@@ -20,30 +22,38 @@ module DebuggerTraceHealth:
 
         struct Health:
             state: mutable HealthState
+            has_verified_event: mutable bool
             last_verified_event: mutable u64
             failure_event: mutable u64
             failure: mutable DebuggerErrors::DebuggerError
 
         def health_exact() -> Health:
-            return Health{state: HealthState.Exact, last_verified_event: 0, failure_event: 0, failure: DebuggerErrors::no_error()}
+            return Health{state: HealthState.Exact, has_verified_event: false, last_verified_event: TRACE_FIRST_EVENT, failure_event: TRACE_FIRST_EVENT, failure: DebuggerErrors::no_error()}
 
         def health_downgrade(health: Health, state: HealthState, event: u64, failure: DebuggerErrors::DebuggerError) -> Health:
             updated: mutable Health = health
             return updated if state.u16() > HEALTH_STATE_MAX
-            return updated if state == HealthState.Exact or state.u16() < health.state.u16()
-            updated.state <- state
-            updated.failure_event <- event
-            updated.failure <- failure
+            return updated if state == HealthState.Exact
+            first_failure: bool = health.state == HealthState.Exact
+            updated.state <- state if state.u16() > health.state.u16()
+            if first_failure or event < health.failure_event:
+                updated.failure_event <- event
+                updated.failure <- failure
+                if updated.has_verified_event and updated.last_verified_event >= event:
+                    updated.has_verified_event <- false if event == TRACE_FIRST_EVENT
+                    updated.last_verified_event <- event - TRACE_EVENT_STEP if event > TRACE_FIRST_EVENT
             return updated
 
         def health_verify(health: Health, event: u64) -> Health:
             updated: mutable Health = health
             return updated if health.state != HealthState.Exact
-            updated.last_verified_event <- event if event >= health.last_verified_event
+            if not health.has_verified_event or event >= health.last_verified_event:
+                updated.last_verified_event <- event
+                updated.has_verified_event <- true
             return updated
 
         def health_can_replay(health: Health, event: u64) -> bool:
-            return health.state.u16() <= HEALTH_STATE_MAX and health.state == HealthState.Exact and event <= health.last_verified_event and DebuggerErrors::error_is_ok(health.failure)
+            return health.state.u16() <= HEALTH_STATE_MAX and health.state == HealthState.Exact and health.has_verified_event and event <= health.last_verified_event and DebuggerErrors::error_is_ok(health.failure)
 
         def health_failure(health: Health) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, TRACE_DETAIL_REASON) if health.state.u16() > HEALTH_STATE_MAX

@@ -47,6 +47,8 @@ module DebuggerDAPPayload:
         const ASCII_UPPER_C: u8 = 67
         const ASCII_UPPER_F: u8 = 70
         const ASCII_UPPER_M: u8 = 77
+        const ASCII_UPPER_I: u8 = 73
+        const ASCII_LOWER_F: u8 = 102
         const ASCII_LOWER_X: u8 = 120
         const ASCII_UPPER_X: u8 = 88
         const MEMORY_REFERENCE_FIELD: u8 = 1
@@ -83,6 +85,8 @@ module DebuggerDAPPayload:
         const LOG_MESSAGE_FIELD: u8 = 18
         const SOURCE_PATH_FIELD: u8 = 19
         const SOURCE_PATH_ROOT_FIELD: u8 = 20
+        const THREAD_ID_FIELD: u8 = 21
+        const FRAME_ID_FIELD: u8 = 22
         const NO_SOURCE_REFERENCE: u64 = 0
         const DAP_PATH_COMPONENT_CAPACITY: usize = DebuggerMetadata::SOURCE_PATH_CAPACITY
         const PROGRAM_PATH_CAPACITY: usize = DebuggerMetadata::MAPPED_SOURCE_PATH_CAPACITY
@@ -104,6 +108,8 @@ module DebuggerDAPPayload:
         const LOG_MESSAGE_FIELD_LENGTH: usize = 10
         const SOURCE_PATH_FIELD_LENGTH: usize = 4
         const SOURCE_PATH_ROOT_FIELD_LENGTH: usize = 14
+        const THREAD_ID_FIELD_LENGTH: usize = 8
+        const FRAME_ID_FIELD_LENGTH: usize = 7
         const MAX_U32_INTEGER: u64 = 4294967295
         const JSON_TRUE_LENGTH: usize = 4
         const JSON_FALSE_LENGTH: usize = 5
@@ -186,6 +192,8 @@ module DebuggerDAPPayload:
             return SOURCE_PATH_ROOT_FIELD_LENGTH if field == SOURCE_PATH_ROOT_FIELD
             return LINES_START_AT_ONE_FIELD_LENGTH if field == LINES_START_AT_ONE_FIELD
             return COLUMNS_START_AT_ONE_FIELD_LENGTH if field == COLUMNS_START_AT_ONE_FIELD
+            return THREAD_ID_FIELD_LENGTH if field == THREAD_ID_FIELD
+            return FRAME_ID_FIELD_LENGTH if field == FRAME_ID_FIELD
             return VARIABLES_REFERENCE_FIELD_LENGTH if field == VARIABLES_REFERENCE_FIELD
             return START_FIELD_LENGTH if field == START_FIELD
             return ARGUMENTS_FIELD_LENGTH if field == ARGUMENTS_FIELD
@@ -374,6 +382,23 @@ module DebuggerDAPPayload:
                 return ASCII_R if position == 4
                 return ASCII_A if position == 5
                 return ASCII_M
+            if field == THREAD_ID_FIELD:
+                return ASCII_T if position == 0
+                return ASCII_H if position == 1
+                return ASCII_R if position == 2
+                return ASCII_E if position == 3
+                return ASCII_A if position == 4
+                return ASCII_D if position == 5
+                return ASCII_UPPER_I if position == 6
+                return ASCII_D
+            if field == FRAME_ID_FIELD:
+                return ASCII_LOWER_F if position == 0
+                return ASCII_R if position == 1
+                return ASCII_A if position == 2
+                return ASCII_M if position == 3
+                return ASCII_E if position == 4
+                return ASCII_UPPER_I if position == 5
+                return ASCII_D
             if field == MEMORY_REFERENCE_FIELD:
                 return ASCII_M if position == 0
                 return ASCII_E if position == 1
@@ -767,6 +792,17 @@ module DebuggerDAPPayload:
                 return invalid_value() if not is_whitespace(payload[index]) and payload[index] != ASCII_COMMA and payload[index] != ASCII_BRACE_CLOSE and payload[index] != ASCII_BRACKET_CLOSE
             return ParsedValue{valid: true, value: value, end: index}
 
+        def request_handle_value_parse(payload: u8&, length: usize, field: u8) -> ParsedValue:
+            root_start: mutable usize = 0
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            arguments: usize = object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 0)
+            return invalid_value() if arguments == NO_INDEX or object_field_value_start(payload, length, root_start, ARGUMENTS_FIELD, 1) != NO_INDEX
+            return invalid_value() if arguments >= length or payload[arguments] != ASCII_BRACE_OPEN
+            reference_start: usize = object_field_value_start(payload, length, arguments, field, 0)
+            return invalid_value() if reference_start == NO_INDEX or object_field_value_start(payload, length, arguments, field, 1) != NO_INDEX
+            return parse_unsigned_bounded(payload, length, reference_start, MAX_INTEGER)
+
     public:
         struct ProgramPath:
             bytes: mutable u8[PROGRAM_PATH_CAPACITY]
@@ -790,6 +826,10 @@ module DebuggerDAPPayload:
             count: mutable usize
             has_count: mutable bool
 
+        struct ReferenceRequest:
+            valid: mutable bool
+            reference: mutable u64
+
         struct SourceBreakpointsRequest:
             valid: mutable bool
             source_reference: mutable u64
@@ -803,6 +843,14 @@ module DebuggerDAPPayload:
             valid: mutable bool
             root: mutable ProgramPath
             has_root: mutable bool
+
+        def thread_id_request_parse(payload: u8&, length: usize) -> ReferenceRequest:
+            parsed: ParsedValue = request_handle_value_parse(payload, length, THREAD_ID_FIELD)
+            return ReferenceRequest{valid: parsed.valid, reference: parsed.value}
+
+        def frame_id_request_parse(payload: u8&, length: usize) -> ReferenceRequest:
+            parsed: ParsedValue = request_handle_value_parse(payload, length, FRAME_ID_FIELD)
+            return ReferenceRequest{valid: parsed.valid, reference: parsed.value}
 
         def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64) -> bool:
             return false if request.count >= DAP_SOURCE_BREAKPOINT_LIMIT or line > MAX_U32_INTEGER

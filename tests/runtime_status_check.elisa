@@ -18,6 +18,21 @@ const BLOCKED_RESPAWN_RESULT: i64 = 27
 const THIRD_WAIT_RESOURCE_ID: u64 = 101
 const CURRENT_FALLBACK_RESULT: i64 = 28
 const CURRENT_FALLBACK_RESOURCE_ID: u64 = 102
+const INVALID_SCHEDULER_COUNT: usize = 513
+const INVALID_SCHEDULER_CURSOR: usize = 1
+const INVALID_SCHEDULER_RESULT: i64 = 29
+const INVALID_SCHEDULER_DECISION_RESULT: i64 = 30
+const INVALID_SCHEDULER_DECISION_ORDINAL: u64 = 1
+const FIRST_SCHEDULER_DECISION_INDEX: usize = 0
+const FIRST_SCHEDULER_DECISION_ORDINAL: u64 = 0
+const SECOND_SCHEDULER_DECISION_ORDINAL: u64 = 1
+const FIRST_SCHEDULER_DECISION_CONSUMED_COUNT: usize = 1
+const FUTURE_SCHEDULER_LOGICAL_TIME: u64 = 8
+const FUTURE_SCHEDULER_OS_THREAD: u64 = 2
+const ROOT_TASK_ID: u64 = 0
+const NO_SYNCHRONIZATION_ID: u64 = 0
+const UNKNOWN_SCHEDULER_TASK_ID: u64 = 99
+const INVALID_SCHEDULER_TASK_RESULT: i64 = 31
 
 def runtime_with_blocked_waiter() -> DebuggerConcurrencyRuntime::TaskRuntime:
     runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
@@ -31,6 +46,30 @@ def runtime_with_blocked_waiter() -> DebuggerConcurrencyRuntime::TaskRuntime:
 def main() -> i64:
     runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
     return 10 if not DebuggerConcurrencyRuntime::runtime_is_valid(runtime)
+    invalid_scheduler_count: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime
+    invalid_scheduler_count.scheduler.count <- INVALID_SCHEDULER_COUNT
+    return INVALID_SCHEDULER_RESULT if DebuggerConcurrencyRuntime::runtime_is_valid(invalid_scheduler_count)
+    invalid_scheduler_cursor: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime
+    invalid_scheduler_cursor.scheduler.cursor <- INVALID_SCHEDULER_CURSOR
+    return INVALID_SCHEDULER_RESULT if DebuggerConcurrencyRuntime::runtime_is_valid(invalid_scheduler_cursor)
+    invalid_scheduler_decision: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    decision_task: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(invalid_scheduler_decision, DebuggerIdentity::debug_id(ROOT_TASK_ID))
+    return INVALID_SCHEDULER_DECISION_RESULT if not DebuggerConcurrencyRuntime::runtime_schedule(invalid_scheduler_decision, decision_task, DebuggerScheduler::ScheduleKind.Run, DebuggerIdentity::debug_id(NO_SYNCHRONIZATION_ID))
+    invalid_scheduler_decision.scheduler.decisions[FIRST_SCHEDULER_DECISION_INDEX].ordinal <- INVALID_SCHEDULER_DECISION_ORDINAL
+    return INVALID_SCHEDULER_DECISION_RESULT if DebuggerConcurrencyRuntime::runtime_is_valid(invalid_scheduler_decision)
+    invalid_scheduler_decision.scheduler.decisions[FIRST_SCHEDULER_DECISION_INDEX].ordinal <- FIRST_SCHEDULER_DECISION_ORDINAL
+    invalid_scheduler_decision.scheduler.decisions[FIRST_SCHEDULER_DECISION_INDEX].task.id <- DebuggerIdentity::debug_id(UNKNOWN_SCHEDULER_TASK_ID)
+    return INVALID_SCHEDULER_TASK_RESULT if DebuggerConcurrencyRuntime::runtime_is_valid(invalid_scheduler_decision)
+    replay_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(true)
+    replay_task: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(replay_runtime, DebuggerIdentity::debug_id(ROOT_TASK_ID))
+    future_task: DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(SECOND_TASK), parent: DebuggerIdentity::debug_id(ROOT_TASK_ID), state: DebuggerConcurrency::TaskState.Runnable, logical_time: FUTURE_SCHEDULER_LOGICAL_TIME, os_thread: FUTURE_SCHEDULER_OS_THREAD}
+    replay_history: mutable DebuggerScheduler::DeterministicScheduler = DebuggerScheduler::scheduler_new(false)
+    replay_history <- DebuggerScheduler::scheduler_append(replay_history, DebuggerScheduler::ScheduleDecision{ordinal: FIRST_SCHEDULER_DECISION_ORDINAL, task: replay_runtime.tasks[FIRST_SCHEDULER_DECISION_INDEX], kind: DebuggerScheduler::ScheduleKind.Run, synchronization: NO_SYNCHRONIZATION_ID})
+    replay_history <- DebuggerScheduler::scheduler_append(replay_history, DebuggerScheduler::ScheduleDecision{ordinal: SECOND_SCHEDULER_DECISION_ORDINAL, task: future_task, kind: DebuggerScheduler::ScheduleKind.Run, synchronization: NO_SYNCHRONIZATION_ID})
+    replay_history.replaying <- true
+    replay_history.cursor <- FIRST_SCHEDULER_DECISION_CONSUMED_COUNT
+    replay_runtime.scheduler <- replay_history
+    return INVALID_SCHEDULER_TASK_RESULT if replay_task.value != FIRST_TASK or not DebuggerConcurrencyRuntime::runtime_is_valid(replay_runtime) or not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(DebuggerConcurrencyCheckpoint::task_snapshot_capture(replay_runtime))
     first: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(0))
     second: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(0))
     return 1 if first.value != FIRST_TASK or second.value != SECOND_TASK

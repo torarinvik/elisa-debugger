@@ -44,6 +44,12 @@ module DebuggerScheduler:
             return false if not schedule_kind_requires_sync(decision.kind) and decision.synchronization != SCHEDULE_NO_SYNC_ID
             return true
 
+        def scheduler_decision_matches_task(decision: ScheduleDecision, task: DebuggerConcurrency::TaskInfo) -> bool:
+            return false if decision.task.id.value != task.id.value or decision.task.parent.value != task.parent.value
+            return false if decision.task.logical_time > task.logical_time
+            return decision.task.state == DebuggerConcurrency::TaskState.Blocked if decision.kind == ScheduleKind.Wake
+            return decision.task.state == DebuggerConcurrency::TaskState.Runnable or decision.task.state == DebuggerConcurrency::TaskState.Running
+
         def scheduler_new(replaying: bool) -> DeterministicScheduler:
             scheduler: mutable DeterministicScheduler = zeroed
             scheduler.count <- 0
@@ -90,10 +96,16 @@ module DebuggerScheduler:
         def scheduler_next(scheduler: DeterministicScheduler, task: DebuggerConcurrency::TaskInfo, kind: ScheduleKind) -> DeterministicScheduler:
             return scheduler_next_with_sync(scheduler, task, kind, DebuggerIdentity::debug_id(0))
 
-        def scheduler_is_exact(scheduler: DeterministicScheduler) -> bool:
-            return false if scheduler.count > SCHEDULE_CAPACITY or scheduler.cursor > scheduler.count or scheduler.diverged or scheduler.overflowed
+        def scheduler_state_is_valid(scheduler: DeterministicScheduler) -> bool:
+            return false if scheduler.count > SCHEDULE_CAPACITY or scheduler.cursor > scheduler.count
             return false if not scheduler.replaying and scheduler.cursor != 0
-            return false if scheduler.replaying and scheduler.cursor != scheduler.count
+            return false if scheduler.overflowed and not scheduler.diverged
             for index in 0..<scheduler.count:
-                return false if scheduler.decisions[index].ordinal != index.u64() or not scheduler_decision_is_valid(scheduler.decisions[index])
+                decision: ScheduleDecision = scheduler.decisions[index]
+                return false if decision.ordinal != index.u64() or not scheduler_decision_is_valid(decision)
+            return true
+
+        def scheduler_is_exact(scheduler: DeterministicScheduler) -> bool:
+            return false if not scheduler_state_is_valid(scheduler) or scheduler.diverged or scheduler.overflowed
+            return false if scheduler.replaying and scheduler.cursor != scheduler.count
             return true

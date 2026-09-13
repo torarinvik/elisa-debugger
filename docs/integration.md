@@ -1,178 +1,117 @@
 # Editor and tool integration
 
-The debugger has two integration boundaries. Use the DAP executable when an
-editor already has a DAP client. Use the versioned headless service for
-editor-neutral managed lifecycle and inspection requests. Plugins that need
-trace bytes, branch, or history operations can use the typed in-process
-service until those payloads are available on the process transport.
+Use one of the two process boundaries according to the host's debugger
+support:
 
-For in-process Elisa integrations, `DebuggerManagedService` is the shared
-managed provider facade. Construct it with a verified `ProgramImage`, dispatch
-typed requests through `service_dispatch`, and read bounded frames or locals
-with `service_frame` and `service_locals`. This path executes the same replay
-engine directly, including reverse-step and validated `targetEvent` seek.
-The DAP executable, CLI, and headless server use this facade for managed
-launch, pause, resume, step, reverse-step, and seek operations. The headless
-process loads and verifies the EDIR artifact named by `arguments.program`
-before replacing its initial image. It also encodes the current frame, local
-scope, and bounded local pages as protocol responses. A variables request puts
-the current `variablesReference` in `arguments` and carries a decimal-string
-page cursor in top-level `pageStart`; the server rejects references from older
-stop generations. In-process clients can still call
-`DebuggerSessionService::managed_new` and `service_handle_managed` with the
-typed envelope model when they need operations that the process transport does
-not yet carry.
+| Boundary | Use it for | Current scope |
+| --- | --- | --- |
+| DAP adapter, `build/elisa-debugger-dap-server` | Editors that can launch a Debug Adapter Protocol process | Managed EDIR launch, source-line debugging, stack and local inspection, memory reads, and the advertised forward/reverse stepping operations |
+| Headless service, `build/elisa-debugger-server` | Test runners, custom frontends, and hosts that need direct managed-session requests | Versioned compact JSON framing, managed EDIR lifecycle and time navigation, and bounded frame/local inspection |
 
-The managed service captures each committed EDIR execution-boundary event in
-its bounded event journal. Once the session is stopped, in-process Elisa
-adapters can include `protocol/managed_trace.elisa` and call
-`DebuggerManagedTraceService::service_trace_verify` and
-`DebuggerManagedTraceService::service_trace_export`; export
-returns a canonical, checksummed byte buffer that the adapter can write or
-transport. Export builds a snapshot and leaves the live recorder usable. The
-current exact trace covers one deterministic root execution. A reverse move or
-execution on a child branch marks that linear capture partial, so later export
-cannot claim that it contains the changed execution. The JSON headless server
-does not yet carry trace artifact bytes, so its `trace.export` request remains
-unavailable; clients should use the typed service API until the versioned
-artifact response is implemented.
+Each process owns its own managed session. The DAP and headless transports do
+not attach to or share one another's session. Neither process currently ships a
+network listener. The public Elisa modules define source-level APIs for Elisa
+callers; they are not a stable cross-language ABI. Plugins written in another
+language should use DAP or the documented JSON process boundary.
 
-Call `DebuggerDiscovery::discovery_for` before selecting optional UI actions.
-The returned protocol version, provider kind, history mode, capabilities, and
-resource limits are stable machine-readable data. Timeline positions and
-bookmarks use `DebuggerTimeline`; managed heap and stack reads use
-`DebuggerMemory`; ordered asynchronous notifications use
-`DebuggerProtocolEvents`. These public modules keep editor adapters independent
-of private replay and storage representations.
+The [support matrix](support-matrix.md) and the running endpoint's discovery or
+capability response define what is available. Method names in a typed Elisa
+module or in the protocol vocabulary do not establish that a process transport
+implements that method's operands and result. In particular, this repository
+does not ship a VS Code or JetBrains plugin, and has not qualified either host
+integration end to end.
 
-For the headless process, send `initialize` with required numeric
-`protocolMajor` and `protocolMinor` before session requests. The server rejects
-an unsupported major with `INCOMPATIBLE_VERSION` and otherwise returns the
-selected compatible minor. Until then, only `discover` is accepted; session
-methods return `INITIALIZE_REQUIRED`. Call `discover` before or after
-initialization to read the current feature set. The current process handshake does not create a
-session or exchange an ownership token. Its exact fields and error shapes are
-described by the [initialize JSON Schema](../schemas/session-protocol-v1.initialize.schema.json)
-and the [wire specification](../spec/session-protocol.md#target-lifecycle).
+## DAP process
 
-`DebuggerProtocolIntegration` is the typed contract for clients that need the
-full discovery and session handshake. Its discovery document includes product
-version, trace schema, installation health, per-session capabilities, and
-bounded page/query/payload limits. Requests carry a client identity, session
-ownership token, expected stop generation, page size, and target event. The
-validator rejects stale generations, missing or mismatched session-owner tokens
-for mutations and cancellation, oversized targets, and unsupported trace
-operations before the provider is touched. The transport passes the expected
-owner token it issued for the session; a non-zero token supplied by a client is
-not sufficient by itself.
-Retry classification is explicit: discovery and read-only inspection operations
-are safe to repeat, launch/attach/branch/terminate are forbidden to repeat after
-an uncertain result, and other mutations are same-request-only so a client can
-deduplicate by request ID without creating a second operation.
+Launch `build/elisa-debugger-dap-server` as a child process and connect its
+standard input and output using DAP `Content-Length` framing. Standard output
+is reserved for protocol messages. The adapter implements managed EDIR
+launch; `program` is a verified EDIR artifact, not Elisa source. It does not
+compile source or apply `args`, `cwd`, `env`, or `stopOnEntry` from a launch
+configuration. DAP attach is unavailable.
 
-## VS Code
+The current adapter supports source-line breakpoints against the EDIR source
+table, one `main` thread, stack and locals inspection, bounded local paging,
+`readMemory`, continue, pause, `next`, `stepIn`, `stepOut`, `stepBack`,
+`reverseContinue`, disconnect, and terminate. Source paths must match the
+artifact's logical paths. Set the adapter launch argument `sourcePathRoot` to
+the workspace root when the editor sends absolute paths; the adapter removes
+that exact root prefix before matching. It does not use basename or suffix
+matching. Conditions, hit conditions, logpoints, function and data
+breakpoints, expression evaluation, variable assignment, restart, and
+disassembly are unavailable. The initialize response advertises the relevant
+DAP capabilities; clients should honor that response.
 
-Register `build/elisa-debugger-dap-server` as a debug adapter that is launched
-as a child process. Send ordinary DAP `initialize`, `launch`,
-`configurationDone`, `setBreakpoints`, `threads`, `stackTrace`, `scopes`,
-`variables`, `evaluate`, `continue`, `next`, `stepIn`, `stepOut`, `pause`, and
-`disconnect` requests. The adapter uses `Content-Length: <bytes>\r\n\r\n` and
-returns one JSON message per frame. Read the advertised capability fields on
-`initialize`; do not infer support from the executable name.
+The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. A locals
+`variablesReference` is valid only for the stop generation that produced it.
+Re-request scopes after execution advances. The adapter supports both
+`source.path` and a known positive `sourceReference` for source breakpoints;
+when both are supplied they must identify the same EDIR source entry.
 
-The adapter follows the `linesStartAt1` and `columnsStartAt1` options from the
-`initialize` request. Both default to `true`; the adapter converts Elisa's
-one-based source lines and zero-based UTF-16 columns to the requested bases.
-Unknown source locations use `0` for both coordinates. Keep the response
-`request_seq` and the adapter sequence separate. A client may send multiple
-frames in one write and may fragment a frame across reads.
+## Headless JSON process
 
-For the current managed provider, set `arguments.program` to a verified `.edir`
-artifact path. The adapter loads and verifies the file before starting the
-session, then reports instruction source lines from that artifact. Missing or
-invalid artifacts fail the launch. Use the `variablesReference` returned by
-`scopes` to request the current locals. The reference is tied to the stop
-generation and becomes stale after execution advances. Variable requests may
-include bounded `start` and `count` fields; initialized integer locals are
-returned as values, while uninitialized locals are marked `<unavailable>`.
-Until source-name metadata is emitted, locals use stable ordinal names such as
-`local0`.
+Run `build/elisa-debugger-server` with one process per client session. The
+transport is a decimal UTF-8 byte length, one space, the JSON request, then a
+newline. Send `discover`, then negotiate protocol major/minor with
+`initialize` before session methods. The compact process currently supports
+protocol `1.0`; see the [initialize schema](../schemas/session-protocol-v1.initialize.schema.json)
+and [wire specification](../spec/session-protocol.md) for exact framing,
+fields, and errors.
 
-EDIR schema 2 carries a bounded source-file table with source IDs, normalized
-logical paths, content digests, and line counts. `setBreakpoints` accepts the
-standard `source.path` form and resolves it only against that table; it never
-derives a file ID from the client path. A positive `sourceReference` remains
-supported for clients that already use the earlier adapter extension. If both
-fields are supplied they must resolve to the same source file. Path matching
-uses exact normalized path bytes, with client backslashes treated as `/`;
-unknown or ambiguous paths fail the request. Since editors normally send an
-absolute path while EDIR stores portable relative logical paths, a DAP `launch`
-request can include the adapter option `sourcePathRoot` set to the local
-workspace root. The adapter strips only that exact root prefix at a path
-separator boundary, then resolves the remaining relative path exactly. For
-example, `/work/project/src/main.elisa` maps to `src/main.elisa` when
-`sourcePathRoot` is `/work/project`; Windows drive roots and backslash paths are
-also supported, including UNC roots. Windows root matching ignores ASCII case
-differences and normalizes backslashes; the relative logical path still matches
-exactly. The option must be an absolute POSIX path, a drive path, or a UNC
-share path, and it never performs basename or suffix matching. `stackTrace` returns a DAP
-`source` object using the same mapped path, so clients can open the frame and
-reuse its path in later breakpoint requests. Clients that already send the
-EDIR logical path can omit the option. The metadata currently contains no
-embedded source text, so a content digest alone does not prove that a client's
-workspace file has matching contents.
+The supported compact request flow is `launch` with
+`arguments.program`, `pause`, `continue`, `step`, `reverseStep`, and `seek`.
+After launch, `threads` returns one logical `main` thread, including while the
+session is running. Pause before requesting `stack`, `scopes`, or `variables`.
+`program` must name a complete verified EDIR artifact. `variablesReference` is
+generation-bound; request a fresh scopes response after execution advances.
+Variable pages use top-level `pageSize` and decimal-string
+`pageStart`/`next` offsets. The current page-size limit is 256 entries.
 
-The normal adjacent compiler checkout may not include the EDIR lowering
-extension. With an Elisa compiler checkout that supports `-emit edir`, run
-`make ELISA_EDIR_COMPILER=/path/to/elisac_stage1.sh compiler-edir-check` to
-compile the typed-local fixture, load and execute its artifact in the debugger
-VM, exercise DAP local inspection, and compare the native result. This gate
-currently covers one typed `i64` local with literal arithmetic; unsupported
-source shapes are rejected by the compiler. Ordinary source compilation and
-native-program launch through DAP remain unavailable on this managed provider.
+This endpoint does not implement attach, source-breakpoint payloads, expression
+evaluation, memory reads, trace artifact transfer, or multi-client session
+ownership. Checkpoint, branch, comparison, and trace operations that need
+structured operands or results are not available through this compact endpoint
+merely because corresponding typed Elisa APIs exist. `discover` reports the
+compact endpoint's capabilities, with process-inaccessible features disabled.
 
-## JetBrains
+The compact process does not emit progress or ordered session events, route
+cancellation, create a shareable session token, or let another process attach
+to its session. Requests and responses are documented in
+[the session protocol](../spec/session-protocol.md). That document labels the
+broader typed target contract separately from the methods currently wired to
+the compact process.
 
-Implement the JetBrains debugger-process bridge against the same DAP endpoint,
-or use the headless service when the plugin needs reverse execution. In-process
-Elisa adapters can also use the typed managed trace verification and export
-functions. The service is a child process with protocol-only stdout. Each
-request is a decimal byte count, one space, the UTF-8 JSON payload, and a final
-newline. Numeric request IDs and event ordinals are represented as decimal
-strings at the external boundary so JavaScript, Kotlin, and Java clients do
-not lose precision.
+## Host adapter mapping
 
-The service method names are versioned and editor-neutral: `discover`,
-`initialize`, `createSession`, `launch`, `attach`, `openTrace`, `replay`,
-`pause`, `continue`, `step`, `reverseStep`, `seek`, `threads`, `stack`,
-`scopes`, `variables`, `evaluate`, `setBreakpoints`, `setDataBreakpoints`,
-`checkpoint`, `branch`, `compare`, `trace.verify`, `trace.export`, `detach`,
-`terminate`, and `close`. Include `expectedStopGeneration` on requests that
-operate on a stopped session. A stale value produces `STALE_GENERATION` and
-does not mutate the session.
+| Host | Map host actions to | Current adapter guidance |
+| --- | --- | --- |
+| VS Code | DAP initialize/launch, source breakpoints, threads/frames/scopes/variables, execution requests, and lifecycle | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. This repository supplies the backend, not the extension manifest or TypeScript host glue. |
+| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter; otherwise the compact JSON requests the host can support | No JetBrains plugin or platform-version qualification is included. A host-specific bridge must only translate UI/session requests and render responses; it cannot obtain attach, evaluate, or advanced trace operations from the current compact endpoint. |
+| Other editors and tools | DAP for standard debugger UI; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve decimal IDs/offsets as strings where the protocol says strings, and report unavailable operations from endpoint behavior rather than parsing messages. |
 
-Use the discovery response to hide unsupported commands and to size client
-buffers from the advertised limits. Subscribe to protocol events by sequence
-number and acknowledge them monotonically; do not infer stop state from log
-text.
+For a DAP host, the mapping is direct: source-line breakpoints use
+`setBreakpoints`; call-stack and local panes use `threads`, `stackTrace`,
+`scopes`, and `variables`; controls use the supported execution requests; the
+host displays capability fields and protocol errors. For a compact JSON host,
+map lifecycle controls to the request names above, refresh inspection handles
+on every stop-generation change, and keep the headless process private to that
+client. There is no supported way to combine a DAP session with a second
+headless connection.
 
-## Other clients
+## Integration rules
 
-Keep transport, rendering, and retry policy in the client. The Elisa modules
-own session transitions, capabilities, cancellation, trace exactness, and
-typed failure codes. Clients should preserve unknown fields, page large
-results with `next`, and treat `UNAVAILABLE`, `CORRUPT`, `DIVERGED`, and
-`RESOURCE_LIMIT` as distinct states. No client should parse human-readable
-messages to decide whether an operation is supported.
+- Use the transport's capability and error responses to gate UI actions, while
+  respecting the documented compact-process limitation for `memoryRead`.
+- Preserve unknown optional fields and distinguish `UNSUPPORTED`,
+  `UNAVAILABLE`, `STALE_GENERATION`, `CORRUPT`, `DIVERGED`, and
+  `RESOURCE_LIMIT`; do not infer support from human-readable messages.
+- Treat the DAP and compact headless service as independent sessions. Do not
+  start a second process to add a timeline panel to an existing session.
+- Do not parse CLI output or import private engine/storage modules into a
+  plugin. The command-line interface is not the editor API.
+- Do not claim native attach, native replay, remote sessions, trace branching,
+  or history panels in a host integration until the selected process transport
+  both advertises and implements the required operation end to end.
 
-For a custom runner, launch the headless server, wait for `discover`, create a
-session, and use the returned stop generation as the optimistic concurrency
-token. For a remote runner, carry the same messages through an authenticated
-tunnel and use the Elisa remote-artifact transfer checks before opening a
-trace.
-
-Remote sessions make disconnect behavior explicit through
-`RemoteDisconnectPolicy`: a client can request detach, pause, or continue when
-the transport disappears. The selected policy remains attached to the remote
-channel across heartbeat draining and reconnect attempts; quota failures still
-block reconnect until a new channel is created.
+See the [plugin-author guide](../spec/plugin-integration.md) for launch
+configuration examples and the current attach limitation.

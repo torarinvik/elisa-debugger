@@ -134,24 +134,28 @@ argument-free operation vocabulary.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use
-bounded `pageSize` and `pageStart` operands. Threads, expression evaluation,
-memory reads, source breakpoint payloads, trace artifact transfer, and provider
-selection are not wired on this endpoint yet. Clients should use discovery and
-the explicit error response instead of assuming those operations exist.
+bounded `pageSize` and `pageStart` operands. It returns the managed session's
+single `main` thread. Expression evaluation, source breakpoint payloads, trace
+artifact transfer, memory reads, and provider selection are not wired on this
+endpoint; discovery reports the smaller process capability set. See [the
+integration guide](docs/integration.md) for the exact process boundaries and
+limitations.
 
 ## Integration boundary
 
-VS Code and JetBrains integrations should launch the headless process and use
-the documented protocol. They do not import private modules, parse CLI text,
-or duplicate replay policy. The DAP adapter and advanced session service share
-the same `DebuggerSession` state and stop-generation semantics. See the
-[plugin-author guide](spec/plugin-integration.md) for DAP launch setup and the
-current attach limitation, and the protocol specification for framing, IDs,
-coordinates, version negotiation, pagination, cancellation, and error behavior.
+VS Code integrations should launch the DAP adapter for the standard debugger
+experience. JetBrains plugins can use that adapter where their chosen host
+route supports DAP; otherwise they can map supported operations to the
+headless JSON process. The transports use the same managed engine policy, but
+each process owns an independent session. No VS Code or JetBrains plugin is
+included or qualified here. Host glue must not import private modules, parse
+CLI text, or duplicate replay policy. See the [integration guide](docs/integration.md),
+[plugin-author guide](spec/plugin-integration.md), and the protocol
+specification for current limits and wire details.
 
 The source also contains typed `DebuggerTimeline`, `DebuggerMemory`, and
-`DebuggerProtocolEvents` contracts for integrations that can call the Elisa
-service in-process. The current compact headless process does not serialize
-those advanced surfaces or share a running session with a second connection.
+`DebuggerProtocolEvents` contracts for Elisa callers. These modules are not a
+stable cross-language ABI, and the compact process does not serialize their
+advanced surfaces or share a running session with a second connection.
 External plugins should enable panels only when their selected transport
-advertises and implements the corresponding operations.
+implements the corresponding operations.

@@ -50,7 +50,8 @@ or transitioning the session to running. `pause`, `continue`, `step`,
 in-process service. Mutating and inspection requests may include
 `expectedStopGeneration`; a stale value fails without applying the request.
 
-After the session is stopped, `stack` returns the current managed frame,
+After launch, `threads` returns the process's single logical `main` thread.
+Once the session is stopped, `stack` returns the current managed frame,
 `scopes` returns the locals scope and its generation-bound
 `variablesReference`, and `variables` returns typed local values. A variables
 request places that reference inside `arguments`. Integer values are decimal
@@ -63,13 +64,15 @@ and the response's decimal-string `next` offset can be sent back as
 `pageStart`. Local pages are additionally bounded by the managed inspection
 capacity.
 
-`discover` reports the features this endpoint can provide. Threads, expression
-evaluation, memory reads, source-breakpoint operands, and trace artifact
-transfer are not wired to this process transport yet. Their method names remain
-reserved for compatible future protocol versions and return an explicit
-unsupported or unavailable result. The typed in-process service exposes a
-broader surface than this process endpoint; clients should not infer wire
-support from an in-process module or from the method vocabulary alone.
+`discover.result.features` includes a boolean for every capability in the
+shared `CapabilitySet`. The process clears features whose request operands or
+result payloads are not wired to this compact transport, including source
+breakpoints, memory reads, checkpoints, branches, trace verification, trace
+export, and historical queries. Threads, frames, scopes, and locals are
+available through the managed inspection surface. Expression evaluation and
+trace artifact transfer are not wired to this process. Clients must honor the
+process's discovery result; method names in the typed in-process API or the
+protocol vocabulary alone do not imply wire support.
 
 ## Target lifecycle
 

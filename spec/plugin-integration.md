@@ -1,8 +1,11 @@
 # Plugin integration guide
 
-The debugger is a process service. A plugin owns presentation and workspace
-configuration; the Elisa executable owns target execution, source identity,
-replay, checkpoints, branches, and capability decisions.
+The debugger exposes process transports; a plugin owns presentation and
+workspace configuration. The Elisa core owns debugger policy, but each process
+transport exposes only the operations it can carry end to end. This repository
+does not include a VS Code or JetBrains plugin or certify a host-platform
+integration. For the transport comparison and current host mapping, see the
+[editor integration guide](../docs/integration.md).
 
 ## VS Code
 
@@ -54,13 +57,15 @@ transport.
 
 ## JetBrains
 
-Use the same DAP executable and launch fields when the JetBrains host supports
-DAP. Map the plugin's run configuration to `request=launch`, `program`, and,
-when required, `sourcePathRoot`; do not expose attach for this adapter. If a
-JetBrains platform needs a native debugger bridge, keep it thin: translate
-host requests to the public Elisa session API and let the backend make
-capability, generation, and replay decisions. Do not parse human CLI output or
-reimplement debugger policy.
+Use the same DAP executable and launch fields when the selected JetBrains
+host/plugin route supports DAP. Map the run configuration to
+`request=launch`, `program`, and, when required, `sourcePathRoot`; do not expose
+attach for this adapter. If a host-specific bridge is required, it can call
+only the operations exposed by a process transport. The public Elisa modules
+are source-level APIs for Elisa callers, not a stable cross-language ABI; a
+Kotlin or Java plugin cannot directly call them as a supported integration
+route. Do not parse human CLI output or reimplement debugger policy. This guide
+does not claim a JetBrains version has been tested.
 
 The DAP adapter uses standard DAP `initialize` capabilities. The headless
 process has a separate `discover`/`initialize` version handshake; its current
@@ -86,12 +91,14 @@ that only supports ordinary DAP debugging should use the advertised DAP
 capabilities and avoid assuming that a method name in the broader session
 protocol is wired to that process.
 
-The typed in-process service can issue advanced operations without opening the
-interactive CLI. Where a transport actually supplies a session ownership token
-and stop generation, clients must preserve them and reject stale handles. When
-a trace is partial, show the last verified event and disable reverse actions
-beyond it. When a value is unavailable, render its availability state instead
-of displaying a numeric zero.
+An Elisa component built in-process can call typed service APIs without
+opening the interactive CLI. Those APIs do not extend the compact JSON process
+transport, and the current DAP process does not expose advanced trace results.
+Where a transport actually supplies a session ownership token and stop
+generation, clients must preserve them and reject stale handles. When a trace
+is partial, show the last verified event and disable reverse actions beyond
+it. When a value is unavailable, render its availability state instead of
+displaying a numeric zero.
 
 The optional `timeline`, `memory`, and `events` surfaces have public Elisa
 contracts backed by `DebuggerTimeline`, `DebuggerMemory`, and

@@ -1,8 +1,9 @@
 # Support matrix
 
-The matrix describes the current checked-in implementation. A client should
-use discovery and per-session capabilities at runtime; this document is a
-human-readable guide, not a substitute for negotiation.
+The matrix describes the current checked-in implementation. Clients should
+use the selected process transport's capabilities. Typed Elisa APIs and
+protocol method names do not imply that the compact process transport can
+carry their operands and results.
 
 | Surface | Managed EDIR | Instrumented native | Attach/postmortem |
 | --- | --- | --- | --- |
@@ -21,8 +22,8 @@ human-readable guide, not a substitute for negotiation.
 | Concurrency diagnostics | Deterministic scheduler, wait graph, bounded alternate schedules, observed races | Capability contract | Unsupported |
 | Trace storage | Checksummed chunks, manifests, recovery scan | Format contract | Read-only artifact mode |
 | Managed trace capture/export | Exact single-root EDIR boundary events through the typed service API; rewinds and child-branch execution make the capture partial | Unsupported | Unsupported |
-| DAP | Bounded adapter | Capability dependent | Capability dependent |
-| Headless session service | EDIR launch, managed lifecycle/time travel, frame/scope/local inspection | Capability dependent | Capability dependent |
+| DAP process | Managed EDIR only: verified-artifact launch; source-line breakpoints; one `main` thread; stack/scopes/locals; bounded local pages; memory reads; continue/pause/step-in/over/out and reverse step/continue. Attach, conditional/log/function/data breakpoints, evaluation, assignment, restart, and disassembly are unavailable. | No native operations are wired | No postmortem operations are wired |
+| Headless JSON process | Managed EDIR launch, pause/continue/step/reverse-step/seek, one `main` thread, stack/scopes, and paged locals. No attach, source breakpoints, evaluation, serialized memory result, trace artifact transfer, or shared-session ownership. | No native operations are wired | No postmortem operations are wired |
 | Remote transport | Handshake, quotas, resumable artifact transfer, reconnect state | Not qualified | Not qualified |
 
 ## Exactness rules
@@ -44,3 +45,10 @@ Until a native provider is wired to a real target, instrumented-native,
 attached-native, and postmortem capability sets identify the requested engine
 kind but advertise no native operations. The DAP adapter only advertises
 termination for the managed engine and does not advertise native disassembly.
+
+The headless process advertises its smaller wire surface through discovery.
+Memory reads, source breakpoints, checkpoints, branches, comparison, and trace
+operations are not enabled on that endpoint where the required operands or
+results are unavailable. A typed in-process API is not evidence that the
+compact process can carry those operands and results. See [editor
+integration](integration.md) for the process boundary and host mapping.

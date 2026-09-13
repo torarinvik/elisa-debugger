@@ -98,11 +98,15 @@ module DebuggerProtocolServer:
         def server_capabilities(engine_capabilities: DebuggerCapabilities::CapabilitySet) -> DebuggerCapabilities::CapabilitySet:
             wire: mutable DebuggerCapabilities::CapabilitySet = engine_capabilities
             # This compact endpoint does not carry source breakpoint operands
-            # or trace result payloads, so keep those engine-level features
-            # hidden while exposing the managed stack and local snapshots
-            # that this endpoint can serialize.
+            # or the result payloads for memory, checkpoint, branch, and trace
+            # operations. Hide those engine-level features while exposing the
+            # managed thread, stack, and local snapshots it can serialize.
             wire.source_breakpoints <- false
+            wire.checkpoints <- false
+            wire.branches <- false
+            wire.trace_verification <- false
             wire.historical_queries <- false
+            wire.memory_read <- false
             wire.trace_export <- false
             return wire
 
@@ -120,7 +124,7 @@ module DebuggerProtocolServer:
             write_dynamic_response(id, RESPONSE_INVALID_STATE_SUFFIX, RESPONSE_INVALID_STATE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
 
         def response_requires_missing_payload(method: DebuggerProtocolRequest::RequestMethod) -> bool:
-            return true if method == DebuggerProtocolRequest::RequestMethod.Threads or method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
+            return true if method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
             return false
 
         def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse) -> void can[Console, Unsafe.PointerCast]:
@@ -142,6 +146,10 @@ module DebuggerProtocolServer:
                 return
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Discover:
                 write_discovery_response(id, capabilities) can Console
+                return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Threads:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_threads_response_encode(id, result.stop_generation)
+                write_json_buffer_response(encoded) can Console
                 return
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Stack:
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_frame_response_encode(id, result.stop_generation, DebuggerManagedService::service_frame(service))
@@ -244,6 +252,7 @@ module DebuggerProtocolServer:
                 metadata_version: 1
             }
             session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
+            session.capabilities <- server_capabilities(session.capabilities)
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
             protocol_initialized: mutable bool = false
             while true:

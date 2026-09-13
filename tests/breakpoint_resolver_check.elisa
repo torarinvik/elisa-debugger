@@ -1,5 +1,47 @@
 include "../src/breakpoint/resolver.elisa"
 
+const TEST_FUNCTION_NAME_CAPACITY: usize = DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY
+const TEST_FUNCTION_SCHEMA_VERSION: u32 = 1
+const TEST_FUNCTION_NAME_FOO_LENGTH: usize = 3
+const TEST_FUNCTION_NAME_FO_LENGTH: usize = 2
+const TEST_FUNCTION_NAME_BAR_LENGTH: usize = 3
+const TEST_FUNCTION_NAME_BAZ_LENGTH: usize = 3
+const TEST_FUNCTION_NAME_BYTES: u8[TEST_FUNCTION_NAME_FOO_LENGTH] = [102, 111, 111]
+const TEST_FUNCTION_PREFIX_BYTES: u8[TEST_FUNCTION_NAME_FO_LENGTH] = [102, 111]
+const TEST_FUNCTION_OTHER_NAME_BYTES: u8[TEST_FUNCTION_NAME_BAR_LENGTH] = [98, 97, 114]
+const TEST_FUNCTION_MISSING_NAME_BYTES: u8[TEST_FUNCTION_NAME_BAZ_LENGTH] = [98, 97, 122]
+const TEST_FUNCTION_BAD_UTF8_LENGTH: usize = 1
+const TEST_FUNCTION_BAD_UTF8_BYTES: u8[TEST_FUNCTION_BAD_UTF8_LENGTH] = [255]
+const TEST_FUNCTION_EMPTY_NAME_LENGTH: usize = 0
+const TEST_ONE_U64: u64 = 1
+const TEST_ONE_USIZE: usize = 1
+const TEST_FUNCTION_ENTRY_STRIDE: u64 = 2
+const TEST_FUNCTION_INSTRUCTION_COUNT: u64 = 6
+const TEST_FUNCTION_COUNT: usize = 3
+const TEST_FUNCTION_CAPACITY_INSTRUCTION_COUNT: u64 = DebuggerEDIR::EDIR_FUNCTION_CAPACITY.u64() * TEST_FUNCTION_ENTRY_STRIDE
+const TEST_FUNCTION_FIRST_INDEX: usize = 0
+const TEST_FUNCTION_SECOND_INDEX: usize = 1
+const TEST_FUNCTION_THIRD_INDEX: usize = 2
+const TEST_FIRST_OVERLOAD_INDEX: usize = 0
+const TEST_SECOND_OVERLOAD_INDEX: usize = 1
+const TEST_SINGLE_MATCH_INDEX: usize = 0
+const TEST_FUNCTION_FIRST_ID: u64 = 10
+const TEST_FUNCTION_SECOND_ID: u64 = 11
+const TEST_FUNCTION_THIRD_ID: u64 = 12
+const TEST_FUNCTION_FIRST_ENTRY: u64 = 1
+const TEST_FUNCTION_FIRST_END: u64 = 2
+const TEST_FUNCTION_SECOND_ENTRY: u64 = 3
+const TEST_FUNCTION_SECOND_END: u64 = 4
+const TEST_FUNCTION_THIRD_ENTRY: u64 = 5
+const TEST_FUNCTION_THIRD_END: u64 = 6
+const TEST_NO_INSTRUCTION: u64 = 18446744073709551615
+const TEST_RESULT_OVERLOAD_RESOLUTION_FAILED: i64 = 11
+const TEST_RESULT_EXACT_NAME_RESOLUTION_FAILED: i64 = 12
+const TEST_RESULT_UNRESOLVED_FAILED: i64 = 13
+const TEST_RESULT_INVALID_QUERY_FAILED: i64 = 14
+const TEST_RESULT_INVALID_METADATA_FAILED: i64 = 15
+const TEST_RESULT_CAPACITY_RESOLUTION_FAILED: i64 = 16
+
 def main() -> i64:
     resolver: mutable DebuggerBreakpointResolver::Resolver = DebuggerBreakpointResolver::resolver_new()
     source: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(1), start_byte: 0, end_byte: 1, start_line: 1, start_column: 0, end_line: 1, end_column: 1, discriminator: 0}
@@ -10,4 +52,79 @@ def main() -> i64:
     return 3 if invalid_function.status != DebuggerMetadata::BreakpointResolution.Invalid
     valid_location: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_source(resolver, DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(1), line: 1, column: 0, discriminator: 0})
     return 4 if valid_location.status != DebuggerMetadata::BreakpointResolution.Resolved or valid_location.instruction != 0
+
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: TEST_FUNCTION_SCHEMA_VERSION, instruction_count: TEST_FUNCTION_INSTRUCTION_COUNT, local_count: 0, has_return: true}
+    image.function_count <- TEST_FUNCTION_COUNT
+    first_function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+    first_function.id <- DebuggerIdentity::debug_id(TEST_FUNCTION_FIRST_ID)
+    first_function.name_length <- TEST_FUNCTION_NAME_FOO_LENGTH
+    for name_index in 0..<TEST_FUNCTION_NAME_FOO_LENGTH:
+        first_function.name_bytes[name_index] <- TEST_FUNCTION_NAME_BYTES[name_index]
+    first_function.entry_instruction <- TEST_FUNCTION_FIRST_ENTRY
+    first_function.end_instruction_exclusive <- TEST_FUNCTION_FIRST_END
+    image.functions[TEST_FUNCTION_FIRST_INDEX] <- first_function
+    second_function: mutable DebuggerEDIR::FunctionDescriptor = first_function
+    second_function.id <- DebuggerIdentity::debug_id(TEST_FUNCTION_SECOND_ID)
+    second_function.entry_instruction <- TEST_FUNCTION_SECOND_ENTRY
+    second_function.end_instruction_exclusive <- TEST_FUNCTION_SECOND_END
+    image.functions[TEST_FUNCTION_SECOND_INDEX] <- second_function
+    third_function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+    third_function.id <- DebuggerIdentity::debug_id(TEST_FUNCTION_THIRD_ID)
+    third_function.name_length <- TEST_FUNCTION_NAME_BAR_LENGTH
+    for name_index in 0..<TEST_FUNCTION_NAME_BAR_LENGTH:
+        third_function.name_bytes[name_index] <- TEST_FUNCTION_OTHER_NAME_BYTES[name_index]
+    third_function.entry_instruction <- TEST_FUNCTION_THIRD_ENTRY
+    third_function.end_instruction_exclusive <- TEST_FUNCTION_THIRD_END
+    image.functions[TEST_FUNCTION_THIRD_INDEX] <- third_function
+
+    overloads: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    return TEST_RESULT_OVERLOAD_RESOLUTION_FAILED if overloads.status != DebuggerMetadata::BreakpointResolution.PartiallyResolved or overloads.matched != 2 or overloads.instruction != TEST_FUNCTION_FIRST_ENTRY
+    return TEST_RESULT_OVERLOAD_RESOLUTION_FAILED if DebuggerBreakpointResolver::resolution_instruction_at(overloads, TEST_FIRST_OVERLOAD_INDEX) != TEST_FUNCTION_FIRST_ENTRY or DebuggerBreakpointResolver::resolution_instruction_at(overloads, TEST_SECOND_OVERLOAD_INDEX) != TEST_FUNCTION_SECOND_ENTRY
+
+    exact_name: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(image, TEST_FUNCTION_OTHER_NAME_BYTES[0], TEST_FUNCTION_NAME_BAR_LENGTH)
+    return TEST_RESULT_EXACT_NAME_RESOLUTION_FAILED if exact_name.status != DebuggerMetadata::BreakpointResolution.Resolved or exact_name.matched != 1 or exact_name.instruction != TEST_FUNCTION_THIRD_ENTRY
+    return TEST_RESULT_EXACT_NAME_RESOLUTION_FAILED if DebuggerBreakpointResolver::resolution_instruction_at(exact_name, TEST_SINGLE_MATCH_INDEX) != TEST_FUNCTION_THIRD_ENTRY
+    prefix_name: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(image, TEST_FUNCTION_PREFIX_BYTES[0], TEST_FUNCTION_NAME_FO_LENGTH)
+    return TEST_RESULT_UNRESOLVED_FAILED if prefix_name.status != DebuggerMetadata::BreakpointResolution.Unresolved or prefix_name.matched != 0 or prefix_name.instruction != TEST_NO_INSTRUCTION
+    missing_name: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(image, TEST_FUNCTION_MISSING_NAME_BYTES[0], TEST_FUNCTION_NAME_BAZ_LENGTH)
+    return TEST_RESULT_UNRESOLVED_FAILED if missing_name.status != DebuggerMetadata::BreakpointResolution.Unresolved or missing_name.matched != 0
+
+    invalid_utf8: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(image, TEST_FUNCTION_BAD_UTF8_BYTES[0], TEST_FUNCTION_BAD_UTF8_LENGTH)
+    empty_name: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(image, TEST_FUNCTION_BAD_UTF8_BYTES[0], TEST_FUNCTION_EMPTY_NAME_LENGTH)
+    return TEST_RESULT_INVALID_QUERY_FAILED if invalid_utf8.status != DebuggerMetadata::BreakpointResolution.Invalid or empty_name.status != DebuggerMetadata::BreakpointResolution.Invalid
+    invalid_name_image: mutable DebuggerEDIR::ProgramImage = image
+    invalid_name_image.functions[TEST_FUNCTION_SECOND_INDEX].name_length <- TEST_FUNCTION_NAME_CAPACITY + TEST_ONE_USIZE
+    invalid_name: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(invalid_name_image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    invalid_range_image: mutable DebuggerEDIR::ProgramImage = image
+    invalid_range_image.functions[TEST_FUNCTION_SECOND_INDEX].end_instruction_exclusive <- TEST_FUNCTION_INSTRUCTION_COUNT + TEST_ONE_U64
+    invalid_range: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(invalid_range_image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    overlapping_range_image: mutable DebuggerEDIR::ProgramImage = image
+    overlapping_range_image.functions[TEST_FUNCTION_SECOND_INDEX].entry_instruction <- TEST_FUNCTION_FIRST_END - TEST_ONE_U64
+    overlapping_range: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(overlapping_range_image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    duplicate_id_image: mutable DebuggerEDIR::ProgramImage = image
+    duplicate_id_image.functions[TEST_FUNCTION_SECOND_INDEX].id <- DebuggerIdentity::debug_id(TEST_FUNCTION_FIRST_ID)
+    duplicate_id: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(duplicate_id_image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    invalid_count_image: mutable DebuggerEDIR::ProgramImage = image
+    invalid_count_image.function_count <- DebuggerEDIR::EDIR_FUNCTION_CAPACITY + TEST_ONE_USIZE
+    invalid_count: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(invalid_count_image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    return TEST_RESULT_INVALID_METADATA_FAILED if invalid_name.status != DebuggerMetadata::BreakpointResolution.Invalid or invalid_range.status != DebuggerMetadata::BreakpointResolution.Invalid or overlapping_range.status != DebuggerMetadata::BreakpointResolution.Invalid or duplicate_id.status != DebuggerMetadata::BreakpointResolution.Invalid or invalid_count.status != DebuggerMetadata::BreakpointResolution.Invalid
+
+    full_overload_image: mutable DebuggerEDIR::ProgramImage = zeroed
+    full_overload_image.program <- DebuggerEDIR::Program{version: TEST_FUNCTION_SCHEMA_VERSION, instruction_count: TEST_FUNCTION_CAPACITY_INSTRUCTION_COUNT, local_count: 0, has_return: true}
+    full_overload_image.function_count <- DebuggerEDIR::EDIR_FUNCTION_CAPACITY
+    for function_index in 0..<DebuggerEDIR::EDIR_FUNCTION_CAPACITY:
+        function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+        function.id <- DebuggerIdentity::debug_id(TEST_FUNCTION_FIRST_ID + function_index.u64())
+        function.name_length <- TEST_FUNCTION_NAME_FOO_LENGTH
+        for name_index in 0..<TEST_FUNCTION_NAME_FOO_LENGTH:
+            function.name_bytes[name_index] <- TEST_FUNCTION_NAME_BYTES[name_index]
+        function.entry_instruction <- function_index.u64() * TEST_FUNCTION_ENTRY_STRIDE
+        function.end_instruction_exclusive <- function.entry_instruction + TEST_ONE_U64
+        full_overload_image.functions[function_index] <- function
+    full_overloads: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(full_overload_image, TEST_FUNCTION_NAME_BYTES[0], TEST_FUNCTION_NAME_FOO_LENGTH)
+    return TEST_RESULT_CAPACITY_RESOLUTION_FAILED if full_overloads.status != DebuggerMetadata::BreakpointResolution.PartiallyResolved or full_overloads.matched != DebuggerEDIR::EDIR_FUNCTION_CAPACITY
+    for function_index in 0..<DebuggerEDIR::EDIR_FUNCTION_CAPACITY:
+        expected_entry: u64 = function_index.u64() * TEST_FUNCTION_ENTRY_STRIDE
+        return TEST_RESULT_CAPACITY_RESOLUTION_FAILED if DebuggerBreakpointResolver::resolution_instruction_at(full_overloads, function_index) != expected_entry
     return 0

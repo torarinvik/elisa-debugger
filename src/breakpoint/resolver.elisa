@@ -4,15 +4,30 @@
 include "./breakpoint.elisa"
 include "../core/identity.elisa"
 include "../metadata/source.elisa"
+include "../vm/edir.elisa"
 
 module DebuggerBreakpointResolver:
     private:
         const RESOLUTION_CAPACITY: usize = 512
-        const RESOLUTION_LOCATION_CAPACITY: usize = 32
+        const RESOLUTION_LOCATION_CAPACITY: usize = DebuggerEDIR::EDIR_FUNCTION_CAPACITY
         # EDIR instruction zero is the valid entry instruction. Keep the
         # sentinel outside the verifier's addressable range so the first
         # source instruction can still receive a breakpoint.
         const NO_INSTRUCTION: u64 = 18446744073709551615
+
+        def function_descriptor_is_resolvable(image: DebuggerEDIR::ProgramImage&, function: DebuggerEDIR::FunctionDescriptor) -> bool:
+            return false if function.id.value == 0
+            return false if function.name_length == 0 or function.name_length > DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY
+            return false if not DebuggerMetadata::metadata_text_utf8_is_valid(function.name_bytes[0], function.name_length, DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY)
+            return false if function.entry_instruction >= function.end_instruction_exclusive
+            return false if function.end_instruction_exclusive > image.program.instruction_count
+            return true
+
+        def function_descriptor_name_matches(function: DebuggerEDIR::FunctionDescriptor, name_bytes: u8&, name_length: usize) -> bool:
+            return false if function.name_length != name_length
+            for index in 0..<name_length:
+                return false if function.name_bytes[index] != name_bytes[index]
+            return true
 
     public:
         struct Candidate:
@@ -71,6 +86,36 @@ module DebuggerBreakpointResolver:
                     result.instruction <- resolver.candidates[index].instruction if result.matched == 0
                     result.matched <- result.matched + 1
                     result.instructions[result.matched - 1] <- resolver.candidates[index].instruction if result.matched <= RESOLUTION_LOCATION_CAPACITY
+            result.status <- DebuggerMetadata::BreakpointResolution.Resolved if result.matched == 1
+            result.status <- DebuggerMetadata::BreakpointResolution.PartiallyResolved if result.matched > 1
+            return result
+
+        # Resolves compiler-supplied schema-3 EDIR descriptors by exact UTF-8
+        # name. Multiple descriptors with the same name represent overloads;
+        # each entry point is retained in the result for the adapter to expose.
+        def resolver_edir_function_name(image: DebuggerEDIR::ProgramImage&, name_bytes: u8&, name_length: usize) -> Resolution:
+            result: mutable Resolution = zeroed
+            result.status <- DebuggerMetadata::BreakpointResolution.Unresolved
+            result.instruction <- NO_INSTRUCTION
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if name_length == 0 or name_length > DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if not DebuggerMetadata::metadata_text_utf8_is_valid(name_bytes, name_length, DebuggerEDIR::EDIR_FUNCTION_NAME_CAPACITY)
+            result.status <- DebuggerMetadata::BreakpointResolution.Invalid if image.function_count > DebuggerEDIR::EDIR_FUNCTION_CAPACITY
+            return result if result.status == DebuggerMetadata::BreakpointResolution.Invalid
+            for index in 0..<image.function_count:
+                function: DebuggerEDIR::FunctionDescriptor = image.functions[index]
+                result.status <- DebuggerMetadata::BreakpointResolution.Invalid if not function_descriptor_is_resolvable(image, function)
+                return result if result.status == DebuggerMetadata::BreakpointResolution.Invalid
+                for previous_index in 0..<index:
+                    previous_function: DebuggerEDIR::FunctionDescriptor = image.functions[previous_index]
+                    result.status <- DebuggerMetadata::BreakpointResolution.Invalid if previous_function.id.value == function.id.value
+                    result.status <- DebuggerMetadata::BreakpointResolution.Invalid if function.entry_instruction < previous_function.end_instruction_exclusive and previous_function.entry_instruction < function.end_instruction_exclusive
+                    return result if result.status == DebuggerMetadata::BreakpointResolution.Invalid
+            for index in 0..<image.function_count:
+                function: DebuggerEDIR::FunctionDescriptor = image.functions[index]
+                if function_descriptor_name_matches(function, name_bytes, name_length):
+                    result.instruction <- function.entry_instruction if result.matched == 0
+                    result.instructions[result.matched] <- function.entry_instruction
+                    result.matched <- result.matched + 1
             result.status <- DebuggerMetadata::BreakpointResolution.Resolved if result.matched == 1
             result.status <- DebuggerMetadata::BreakpointResolution.PartiallyResolved if result.matched > 1
             return result

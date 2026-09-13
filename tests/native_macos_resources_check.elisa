@@ -1,0 +1,30 @@
+include "../src/native/macos_resources.elisa"
+
+@link_name("getpid")
+extern debugger_macos_resources_getpid() -> i32
+
+const module TestResult:
+    SELF_SAMPLE_FAILURE: i64 = 1
+    SELF_METRICS_FAILURE: i64 = 2
+    ZERO_PID_FAILURE: i64 = 3
+    OVERSIZED_PID_FAILURE: i64 = 4
+    SUCCESS: i64 = 0
+
+const module TestProcess:
+    NO_PID: u64 = 0
+    UNSUPPORTED_PID: u64 = 2147483648
+
+def main() -> i64:
+    current_pid: i32 = debugger_macos_resources_getpid()
+    return TestResult::SELF_SAMPLE_FAILURE if current_pid <= TestProcess::NO_PID.i32()
+
+    sample: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(current_pid.u64())
+    return TestResult::SELF_SAMPLE_FAILURE if not DebuggerNativeMacOSResources::macos_sample_is_valid(sample)
+    return TestResult::SELF_METRICS_FAILURE if sample.process_id != current_pid.u64() or sample.resident_bytes == 0 or sample.virtual_bytes < sample.resident_bytes
+
+    zero_pid: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(TestProcess::NO_PID)
+    return TestResult::ZERO_PID_FAILURE if zero_pid.status != DebuggerNativeMacOSResources::SampleStatus.InvalidProcessId or zero_pid.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+
+    oversized_pid: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(TestProcess::UNSUPPORTED_PID)
+    return TestResult::OVERSIZED_PID_FAILURE if oversized_pid.status != DebuggerNativeMacOSResources::SampleStatus.InvalidProcessId
+    return TestResult::SUCCESS

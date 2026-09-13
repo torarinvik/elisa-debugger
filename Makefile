@@ -70,7 +70,7 @@ ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 .PHONY: protocol-client-ordering-check
 .PHONY: dap-continue-partial-check
 .PHONY: build-runner-check
-.PHONY: native-jetsam-check native-jetsam-tool
+.PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool
 
 build: $(BUILD)/elisa-debugger
 
@@ -97,6 +97,9 @@ module-check: $(BUILD)/elisa-debugger-native-elf-check
 module-check: $(BUILD)/elisa-debugger-native-macho-check
 module-check: $(BUILD)/elisa-debugger-native-artifact-check
 module-check: $(BUILD)/elisa-debugger-native-jetsam-check
+ifeq ($(shell uname -s),Darwin)
+module-check: $(BUILD)/elisa-debugger-native-macos-resources-check
+endif
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check
@@ -136,6 +139,9 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-native-macho-check"
 	"$(BUILD)/elisa-debugger-native-artifact-check"
 	"$(BUILD)/elisa-debugger-native-jetsam-check"
+ifeq ($(shell uname -s),Darwin)
+	"$(BUILD)/elisa-debugger-native-macos-resources-check"
+endif
 	"$(BUILD)/elisa-debugger-native-symbols-identity-check"
 	"$(BUILD)/elisa-debugger-native-symbol-loader-check"
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
@@ -574,6 +580,19 @@ $(BUILD)/elisa-debugger-jetsam: src/native/jetsam_cli.elisa $(ELISA_SOURCE_FILES
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 native-jetsam-tool: $(BUILD)/elisa-debugger-jetsam
+
+$(BUILD)/elisa-debugger-native-macos-resources-check: tests/native_macos_resources_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-macos-resources-check: $(BUILD)/elisa-debugger-native-macos-resources-check
+	"$(BUILD)/elisa-debugger-native-macos-resources-check"
+
+$(BUILD)/elisa-debugger-procinfo: src/native/macos_resources_cli.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-macos-resources-tool: $(BUILD)/elisa-debugger-procinfo
 
 $(BUILD)/elisa-debugger-native-symbols-identity-check: tests/native_symbols_identity_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

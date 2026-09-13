@@ -135,6 +135,14 @@ tool reports Jetsam counters; it does not attach to a live process or identify
 native allocation call sites. Run its regression fixture with
 `make ELISA_ALLOW_STALE_STAGE1=0 native-jetsam-check`.
 
+`build/elisa-debugger-procinfo <pid>` takes one read-only live macOS process
+resource snapshot. Build it with
+`make ELISA_ALLOW_STALE_STAGE1=0 native-macos-resources-tool`. It reports
+virtual/resident bytes, process and thread CPU time, thread counts, page faults,
+and the process start identity. It does not suspend the target, read its memory,
+trace allocations, or integrate with an interactive debugger session. Verify
+the sampler with `make ELISA_ALLOW_STALE_STAGE1=0 native-macos-resources-check`.
+
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
 `checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`) and reports

@@ -24,6 +24,7 @@ carry their operands and results.
 | Managed trace capture/export | Exact single-root EDIR boundary events through the typed service API; rewinds and child-branch execution make the capture partial | Unsupported | Unsupported |
 | DAP process | Managed EDIR only: verified-artifact launch; source-line breakpoints; one `main` thread; stack/scopes/locals; bounded local pages; memory reads; continue/pause/step-in/over/out and reverse step/continue. Attach, conditional/log/function/data breakpoints, evaluation, assignment, restart, and disassembly are unavailable. | No native operations are wired | No postmortem operations are wired |
 | Headless JSON process | Managed EDIR launch, pause/continue/step/reverse-step/seek, one `main` thread, stack/scopes, and paged locals. No attach, source breakpoints, evaluation, serialized memory result, trace artifact transfer, or shared-session ownership. | No native operations are wired | No postmortem operations are wired |
+| macOS live resource snapshot CLI | Not applicable | One read-only `PROC_PIDTASKALLINFO` snapshot by PID: virtual/resident bytes, process/thread CPU time, thread counts, page faults, and process start identity. No suspension, memory reads, allocation tracing, or interactive-session integration. | Not applicable |
 | macOS Jetsam report CLI | Not applicable | Not applicable | Bounded read-only `.ips` parsing; PID/UUID identity checks; resident bytes from page count and page size; lifetime maximum, region count, and CPU time; ordered snapshot counter comparison. No live attach, core-dump inspection, or allocation-site attribution. |
 | Remote transport | Handshake, quotas, resumable artifact transfer, reconnect state | Not qualified | Not qualified |
 
@@ -42,9 +43,11 @@ and test surface rather than a claim that the current host has completed native
 attach or native replay qualification. Additional targets must add their FFI,
 process, signal, symbol, and cleanup tests before being listed as qualified.
 
-Until a native provider is wired to a real target, instrumented-native,
-attached-native, and postmortem capability sets identify the requested engine
-kind but advertise no native operations. The DAP adapter only advertises
+Until a native provider is wired to an interactive real target,
+instrumented-native, attached-native, and postmortem capability sets identify
+the requested engine kind but advertise no native debugging operations. The
+standalone macOS resource snapshot CLI is observational only and does not
+change those capability sets. The DAP adapter only advertises
 termination for the managed engine and does not advertise native disassembly.
 The native controller model retains a reported target-crash detail separately
 from an agent transport failure, but no process monitor or target-agent transport

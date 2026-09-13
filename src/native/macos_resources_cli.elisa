@@ -1,0 +1,46 @@
+# One-shot read-only macOS process resource snapshot CLI.
+
+include "./macos_resources.elisa"
+
+@link_name("printf")
+extern debugger_macos_resources_printf(format: cstr, ...) -> int can[Console]
+
+module DebuggerNativeMacOSResourcesCLI:
+    private:
+        const module Limits:
+            MAX_PID: u64 = 2147483647
+            MAX_PID_DIGITS: usize = 10
+            DECIMAL_BASE: u64 = 10
+            FIRST_ARGUMENT_INDEX: usize = 1
+            EXPECTED_ARGUMENT_COUNT: i64 = 2
+
+        def parse_pid(argument: cstr) -> u64:
+            parsed: mutable u64 = 0
+            digits: mutable usize = 0
+            while digits < Limits::MAX_PID_DIGITS and argument[digits].u8() >= 48 and argument[digits].u8() <= 57:
+                digit: u64 = (argument[digits].u8() - 48).u64()
+                return 0 if parsed > (Limits::MAX_PID - digit) / Limits::DECIMAL_BASE
+                parsed <- parsed * Limits::DECIMAL_BASE + digit
+                digits <- digits + 1
+            return 0 if digits == 0 or argument[digits].u8() != 0 or parsed == 0
+            return parsed
+
+        def print_sample(sample: DebuggerNativeMacOSResources::ProcessSample) -> void can[Console]:
+            _ = debugger_macos_resources_printf("pid=%llu start=%llu.%06llu virtualBytes=%llu residentBytes=%llu userNanoseconds=%llu systemNanoseconds=%llu threadUserNanoseconds=%llu threadSystemNanoseconds=%llu threads=%llu runningThreads=%llu pageFaults=%llu copyOnWriteFaults=%llu\n", sample.process_id, sample.start_seconds, sample.start_microseconds, sample.virtual_bytes, sample.resident_bytes, sample.user_time_nanoseconds, sample.system_time_nanoseconds, sample.thread_user_time_nanoseconds, sample.thread_system_time_nanoseconds, sample.thread_count, sample.running_thread_count, sample.page_faults, sample.copy_on_write_faults) can Console
+
+    public:
+        def run(argc: i64, argv: mutable void&) -> i64 can[Console, Unsafe.PointerCast]:
+            return 2 if argc != Limits::EXPECTED_ARGUMENT_COUNT
+            arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+            process_id: u64 = parse_pid(arguments[Limits::FIRST_ARGUMENT_INDEX].cast[cstr])
+            return 2 if process_id == 0
+
+            sample: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(process_id) can Unsafe.PointerCast
+            if not DebuggerNativeMacOSResources::macos_sample_is_valid(sample):
+                _ = debugger_macos_resources_printf("error: pid=%llu sampleStatus=%d code=%d detail=%u retryable=%d\n", process_id, sample.status, sample.failure.code, sample.failure.detail, sample.failure.retryable) can Console
+                return 3
+            print_sample(sample) can Console
+            return 0
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Console, Unsafe.PointerCast]:
+    return DebuggerNativeMacOSResourcesCLI::run(argc, argv) can Console, Unsafe.PointerCast

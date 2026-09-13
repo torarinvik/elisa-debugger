@@ -1,0 +1,152 @@
+# Read-only macOS process resource sampling through libproc. This does not
+# acquire a task port, suspend the target, read its memory, or control it.
+
+include "../core/errors.elisa"
+
+@link_name("proc_pidinfo")
+extern debugger_macos_proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: mutable void&, buffer_size: i32) -> i32 can[Unsafe.PointerCast]
+
+module DebuggerNativeMacOSResources:
+    private:
+        const module Flavor:
+            PROC_PIDTASKALLINFO: i32 = 2
+
+        const module ABI:
+            TASK_ALL_INFO_SIZE: i32 = 232
+
+        const module ProcessIdentity:
+            NO_PROCESS_ID: u64 = 0
+            MAX_PROCESS_ID: u64 = 2147483647
+            NO_START_SECONDS: u64 = 0
+            NO_START_MICROSECONDS: u64 = 0
+
+        const module Sampling:
+            NO_QUERY_ARGUMENT: u64 = 0
+
+        const module Counters:
+            MINIMUM_VALID_COUNTER: i32 = 0
+            MINIMUM_THREAD_COUNT: i32 = 1
+
+        const module ProcessTime:
+            MICROSECONDS_PER_SECOND: u64 = 1000000
+
+        const module Detail:
+            INVALID_PID: u32 = 1
+            PROCESS_INFO_UNAVAILABLE: u32 = 2
+            PROCESS_IDENTITY_MISMATCH: u32 = 3
+            INVALID_COUNTERS: u32 = 4
+
+        struct ProcBsdInfo:
+            flags: mutable u32
+            status: mutable u32
+            exit_status: mutable u32
+            pid: mutable u32
+            parent_pid: mutable u32
+            uid: mutable u32
+            gid: mutable u32
+            real_uid: mutable u32
+            real_gid: mutable u32
+            saved_uid: mutable u32
+            saved_gid: mutable u32
+            reserved: mutable u32
+            command: mutable u8[16]
+            name: mutable u8[32]
+            open_files: mutable u32
+            process_group: mutable u32
+            job_control_count: mutable u32
+            controlling_terminal: mutable u32
+            terminal_process_group: mutable u32
+            nice: mutable i32
+            start_seconds: mutable u64
+            start_microseconds: mutable u64
+
+        struct ProcTaskInfo:
+            virtual_bytes: mutable u64
+            resident_bytes: mutable u64
+            total_user_nanoseconds: mutable u64
+            total_system_nanoseconds: mutable u64
+            threads_user_nanoseconds: mutable u64
+            threads_system_nanoseconds: mutable u64
+            policy: mutable i32
+            page_faults: mutable i32
+            pageins: mutable i32
+            copy_on_write_faults: mutable i32
+            messages_sent: mutable i32
+            messages_received: mutable i32
+            mach_syscalls: mutable i32
+            unix_syscalls: mutable i32
+            context_switches: mutable i32
+            thread_count: mutable i32
+            running_thread_count: mutable i32
+            priority: mutable i32
+
+        struct ProcTaskAllInfo:
+            bsd: mutable ProcBsdInfo
+            task: mutable ProcTaskInfo
+
+    public:
+        enum SampleStatus:
+            Ready
+            InvalidProcessId
+            Unavailable
+            IdentityMismatch
+            InvalidCounters
+
+        struct ProcessSample:
+            status: mutable SampleStatus
+            process_id: mutable u64
+            start_seconds: mutable u64
+            start_microseconds: mutable u64
+            virtual_bytes: mutable u64
+            resident_bytes: mutable u64
+            user_time_nanoseconds: mutable u64
+            system_time_nanoseconds: mutable u64
+            thread_user_time_nanoseconds: mutable u64
+            thread_system_time_nanoseconds: mutable u64
+            thread_count: mutable u64
+            running_thread_count: mutable u64
+            page_faults: mutable u64
+            copy_on_write_faults: mutable u64
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def macos_sample_process(process_id: u64) -> ProcessSample:
+            return macos_sample_failure(SampleStatus.InvalidProcessId, process_id, DebuggerErrors::ErrorCode.InvalidArgument, Detail::INVALID_PID, false) if process_id == ProcessIdentity::NO_PROCESS_ID or process_id > ProcessIdentity::MAX_PROCESS_ID
+
+            info: mutable ProcTaskAllInfo = zeroed
+            buffer: mutable void& = (&info).cast[mutable void&] can Unsafe.PointerCast
+            bytes_read: i32 = debugger_macos_proc_pidinfo(process_id.i32(), Flavor::PROC_PIDTASKALLINFO, Sampling::NO_QUERY_ARGUMENT, buffer, ABI::TASK_ALL_INFO_SIZE) can Unsafe.PointerCast
+            return macos_sample_failure(SampleStatus.Unavailable, process_id, DebuggerErrors::ErrorCode.Unavailable, Detail::PROCESS_INFO_UNAVAILABLE, true) if bytes_read != ABI::TASK_ALL_INFO_SIZE
+            return macos_sample_failure(SampleStatus.IdentityMismatch, process_id, DebuggerErrors::ErrorCode.StaleGeneration, Detail::PROCESS_IDENTITY_MISMATCH, true) if info.bsd.pid.u64() != process_id or (info.bsd.start_seconds == ProcessIdentity::NO_START_SECONDS and info.bsd.start_microseconds == ProcessIdentity::NO_START_MICROSECONDS)
+            return macos_sample_failure(SampleStatus.InvalidCounters, process_id, DebuggerErrors::ErrorCode.Corrupt, Detail::INVALID_COUNTERS, false) if info.bsd.start_microseconds >= ProcessTime::MICROSECONDS_PER_SECOND or info.task.page_faults < Counters::MINIMUM_VALID_COUNTER or info.task.pageins < Counters::MINIMUM_VALID_COUNTER or info.task.copy_on_write_faults < Counters::MINIMUM_VALID_COUNTER or info.task.messages_sent < Counters::MINIMUM_VALID_COUNTER or info.task.messages_received < Counters::MINIMUM_VALID_COUNTER or info.task.mach_syscalls < Counters::MINIMUM_VALID_COUNTER or info.task.unix_syscalls < Counters::MINIMUM_VALID_COUNTER or info.task.context_switches < Counters::MINIMUM_VALID_COUNTER or info.task.thread_count < Counters::MINIMUM_THREAD_COUNT or info.task.running_thread_count < Counters::MINIMUM_VALID_COUNTER or info.task.running_thread_count > info.task.thread_count
+
+            sample: mutable ProcessSample = zeroed
+            sample.status <- SampleStatus.Ready
+            sample.process_id <- process_id
+            sample.start_seconds <- info.bsd.start_seconds
+            sample.start_microseconds <- info.bsd.start_microseconds
+            sample.virtual_bytes <- info.task.virtual_bytes
+            sample.resident_bytes <- info.task.resident_bytes
+            sample.user_time_nanoseconds <- info.task.total_user_nanoseconds
+            sample.system_time_nanoseconds <- info.task.total_system_nanoseconds
+            sample.thread_user_time_nanoseconds <- info.task.threads_user_nanoseconds
+            sample.thread_system_time_nanoseconds <- info.task.threads_system_nanoseconds
+            sample.thread_count <- info.task.thread_count.u64()
+            sample.running_thread_count <- info.task.running_thread_count.u64()
+            sample.page_faults <- info.task.page_faults.u64()
+            sample.copy_on_write_faults <- info.task.copy_on_write_faults.u64()
+            sample.failure <- DebuggerErrors::no_error()
+            return sample
+
+        def macos_sample_is_valid(sample: ProcessSample) -> bool:
+            return false if sample.status != SampleStatus.Ready or not DebuggerErrors::error_is_ok(sample.failure)
+            return false if sample.process_id == ProcessIdentity::NO_PROCESS_ID or sample.start_seconds == ProcessIdentity::NO_START_SECONDS and sample.start_microseconds == ProcessIdentity::NO_START_MICROSECONDS
+            return false if sample.start_microseconds >= ProcessTime::MICROSECONDS_PER_SECOND
+            return false if sample.running_thread_count > sample.thread_count or sample.thread_count == 0
+            return true
+
+        def macos_sample_failure(status: SampleStatus, process_id: u64, code: DebuggerErrors::ErrorCode, detail: u32, retryable: bool) -> ProcessSample:
+            failure: mutable ProcessSample = zeroed
+            failure.status <- status
+            failure.process_id <- process_id
+            failure.failure <- DebuggerErrors::make_error(code, retryable, detail)
+            return failure

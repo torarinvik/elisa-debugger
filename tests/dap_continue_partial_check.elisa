@@ -1,0 +1,87 @@
+include "../src/protocol/dap.elisa"
+include "../src/protocol/managed_service.elisa"
+include "../src/protocol/request.elisa"
+include "../src/vm/edir.elisa"
+
+module DAPContinuePartialCheck:
+    private:
+        const module ResultCode:
+            OK: i64 = 0
+            LAUNCH_FAILED: i64 = 1
+            CONTINUE_FAILED: i64 = 2
+            STOP_STATE_FAILED: i64 = 3
+            EVENT_BATCH_FAILED: i64 = 4
+            NO_COMMIT_FAILED: i64 = 5
+
+        const module Program:
+            INSTRUCTION_COUNT: u64 = 65
+            NOP_COUNT: usize = 64
+            RETURN_INDEX: usize = 64
+            VERSION: u32 = 1
+            NO_LOCALS: u64 = 0
+            NO_OPERAND: i64 = 0
+
+        const module Identity:
+            SESSION_ID: u64 = 1
+            BUILD_COMPILER_ID: u64 = 1
+            BUILD_RUNTIME_ID: u64 = 2
+            BUILD_SOURCE_ID: u64 = 3
+            BUILD_TARGET_ID: u64 = 4
+            METADATA_VERSION: u32 = 1
+            RECORDING_ID: u64 = 1
+
+        const module Request:
+            ID: u64 = 1
+            INITIAL_GENERATION: u64 = 0
+            INITIAL_EVENT: u64 = 0
+            NO_EXIT_CODE: i64 = 0
+
+        const module Event:
+            EMPTY_BATCH_COUNT: usize = 0
+            BATCH_COUNT: usize = 2
+            CONTINUED_INDEX: usize = 0
+            STOPPED_INDEX: usize = 1
+
+        def make_long_running_service() -> DebuggerManagedService::Service:
+            image: mutable DebuggerEDIR::ProgramImage = zeroed
+            image.program <- DebuggerEDIR::Program{version: Program::VERSION, instruction_count: Program::INSTRUCTION_COUNT, local_count: Program::NO_LOCALS, has_return: true}
+            for index in 0..<Program::NOP_COUNT:
+                image.instructions[index] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: Program::NO_OPERAND, b: Program::NO_OPERAND, source: zeroed}
+            image.instructions[Program::RETURN_INDEX] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Program::NO_OPERAND, b: Program::NO_OPERAND, source: zeroed}
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+                compiler: DebuggerIdentity::debug_id(Identity::BUILD_COMPILER_ID),
+                runtime: DebuggerIdentity::debug_id(Identity::BUILD_RUNTIME_ID),
+                source: DebuggerIdentity::debug_id(Identity::BUILD_SOURCE_ID),
+                target: DebuggerIdentity::debug_id(Identity::BUILD_TARGET_ID),
+                metadata_version: Identity::METADATA_VERSION
+            }
+            session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Identity::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+            return DebuggerManagedService::service_new(session, image, DebuggerIdentity::debug_id(Identity::RECORDING_ID))
+
+        def control_request(method: DebuggerProtocolRequest::RequestMethod) -> DebuggerProtocolRequest::Request:
+            return DebuggerProtocolRequest::Request{method: method, id: Request::ID, has_id: true, expected_generation: Request::INITIAL_GENERATION, target_event: Request::INITIAL_EVENT, valid: true}
+
+        def check_committed_partial_continue() -> i64:
+            service: mutable DebuggerManagedService::Service = make_long_running_service()
+            launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, control_request(DebuggerProtocolRequest::RequestMethod.Launch))
+            return ResultCode::LAUNCH_FAILED if not launched.accepted
+
+            generation_before_continue: u64 = service.controller.session.stop_generation
+            continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, control_request(DebuggerProtocolRequest::RequestMethod.Continue))
+            state_committed: bool = service.controller.session.stop_generation != generation_before_continue
+            return ResultCode::CONTINUE_FAILED if continued.accepted or continued.failure.code != DebuggerErrors::ErrorCode.ResourceLimit
+            return ResultCode::STOP_STATE_FAILED if not state_committed or service.controller.session.state != DebuggerSession::SessionState.Stopped or service.controller.engine.event_count != Program::NOP_COUNT or service.controller.engine.machine.halted
+
+            events: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(DebuggerDAP::RequestKind.Continue, continued.accepted, state_committed, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)
+            return ResultCode::EVENT_BATCH_FAILED if events.count != Event::BATCH_COUNT or events.events[Event::CONTINUED_INDEX].kind != DebuggerDAP::EventKind.Continued or events.events[Event::STOPPED_INDEX].kind != DebuggerDAP::EventKind.Stopped or events.events[Event::STOPPED_INDEX].reason != DebuggerDAP::StopReason.Pause
+
+            unchanged_failure: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(DebuggerDAP::RequestKind.Continue, false, false, DebuggerSession::SessionState.Stopped, false, false, Request::NO_EXIT_CODE)
+            return ResultCode::NO_COMMIT_FAILED if unchanged_failure.count != Event::EMPTY_BATCH_COUNT
+            return ResultCode::OK
+
+    public:
+        def run() -> i64:
+            return check_committed_partial_continue()
+
+def main() -> i64:
+    return DAPContinuePartialCheck::run()

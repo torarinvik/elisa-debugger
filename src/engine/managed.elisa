@@ -37,6 +37,15 @@ module DebuggerManagedEngine:
         const module Step:
             COMPOUND_LIMIT: u64 = 64
 
+        const module Reverse:
+            FRAME_DEPTH_INCREMENT: usize = 1
+            TOP_LEVEL_FRAME_DEPTH: usize = 0
+            PREVIOUS_EVENT_INCREMENT: usize = 1
+            SNAPSHOT_ID_INCREMENT: u64 = 1
+            CALL_RETURN_INCREMENT: u64 = 1
+            NO_RETURN_ADDRESS: u64 = 0
+            MINIMUM_CALL_TARGET: i64 = 0
+
         const module SourcePath:
             SLASH: u8 = 47
             BACKSLASH: u8 = 92
@@ -263,6 +272,89 @@ module DebuggerManagedEngine:
             frame_has_not_returned: bool = initial_depth == 0 or controller.engine.machine.return_stack_pointer >= initial_depth
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and frame_has_not_returned and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT
             return DebuggerErrors::no_error()
+
+    private:
+        def managed_reverse_snapshot_is_valid(controller: mutable ManagedController&, event: usize) -> bool:
+            return false if event >= controller.engine.event_count or event >= DebuggerReplayEngine::replay_engine_history_capacity()
+            snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[event]
+            return false if snapshot.id.value != event.u64() + Reverse::SNAPSHOT_ID_INCREMENT or snapshot.event != event.u64()
+            return false if snapshot.program_counter >= controller.engine.image.program.instruction_count or snapshot.halted or snapshot.faulted
+            return false if not DebuggerCheckpoint::snapshot_shape_is_valid(snapshot)
+            return snapshot.state_hash == DebuggerCheckpoint::snapshot_state_hash(snapshot)
+
+        def managed_reverse_snapshot_is_currently_same_frame(snapshot: DebuggerCheckpoint::MachineSnapshot, frame_depth: usize, return_address: u64) -> bool:
+            return false if snapshot.return_stack_pointer != frame_depth
+            return true if frame_depth == Reverse::TOP_LEVEL_FRAME_DEPTH
+            return snapshot.return_stack[frame_depth - Reverse::FRAME_DEPTH_INCREMENT] == return_address
+
+        # The pre-call snapshot and the immediately following snapshot identify
+        # one dynamic invocation. Stack depth distinguishes recursive calls to
+        # the same EDIR instruction; the return address ties the active frame
+        # to that call instead of matching by function or target PC alone.
+        def managed_reverse_call_entry_matches(controller: mutable ManagedController&, event: usize, frame_depth: usize, return_address: u64) -> bool:
+            return false if frame_depth == Reverse::TOP_LEVEL_FRAME_DEPTH or not managed_reverse_snapshot_is_valid(controller, event)
+            before: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[event]
+            return false if before.return_stack_pointer != frame_depth - Reverse::FRAME_DEPTH_INCREMENT
+            instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[before.program_counter.usize()]
+            return false if instruction.opcode != DebuggerEDIR::Opcode.Call or instruction.a < Reverse::MINIMUM_CALL_TARGET
+            return false if before.program_counter + Reverse::CALL_RETURN_INCREMENT != return_address
+            if event == controller.engine.event_count - Reverse::PREVIOUS_EVENT_INCREMENT:
+                return false if controller.engine.machine.return_stack_pointer != frame_depth or controller.engine.machine.program_counter != instruction.a.u64()
+                return controller.engine.machine.return_stack[frame_depth - Reverse::FRAME_DEPTH_INCREMENT] == return_address
+            after_event: usize = event + Reverse::PREVIOUS_EVENT_INCREMENT
+            return false if not managed_reverse_snapshot_is_valid(controller, after_event)
+            after: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[after_event]
+            return false if after.return_stack_pointer != frame_depth or after.program_counter != instruction.a.u64()
+            return after.return_stack[frame_depth - Reverse::FRAME_DEPTH_INCREMENT] == return_address
+
+    public:
+        def managed_reverse_step_over(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.event_count == Event::INITIAL_INDEX
+            current_event: usize = controller.engine.event_count
+            current_machine: DebuggerEDIR::Machine = controller.engine.machine
+            current_snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(current_machine, DebuggerIdentity::debug_id(current_event.u64() + Reverse::SNAPSHOT_ID_INCREMENT), current_event.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not DebuggerCheckpoint::snapshot_shape_is_valid(current_snapshot) or current_snapshot.state_hash != DebuggerCheckpoint::snapshot_state_hash(current_snapshot)
+            selected_depth: usize = current_machine.return_stack_pointer
+            selected_return_address: mutable u64 = Reverse::NO_RETURN_ADDRESS
+            if selected_depth > Reverse::TOP_LEVEL_FRAME_DEPTH:
+                selected_return_address <- current_machine.return_stack[selected_depth - Reverse::FRAME_DEPTH_INCREMENT]
+            current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+            event: mutable usize = current_event
+            while event > Event::INITIAL_INDEX:
+                event <- event - Reverse::PREVIOUS_EVENT_INCREMENT
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not managed_reverse_snapshot_is_valid(controller, event)
+                candidate: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[event]
+                call_entry_matches: bool = managed_reverse_call_entry_matches(controller, event, selected_depth, selected_return_address)
+                if candidate.return_stack_pointer < selected_depth:
+                    return managed_seek(controller, event) if call_entry_matches
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+                if managed_reverse_snapshot_is_currently_same_frame(candidate, selected_depth, selected_return_address):
+                    candidate_instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[candidate.program_counter.usize()]
+                    if not managed_source_position_matches(current_source, candidate_instruction.source):
+                        return managed_seek(controller, event)
+                return managed_seek(controller, event) if call_entry_matches
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+
+        def managed_reverse_step_out(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.event_count == Event::INITIAL_INDEX
+            current_event: usize = controller.engine.event_count
+            current_machine: DebuggerEDIR::Machine = controller.engine.machine
+            current_snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(current_machine, DebuggerIdentity::debug_id(current_event.u64() + Reverse::SNAPSHOT_ID_INCREMENT), current_event.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not DebuggerCheckpoint::snapshot_shape_is_valid(current_snapshot) or current_snapshot.state_hash != DebuggerCheckpoint::snapshot_state_hash(current_snapshot)
+            selected_depth: usize = current_machine.return_stack_pointer
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if selected_depth == Reverse::TOP_LEVEL_FRAME_DEPTH
+            selected_return_address: u64 = current_machine.return_stack[selected_depth - Reverse::FRAME_DEPTH_INCREMENT]
+            event: mutable usize = current_event
+            while event > Event::INITIAL_INDEX:
+                event <- event - Reverse::PREVIOUS_EVENT_INCREMENT
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not managed_reverse_snapshot_is_valid(controller, event)
+                candidate: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[event]
+                call_entry_matches: bool = managed_reverse_call_entry_matches(controller, event, selected_depth, selected_return_address)
+                return managed_seek(controller, event) if call_entry_matches
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if candidate.return_stack_pointer < selected_depth
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
 
         def managed_reverse_continue(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)

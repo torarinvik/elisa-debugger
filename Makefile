@@ -68,6 +68,7 @@ ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
 .PHONY: remote-authorization-check server-version-check compiler-edir-loop-check
 .PHONY: protocol-client-ordering-check
+.PHONY: dap-continue-partial-check
 .PHONY: build-runner-check
 
 build: $(BUILD)/elisa-debugger
@@ -102,7 +103,7 @@ module-check: $(BUILD)/elisa-debugger-state-integrity-check
 module-check: $(BUILD)/elisa-debugger-trace-checkpoint-validation-check
 module-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
 module-check: $(BUILD)/elisa-debugger-managed-memory-write-history-check
-module-check: $(BUILD)/elisa-debugger-dap-events-check
+module-check: $(BUILD)/elisa-debugger-dap-events-check $(BUILD)/elisa-debugger-dap-continue-partial-check
 module-check: $(BUILD)/elisa-debugger-protocol-client-ordering-check
 module-check: edir-file-loader-check
 
@@ -137,6 +138,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
 	"$(BUILD)/elisa-debugger-full-checkpoint-codec-check"
 	"$(BUILD)/elisa-debugger-dap-events-check"
+	"$(BUILD)/elisa-debugger-dap-continue-partial-check"
 	"$(BUILD)/elisa-debugger-replay-provenance-check"
 	"$(BUILD)/elisa-debugger-replay-branches-check"
 	"$(BUILD)/elisa-debugger-state-integrity-check"
@@ -267,6 +269,13 @@ $(BUILD)/elisa-debugger-dap-events-check: tests/dap_events_check.elisa $(ELISA_S
 
 dap-events-check: $(BUILD)/elisa-debugger-dap-events-check
 	"$(BUILD)/elisa-debugger-dap-events-check"
+
+$(BUILD)/elisa-debugger-dap-continue-partial-check: tests/dap_continue_partial_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+dap-continue-partial-check: $(BUILD)/elisa-debugger-dap-continue-partial-check
+	"$(BUILD)/elisa-debugger-dap-continue-partial-check"
 
 dap-command-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 	sh tests/dap_command_collision_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir"

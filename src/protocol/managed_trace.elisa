@@ -14,6 +14,9 @@ module DebuggerManagedTraceService:
             DETAIL_TRACE_CAPABILITY: u32 = 1
             DETAIL_TRACE_STATE: u32 = 2
 
+        const module Boundary:
+            NO_RECORDED_EVENTS: usize = 0
+
         def trace_build_error(failure: DebuggerErrors::DebuggerError) -> DebuggerTracePipeline::BundleBuildResult:
             return DebuggerTracePipeline::BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
 
@@ -26,6 +29,15 @@ module DebuggerManagedTraceService:
             recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(service.controller.session.build, service.controller.engine.recording)
             for index in 0..<service.recorded_event_count:
                 failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, service.recorded_events[index])
+                return trace_build_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            # Full checkpoints include VM, scheduler, effect, virtual-resource,
+            # and adapter state. Only capture one at the recorded high-water
+            # boundary: rewinding the VM does not rewind those side streams.
+            # The checkpoint belongs to the boundary after the final event, so
+            # its event ordinal is allowed to be last_event + 1.
+            if service.recorded_event_count > Boundary::NO_RECORDED_EVENTS and service.controller.engine.event_count == service.recorded_event_count:
+                checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+                failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
                 return trace_build_error(failure) if not DebuggerErrors::error_is_ok(failure)
             return DebuggerTracePipeline::bundle_from_recorder(recorder)
 

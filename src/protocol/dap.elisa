@@ -89,10 +89,16 @@ module DebuggerDAP:
         # DAP lifecycle policy is kept separate from wire encoding. This lets
         # adapters and tests agree on event order without depending on JSON or
         # transport framing.
-        def events_after_request(request: RequestKind, accepted: bool, session_state: DebuggerSession::SessionState, machine_halted: bool, machine_faulted: bool, exit_code: i64) -> EventBatch:
+        def events_after_request(request: RequestKind, accepted: bool, state_committed: bool, session_state: DebuggerSession::SessionState, machine_halted: bool, machine_faulted: bool, exit_code: i64) -> EventBatch:
             batch: mutable EventBatch = zeroed
-            return batch if not accepted
+            # A control request can fail after the engine has committed useful
+            # forward progress and stopped. In that case the response remains
+            # an error, but clients still need events that make their visible
+            # execution state agree with the session. `state_committed` is
+            # supplied by the adapter from the stop-generation transition.
+            return batch if not accepted and not state_committed
             if request == RequestKind.Initialize:
+                return batch if not accepted
                 event_batch_add(batch, EventKind.Initialized, StopReason.None, ProcessExit::NO_EXIT_CODE)
                 return batch
             return batch if request == RequestKind.Launch
@@ -102,9 +108,11 @@ module DebuggerDAP:
                     event_batch_add(batch, EventKind.Terminated, StopReason.None, ProcessExit::NO_EXIT_CODE)
                     event_batch_add(batch, EventKind.Exited, StopReason.None, exit_code)
                 else:
-                    # A successful bounded continue that has not exited stopped
-                    # at a verified managed breakpoint.
-                    event_batch_add(batch, EventKind.Stopped, StopReason.Breakpoint, ProcessExit::NO_EXIT_CODE)
+                    # A failed bounded continue may still have committed a
+                    # stopped position. Report it as a debugger pause rather
+                    # than claiming that a breakpoint caused the stop.
+                    reason: StopReason = StopReason.Breakpoint if accepted else StopReason.Pause
+                    event_batch_add(batch, EventKind.Stopped, reason, ProcessExit::NO_EXIT_CODE)
                 return batch
             if request == RequestKind.Terminate:
                 event_batch_add(batch, EventKind.Terminated, StopReason.None, ProcessExit::NO_EXIT_CODE)

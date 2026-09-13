@@ -177,6 +177,8 @@ module DebuggerDAPServer:
             DAP_CONTINUE_COMMAND_LENGTH: usize = 8
             DAP_CONTINUE_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"allThreadsContinued\":true}}"
             DAP_CONTINUE_SUFFIX_LENGTH: usize = 53
+            DAP_CONTINUE_PARTIAL_FAILURE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"execution advanced and stopped; inspect the current state before continuing\"}"
+            DAP_CONTINUE_PARTIAL_FAILURE_SUFFIX_LENGTH: usize = 106
             DAP_NEXT_COMMAND: cstr = "next"
             DAP_NEXT_COMMAND_LENGTH: usize = 4
             DAP_STEP_BACK_COMMAND: cstr = "stepBack"
@@ -1838,8 +1840,15 @@ module DebuggerDAPServer:
                 _ = printf("%02llx", memory.bytes[index].u64()) can Console
             _ = printf(Memory::DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, client_coordinates: DebuggerDAPPayload::ClientCoordinates, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, state_committed: bool, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, client_coordinates: DebuggerDAPPayload::ClientCoordinates, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
+                if command_hash == CommandDispatch::COMMAND_HASH_CONTINUE and state_committed:
+                    # Continue may report a bounded-work failure after the VM
+                    # has already advanced and committed a stopped position.
+                    # Keep the request failure explicit while telling the host
+                    # to refresh inspection from the stop event that follows.
+                    write_dynamic_response(response_sequence, request_sequence, ExecutionControl::DAP_CONTINUE_COMMAND, ExecutionControl::DAP_CONTINUE_COMMAND_LENGTH, ExecutionControl::DAP_CONTINUE_PARTIAL_FAILURE_SUFFIX, ExecutionControl::DAP_CONTINUE_PARTIAL_FAILURE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                    return
                 if command_hash == CommandDispatch::COMMAND_HASH_VARIABLES:
                     suffix: mutable cstr = ResponseStatus::DAP_UNAVAILABLE_SUFFIX
                     suffix_length: mutable usize = ResponseStatus::DAP_UNAVAILABLE_SUFFIX_LENGTH
@@ -1974,12 +1983,14 @@ module DebuggerDAPServer:
                     if completed:
                         memory <- zeroed
                         source_breakpoints <- zeroed
+                        generation_before_request: u64 = service.controller.session.stop_generation
                         result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, variables, source_breakpoints, client_coordinates)
                         service.controller.session <- result.session
-                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, memory, variables, source_breakpoints, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
+                        state_committed: bool = service.controller.session.stop_generation != generation_before_request
+                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, state_committed, memory, variables, source_breakpoints, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
                         return TransportLimits::DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == TransportLimits::MAX_DAP_OUTBOUND_SEQUENCE
                         outbound_sequence <- outbound_sequence + NumberFormat::DAP_DECIMAL_INCREMENT
-                        event_batch: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(event_request_kind(decoder.command_hash), result.accepted, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)
+                        event_batch: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(event_request_kind(decoder.command_hash), result.accepted, state_committed, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)
                         for event_index in 0..<event_batch.count:
                             write_adapter_event(event_batch.events[event_index], outbound_sequence) can Console, Unsafe.PointerCast
                             return TransportLimits::DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == TransportLimits::MAX_DAP_OUTBOUND_SEQUENCE

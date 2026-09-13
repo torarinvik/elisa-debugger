@@ -24,6 +24,7 @@ carry their operands and results.
 | Managed trace capture/export | Exact single-root EDIR boundary events through the typed service API; rewinds and child-branch execution make the capture partial | Unsupported | Unsupported |
 | DAP process | Managed EDIR only: verified-artifact launch; source-line breakpoints; one `main` thread; stack/scopes/locals; bounded local pages; memory reads; continue/pause/step-in/over/out and reverse step/continue. Attach, conditional/log/function/data breakpoints, evaluation, assignment, restart, and disassembly are unavailable. | No native operations are wired | No postmortem operations are wired |
 | Headless JSON process | Managed EDIR launch, pause/continue/step/reverse-step/seek, one `main` thread, stack/scopes, and paged locals. No attach, source breakpoints, evaluation, serialized memory result, trace artifact transfer, or shared-session ownership. | No native operations are wired | No postmortem operations are wired |
+| macOS Jetsam report CLI | Not applicable | Not applicable | Bounded read-only `.ips` parsing; PID/UUID identity checks; resident bytes from page count and page size; lifetime maximum, region count, and CPU time; ordered snapshot counter comparison. No live attach, core-dump inspection, or allocation-site attribution. |
 | Remote transport | Handshake, quotas, resumable artifact transfer, reconnect state | Not qualified | Not qualified |
 
 ## Exactness rules

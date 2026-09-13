@@ -70,6 +70,7 @@ ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 .PHONY: protocol-client-ordering-check
 .PHONY: dap-continue-partial-check
 .PHONY: build-runner-check
+.PHONY: native-jetsam-check native-jetsam-tool
 
 build: $(BUILD)/elisa-debugger
 
@@ -95,6 +96,7 @@ module-check: $(BUILD)/elisa-debugger-remote-artifacts-check
 module-check: $(BUILD)/elisa-debugger-native-elf-check
 module-check: $(BUILD)/elisa-debugger-native-macho-check
 module-check: $(BUILD)/elisa-debugger-native-artifact-check
+module-check: $(BUILD)/elisa-debugger-native-jetsam-check
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check
@@ -133,6 +135,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-native-elf-check"
 	"$(BUILD)/elisa-debugger-native-macho-check"
 	"$(BUILD)/elisa-debugger-native-artifact-check"
+	"$(BUILD)/elisa-debugger-native-jetsam-check"
 	"$(BUILD)/elisa-debugger-native-symbols-identity-check"
 	"$(BUILD)/elisa-debugger-native-symbol-loader-check"
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
@@ -558,6 +561,19 @@ $(BUILD)/elisa-debugger-native-artifact-check: tests/native_artifact_check.elisa
 
 native-artifact-check: $(BUILD)/elisa-debugger-native-artifact-check
 	"$(BUILD)/elisa-debugger-native-artifact-check"
+
+$(BUILD)/elisa-debugger-native-jetsam-check: tests/native_jetsam_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-jetsam-check: $(BUILD)/elisa-debugger-native-jetsam-check
+	"$(BUILD)/elisa-debugger-native-jetsam-check"
+
+$(BUILD)/elisa-debugger-jetsam: src/native/jetsam_cli.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-jetsam-tool: $(BUILD)/elisa-debugger-jetsam
 
 $(BUILD)/elisa-debugger-native-symbols-identity-check: tests/native_symbols_identity_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

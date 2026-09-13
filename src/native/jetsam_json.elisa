@@ -1,0 +1,390 @@
+# Internal JSON primitives shared by native postmortem artifact readers.
+# This surface exposes bounded lookups and typed scalar results only; parser
+# state, delimiters, and grammar helpers remain private to this module.
+
+module DebuggerNativeJetsamJSON:
+    private:
+        const module Json:
+            NO_INDEX: usize = 18446744073709551615
+            MAX_NESTING: usize = 64
+            ASCII_QUOTE: u8 = 34
+            ASCII_BACKSLASH: u8 = 92
+            ASCII_SPACE: u8 = 32
+            ASCII_TAB: u8 = 9
+            ASCII_LF: u8 = 10
+            ASCII_CR: u8 = 13
+            ASCII_ZERO: u8 = 48
+            ASCII_NINE: u8 = 57
+            ASCII_COMMA: u8 = 44
+            ASCII_COLON: u8 = 58
+            ASCII_OBJECT_OPEN: u8 = 123
+            ASCII_OBJECT_CLOSE: u8 = 125
+            ASCII_ARRAY_OPEN: u8 = 91
+            ASCII_ARRAY_CLOSE: u8 = 93
+            ASCII_SLASH: u8 = 47
+            ASCII_B: u8 = 98
+            ASCII_E: u8 = 101
+            ASCII_F: u8 = 102
+            ASCII_N: u8 = 110
+            ASCII_R: u8 = 114
+            ASCII_T: u8 = 116
+            ASCII_U: u8 = 117
+            ASCII_A: u8 = 97
+            ASCII_L: u8 = 108
+            ASCII_S: u8 = 115
+            ASCII_MINUS: u8 = 45
+            ASCII_PLUS: u8 = 43
+            ASCII_PERIOD: u8 = 46
+            ASCII_UPPER_E: u8 = 69
+            ASCII_HEX_A: u8 = 65
+            ASCII_HEX_F: u8 = 70
+            ASCII_HEX_LOWER_A: u8 = 97
+            ASCII_HEX_LOWER_F: u8 = 102
+            UINT_MAX: u64 = 18446744073709551615
+            DECIMAL_BASE: u64 = 10
+            HASH_SEED: u64 = 14695981039346656037
+            HASH_PRIME: u64 = 1099511628211
+
+    public:
+        struct FieldLookup:
+            valid: mutable bool
+            found: mutable bool
+            start: mutable usize
+
+        struct NumberResult:
+            valid: mutable bool
+            value: mutable u64
+
+        struct StringHash:
+            valid: mutable bool
+            value: mutable u64
+
+    private:
+        def is_whitespace(byte: u8) -> bool:
+            return byte == Json::ASCII_SPACE or byte == Json::ASCII_TAB or byte == Json::ASCII_LF or byte == Json::ASCII_CR
+
+        def skip_whitespace(bytes: u8&, length: usize, start: usize) -> usize:
+            index: mutable usize = start
+            while index < length and is_whitespace(bytes[index]):
+                index <- index + 1
+            return index
+
+        def hex_digit(byte: u8) -> bool:
+            return byte >= Json::ASCII_ZERO and byte <= Json::ASCII_NINE or byte >= Json::ASCII_HEX_A and byte <= Json::ASCII_HEX_F or byte >= Json::ASCII_HEX_LOWER_A and byte <= Json::ASCII_HEX_LOWER_F
+
+        def json_string_end(bytes: u8&, length: usize, start: usize) -> usize:
+            return Json::NO_INDEX if start >= length or bytes[start] != Json::ASCII_QUOTE
+            index: mutable usize = start + 1
+            while index < length:
+                byte: u8 = bytes[index]
+                if byte == Json::ASCII_QUOTE:
+                    return index + 1
+                if byte == Json::ASCII_BACKSLASH:
+                    index <- index + 1
+                    return Json::NO_INDEX if index >= length
+                    escaped: u8 = bytes[index]
+                    if escaped == Json::ASCII_U:
+                        return Json::NO_INDEX if length - index <= 4
+                        for digit in 1..<5:
+                            return Json::NO_INDEX if not hex_digit(bytes[index + digit])
+                        index <- index + 4
+                    else:
+                        return Json::NO_INDEX if escaped != Json::ASCII_QUOTE and escaped != Json::ASCII_BACKSLASH and escaped != Json::ASCII_SLASH and escaped != Json::ASCII_B and escaped != Json::ASCII_F and escaped != Json::ASCII_N and escaped != Json::ASCII_R and escaped != Json::ASCII_T
+                else:
+                    return Json::NO_INDEX if byte < 32
+                index <- index + 1
+            return Json::NO_INDEX
+
+        def primitive_end(bytes: u8&, length: usize, start: usize) -> usize:
+            return Json::NO_INDEX if start >= length
+            first: u8 = bytes[start]
+            if first == Json::ASCII_T:
+                return Json::NO_INDEX if length - start < 4 or bytes[start + 1] != Json::ASCII_R or bytes[start + 2] != Json::ASCII_U or bytes[start + 3] != Json::ASCII_E
+                return primitive_suffix(bytes, length, start + 4)
+            if first == Json::ASCII_F:
+                return Json::NO_INDEX if length - start < 5 or bytes[start + 1] != Json::ASCII_A or bytes[start + 2] != Json::ASCII_L or bytes[start + 3] != Json::ASCII_S or bytes[start + 4] != Json::ASCII_E
+                return primitive_suffix(bytes, length, start + 5)
+            if first == Json::ASCII_N:
+                return Json::NO_INDEX if length - start < 4 or bytes[start + 1] != Json::ASCII_U or bytes[start + 2] != Json::ASCII_L or bytes[start + 3] != Json::ASCII_L
+                return primitive_suffix(bytes, length, start + 4)
+            index: mutable usize = start
+            index <- index + 1 if index < length and bytes[index] == Json::ASCII_MINUS
+            return Json::NO_INDEX if index >= length
+            if bytes[index] == Json::ASCII_ZERO:
+                index <- index + 1
+                return Json::NO_INDEX if index < length and bytes[index] >= Json::ASCII_ZERO and bytes[index] <= Json::ASCII_NINE
+            else:
+                return Json::NO_INDEX if bytes[index] < 49 or bytes[index] > Json::ASCII_NINE
+                while index < length and bytes[index] >= Json::ASCII_ZERO and bytes[index] <= Json::ASCII_NINE:
+                    index <- index + 1
+            if index < length and bytes[index] == Json::ASCII_PERIOD:
+                index <- index + 1
+                return Json::NO_INDEX if index >= length or bytes[index] < Json::ASCII_ZERO or bytes[index] > Json::ASCII_NINE
+                while index < length and bytes[index] >= Json::ASCII_ZERO and bytes[index] <= Json::ASCII_NINE:
+                    index <- index + 1
+            if index < length and (bytes[index] == Json::ASCII_E or bytes[index] == Json::ASCII_UPPER_E):
+                index <- index + 1
+                index <- index + 1 if index < length and (bytes[index] == Json::ASCII_PLUS or bytes[index] == Json::ASCII_MINUS)
+                return Json::NO_INDEX if index >= length or bytes[index] < Json::ASCII_ZERO or bytes[index] > Json::ASCII_NINE
+                while index < length and bytes[index] >= Json::ASCII_ZERO and bytes[index] <= Json::ASCII_NINE:
+                    index <- index + 1
+            return primitive_suffix(bytes, length, index)
+
+        def primitive_suffix(bytes: u8&, length: usize, end: usize) -> usize:
+            return end if end == length
+            byte: u8 = bytes[end]
+            return end if is_whitespace(byte) or byte == Json::ASCII_COMMA or byte == Json::ASCII_OBJECT_CLOSE or byte == Json::ASCII_ARRAY_CLOSE
+            return Json::NO_INDEX
+
+        def value_end(bytes: u8&, length: usize, start: usize) -> usize:
+            return Json::NO_INDEX if start >= length
+            return json_string_end(bytes, length, start) if bytes[start] == Json::ASCII_QUOTE
+            return primitive_end(bytes, length, start) if bytes[start] != Json::ASCII_OBJECT_OPEN and bytes[start] != Json::ASCII_ARRAY_OPEN
+            delimiters: mutable u8[Json::MAX_NESTING] = zeroed
+            states: mutable u8[Json::MAX_NESTING] = zeroed
+            delimiters[0] <- bytes[start]
+            depth: mutable usize = 1
+            index: mutable usize = start + 1
+            while index < length:
+                index <- skip_whitespace(bytes, length, index)
+                return Json::NO_INDEX if index >= length
+                opener: u8 = delimiters[depth - 1]
+                state: u8 = states[depth - 1]
+                if opener == Json::ASCII_OBJECT_OPEN:
+                    if state == 0 or state == 4:
+                        if state == 0 and bytes[index] == Json::ASCII_OBJECT_CLOSE:
+                            depth <- depth - 1
+                            index <- index + 1
+                            return index if depth == 0
+                            continue
+                        return Json::NO_INDEX if bytes[index] != Json::ASCII_QUOTE
+                        key_end: usize = json_string_end(bytes, length, index)
+                        return Json::NO_INDEX if key_end == Json::NO_INDEX
+                        states[depth - 1] <- 1
+                        index <- key_end
+                    else:
+                        if state == 1:
+                            return Json::NO_INDEX if bytes[index] != Json::ASCII_COLON
+                            states[depth - 1] <- 2
+                            index <- index + 1
+                        else:
+                            if state == 2:
+                                states[depth - 1] <- 3
+                                if bytes[index] == Json::ASCII_QUOTE:
+                                    value_string_end: usize = json_string_end(bytes, length, index)
+                                    return Json::NO_INDEX if value_string_end == Json::NO_INDEX
+                                    index <- value_string_end
+                                else:
+                                    if bytes[index] == Json::ASCII_OBJECT_OPEN or bytes[index] == Json::ASCII_ARRAY_OPEN:
+                                        return Json::NO_INDEX if depth >= Json::MAX_NESTING
+                                        delimiters[depth] <- bytes[index]
+                                        states[depth] <- 0
+                                        depth <- depth + 1
+                                        index <- index + 1
+                                    else:
+                                        value_primitive_end: usize = primitive_end(bytes, length, index)
+                                        return Json::NO_INDEX if value_primitive_end == Json::NO_INDEX
+                                        index <- value_primitive_end
+                            else:
+                                if bytes[index] == Json::ASCII_COMMA:
+                                    states[depth - 1] <- 4
+                                    index <- index + 1
+                                else:
+                                    return Json::NO_INDEX if bytes[index] != Json::ASCII_OBJECT_CLOSE
+                                    depth <- depth - 1
+                                    index <- index + 1
+                                    return index if depth == 0
+                else:
+                    if state == 0 or state == 2:
+                        if state == 0 and bytes[index] == Json::ASCII_ARRAY_CLOSE:
+                            depth <- depth - 1
+                            index <- index + 1
+                            return index if depth == 0
+                            continue
+                        return Json::NO_INDEX if state == 2 and bytes[index] == Json::ASCII_ARRAY_CLOSE
+                        states[depth - 1] <- 1
+                        if bytes[index] == Json::ASCII_QUOTE:
+                            value_string_end: usize = json_string_end(bytes, length, index)
+                            return Json::NO_INDEX if value_string_end == Json::NO_INDEX
+                            index <- value_string_end
+                        else:
+                            if bytes[index] == Json::ASCII_OBJECT_OPEN or bytes[index] == Json::ASCII_ARRAY_OPEN:
+                                return Json::NO_INDEX if depth >= Json::MAX_NESTING
+                                delimiters[depth] <- bytes[index]
+                                states[depth] <- 0
+                                depth <- depth + 1
+                                index <- index + 1
+                            else:
+                                value_primitive_end: usize = primitive_end(bytes, length, index)
+                                return Json::NO_INDEX if value_primitive_end == Json::NO_INDEX
+                                index <- value_primitive_end
+                    else:
+                        if bytes[index] == Json::ASCII_COMMA:
+                            states[depth - 1] <- 2
+                            index <- index + 1
+                        else:
+                            return Json::NO_INDEX if bytes[index] != Json::ASCII_ARRAY_CLOSE
+                            depth <- depth - 1
+                            index <- index + 1
+                            return index if depth == 0
+            return Json::NO_INDEX
+
+        def cstr_length(value: cstr) -> usize:
+            index: mutable usize = 0
+            while value[index] != 0:
+                index <- index + 1
+            return index
+
+        def json_key_matches(bytes: u8&, start: usize, end: usize, expected: cstr) -> bool:
+            expected_length: usize = cstr_length(expected)
+            return false if end - start != expected_length + 2
+            return false if bytes[start] != Json::ASCII_QUOTE or bytes[end - 1] != Json::ASCII_QUOTE
+            for index in 0..<expected_length:
+                return false if bytes[start + index + 1] != expected[index].u8()
+            return true
+
+        def object_field(bytes: u8&, length: usize, object_start: usize, expected: cstr) -> FieldLookup:
+            if object_start >= length or bytes[object_start] != Json::ASCII_OBJECT_OPEN:
+                return FieldLookup{valid: false, found: false, start: Json::NO_INDEX}
+            index: mutable usize = object_start + 1
+            result: mutable FieldLookup = FieldLookup{valid: true, found: false, start: Json::NO_INDEX}
+            while index < length:
+                index <- skip_whitespace(bytes, length, index)
+                index <- index + 1 if index < length and bytes[index] == Json::ASCII_COMMA
+                index <- skip_whitespace(bytes, length, index)
+                return result if index < length and bytes[index] == Json::ASCII_OBJECT_CLOSE
+                return FieldLookup{valid: false, found: false, start: Json::NO_INDEX} if index >= length
+                key_start: usize = index
+                key_end: usize = json_string_end(bytes, length, key_start)
+                return FieldLookup{valid: false, found: false, start: Json::NO_INDEX} if key_end == Json::NO_INDEX
+                index <- skip_whitespace(bytes, length, key_end)
+                return FieldLookup{valid: false, found: false, start: Json::NO_INDEX} if index >= length or bytes[index] != Json::ASCII_COLON
+                value_start: usize = skip_whitespace(bytes, length, index + 1)
+                field_end: usize = value_end(bytes, length, value_start)
+                return FieldLookup{valid: false, found: false, start: Json::NO_INDEX} if field_end == Json::NO_INDEX
+                if json_key_matches(bytes, key_start, key_end, expected):
+                    return FieldLookup{valid: false, found: false, start: Json::NO_INDEX} if result.found
+                    result.found <- true
+                    result.start <- value_start
+                index <- skip_whitespace(bytes, length, field_end)
+                return result if index < length and bytes[index] == Json::ASCII_OBJECT_CLOSE
+                return FieldLookup{valid: false, found: false, start: Json::NO_INDEX} if index >= length or bytes[index] != Json::ASCII_COMMA
+                index <- index + 1
+            return FieldLookup{valid: false, found: false, start: Json::NO_INDEX}
+
+        def parse_unsigned(bytes: u8&, length: usize, start: usize) -> NumberResult:
+            return NumberResult{valid: false, value: 0} if start >= length or bytes[start] < Json::ASCII_ZERO or bytes[start] > Json::ASCII_NINE
+            return NumberResult{valid: false, value: 0} if bytes[start] == Json::ASCII_ZERO and start + 1 < length and bytes[start + 1] >= Json::ASCII_ZERO and bytes[start + 1] <= Json::ASCII_NINE
+            index: mutable usize = start
+            value: mutable u64 = 0
+            while index < length and bytes[index] >= Json::ASCII_ZERO and bytes[index] <= Json::ASCII_NINE:
+                digit: u64 = (bytes[index] - Json::ASCII_ZERO).u64()
+                return NumberResult{valid: false, value: 0} if value > (Json::UINT_MAX - digit) / Json::DECIMAL_BASE
+                value <- value * Json::DECIMAL_BASE + digit
+                index <- index + 1
+            return NumberResult{valid: false, value: 0} if index < length and not is_whitespace(bytes[index]) and bytes[index] != Json::ASCII_COMMA and bytes[index] != Json::ASCII_OBJECT_CLOSE and bytes[index] != Json::ASCII_ARRAY_CLOSE
+            return NumberResult{valid: true, value: value}
+
+        def power_of_ten(exponent: u32) -> NumberResult:
+            value: mutable u64 = 1
+            for _ in 0..<exponent:
+                return NumberResult{valid: false, value: 0} if value > Json::UINT_MAX / Json::DECIMAL_BASE
+                value <- value * Json::DECIMAL_BASE
+            return NumberResult{valid: true, value: value}
+
+        def parse_cpu_time(bytes: u8&, start: usize, end: usize) -> NumberResult:
+            return NumberResult{valid: false, value: 0} if start >= end
+            index: mutable usize = start
+            mantissa: mutable u64 = 0
+            significant_digits: mutable u32 = 0
+            fractional_digits: mutable u32 = 0
+            integer_digits: mutable u32 = 0
+            dropped_integer_digits: mutable u32 = 0
+            seen_decimal: mutable bool = false
+            seen_digit: mutable bool = false
+            seen_nonzero: mutable bool = false
+            integer_leading_zero: mutable bool = false
+            while index < end and bytes[index] != 101 and bytes[index] != 69:
+                byte: u8 = bytes[index]
+                if byte == 46:
+                    return NumberResult{valid: false, value: 0} if seen_decimal or integer_digits == 0
+                    seen_decimal <- true
+                else:
+                    return NumberResult{valid: false, value: 0} if byte < Json::ASCII_ZERO or byte > Json::ASCII_NINE
+                    seen_digit <- true
+                    digit: u64 = (byte - Json::ASCII_ZERO).u64()
+                    if not seen_decimal:
+                        return NumberResult{valid: false, value: 0} if integer_leading_zero
+                        integer_leading_zero <- digit == 0 and integer_digits == 0
+                        integer_digits <- integer_digits + 1
+                    if digit != 0:
+                        seen_nonzero <- true
+                    if not seen_nonzero:
+                        fractional_digits <- fractional_digits + 1 if seen_decimal
+                        index <- index + 1
+                        continue
+                    if significant_digits < 18:
+                        return NumberResult{valid: false, value: 0} if mantissa > (Json::UINT_MAX - digit) / Json::DECIMAL_BASE
+                        mantissa <- mantissa * Json::DECIMAL_BASE + digit
+                        significant_digits <- significant_digits + 1
+                    else:
+                        dropped_integer_digits <- dropped_integer_digits + 1 if not seen_decimal
+                    fractional_digits <- fractional_digits + 1 if seen_decimal
+                index <- index + 1
+            return NumberResult{valid: false, value: 0} if not seen_digit or integer_digits == 0 or seen_decimal and fractional_digits == 0
+            exponent: mutable i64 = 0
+            if index < end:
+                index <- index + 1
+                exponent_negative: mutable bool = false
+                if index < end and (bytes[index] == 43 or bytes[index] == 45):
+                    exponent_negative <- bytes[index] == 45
+                    index <- index + 1
+                return NumberResult{valid: false, value: 0} if index >= end
+                while index < end:
+                    return NumberResult{valid: false, value: 0} if bytes[index] < Json::ASCII_ZERO or bytes[index] > Json::ASCII_NINE
+                    exponent <- exponent * 10 + (bytes[index] - Json::ASCII_ZERO).i64()
+                    return NumberResult{valid: false, value: 0} if exponent > 18
+                    index <- index + 1
+                exponent <- 0 - exponent if exponent_negative
+            scale: i64 = fractional_digits.i64() - dropped_integer_digits.i64() - exponent - 6
+            if scale > 0:
+                return NumberResult{valid: true, value: 0} if scale > 19
+                divisor: NumberResult = power_of_ten(scale.u32())
+                return NumberResult{valid: false, value: 0} if not divisor.valid
+                mantissa <- mantissa / divisor.value
+            else:
+                return NumberResult{valid: false, value: 0} if scale < -19
+                multiplier: NumberResult = power_of_ten((0 - scale).u32())
+                return NumberResult{valid: false, value: 0} if not multiplier.valid or mantissa > Json::UINT_MAX / multiplier.value
+                mantissa <- mantissa * multiplier.value
+            return NumberResult{valid: true, value: mantissa}
+
+        def hash_json_string(bytes: u8&, length: usize, start: usize) -> StringHash:
+            end: usize = json_string_end(bytes, length, start)
+            return StringHash{valid: false, value: 0} if end == Json::NO_INDEX
+            hash: mutable u64 = Json::HASH_SEED
+            for index in start + 1..<end - 1:
+                hash <- (hash ^ bytes[index].u64()) * Json::HASH_PRIME
+            return StringHash{valid: true, value: hash}
+
+    public:
+        def json_no_index() -> usize:
+            return Json::NO_INDEX
+
+        def json_skip_whitespace(bytes: u8&, length: usize, start: usize) -> usize:
+            return skip_whitespace(bytes, length, start)
+
+        def json_value_end(bytes: u8&, length: usize, start: usize) -> usize:
+            return value_end(bytes, length, start)
+
+        def json_object_field(bytes: u8&, length: usize, object_start: usize, expected: cstr) -> FieldLookup:
+            return object_field(bytes, length, object_start, expected)
+
+        def json_parse_unsigned(bytes: u8&, length: usize, start: usize) -> NumberResult:
+            return parse_unsigned(bytes, length, start)
+
+        def json_parse_cpu_time(bytes: u8&, start: usize, end: usize) -> NumberResult:
+            return parse_cpu_time(bytes, start, end)
+
+        def json_hash_string(bytes: u8&, length: usize, start: usize) -> StringHash:
+            return hash_json_string(bytes, length, start)

@@ -1,0 +1,67 @@
+include "../src/native/jetsam.elisa"
+
+const module Fixture:
+    REPORT: cstr = "{\"header\":true,\"note\":\"prefix\\\"quoted\"}{\"date\":\"2026-09-13 17:55:05.81 +0200\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"pageSize\":16384},\"processes\":[{\"pid\":0,\"name\":\"kernel_task\",\"uuid\":\"00000000-0000-0000-0000-000000000000\",\"rpages\":6766,\"lifetimeMax\":15630,\"mem_regions\":3713,\"cpuTime\":0.0064200000000000004},{\"pid\":60683,\"name\":\"wasmbrowser\",\"uuid\":\"be387c1b-91ce-3ba9-94a7-974e8d1e9efd\",\"rpages\":9503915,\"lifetimeMax\":9504280,\"mem_regions\":35441,\"cpuTime\":2231.6068879999998}]}"
+    LOWER_REPORT: cstr = "{\"header\":true}{\"date\":\"2026-09-13 17:04:38.00 +0200\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"pageSize\":16384},\"processes\":[{\"pid\":60683,\"name\":\"wasmbrowser\",\"uuid\":\"be387c1b-91ce-3ba9-94a7-974e8d1e9efd\",\"rpages\":9486147,\"lifetimeMax\":9486147,\"mem_regions\":35378,\"cpuTime\":2229.125325}]}"
+    OTHER_UUID_REPORT: cstr = "{\"header\":true}{\"date\":\"2026-09-13 17:56:05.81 +0200\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"pageSize\":16384},\"processes\":[{\"pid\":60683,\"name\":\"wasmbrowser\",\"uuid\":\"be387c1b-91ce-3ba9-94a7-974e8d1e9ef0\",\"rpages\":9503915,\"lifetimeMax\":9504280,\"mem_regions\":35441,\"cpuTime\":0.0064200000000000004}]}"
+    DUPLICATE_PAGE_REPORT: cstr = "{\"header\":true}{\"date\":\"now\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"pageSize\":16384,\"pageSize\":4096},\"processes\":[]}"
+    NESTED_DECOY_REPORT: cstr = "{\"header\":true}{\"date\":\"now\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"nested\":{\"pageSize\":4096},\"pageSize\":16384},\"processes\":[{\"pid\":60683,\"name\":\"wasmbrowser\",\"uuid\":\"be387c1b-91ce-3ba9-94a7-974e8d1e9efd\",\"rpages\":9503915}]}"
+    MALFORMED_REPORT: cstr = "{\"header\":true}{\"date\":\"now\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"pageSize\":16384},\"processes\":[}"
+    EMPTY_PROCESS_REPORT: cstr = "{\"header\":true}{\"date\":\"2026-09-13 17:55:05.81 +0200\",\"largestProcess\":\"wasmbrowser\",\"memoryStatus\":{\"pageSize\":16384},\"processes\":[]}"
+    DUPLICATE_NAME_REPORT: cstr = "{\"header\":true}{\"date\":\"now\",\"largestProcess\":\"app\",\"memoryStatus\":{\"pageSize\":4096},\"processes\":[{\"pid\":1,\"name\":\"app\",\"uuid\":\"00000000-0000-0000-0000-000000000001\",\"rpages\":3},{\"pid\":2,\"name\":\"other\",\"uuid\":\"00000000-0000-0000-0000-000000000002\",\"rpages\":100},{\"pid\":3,\"name\":\"app\",\"uuid\":\"00000000-0000-0000-0000-000000000003\",\"rpages\":9}]}"
+    TRAILING_COMMA_REPORT: cstr = "{\"header\":true}{\"date\":\"now\",\"largestProcess\":\"app\",\"memoryStatus\":{\"pageSize\":4096},\"processes\":[],}"
+    BAD_NUMBER_REPORT: cstr = "{\"header\":true}{\"date\":\"now\",\"largestProcess\":\"app\",\"memoryStatus\":{\"pageSize\":04096},\"processes\":[]}"
+    EXPECTED_PROCESS_ID: u64 = 60683
+    EXPECTED_PAGE_SIZE: u64 = 16384
+    EXPECTED_RESIDENT_PAGES: u64 = 9503915
+    EXPECTED_RESIDENT_BYTES: u64 = 155712143360
+    EXPECTED_LIFETIME_MAX: u64 = 9504280
+    EXPECTED_MEMORY_REGIONS: u64 = 35441
+    EXPECTED_CPU_MICROS: u64 = 2231606887
+    EXPECTED_BYTES_GROWTH: u64 = 291110912
+    EXPECTED_REGION_GROWTH: u64 = 63
+    EXPECTED_CPU_GROWTH_MICROS: u64 = 2481562
+
+
+def cstr_length(value: cstr) -> usize:
+    index: mutable usize = 0
+    while value[index] != 0:
+        index <- index + 1
+    return index
+
+def parse_fixture(value: cstr, pid: u64) -> DebuggerNativeJetsam::Report:
+    return DebuggerNativeJetsam::jetsam_parse((&value[0]).cast[u8&], cstr_length(value), pid) can Unsafe.PointerCast
+
+def main() -> i64:
+    report: DebuggerNativeJetsam::Report = parse_fixture(Fixture::REPORT, Fixture::EXPECTED_PROCESS_ID)
+    return 1 if not report.valid or report.status != DebuggerNativeJetsam::ParseStatus.Ready
+    return 2 if report.process_id != Fixture::EXPECTED_PROCESS_ID or report.page_size != Fixture::EXPECTED_PAGE_SIZE
+    return 3 if report.resident_pages != Fixture::EXPECTED_RESIDENT_PAGES or report.resident_bytes != Fixture::EXPECTED_RESIDENT_BYTES
+    return 4 if report.lifetime_max_pages != Fixture::EXPECTED_LIFETIME_MAX or report.lifetime_max_bytes != Fixture::EXPECTED_LIFETIME_MAX * Fixture::EXPECTED_PAGE_SIZE
+    return 5 if report.memory_regions != Fixture::EXPECTED_MEMORY_REGIONS or report.cpu_time_micros != Fixture::EXPECTED_CPU_MICROS
+    return 6 if not report.has_lifetime_max or not report.has_memory_regions or not report.has_cpu_time or not report.is_largest_process
+    auto_selected: DebuggerNativeJetsam::Report = parse_fixture(Fixture::REPORT, 0)
+    return 7 if not auto_selected.valid or auto_selected.process_id != Fixture::EXPECTED_PROCESS_ID
+    other_uuid: DebuggerNativeJetsam::Report = parse_fixture(Fixture::OTHER_UUID_REPORT, Fixture::EXPECTED_PROCESS_ID)
+    return 8 if not other_uuid.valid or DebuggerNativeJetsam::jetsam_report_matches_process(report, other_uuid)
+    return 16 if other_uuid.cpu_time_micros != 6420
+    return 9 if DebuggerNativeJetsam::jetsam_report_matches_process(report, parse_fixture(Fixture::REPORT, Fixture::EXPECTED_PROCESS_ID)) == false
+    baseline: DebuggerNativeJetsam::Report = parse_fixture(Fixture::LOWER_REPORT, Fixture::EXPECTED_PROCESS_ID)
+    delta: DebuggerNativeJetsam::SnapshotDelta = DebuggerNativeJetsam::jetsam_snapshot_compare(baseline, report)
+    return 17 if not delta.valid or not delta.resident_bytes_grew or delta.resident_bytes_delta != Fixture::EXPECTED_BYTES_GROWTH
+    return 18 if not delta.memory_regions_grew or delta.memory_regions_delta != Fixture::EXPECTED_REGION_GROWTH
+    return 19 if not delta.cpu_time_available or not delta.cpu_time_grew or delta.cpu_time_delta_micros != Fixture::EXPECTED_CPU_GROWTH_MICROS
+    return 10 if parse_fixture(Fixture::REPORT, 42).status != DebuggerNativeJetsam::ParseStatus.MissingProcess
+    return 11 if parse_fixture(Fixture::DUPLICATE_PAGE_REPORT, 0).status != DebuggerNativeJetsam::ParseStatus.InvalidJSON
+    nested: DebuggerNativeJetsam::Report = parse_fixture(Fixture::NESTED_DECOY_REPORT, Fixture::EXPECTED_PROCESS_ID)
+    return 12 if not nested.valid or nested.page_size != Fixture::EXPECTED_PAGE_SIZE
+    return 13 if parse_fixture(Fixture::MALFORMED_REPORT, 0).status != DebuggerNativeJetsam::ParseStatus.InvalidJSON
+    empty: mutable u8[1] = zeroed
+    return 14 if DebuggerNativeJetsam::jetsam_parse(empty[0], 0, 0).status != DebuggerNativeJetsam::ParseStatus.Empty
+    return 15 if DebuggerNativeJetsam::jetsam_parse(empty[0], DebuggerNativeJetsam::jetsam_max_report_bytes() + 1, 0).status != DebuggerNativeJetsam::ParseStatus.TooLarge
+    return 20 if parse_fixture(Fixture::EMPTY_PROCESS_REPORT, 0).status != DebuggerNativeJetsam::ParseStatus.MissingProcess
+    duplicate_name: DebuggerNativeJetsam::Report = parse_fixture(Fixture::DUPLICATE_NAME_REPORT, 0)
+    return 21 if not duplicate_name.valid or duplicate_name.process_id != 3 or duplicate_name.resident_pages != 9
+    return 22 if parse_fixture(Fixture::TRAILING_COMMA_REPORT, 0).status != DebuggerNativeJetsam::ParseStatus.InvalidJSON
+    return 23 if parse_fixture(Fixture::BAD_NUMBER_REPORT, 0).status != DebuggerNativeJetsam::ParseStatus.InvalidJSON
+    return 0

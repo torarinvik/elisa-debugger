@@ -124,6 +124,17 @@ and data breakpoints; hover evaluation; restart; set-variable; and disassembly
 as unsupported. Plugins should use the actual capability response rather
 than the broader typed Elisa module surface.
 
+`build/elisa-debugger-jetsam` is a read-only macOS memory-pressure report
+inspector. Build it with `make ELISA_ALLOW_STALE_STAGE1=0 native-jetsam-tool`,
+then inspect one snapshot with `build/elisa-debugger-jetsam <report.ips> [pid]`
+or compare two ordered snapshots with
+`build/elisa-debugger-jetsam --compare <baseline.ips> <latest.ips> [pid]`.
+The optional PID defaults to the report's `largestProcess`. Inputs are capped
+at 16 MiB and matched by PID plus process binary UUID before comparison. This
+tool reports Jetsam counters; it does not attach to a live process or identify
+native allocation call sites. Run its regression fixture with
+`make ELISA_ALLOW_STALE_STAGE1=0 native-jetsam-check`.
+
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
 `checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`) and reports

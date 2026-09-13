@@ -1,0 +1,269 @@
+# Inspect-only macOS Jetsam analysis. JSON grammar and scalar validation live
+# behind DebuggerNativeJetsamJSON; this module owns the report schema and math.
+
+include "./jetsam_json.elisa"
+
+module DebuggerNativeJetsam:
+    private:
+        const module JetsamInput:
+            MAX_REPORT_BYTES: usize = 16777216
+            OBJECT_OPEN: u8 = 123
+            ARRAY_OPEN: u8 = 91
+            ARRAY_CLOSE: u8 = 93
+            UINT_MAX: u64 = 18446744073709551615
+
+        const module Key:
+            DATE: cstr = "date"
+            LARGEST_PROCESS: cstr = "largestProcess"
+            MEMORY_STATUS: cstr = "memoryStatus"
+            PAGE_SIZE: cstr = "pageSize"
+            PROCESSES: cstr = "processes"
+            PID: cstr = "pid"
+            NAME: cstr = "name"
+            UUID: cstr = "uuid"
+            RPAGES: cstr = "rpages"
+            LIFETIME_MAX: cstr = "lifetimeMax"
+            MEMORY_REGIONS: cstr = "mem_regions"
+            CPU_TIME: cstr = "cpuTime"
+
+    public:
+        enum ParseStatus:
+            Ready
+            Empty
+            TooLarge
+            InvalidJSON
+            UnsupportedFormat
+            MissingPageSize
+            MissingProcess
+            InvalidMetrics
+            Overflow
+
+        enum ParseDetail:
+            None
+            FirstDocument
+            SecondDocument
+            RootFields
+            MemoryStatus
+            ProcessArray
+            ProcessEntry
+
+        struct Report:
+            status: mutable ParseStatus
+            failure_detail: mutable ParseDetail
+            valid: mutable bool
+            process_id: mutable u64
+            page_size: mutable u64
+            resident_pages: mutable u64
+            resident_bytes: mutable u64
+            lifetime_max_pages: mutable u64
+            lifetime_max_bytes: mutable u64
+            memory_regions: mutable u64
+            cpu_time_micros: mutable u64
+            process_name_hash: mutable u64
+            process_uuid_hash: mutable u64
+            report_date_hash: mutable u64
+            is_largest_process: mutable bool
+            has_lifetime_max: mutable bool
+            has_memory_regions: mutable bool
+            has_cpu_time: mutable bool
+
+        struct SnapshotDelta:
+            valid: mutable bool
+            resident_bytes_grew: mutable bool
+            resident_bytes_delta: mutable u64
+            memory_regions_grew: mutable bool
+            memory_regions_delta: mutable u64
+            cpu_time_available: mutable bool
+            cpu_time_grew: mutable bool
+            cpu_time_delta_micros: mutable u64
+
+    private:
+        struct ProcessIdentity:
+            valid: mutable bool
+            pid: mutable u64
+            name_hash: mutable u64
+
+        struct ProcessFields:
+            valid: mutable bool
+            pid: mutable u64
+            name_hash: mutable u64
+            uuid_hash: mutable u64
+            resident_pages: mutable u64
+            lifetime_max_pages: mutable u64
+            memory_regions: mutable u64
+            cpu_time_micros: mutable u64
+            has_lifetime_max: mutable bool
+            has_memory_regions: mutable bool
+            has_cpu_time: mutable bool
+
+        def invalid_process_fields() -> ProcessFields:
+            return zeroed
+
+        def process_identity(bytes: u8&, length: usize, object_start: usize) -> ProcessIdentity:
+            pid_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::PID)
+            name_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::NAME)
+            return zeroed if not pid_lookup.valid or not name_lookup.valid or not pid_lookup.found or not name_lookup.found
+            pid: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_unsigned(bytes, length, pid_lookup.start)
+            name: DebuggerNativeJetsamJSON::StringHash = DebuggerNativeJetsamJSON::json_hash_string(bytes, length, name_lookup.start)
+            return zeroed if not pid.valid or not name.valid
+            return ProcessIdentity{valid: true, pid: pid.value, name_hash: name.value}
+
+        def process_fields(bytes: u8&, length: usize, object_start: usize) -> ProcessFields:
+            parsed: mutable ProcessFields = zeroed
+            pid_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::PID)
+            name_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::NAME)
+            uuid_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::UUID)
+            pages_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::RPAGES)
+            return parsed if not pid_lookup.valid or not name_lookup.valid or not uuid_lookup.valid or not pages_lookup.valid or not pid_lookup.found or not name_lookup.found or not uuid_lookup.found or not pages_lookup.found
+            pid: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_unsigned(bytes, length, pid_lookup.start)
+            pages: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_unsigned(bytes, length, pages_lookup.start)
+            name: DebuggerNativeJetsamJSON::StringHash = DebuggerNativeJetsamJSON::json_hash_string(bytes, length, name_lookup.start)
+            uuid: DebuggerNativeJetsamJSON::StringHash = DebuggerNativeJetsamJSON::json_hash_string(bytes, length, uuid_lookup.start)
+            return parsed if not pid.valid or not pages.valid or not name.valid or not uuid.valid
+            parsed.pid <- pid.value
+            parsed.resident_pages <- pages.value
+            parsed.name_hash <- name.value
+            parsed.uuid_hash <- uuid.value
+            parsed.valid <- true
+            lifetime_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::LIFETIME_MAX)
+            if lifetime_lookup.found:
+                lifetime: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_unsigned(bytes, length, lifetime_lookup.start)
+                return invalid_process_fields() if not lifetime_lookup.valid or not lifetime.valid
+                parsed.lifetime_max_pages <- lifetime.value
+                parsed.has_lifetime_max <- true
+            else:
+                return invalid_process_fields() if not lifetime_lookup.valid
+            regions_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::MEMORY_REGIONS)
+            if regions_lookup.found:
+                regions: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_unsigned(bytes, length, regions_lookup.start)
+                return invalid_process_fields() if not regions_lookup.valid or not regions.valid
+                parsed.memory_regions <- regions.value
+                parsed.has_memory_regions <- true
+            else:
+                return invalid_process_fields() if not regions_lookup.valid
+            cpu_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, object_start, Key::CPU_TIME)
+            if cpu_lookup.found:
+                cpu_end: usize = DebuggerNativeJetsamJSON::json_value_end(bytes, length, cpu_lookup.start)
+                return invalid_process_fields() if not cpu_lookup.valid or cpu_end == DebuggerNativeJetsamJSON::json_no_index()
+                cpu: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_cpu_time(bytes, cpu_lookup.start, cpu_end)
+                return invalid_process_fields() if not cpu.valid
+                parsed.cpu_time_micros <- cpu.value
+                parsed.has_cpu_time <- true
+            else:
+                return invalid_process_fields() if not cpu_lookup.valid
+            return parsed
+
+    public:
+        def jetsam_max_report_bytes() -> usize:
+            return JetsamInput::MAX_REPORT_BYTES
+
+        def jetsam_parse(bytes: u8&, length: usize, target_pid: u64) -> Report:
+            report: mutable Report = zeroed
+            report.status <- ParseStatus.Empty if length == 0
+            report.status <- ParseStatus.TooLarge if length > JetsamInput::MAX_REPORT_BYTES
+            return report if length == 0 or length > JetsamInput::MAX_REPORT_BYTES
+            first_start: usize = DebuggerNativeJetsamJSON::json_skip_whitespace(bytes, length, 0)
+            first_end: usize = DebuggerNativeJetsamJSON::json_value_end(bytes, length, first_start)
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.FirstDocument) if first_end == DebuggerNativeJetsamJSON::json_no_index() or bytes[first_start] != JetsamInput::OBJECT_OPEN
+            body_start: usize = DebuggerNativeJetsamJSON::json_skip_whitespace(bytes, length, first_end)
+            return jetsam_invalid(ParseStatus.UnsupportedFormat) if body_start >= length or bytes[body_start] != JetsamInput::OBJECT_OPEN
+            body_end: usize = DebuggerNativeJetsamJSON::json_value_end(bytes, length, body_start)
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.SecondDocument) if body_end == DebuggerNativeJetsamJSON::json_no_index() or DebuggerNativeJetsamJSON::json_skip_whitespace(bytes, length, body_end) != length
+            date_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, body_start, Key::DATE)
+            largest_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, body_start, Key::LARGEST_PROCESS)
+            memory_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, body_start, Key::MEMORY_STATUS)
+            processes_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, body_start, Key::PROCESSES)
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.RootFields) if not date_lookup.valid or not largest_lookup.valid or not memory_lookup.valid or not processes_lookup.valid
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.RootFields) if not date_lookup.found or not largest_lookup.found or not memory_lookup.found or not processes_lookup.found
+            date_hash: DebuggerNativeJetsamJSON::StringHash = DebuggerNativeJetsamJSON::json_hash_string(bytes, length, date_lookup.start)
+            largest_hash: DebuggerNativeJetsamJSON::StringHash = DebuggerNativeJetsamJSON::json_hash_string(bytes, length, largest_lookup.start)
+            return jetsam_invalid(ParseStatus.InvalidJSON) if not date_hash.valid or not largest_hash.valid
+            page_lookup: DebuggerNativeJetsamJSON::FieldLookup = DebuggerNativeJetsamJSON::json_object_field(bytes, length, memory_lookup.start, Key::PAGE_SIZE)
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.MemoryStatus) if not page_lookup.valid
+            return jetsam_invalid(ParseStatus.MissingPageSize) if not page_lookup.found
+            page_size: DebuggerNativeJetsamJSON::NumberResult = DebuggerNativeJetsamJSON::json_parse_unsigned(bytes, length, page_lookup.start)
+            return jetsam_invalid(ParseStatus.InvalidMetrics) if not page_size.valid or page_size.value == 0
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.ProcessArray) if processes_lookup.start >= length or bytes[processes_lookup.start] != JetsamInput::ARRAY_OPEN
+            array_end: usize = DebuggerNativeJetsamJSON::json_value_end(bytes, length, processes_lookup.start)
+            return jetsam_invalid_at(ParseStatus.InvalidJSON, ParseDetail.ProcessArray) if array_end == DebuggerNativeJetsamJSON::json_no_index()
+            process_index: mutable usize = processes_lookup.start + 1
+            selected: mutable ProcessFields = zeroed
+            while process_index < array_end - 1:
+                process_index <- DebuggerNativeJetsamJSON::json_skip_whitespace(bytes, array_end, process_index)
+                process_index <- process_index + 1 if process_index < array_end and bytes[process_index] == 44
+                process_index <- DebuggerNativeJetsamJSON::json_skip_whitespace(bytes, array_end, process_index)
+                break if process_index >= array_end - 1
+                return jetsam_invalid_json() if bytes[process_index] != JetsamInput::OBJECT_OPEN
+                process_end: usize = DebuggerNativeJetsamJSON::json_value_end(bytes, array_end, process_index)
+                return jetsam_invalid_json() if process_end == DebuggerNativeJetsamJSON::json_no_index()
+                candidate: ProcessIdentity = process_identity(bytes, process_end, process_index)
+                return jetsam_invalid_json() if not candidate.valid
+                choose_by_pid: bool = target_pid != 0 and candidate.pid == target_pid
+                choose_largest: bool = target_pid == 0 and candidate.name_hash == largest_hash.value
+                if choose_by_pid or choose_largest:
+                    matched_fields: ProcessFields = process_fields(bytes, process_end, process_index)
+                    return jetsam_invalid_metrics() if not matched_fields.valid
+                    if choose_by_pid:
+                        return jetsam_invalid_metrics() if selected.valid
+                        selected <- matched_fields
+                    else:
+                        if not selected.valid or matched_fields.resident_pages > selected.resident_pages:
+                            selected <- matched_fields
+                process_index <- process_end
+            return jetsam_invalid(ParseStatus.MissingProcess) if not selected.valid
+            return jetsam_invalid(ParseStatus.Overflow) if selected.resident_pages > JetsamInput::UINT_MAX / page_size.value
+            report.status <- ParseStatus.Ready
+            report.valid <- true
+            report.process_id <- selected.pid
+            report.page_size <- page_size.value
+            report.resident_pages <- selected.resident_pages
+            report.resident_bytes <- selected.resident_pages * page_size.value
+            report.lifetime_max_pages <- selected.lifetime_max_pages
+            report.has_lifetime_max <- selected.has_lifetime_max
+            if selected.has_lifetime_max:
+                return jetsam_invalid(ParseStatus.Overflow) if selected.lifetime_max_pages > JetsamInput::UINT_MAX / page_size.value
+                report.lifetime_max_bytes <- selected.lifetime_max_pages * page_size.value
+            report.memory_regions <- selected.memory_regions
+            report.has_memory_regions <- selected.has_memory_regions
+            report.cpu_time_micros <- selected.cpu_time_micros
+            report.has_cpu_time <- selected.has_cpu_time
+            report.process_name_hash <- selected.name_hash
+            report.process_uuid_hash <- selected.uuid_hash
+            report.report_date_hash <- date_hash.value
+            report.is_largest_process <- selected.name_hash == largest_hash.value
+            return report
+
+        def jetsam_invalid(status: ParseStatus) -> Report:
+            return jetsam_invalid_at(status, ParseDetail.None)
+
+        def jetsam_invalid_at(status: ParseStatus, detail: ParseDetail) -> Report:
+            report: mutable Report = zeroed
+            report.status <- status
+            report.failure_detail <- detail
+            report.valid <- false
+            return report
+
+        def jetsam_invalid_json() -> Report:
+            return jetsam_invalid(ParseStatus.InvalidJSON)
+
+        def jetsam_invalid_metrics() -> Report:
+            return jetsam_invalid(ParseStatus.InvalidMetrics)
+
+        def jetsam_report_matches_process(left: Report, right: Report) -> bool:
+            return left.valid and right.valid and left.process_id == right.process_id and left.process_uuid_hash == right.process_uuid_hash and left.page_size == right.page_size
+
+        # `baseline` must precede `latest`; each magnitude is absolute and the
+        # corresponding `*_grew` flag gives its direction without signed casts.
+        def jetsam_snapshot_compare(baseline: Report, latest: Report) -> SnapshotDelta:
+            delta: mutable SnapshotDelta = zeroed
+            return delta if not jetsam_report_matches_process(baseline, latest)
+            delta.valid <- true
+            delta.resident_bytes_grew <- latest.resident_bytes > baseline.resident_bytes
+            delta.resident_bytes_delta <- latest.resident_bytes - baseline.resident_bytes if latest.resident_bytes >= baseline.resident_bytes else baseline.resident_bytes - latest.resident_bytes
+            delta.memory_regions_grew <- latest.memory_regions > baseline.memory_regions
+            delta.memory_regions_delta <- latest.memory_regions - baseline.memory_regions if latest.memory_regions >= baseline.memory_regions else baseline.memory_regions - latest.memory_regions
+            delta.cpu_time_available <- baseline.has_cpu_time and latest.has_cpu_time
+            if delta.cpu_time_available:
+                delta.cpu_time_grew <- latest.cpu_time_micros > baseline.cpu_time_micros
+                delta.cpu_time_delta_micros <- latest.cpu_time_micros - baseline.cpu_time_micros if latest.cpu_time_micros >= baseline.cpu_time_micros else baseline.cpu_time_micros - latest.cpu_time_micros
+            return delta

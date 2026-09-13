@@ -98,6 +98,23 @@ const TEST_ADAPTER_RESTORE_FAILURE: i64 = 22
 const TEST_ADAPTER_TAMPER_ACCEPTED: i64 = 23
 const TEST_REPLAY_WRITE_UNSUPPRESSED_ACCEPTED: i64 = 24
 const TEST_BRANCH_WRITE_NOT_SUPPRESSED: i64 = 25
+const TEST_LARGE_TRACE_CAPACITY_FAILURE: i64 = 26
+const TEST_ORIGINAL_TRACE_BINARY_CAPACITY: usize = 65536
+const TEST_LARGE_CHECKPOINT_TASK_COUNT: usize = 1
+const TEST_LARGE_CHECKPOINT_TASK_ID: u64 = 1
+const TEST_LARGE_CHECKPOINT_NEXT_TASK_ID: u64 = 2
+const TEST_LARGE_CHECKPOINT_TASK_LOGICAL_TIME: u64 = 512
+const TEST_LARGE_CHECKPOINT_WAIT_COUNT: usize = 0
+const TEST_LARGE_CHECKPOINT_SCHEDULER_CURSOR: usize = 0
+const TEST_LARGE_CHECKPOINT_EFFECT_CURSOR: usize = 0
+const TEST_LARGE_CHECKPOINT_FIRST_HANDLE: u64 = 1
+const TEST_LARGE_CHECKPOINT_NEXT_HANDLE: u64 = TEST_RESOURCE_CAPACITY.u64() + TEST_LARGE_CHECKPOINT_FIRST_HANDLE
+const TEST_LARGE_CHECKPOINT_FILE_LENGTH: usize = 256
+const TEST_LARGE_CHECKPOINT_FILE_CURSOR: usize = 0
+const TEST_LARGE_CHECKPOINT_OS_THREAD: u64 = 0
+const TEST_LARGE_ADAPTER_SAMPLE_CAPACITY: usize = 128
+const TEST_LARGE_CONSOLE_RECORD_CAPACITY: usize = 64
+const TEST_LARGE_CONSOLE_DATA_CAPACITY: usize = 256
 
 def test_checksum_with_basis(bytes: u8&, length: usize, basis: u64) -> u64:
     checksum: mutable u64 = basis
@@ -245,6 +262,80 @@ def checkpoint_trace_event_chunk(checkpoint: DebuggerFullCheckpoint::ManagedChec
     for index in 0..<payload.length:
         chunk.payload[index] <- payload.bytes[index]
     return chunk
+
+def make_large_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
+    checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
+
+    task: mutable DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(TEST_LARGE_CHECKPOINT_TASK_ID), parent: DebuggerIdentity::debug_id(NO_PARENT_TASK), state: DebuggerConcurrency::TaskState.Running, logical_time: TEST_LARGE_CHECKPOINT_TASK_LOGICAL_TIME, os_thread: TEST_LARGE_CHECKPOINT_OS_THREAD}
+    checkpoint.tasks.task_count <- TEST_LARGE_CHECKPOINT_TASK_COUNT
+    checkpoint.tasks.next_id <- TEST_LARGE_CHECKPOINT_NEXT_TASK_ID
+    checkpoint.tasks.tasks[0] <- task
+    checkpoint.tasks.status <- DebuggerConcurrencyRuntime::RuntimeStatus.Running
+    checkpoint.tasks.current <- task.id
+    checkpoint.tasks.wait_count <- TEST_LARGE_CHECKPOINT_WAIT_COUNT
+    checkpoint.tasks.scheduler_cursor <- TEST_LARGE_CHECKPOINT_SCHEDULER_CURSOR
+    checkpoint.tasks.scheduler_count <- TEST_SCHEDULE_CAPACITY
+    checkpoint.tasks.scheduler_replaying <- false
+    checkpoint.tasks.scheduler_diverged <- false
+    checkpoint.tasks.scheduler_overflowed <- false
+    for index in 0..<TEST_SCHEDULE_CAPACITY:
+        checkpoint.tasks.scheduler_decisions[index] <- DebuggerScheduler::ScheduleDecision{ordinal: index.u64(), task: task, kind: DebuggerScheduler::ScheduleKind.Run, synchronization: NO_SYNC_RESOURCE}
+
+    checkpoint.effects.count <- TEST_EFFECT_CAPACITY
+    checkpoint.effects.cursor <- TEST_LARGE_CHECKPOINT_EFFECT_CURSOR
+    for index in 0..<TEST_EFFECT_CAPACITY:
+        checkpoint.effects.records[index] <- DebuggerEffects::EffectRecord{sequence: index.u64(), kind: DebuggerEffects::EffectKind.Clock, request_hash: TEST_EFFECT_REQUEST_HASH, result_hash: TEST_EFFECT_RESULT_HASH, result_value: TEST_EFFECT_RESULT_VALUE, suppress_external_write: false}
+
+    checkpoint.resources.count <- TEST_RESOURCE_CAPACITY
+    checkpoint.resources.next_handle <- TEST_LARGE_CHECKPOINT_NEXT_HANDLE
+    for index in 0..<TEST_RESOURCE_CAPACITY:
+        checkpoint.resources.files[index].handle <- DebuggerIdentity::debug_id(TEST_LARGE_CHECKPOINT_FIRST_HANDLE + index.u64())
+        checkpoint.resources.files[index].path <- DebuggerIdentity::debug_id(TEST_RESOURCE_PATH_ID + index.u64())
+        checkpoint.resources.files[index].length <- TEST_LARGE_CHECKPOINT_FILE_LENGTH
+        checkpoint.resources.files[index].cursor <- TEST_LARGE_CHECKPOINT_FILE_CURSOR
+        checkpoint.resources.files[index].writable <- true
+        checkpoint.resources.files[index].generation <- TEST_RESOURCE_GENERATION
+
+    checkpoint.adapters.clock.count <- TEST_LARGE_ADAPTER_SAMPLE_CAPACITY
+    for index in 0..<TEST_LARGE_ADAPTER_SAMPLE_CAPACITY:
+        checkpoint.adapters.clock.samples[index] <- DebuggerReplayAdapters::AdapterSample{sequence: index.u64(), source: DebuggerIdentity::debug_id(TEST_ADAPTER_SOURCE_ID), value: TEST_ADAPTER_CLOCK_FIRST}
+    checkpoint.adapters.random.count <- TEST_LARGE_ADAPTER_SAMPLE_CAPACITY
+    for index in 0..<TEST_LARGE_ADAPTER_SAMPLE_CAPACITY:
+        checkpoint.adapters.random.samples[index] <- DebuggerReplayAdapters::AdapterSample{sequence: index.u64(), source: DebuggerIdentity::debug_id(TEST_ADAPTER_SOURCE_ID), value: TEST_ADAPTER_RANDOM_FIRST}
+    checkpoint.adapters.console.count <- TEST_LARGE_CONSOLE_RECORD_CAPACITY
+    for index in 0..<TEST_LARGE_CONSOLE_RECORD_CAPACITY:
+        checkpoint.adapters.console.records[index].sequence <- index.u64()
+        checkpoint.adapters.console.records[index].channel <- DebuggerReplayAdapters::ConsoleChannel.Stdout
+        checkpoint.adapters.console.records[index].kind <- DebuggerReplayAdapters::ConsoleRecordKind.Output
+        checkpoint.adapters.console.records[index].requested <- TEST_LARGE_CONSOLE_DATA_CAPACITY
+        checkpoint.adapters.console.records[index].length <- TEST_LARGE_CONSOLE_DATA_CAPACITY
+        checkpoint.adapters.console.records[index].eof <- false
+
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(checkpoint)
+    return checkpoint
+
+def check_large_trace_capacity() -> i64:
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_large_checkpoint()
+    return TEST_LARGE_TRACE_CAPACITY_FAILURE if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+    encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
+    return TEST_LARGE_TRACE_CAPACITY_FAILURE if encoded.failed or encoded.length <= TEST_ORIGINAL_TRACE_BINARY_CAPACITY
+    chunk: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(checkpoint, TEST_TRACE_SEQUENCE)
+    return TEST_LARGE_TRACE_CAPACITY_FAILURE if chunk.status != DebuggerTraceStorage::StorageStatus.Ready or not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(chunk.chunk)
+    frame: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk.chunk)
+    return TEST_LARGE_TRACE_CAPACITY_FAILURE if not DebuggerTraceBinary::writer_is_valid(frame)
+    decoded: DebuggerTraceStorage::ChunkDecode = DebuggerTraceStorage::storage_decode_chunk(frame.bytes[0], frame.length)
+    return TEST_LARGE_TRACE_CAPACITY_FAILURE if decoded.status != DebuggerTraceStorage::StorageStatus.Ready
+    manifest_frame: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(checkpoint_manifest_chunk(checkpoint))
+    event_frame: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(checkpoint_trace_event_chunk(checkpoint))
+    footer: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_footer(TEST_TRACE_FOOTER_SEQUENCE, checkpoint.event)
+    trace_bytes: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
+    append_trace_bytes(trace_bytes, manifest_frame)
+    append_trace_bytes(trace_bytes, frame)
+    append_trace_bytes(trace_bytes, event_frame)
+    append_trace_bytes(trace_bytes, footer)
+    scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(trace_bytes.bytes[0], trace_bytes.length)
+    return TEST_LARGE_TRACE_CAPACITY_FAILURE if not DebuggerTraceBinary::writer_is_valid(trace_bytes) or scan.status != DebuggerTraceStorage::StorageStatus.Ready or not scan.footer_verified
+    return 0
 
 def append_trace_bytes(output: mutable DebuggerTraceBinary::ByteWriter&, source: DebuggerTraceBinary::ByteWriter) -> void:
     if not DebuggerTraceBinary::writer_is_valid(source):
@@ -416,4 +507,6 @@ def check_rejects_malformed_inputs() -> i64:
 def main() -> i64:
     round_trip: i64 = check_round_trip()
     return round_trip if round_trip != 0
+    large_capacity: i64 = check_large_trace_capacity()
+    return large_capacity if large_capacity != 0
     return check_rejects_malformed_inputs()

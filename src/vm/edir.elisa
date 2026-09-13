@@ -11,6 +11,8 @@ module DebuggerEDIR:
         const EDIR_OPCODE_MAX: u16 = 19
         const EDIR_MAX_INSTRUCTIONS: usize = 256
         const EDIR_MAX_SOURCE_FILES: usize = 16
+        const EDIR_MAX_FUNCTIONS: usize = 64
+        const EDIR_MAX_FUNCTION_NAME_BYTES: usize = 128
         const EDIR_NO_SOURCE_FILE_ID: u64 = 0
         const EDIR_NO_SOURCE_LINE: u32 = 0
         const EDIR_MAX_LOCALS: usize = 32
@@ -83,8 +85,33 @@ module DebuggerEDIR:
                 return false if span.start_line == EDIR_NO_SOURCE_LINE or span.end_line == EDIR_NO_SOURCE_LINE or span.start_line.u64() > file.line_count or span.end_line.u64() > file.line_count
             return true
 
+        def function_source_is_valid(image: ProgramImage, source: DebuggerIdentity::SourceSpan) -> bool:
+            return false if not source_range_is_valid(source) or source.file.value == EDIR_NO_SOURCE_FILE_ID
+            return false if source.start_line == EDIR_NO_SOURCE_LINE or source.end_line == EDIR_NO_SOURCE_LINE
+            file_index: usize = source_file_index(image, source.file)
+            return false if file_index == EDIR_MAX_SOURCE_FILES
+            file: DebuggerMetadata::SourceFile = image.source_files[file_index]
+            return source.start_line.u64() <= file.line_count and source.end_line.u64() <= file.line_count
+
+        def function_table_is_valid(image: ProgramImage) -> bool:
+            return false if image.function_count > EDIR_MAX_FUNCTIONS
+            for index in 0..<image.function_count:
+                function: FunctionDescriptor = image.functions[index]
+                return false if DebuggerIdentity::debug_id_is_zero(function.id)
+                return false if function.name_length == 0 or function.name_length > EDIR_MAX_FUNCTION_NAME_BYTES
+                return false if not DebuggerMetadata::metadata_text_utf8_is_valid(function.name_bytes[0], function.name_length, EDIR_MAX_FUNCTION_NAME_BYTES)
+                return false if function.entry_instruction >= function.end_instruction_exclusive or function.end_instruction_exclusive > image.program.instruction_count
+                return false if not function_source_is_valid(image, function.source)
+                for previous in 0..<index:
+                    previous_function: FunctionDescriptor = image.functions[previous]
+                    return false if previous_function.id.value == function.id.value
+                    return false if function.entry_instruction < previous_function.end_instruction_exclusive and previous_function.entry_instruction < function.end_instruction_exclusive
+            return true
+
     public:
         const EDIR_SOURCE_FILE_CAPACITY: usize = EDIR_MAX_SOURCE_FILES
+        const EDIR_FUNCTION_CAPACITY: usize = EDIR_MAX_FUNCTIONS
+        const EDIR_FUNCTION_NAME_CAPACITY: usize = EDIR_MAX_FUNCTION_NAME_BYTES
 
         enum Opcode:
             Nop
@@ -119,6 +146,7 @@ module DebuggerEDIR:
             MissingReturn
             InvalidSourceRange
             InvalidSourceTable
+            InvalidFunctionTable
             InvalidCallDepth
 
         struct Instruction:
@@ -133,11 +161,25 @@ module DebuggerEDIR:
             local_count: mutable u64
             has_return: mutable bool
 
+        # Instruction ranges are half-open: entry_instruction is included and
+        # end_instruction_exclusive is the first instruction outside the body.
+        # Descriptors are compiler-supplied artifact metadata; the VM never
+        # derives them from branch targets or instruction addresses.
+        struct FunctionDescriptor:
+            id: mutable DebuggerIdentity::DebugId
+            name_bytes: mutable u8[EDIR_MAX_FUNCTION_NAME_BYTES]
+            name_length: mutable usize
+            entry_instruction: mutable u64
+            end_instruction_exclusive: mutable u64
+            source: mutable DebuggerIdentity::SourceSpan
+
         struct ProgramImage:
             program: mutable Program
             instructions: mutable Instruction[EDIR_MAX_INSTRUCTIONS]
             source_file_count: mutable usize
             source_files: mutable DebuggerMetadata::SourceFile[EDIR_MAX_SOURCE_FILES]
+            function_count: mutable usize
+            functions: mutable FunctionDescriptor[EDIR_MAX_FUNCTIONS]
 
         struct Verification:
             valid: mutable bool
@@ -168,6 +210,12 @@ module DebuggerEDIR:
 
         def source_file_capacity() -> usize:
             return EDIR_SOURCE_FILE_CAPACITY
+
+        def function_capacity() -> usize:
+            return EDIR_MAX_FUNCTIONS
+
+        def function_name_capacity() -> usize:
+            return EDIR_MAX_FUNCTION_NAME_BYTES
 
         def frame_save(machine: mutable Machine&, depth: usize) -> void:
             return if depth >= EDIR_MAX_CALL_DEPTH
@@ -356,6 +404,7 @@ module DebuggerEDIR:
             verification: Verification = verify_image(image)
             return verification if not verification.valid
             return verification_failure(VerificationError.InvalidSourceTable, EDIR_NO_SOURCE_FILE_ID) if not source_file_table_is_valid(image)
+            return verification_failure(VerificationError.InvalidFunctionTable, 0) if not function_table_is_valid(image)
             return verification
 
         def machine_new() -> Machine:

@@ -10,6 +10,9 @@ const EDIR_U16_FIELD_BYTES: usize = 2
 const EDIR_U32_FIELD_BYTES: usize = 4
 const EDIR_U64_FIELD_BYTES: usize = 8
 const SOURCE_FILE_FIXED_BYTES: usize = 36
+const SOURCE_SPAN_BYTES: usize = EDIR_U64_FIELD_BYTES * 3 + EDIR_U32_FIELD_BYTES * 5
+const INSTRUCTION_BYTES: usize = EDIR_U16_FIELD_BYTES + EDIR_U64_FIELD_BYTES * 2 + SOURCE_SPAN_BYTES
+const FUNCTION_FIXED_BYTES: usize = EDIR_U64_FIELD_BYTES * 3 + SOURCE_SPAN_BYTES + EDIR_U32_FIELD_BYTES
 const SOURCE_FILE_ROW_MAX_BYTES: usize = SOURCE_FILE_FIXED_BYTES + DebuggerMetadata::SOURCE_PATH_CAPACITY
 const SOURCE_PATH_LENGTH: usize = 10
 const SOURCE_PATH_BYTES: u8[SOURCE_PATH_LENGTH] = [109, 97, 105, 110, 46, 101, 108, 105, 115, 97]
@@ -40,7 +43,9 @@ const SOURCE_COLUMN: u32 = 3
 const SOURCE_DISCRIMINATOR: u32 = 1
 const MAX_ARTIFACT_INSTRUCTIONS: usize = 128
 const MAX_ARTIFACT_SOURCE_FILES: usize = 16
-const MAX_ARTIFACT_BYTES: usize = 24925
+const MAX_ARTIFACT_FUNCTIONS: usize = 64
+const MAX_FUNCTION_NAME_BYTES: usize = 128
+const MAX_ARTIFACT_BYTES: usize = 37729
 const FIRST_SOURCE_INDEX: usize = 0
 const DUPLICATE_SOURCE_INDEX: usize = 1
 const SOURCE_ID_BASE: u64 = 100
@@ -51,10 +56,47 @@ const LEGACY_SCHEMA_VALUE: u8 = 1
 const MAX_SOURCE_FILE_COUNT_PLUS_ONE: u8 = 17
 const OVERSIZE_PATH_LENGTH_LOW_BYTE: u8 = 1
 const OVERSIZE_PATH_LENGTH_HIGH_BYTE: u8 = 4
+const FUNCTION_ID: u64 = 987
+const FUNCTION_NAME_LENGTH: usize = 9
+const FUNCTION_NAME_BYTES: u8[FUNCTION_NAME_LENGTH] = [109, 111, 100, 117, 108, 101, 58, 58, 102]
+const FUNCTION_ENTRY: u64 = 1
+const FUNCTION_END_EXCLUSIVE: u64 = 3
+const ADJACENT_FIRST_ENTRY: u64 = 0
+const ADJACENT_BOUNDARY: u64 = 1
+const OVERLAPPING_FUNCTION_ENTRY: u64 = 2
+const FUNCTION_COUNT_ONE: usize = 1
+const FUNCTION_COUNT_OFFSET: usize = EDIR_HEADER_BYTES + SOURCE_FILE_FIXED_BYTES + SOURCE_PATH_LENGTH + INSTRUCTION_COUNT.usize() * INSTRUCTION_BYTES
+const FUNCTION_ID_OFFSET: usize = FUNCTION_COUNT_OFFSET + EDIR_U32_FIELD_BYTES
+const FUNCTION_ENTRY_OFFSET: usize = FUNCTION_ID_OFFSET + EDIR_U64_FIELD_BYTES
+const FUNCTION_END_OFFSET: usize = FUNCTION_ENTRY_OFFSET + EDIR_U64_FIELD_BYTES
+const FUNCTION_SOURCE_OFFSET: usize = FUNCTION_END_OFFSET + EDIR_U64_FIELD_BYTES
+const FUNCTION_NAME_LENGTH_OFFSET: usize = FUNCTION_SOURCE_OFFSET + SOURCE_SPAN_BYTES
+const FUNCTION_NAME_OFFSET: usize = FUNCTION_NAME_LENGTH_OFFSET + EDIR_U32_FIELD_BYTES
+const MAX_FUNCTIONS_PLUS_ONE: usize = MAX_ARTIFACT_FUNCTIONS + 1
+const MAX_FUNCTIONS_COUNT_OFFSET: usize = EDIR_HEADER_BYTES + MAX_ARTIFACT_SOURCE_FILES * SOURCE_FILE_ROW_MAX_BYTES + MAX_ARTIFACT_INSTRUCTIONS * INSTRUCTION_BYTES
+const MAX_FUNCTION_ROW_BYTES: usize = FUNCTION_FIXED_BYTES + MAX_FUNCTION_NAME_BYTES
+const SECOND_MAX_FUNCTION_ID_OFFSET: usize = MAX_FUNCTIONS_COUNT_OFFSET + EDIR_U32_FIELD_BYTES + MAX_FUNCTION_ROW_BYTES
+const FUNCTION_ID_BASE: u64 = 5000
+const FUNCTION_NAME_FILL_BYTE: u8 = 97
+const FUNCTION_RANGE_STRIDE: u64 = 2
+const FUNCTION_RANGE_WIDTH: u64 = 1
+const MAX_FUNCTION_SOURCE_START_BYTE: u64 = 0
+const MAX_FUNCTION_SOURCE_END_BYTE: u64 = 1
+const MAX_FUNCTION_SOURCE_LINE: u32 = 1
+const MAX_FUNCTION_SOURCE_START_COLUMN: u32 = 0
+const MAX_FUNCTION_SOURCE_END_COLUMN: u32 = 1
+const INVALID_FUNCTION_END: u8 = 0
+const INVALID_FUNCTION_NAME_LENGTH: u8 = 129
+const INVALID_FUNCTION_FILE_ID: u8 = 12
+const FUNCTION_NAME_C0_CONTROL: u8 = 0
+const FUNCTION_NAME_C1_LEAD_BYTE: u8 = 194
+const FUNCTION_NAME_C1_CONTINUATION_BYTE: u8 = 128
+const LEGACY_V2_SCHEMA_VALUE: u8 = 2
 
 def main() -> i64:
     return 6 if DebuggerEDIRCodec::artifact_max_instruction_count() != MAX_ARTIFACT_INSTRUCTIONS or DebuggerEDIRCodec::artifact_max_bytes() != MAX_ARTIFACT_BYTES
     return 9 if DebuggerEDIRCodec::artifact_max_source_file_count() != MAX_ARTIFACT_SOURCE_FILES or DebuggerEDIRCodec::artifact_source_path_capacity() != DebuggerMetadata::source_path_capacity()
+    return 30 if DebuggerEDIRCodec::artifact_max_function_count() != MAX_ARTIFACT_FUNCTIONS or DebuggerEDIRCodec::artifact_function_name_capacity() != MAX_FUNCTION_NAME_BYTES
     source: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{
         file: DebuggerIdentity::debug_id(SOURCE_FILE),
         start_byte: SOURCE_START_BYTE,
@@ -77,6 +119,16 @@ def main() -> i64:
     for path_index in 0..<SOURCE_PATH_LENGTH:
         source_file.path_bytes[path_index] <- SOURCE_PATH_BYTES[path_index]
     image.source_files[FIRST_SOURCE_INDEX] <- source_file
+    image.function_count <- FUNCTION_COUNT_ONE
+    function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+    function.id <- DebuggerIdentity::debug_id(FUNCTION_ID)
+    function.name_length <- FUNCTION_NAME_LENGTH
+    for name_index in 0..<FUNCTION_NAME_LENGTH:
+        function.name_bytes[name_index] <- FUNCTION_NAME_BYTES[name_index]
+    function.entry_instruction <- FUNCTION_ENTRY
+    function.end_instruction_exclusive <- FUNCTION_END_EXCLUSIVE
+    function.source <- source
+    image.functions[0] <- function
     image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: ENTRY_CONSTANT, b: 0, source: source}
     image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: 0, b: 0, source: source}
     image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: source}
@@ -85,6 +137,9 @@ def main() -> i64:
     reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(encoded.bytes[0], encoded.length)
     decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(reader)
     return 2 if not decoded.valid or decoded.image.program.instruction_count != INSTRUCTION_COUNT or decoded.image.instructions[0].opcode != DebuggerEDIR::Opcode.Constant or decoded.image.instructions[0].a != ENTRY_CONSTANT
+    return 31 if decoded.image.function_count != FUNCTION_COUNT_ONE or decoded.image.functions[0].id.value != FUNCTION_ID or decoded.image.functions[0].entry_instruction != FUNCTION_ENTRY or decoded.image.functions[0].end_instruction_exclusive != FUNCTION_END_EXCLUSIVE or decoded.image.functions[0].source.file.value != SOURCE_FILE or decoded.image.functions[0].name_length != FUNCTION_NAME_LENGTH
+    for name_index in 0..<FUNCTION_NAME_LENGTH:
+        return 32 if decoded.image.functions[0].name_bytes[name_index] != FUNCTION_NAME_BYTES[name_index]
     return 3 if decoded.image.instructions[0].source.file.value != SOURCE_FILE or decoded.image.instructions[0].source.start_line != SOURCE_LINE or decoded.image.instructions[0].source.discriminator != SOURCE_DISCRIMINATOR
     return 10 if decoded.image.source_file_count != 1 or decoded.image.source_files[FIRST_SOURCE_INDEX].path_length != SOURCE_PATH_LENGTH
     return 11 if decoded.image.source_files[FIRST_SOURCE_INDEX].id.value != SOURCE_FILE or decoded.image.source_files[FIRST_SOURCE_INDEX].logical_path.value != SOURCE_LOGICAL_PATH or decoded.image.source_files[FIRST_SOURCE_INDEX].content.value != SOURCE_CONTENT_DIGEST or decoded.image.source_files[FIRST_SOURCE_INDEX].line_count != SOURCE_LINE_COUNT
@@ -105,6 +160,14 @@ def main() -> i64:
     legacy_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(legacy_reader)
     legacy_validity_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(legacy.bytes[0], legacy.length)
     return 13 if legacy_decoded.valid or DebuggerEDIRCodec::artifact_is_valid(legacy_validity_reader)
+    legacy_v2_image: mutable DebuggerEDIR::ProgramImage = image
+    legacy_v2_image.function_count <- 0
+    legacy_v2: mutable DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(legacy_v2_image)
+    legacy_v2.bytes[0] <- LEGACY_V2_SCHEMA_VALUE
+    legacy_v2.length <- legacy_v2.length - EDIR_U32_FIELD_BYTES
+    legacy_v2_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(legacy_v2.bytes[0], legacy_v2.length)
+    legacy_v2_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(legacy_v2_reader)
+    return 33 if not legacy_v2_decoded.valid or legacy_v2_decoded.image.function_count != 0
     unknown_file: mutable DebuggerEDIR::ProgramImage = image
     unknown_file.instructions[0].source.file <- DebuggerIdentity::debug_id(SOURCE_FILE + 1)
     unknown_file_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(unknown_file)
@@ -122,6 +185,58 @@ def main() -> i64:
     too_many_source_rows.source_file_count <- MAX_ARTIFACT_SOURCE_FILES + 1
     too_many_source_rows_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(too_many_source_rows)
     return 28 if DebuggerTraceBinary::writer_is_valid(too_many_source_rows_encoded)
+    zero_function_id: mutable DebuggerEDIR::ProgramImage = image
+    zero_function_id.functions[0].id <- DebuggerIdentity::debug_id(0)
+    zero_function_id_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(zero_function_id)
+    return 34 if DebuggerTraceBinary::writer_is_valid(zero_function_id_encoded)
+    duplicate_function_id: mutable DebuggerEDIR::ProgramImage = image
+    duplicate_function_id.function_count <- FUNCTION_COUNT_ONE + 1
+    duplicate_function_id.functions[1] <- image.functions[0]
+    duplicate_function_id_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(duplicate_function_id)
+    return 35 if DebuggerTraceBinary::writer_is_valid(duplicate_function_id_encoded)
+    invalid_function_name_length: mutable DebuggerEDIR::ProgramImage = image
+    invalid_function_name_length.functions[0].name_length <- MAX_FUNCTION_NAME_BYTES + 1
+    invalid_function_name_length_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(invalid_function_name_length)
+    return 36 if DebuggerTraceBinary::writer_is_valid(invalid_function_name_length_encoded)
+    invalid_function_range: mutable DebuggerEDIR::ProgramImage = image
+    invalid_function_range.functions[0].end_instruction_exclusive <- invalid_function_range.functions[0].entry_instruction
+    invalid_function_range_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(invalid_function_range)
+    return 37 if DebuggerTraceBinary::writer_is_valid(invalid_function_range_encoded)
+    adjacent_function_ranges: mutable DebuggerEDIR::ProgramImage = image
+    adjacent_function_ranges.function_count <- FUNCTION_COUNT_ONE + 1
+    adjacent_function_ranges.functions[0].entry_instruction <- ADJACENT_FIRST_ENTRY
+    adjacent_function_ranges.functions[0].end_instruction_exclusive <- ADJACENT_BOUNDARY
+    adjacent_function_ranges.functions[1] <- image.functions[0]
+    adjacent_function_ranges.functions[1].id <- DebuggerIdentity::debug_id(FUNCTION_ID + 1)
+    adjacent_function_ranges.functions[1].entry_instruction <- ADJACENT_BOUNDARY
+    adjacent_function_ranges.functions[1].end_instruction_exclusive <- FUNCTION_END_EXCLUSIVE
+    adjacent_function_ranges_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(adjacent_function_ranges)
+    return 46 if not DebuggerTraceBinary::writer_is_valid(adjacent_function_ranges_encoded)
+    overlapping_function_ranges: mutable DebuggerEDIR::ProgramImage = image
+    overlapping_function_ranges.function_count <- FUNCTION_COUNT_ONE + 1
+    overlapping_function_ranges.functions[1] <- image.functions[0]
+    overlapping_function_ranges.functions[1].id <- DebuggerIdentity::debug_id(FUNCTION_ID + 1)
+    overlapping_function_ranges.functions[1].entry_instruction <- OVERLAPPING_FUNCTION_ENTRY
+    overlapping_function_ranges.functions[1].end_instruction_exclusive <- FUNCTION_END_EXCLUSIVE
+    overlapping_function_ranges_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(overlapping_function_ranges)
+    return 47 if DebuggerTraceBinary::writer_is_valid(overlapping_function_ranges_encoded)
+    invalid_function_c0_name: mutable DebuggerEDIR::ProgramImage = image
+    invalid_function_c0_name.functions[0].name_bytes[0] <- FUNCTION_NAME_C0_CONTROL
+    invalid_function_c0_name_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(invalid_function_c0_name)
+    return 48 if DebuggerTraceBinary::writer_is_valid(invalid_function_c0_name_encoded)
+    invalid_function_c1_name: mutable DebuggerEDIR::ProgramImage = image
+    invalid_function_c1_name.functions[0].name_bytes[0] <- FUNCTION_NAME_C1_LEAD_BYTE
+    invalid_function_c1_name.functions[0].name_bytes[1] <- FUNCTION_NAME_C1_CONTINUATION_BYTE
+    invalid_function_c1_name_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(invalid_function_c1_name)
+    return 49 if DebuggerTraceBinary::writer_is_valid(invalid_function_c1_name_encoded)
+    unknown_function_source: mutable DebuggerEDIR::ProgramImage = image
+    unknown_function_source.functions[0].source.file <- DebuggerIdentity::debug_id(SOURCE_FILE + 1)
+    unknown_function_source_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(unknown_function_source)
+    return 38 if DebuggerTraceBinary::writer_is_valid(unknown_function_source_encoded)
+    too_many_functions: mutable DebuggerEDIR::ProgramImage = image
+    too_many_functions.function_count <- MAX_FUNCTIONS_PLUS_ONE
+    too_many_functions_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(too_many_functions)
+    return 39 if DebuggerTraceBinary::writer_is_valid(too_many_functions_encoded)
     invalid_path: mutable DebuggerEDIR::ProgramImage = image
     invalid_path.source_files[FIRST_SOURCE_INDEX].path_length <- DebuggerMetadata::source_path_capacity() + 1
     invalid_path_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(invalid_path)
@@ -156,6 +271,26 @@ def main() -> i64:
     invalid_serialized_path_length.bytes[SOURCE_FILE_PATH_LENGTH_OFFSET + 1] <- OVERSIZE_PATH_LENGTH_HIGH_BYTE
     invalid_serialized_path_length_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_serialized_path_length.bytes[0], invalid_serialized_path_length.length)
     return 23 if DebuggerEDIRCodec::artifact_is_valid(invalid_serialized_path_length_reader)
+    invalid_function_count_bytes: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_function_count_bytes.bytes[FUNCTION_COUNT_OFFSET] <- MAX_FUNCTIONS_PLUS_ONE.u8()
+    invalid_function_count_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_function_count_bytes.bytes[0], invalid_function_count_bytes.length)
+    return 40 if DebuggerEDIRCodec::artifact_is_valid(invalid_function_count_reader)
+    invalid_function_range_bytes: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_function_range_bytes.bytes[FUNCTION_END_OFFSET] <- INVALID_FUNCTION_END
+    invalid_function_range_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_function_range_bytes.bytes[0], invalid_function_range_bytes.length)
+    return 41 if DebuggerEDIRCodec::artifact_is_valid(invalid_function_range_reader)
+    invalid_function_name_length_bytes: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_function_name_length_bytes.bytes[FUNCTION_NAME_LENGTH_OFFSET] <- INVALID_FUNCTION_NAME_LENGTH
+    invalid_function_name_length_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_function_name_length_bytes.bytes[0], invalid_function_name_length_bytes.length)
+    return 42 if DebuggerEDIRCodec::artifact_is_valid(invalid_function_name_length_reader)
+    invalid_function_source_bytes: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_function_source_bytes.bytes[FUNCTION_SOURCE_OFFSET] <- INVALID_FUNCTION_FILE_ID
+    invalid_function_source_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_function_source_bytes.bytes[0], invalid_function_source_bytes.length)
+    return 43 if DebuggerEDIRCodec::artifact_is_valid(invalid_function_source_reader)
+    invalid_function_name_utf8: mutable DebuggerTraceBinary::ByteWriter = encoded
+    invalid_function_name_utf8.bytes[FUNCTION_NAME_OFFSET] <- INVALID_UTF8_BYTE
+    invalid_function_name_utf8_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(invalid_function_name_utf8.bytes[0], invalid_function_name_utf8.length)
+    return 44 if DebuggerEDIRCodec::artifact_is_valid(invalid_function_name_utf8_reader)
     max_image: mutable DebuggerEDIR::ProgramImage = zeroed
     max_image.program <- DebuggerEDIR::Program{version: PROGRAM_VERSION, instruction_count: MAX_ARTIFACT_INSTRUCTIONS.u64(), local_count: 0, has_return: true}
     max_image.source_file_count <- MAX_ARTIFACT_SOURCE_FILES
@@ -173,10 +308,35 @@ def main() -> i64:
     for index in 0..<MAX_ARTIFACT_INSTRUCTIONS:
         max_image.instructions[index] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: 0, b: 0, source: zeroed}
     max_image.instructions[MAX_ARTIFACT_INSTRUCTIONS - 1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    max_image.function_count <- MAX_ARTIFACT_FUNCTIONS
+    max_function_source: DebuggerIdentity::SourceSpan = DebuggerIdentity::SourceSpan{
+        file: DebuggerIdentity::debug_id(SOURCE_ID_BASE),
+        start_byte: MAX_FUNCTION_SOURCE_START_BYTE,
+        end_byte: MAX_FUNCTION_SOURCE_END_BYTE,
+        start_line: MAX_FUNCTION_SOURCE_LINE,
+        start_column: MAX_FUNCTION_SOURCE_START_COLUMN,
+        end_line: MAX_FUNCTION_SOURCE_LINE,
+        end_column: MAX_FUNCTION_SOURCE_END_COLUMN,
+        discriminator: SOURCE_DISCRIMINATOR
+    }
+    for function_index in 0..<MAX_ARTIFACT_FUNCTIONS:
+        max_function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+        max_function.id <- DebuggerIdentity::debug_id(FUNCTION_ID_BASE + function_index.u64())
+        max_function.name_length <- MAX_FUNCTION_NAME_BYTES
+        for name_index in 0..<MAX_FUNCTION_NAME_BYTES:
+            max_function.name_bytes[name_index] <- FUNCTION_NAME_FILL_BYTE
+        max_function.entry_instruction <- function_index.u64() * FUNCTION_RANGE_STRIDE
+        max_function.end_instruction_exclusive <- max_function.entry_instruction + FUNCTION_RANGE_WIDTH
+        max_function.source <- max_function_source
+        max_image.functions[function_index] <- max_function
     max_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(max_image)
     return 7 if not DebuggerTraceBinary::writer_is_valid(max_encoded) or max_encoded.length != MAX_ARTIFACT_BYTES
     max_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(max_encoded.bytes[0], max_encoded.length)
     return 8 if not DebuggerEDIRCodec::artifact_is_valid(max_reader)
+    duplicate_serialized_function_id: mutable DebuggerTraceBinary::ByteWriter = max_encoded
+    duplicate_serialized_function_id.bytes[SECOND_MAX_FUNCTION_ID_OFFSET] <- FUNCTION_ID_BASE.u8()
+    duplicate_serialized_function_id_reader: mutable DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(duplicate_serialized_function_id.bytes[0], duplicate_serialized_function_id.length)
+    return 45 if DebuggerEDIRCodec::artifact_is_valid(duplicate_serialized_function_id_reader)
     duplicate_serialized_id: mutable DebuggerTraceBinary::ByteWriter = max_encoded
     duplicate_serialized_id.bytes[SECOND_MAX_SOURCE_ROW_OFFSET] <- SOURCE_ID_BASE.u8()
     duplicate_serialized_id_reader: DebuggerTraceBinary::ByteReader = DebuggerTraceBinary::reader_new(duplicate_serialized_id.bytes[0], duplicate_serialized_id.length)

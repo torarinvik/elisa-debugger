@@ -150,6 +150,7 @@ headless JSON process. The transports use the same managed engine policy, but
 each process owns an independent session. No VS Code or JetBrains plugin is
 included or qualified here. Host glue must not import private modules, parse
 CLI text, or duplicate replay policy. See the [integration guide](docs/integration.md),
+[compiler integration record](docs/compiler-integration.md),
 [plugin-author guide](spec/plugin-integration.md), and the protocol
 specification for current limits and wire details.
 

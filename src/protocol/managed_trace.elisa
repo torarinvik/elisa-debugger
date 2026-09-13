@@ -6,6 +6,7 @@ include "../trace/recorder.elisa"
 include "../trace/pipeline.elisa"
 include "../trace/export.elisa"
 include "../trace/verify.elisa"
+include "../trace/reader.elisa"
 
 module DebuggerManagedTraceService:
     private:
@@ -17,8 +18,108 @@ module DebuggerManagedTraceService:
         const module Boundary:
             NO_RECORDED_EVENTS: usize = 0
 
+        const module RestoreIdentity:
+            ROOT_BRANCH: u64 = 0
+
+        const module RestoreRequest:
+            REQUEST_ID: u64 = 1
+            NO_EXPECTED_GENERATION: u64 = 0
+            INITIAL_EVENT: u64 = 0
+
+        const module RestoreBookmark:
+            NO_ID: u64 = 0
+
+        const module RestoreDetail:
+            INVALID_READER: u32 = 3
+            BUILD_MISMATCH: u32 = 4
+            RECORDING_MISMATCH: u32 = 5
+            CHECKPOINT_MISMATCH: u32 = 6
+            EVENT_MISMATCH: u32 = 7
+            CHECKPOINT_CAPACITY: u32 = 8
+
         def trace_build_error(failure: DebuggerErrors::DebuggerError) -> DebuggerTracePipeline::BundleBuildResult:
             return DebuggerTracePipeline::BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
+
+        def trace_restore_error(code: DebuggerErrors::ErrorCode, retryable: bool, detail: u32) -> DebuggerManagedService::Result:
+            failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(code, retryable, detail)
+            return DebuggerManagedService::Result{accepted: false, failure: failure}
+
+        def trace_restore_build_matches(build: DebuggerIdentity::BuildIdentity, manifest: DebuggerTraceManifest::BundleManifest) -> bool:
+            return build.compiler.value == manifest.compiler.value and build.runtime.value == manifest.runtime.value and build.source.value == manifest.source.value and build.target.value == manifest.target.value and build.metadata_version == manifest.metadata_version
+
+        def trace_restore_events_match(expected: DebuggerEvents::EventEnvelope, actual: DebuggerEvents::EventEnvelope) -> bool:
+            return false if expected.schema != actual.schema or expected.ordinal != actual.ordinal or expected.task.value != actual.task.value or expected.kind != actual.kind or expected.quality != actual.quality or expected.payload_hash != actual.payload_hash
+            return false if expected.position.recording.value != actual.position.recording.value or expected.position.branch.value != actual.position.branch.value or expected.position.event != actual.position.event
+            return false if expected.position.task.value != actual.position.task.value or expected.position.invocation.value != actual.position.invocation.value or expected.position.statement.value != actual.position.statement.value or expected.position.microstep != actual.position.microstep
+            return true
+
+        def trace_restore_dispatch(service: mutable DebuggerManagedService::Service&, method: DebuggerProtocolRequest::RequestMethod) -> DebuggerManagedService::Result:
+            request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: RestoreRequest::REQUEST_ID, has_id: true, expected_generation: RestoreRequest::NO_EXPECTED_GENERATION, target_event: RestoreRequest::INITIAL_EVENT, valid: true}
+            return DebuggerManagedService::service_dispatch(service, request)
+
+        def trace_restore_preserve_bookmarks(restored: mutable DebuggerManagedService::Service&, previous: DebuggerManagedService::Service&, target_event: u64) -> void:
+            capacity: usize = DebuggerTimeline::timeline_bookmark_capacity()
+            return if previous.timeline.bookmark_count > capacity or previous.timeline.next_bookmark_id == RestoreBookmark::NO_ID or not DebuggerTimeline::history_bounds_is_valid(previous.timeline.bounds)
+            restored.timeline.next_bookmark_id <- previous.timeline.next_bookmark_id
+            for index in 0..<previous.timeline.bookmark_count:
+                bookmark: DebuggerTimeline::Bookmark = previous.timeline.bookmarks[index]
+                continue if bookmark.id.value == RestoreBookmark::NO_ID or bookmark.id.value >= previous.timeline.next_bookmark_id
+                continue if bookmark.position.recording.value != restored.controller.engine.recording.value or bookmark.position.branch.value != RestoreIdentity::ROOT_BRANCH or bookmark.position.event > target_event
+                continue if restored.timeline.bookmark_count >= capacity
+                duplicate: mutable bool = false
+                for existing in 0..<restored.timeline.bookmark_count:
+                    duplicate <- true if restored.timeline.bookmarks[existing].id.value == bookmark.id.value
+                continue if duplicate
+                restored.timeline.bookmarks[restored.timeline.bookmark_count] <- bookmark
+                restored.timeline.bookmark_count <- restored.timeline.bookmark_count + 1
+
+        def trace_restore_preserve_configuration(restored: mutable DebuggerManagedService::Service&, previous: DebuggerManagedService::Service&, target_event: u64) -> void:
+            restored.controller.state.breakpoints <- previous.controller.state.breakpoints
+            restored.controller.state.watchpoints <- previous.controller.state.watchpoints
+            restored.controller.source_path_root <- previous.controller.source_path_root
+            restored.controller.source_path_root_length <- previous.controller.source_path_root_length
+            restored.controller.engine.next_branch_id <- previous.controller.engine.next_branch_id
+            trace_restore_preserve_bookmarks(restored, previous, target_event)
+
+        def trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, target_event: u64) -> DebuggerManagedService::Result:
+            return trace_restore_error(DebuggerErrors::ErrorCode.Corrupt, false, RestoreDetail::INVALID_READER) if not DebuggerTraceReader::reader_is_exact(reader) or reader.manifest.first_event != RestoreRequest::INITIAL_EVENT
+            return trace_restore_error(DebuggerErrors::ErrorCode.Unavailable, true, RestoreDetail::INVALID_READER) if target_event > reader.event_count.u64()
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::BUILD_MISMATCH) if not trace_restore_build_matches(service.controller.session.build, reader.manifest)
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::RECORDING_MISMATCH) if reader.recording.value != service.controller.engine.recording.value
+            checkpoint_lookup: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, target_event)
+            return trace_restore_error(DebuggerErrors::ErrorCode.Unavailable, true, RestoreDetail::CHECKPOINT_MISMATCH) if not checkpoint_lookup.found
+            checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint_lookup.checkpoint
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::RECORDING_MISMATCH) if checkpoint.recording.value != service.controller.engine.recording.value or checkpoint.branch.value != RestoreIdentity::ROOT_BRANCH
+            return trace_restore_error(DebuggerErrors::ErrorCode.ResourceLimit, false, RestoreDetail::CHECKPOINT_CAPACITY) if target_event > DebuggerManagedService::service_recording_capacity().u64()
+            return trace_restore_error(DebuggerErrors::ErrorCode.Corrupt, false, RestoreDetail::INVALID_READER) if checkpoint.event > reader.event_count.u64()
+            return trace_restore_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_TRACE_CAPABILITY) if service.controller.session.capabilities.engine != DebuggerCapabilities::EngineKind.Managed or service.controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
+
+            fresh_session: DebuggerSession::Session = DebuggerSession::new_session(service.controller.session.id, service.controller.session.build, service.controller.session.capabilities)
+            fresh_session.stop_generation <- service.controller.session.stop_generation
+            temporary: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(fresh_session, service.controller.engine.image, service.controller.engine.recording)
+            launched: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Launch)
+            return launched if not launched.accepted
+            paused: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Pause)
+            return paused if not paused.accepted
+            while temporary.controller.engine.event_count.u64() < checkpoint.event:
+                stepped: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Step)
+                return stepped if not stepped.accepted
+
+            for index in 0..<checkpoint.event.usize():
+                return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::EVENT_MISMATCH) if not trace_restore_events_match(reader.events[index], temporary.controller.engine.events[index])
+            return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH) if checkpoint.event != temporary.controller.engine.event_count.u64() or checkpoint.state_hash != DebuggerReplayEngine::replay_engine_state_hash(temporary.controller.engine) or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, temporary.controller.engine.machine)
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_restore_full_checkpoint(temporary.controller, checkpoint)
+            return DebuggerManagedService::Result{accepted: false, failure: failure} if not DebuggerErrors::error_is_ok(failure)
+            while temporary.controller.engine.event_count.u64() < target_event:
+                stepped: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Step)
+                return stepped if not stepped.accepted
+            return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH) if temporary.controller.engine.event_count.u64() != target_event
+            for index in 0..<target_event.usize():
+                return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::EVENT_MISMATCH) if not trace_restore_events_match(reader.events[index], temporary.controller.engine.events[index])
+            trace_restore_preserve_configuration(temporary, service, target_event)
+            DebuggerManagedService::service_sync_timeline(temporary)
+            service <- temporary
+            return DebuggerManagedService::Result{accepted: true, failure: DebuggerErrors::no_error()}
 
         def trace_service_bundle(service: mutable DebuggerManagedService::Service&) -> DebuggerTracePipeline::BundleBuildResult:
             capabilities: DebuggerCapabilities::CapabilitySet = service.controller.session.capabilities
@@ -66,3 +167,8 @@ module DebuggerManagedTraceService:
             built: DebuggerTracePipeline::BundleBuildResult = trace_service_bundle(service)
             return trace_report_for_failure(service, built.failure) if not built.accepted
             return DebuggerTraceVerify::verify_bundle(built.bundle)
+
+        # Restore from a reader-owned checkpoint only after replaying and
+        # matching the complete prefix in a temporary service.
+        def service_trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, target_event: u64) -> DebuggerManagedService::Result:
+            return trace_restore_checkpoint(service, reader, target_event)

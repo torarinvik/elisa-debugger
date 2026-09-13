@@ -48,7 +48,7 @@ module DebuggerManagedService:
         const module RequestState:
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_EXPECTED_GENERATION: u64 = 0
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_REQUEST_ID: u64 = 0
-            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX: u16 = 29
+            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX: u16 = 31
 
         def memory_history_error(window: DebuggerHistory::QueryWindow, failure: DebuggerErrors::DebuggerError) -> DebuggerQueryEngine::QueryExecution:
             result: mutable DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_execution_new(window)
@@ -138,6 +138,9 @@ module DebuggerManagedService:
         def service_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> Service:
             return Service{controller: DebuggerManagedEngine::managed_new(session, image, recording), recorded_events: zeroed, recorded_event_count: 0, trace_partial: false, trace_failure: DebuggerErrors::no_error(), last_error: DebuggerErrors::no_error(), last_checkpoint_event: 0, last_checkpoint_hash: 0, has_checkpoint: false, last_branch: DebuggerIdentity::debug_id(0), timeline: DebuggerTimeline::timeline_new(session.position, session.capabilities)}
 
+        def service_recording_capacity() -> usize:
+            return EventCapture::SERVICE_EVENT_CAPTURE_CAPACITY
+
         def result_error(failure: DebuggerErrors::DebuggerError) -> Result:
             return Result{accepted: false, failure: failure}
 
@@ -198,6 +201,8 @@ module DebuggerManagedService:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::PROTOCOL_MANAGED_SERVICE_ERROR_DETAIL_DETAIL_STALE_GENERATION)
             service.last_error <- failure
             return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            return service_reverse_step_over(service) if request.method == DebuggerProtocolRequest::RequestMethod.ReverseStepOver
+            return service_reverse_step_out(service) if request.method == DebuggerProtocolRequest::RequestMethod.ReverseStepOut
             if request.method == DebuggerProtocolRequest::RequestMethod.Launch:
                 failure <- DebuggerManagedEngine::managed_launch(service.controller)
             if request.method == DebuggerProtocolRequest::RequestMethod.Initialize:
@@ -283,7 +288,7 @@ module DebuggerManagedService:
             if request.method == DebuggerProtocolRequest::RequestMethod.Close:
                 service.controller.session <- DebuggerSession::session_close(service.controller.session)
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
-            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Memory and request.method != DebuggerProtocolRequest::RequestMethod.Threads and request.method != DebuggerProtocolRequest::RequestMethod.Stack and request.method != DebuggerProtocolRequest::RequestMethod.Scopes and request.method != DebuggerProtocolRequest::RequestMethod.Variables and request.method != DebuggerProtocolRequest::RequestMethod.Evaluate and request.method != DebuggerProtocolRequest::RequestMethod.SetBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.Checkpoint and request.method != DebuggerProtocolRequest::RequestMethod.Branch and request.method != DebuggerProtocolRequest::RequestMethod.Compare and request.method != DebuggerProtocolRequest::RequestMethod.TraceVerify and request.method != DebuggerProtocolRequest::RequestMethod.TraceExport:
+            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOver and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOut and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Memory and request.method != DebuggerProtocolRequest::RequestMethod.Threads and request.method != DebuggerProtocolRequest::RequestMethod.Stack and request.method != DebuggerProtocolRequest::RequestMethod.Scopes and request.method != DebuggerProtocolRequest::RequestMethod.Variables and request.method != DebuggerProtocolRequest::RequestMethod.Evaluate and request.method != DebuggerProtocolRequest::RequestMethod.SetBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.Checkpoint and request.method != DebuggerProtocolRequest::RequestMethod.Branch and request.method != DebuggerProtocolRequest::RequestMethod.Compare and request.method != DebuggerProtocolRequest::RequestMethod.TraceVerify and request.method != DebuggerProtocolRequest::RequestMethod.TraceExport:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method != DebuggerProtocolRequest::RequestMethod.Discover and request.method != DebuggerProtocolRequest::RequestMethod.Initialize and request.method != DebuggerProtocolRequest::RequestMethod.CreateSession and request.method != DebuggerProtocolRequest::RequestMethod.OpenTrace and request.method != DebuggerProtocolRequest::RequestMethod.Replay and request.method != DebuggerProtocolRequest::RequestMethod.Detach and request.method != DebuggerProtocolRequest::RequestMethod.Terminate and request.method != DebuggerProtocolRequest::RequestMethod.Close
             service.last_error <- failure
             service_sync_timeline(service)
@@ -429,6 +434,20 @@ module DebuggerManagedService:
 
         def service_step_out(service: mutable Service&) -> Result:
             failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_out(service.controller)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            service_sync_timeline(service)
+            return result_ok()
+
+        def service_reverse_step_over(service: mutable Service&) -> Result:
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step_over(service.controller)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            service_sync_timeline(service)
+            return result_ok()
+
+        def service_reverse_step_out(service: mutable Service&) -> Result:
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step_out(service.controller)
             service.last_error <- failure
             return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
             service_sync_timeline(service)

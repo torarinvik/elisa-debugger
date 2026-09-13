@@ -1,4 +1,5 @@
 include "../src/protocol/managed_service.elisa"
+include "../src/protocol/session_service.elisa"
 include "../src/core/identity.elisa"
 include "../src/core/capabilities.elisa"
 
@@ -148,6 +149,28 @@ const module ManagedReverseResult:
     TOP_LEVEL_BOUNDARY_FAILURE: i64 = 12
     SUCCESS: i64 = 0
 
+const module ManagedReverseRoute:
+    REQUEST_ID: u64 = 90
+    NO_SESSION_ID: u64 = 0
+    NO_EXPECTED_GENERATION: u64 = 0
+    NO_PAGE_SIZE: u64 = 0
+    NO_TARGET_EVENT: u64 = 0
+    EXPECTED_REVERSE_OUT_EVENT: usize = ManagedReverseEvent::DEEPEST_RECURSIVE_CALL
+    EXPECTED_REVERSE_OVER_EVENT: usize = ManagedReverseEvent::REVERSE_OVER_TARGET
+    LAUNCH_FAILURE: i64 = 1
+    PAUSE_FAILURE: i64 = 2
+    EMPTY_HISTORY_ROUTE_FAILURE: i64 = 3
+    FORWARD_STEP_FAILURE: i64 = 4
+    REVERSE_OUT_ROUTE_FAILURE: i64 = 5
+    REVERSE_OVER_ROUTE_FAILURE: i64 = 6
+    REQUEST_PARSE_FAILURE: i64 = 7
+    CHECK_FAILURE_BASE: i64 = 70
+    SUCCESS: i64 = 0
+
+const module ManagedReverseWire:
+    REVERSE_STEP_OVER_JSON: cstr = "{\"method\":\"reverseStepOver\",\"id\":90}"
+    REVERSE_STEP_OUT_JSON: cstr = "{\"method\":\"reverseStepOut\",\"id\":90}"
+
 
 def managed_reverse_recursive_image() -> DebuggerEDIR::ProgramImage:
     image: mutable DebuggerEDIR::ProgramImage = zeroed
@@ -191,6 +214,35 @@ def check_managed_reverse_compound_steps() -> i64:
     top_level_boundary: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step_out(controller)
     return ManagedReverseResult::TOP_LEVEL_BOUNDARY_FAILURE if top_level_boundary.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != ManagedReverseEvent::ROOT_CALL or controller.engine.machine.program_counter != ManagedReverseInstruction::ROOT_CALL_INDEX.u64() or controller.engine.machine.return_stack_pointer != ManagedReverseFrame::TOP_LEVEL_DEPTH
     return ManagedReverseResult::SUCCESS
+
+def check_managed_reverse_protocol_route() -> i64:
+    parsed_reverse_over: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(ManagedReverseWire::REVERSE_STEP_OVER_JSON.cast[u8&], DebuggerProtocolRequest::request_cstr_length(ManagedReverseWire::REVERSE_STEP_OVER_JSON))
+    parsed_reverse_out: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(ManagedReverseWire::REVERSE_STEP_OUT_JSON.cast[u8&], DebuggerProtocolRequest::request_cstr_length(ManagedReverseWire::REVERSE_STEP_OUT_JSON))
+    return ManagedReverseRoute::REQUEST_PARSE_FAILURE if not parsed_reverse_over.valid or parsed_reverse_over.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOver or not parsed_reverse_out.valid or parsed_reverse_out.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOut
+    return ManagedReverseRoute::REQUEST_PARSE_FAILURE if DebuggerProtocolDispatcher::operation_for_method(parsed_reverse_over.method) != DebuggerCoordinator::Operation.ReverseStepOver or DebuggerProtocolDispatcher::operation_for_method(parsed_reverse_out.method) != DebuggerCoordinator::Operation.ReverseStepOut
+    image: DebuggerEDIR::ProgramImage = managed_reverse_recursive_image()
+    seed_controller: DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(seed_controller.session, image, DebuggerIdentity::debug_id(Test::MANAGED_REGRESSION_RECORDING_ID))
+    launch_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: ManagedReverseRoute::REQUEST_ID, has_id: true, expected_generation: ManagedReverseRoute::NO_EXPECTED_GENERATION, target_event: ManagedReverseRoute::NO_TARGET_EVENT, valid: true}
+    launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, launch_request)
+    return ManagedReverseRoute::LAUNCH_FAILURE if not launched.accepted
+    pause_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Pause, id: ManagedReverseRoute::REQUEST_ID, has_id: true, expected_generation: ManagedReverseRoute::NO_EXPECTED_GENERATION, target_event: ManagedReverseRoute::NO_TARGET_EVENT, valid: true}
+    paused: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, pause_request)
+    return ManagedReverseRoute::PAUSE_FAILURE if not paused.accepted
+    empty_history_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.ReverseStepOver, request_id: ManagedReverseRoute::REQUEST_ID, session_id: ManagedReverseRoute::NO_SESSION_ID, expected_stop_generation: ManagedReverseRoute::NO_EXPECTED_GENERATION, page_size: ManagedReverseRoute::NO_PAGE_SIZE, target_event: ManagedReverseRoute::NO_TARGET_EVENT}
+    empty_history_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle_managed(service, empty_history_request)
+    return ManagedReverseRoute::EMPTY_HISTORY_ROUTE_FAILURE if empty_history_response.ok or empty_history_response.failure.code != DebuggerErrors::ErrorCode.Unavailable or service.controller.engine.event_count != Test::NO_TARGET_EVENT.usize()
+    for step_index in 0..<ManagedReverseProgram::STEP_COUNT_TO_DEEPEST_CALL:
+        step_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: ManagedReverseRoute::REQUEST_ID, has_id: true, expected_generation: ManagedReverseRoute::NO_EXPECTED_GENERATION, target_event: ManagedReverseRoute::NO_TARGET_EVENT, valid: true}
+        stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, step_request)
+        return ManagedReverseRoute::FORWARD_STEP_FAILURE if not stepped.accepted
+    reverse_out_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.ReverseStepOut, request_id: ManagedReverseRoute::REQUEST_ID, session_id: ManagedReverseRoute::NO_SESSION_ID, expected_stop_generation: ManagedReverseRoute::NO_EXPECTED_GENERATION, page_size: ManagedReverseRoute::NO_PAGE_SIZE, target_event: ManagedReverseRoute::NO_TARGET_EVENT}
+    reverse_out_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle_managed(service, reverse_out_request)
+    return ManagedReverseRoute::REVERSE_OUT_ROUTE_FAILURE if not reverse_out_response.ok or service.controller.engine.event_count != ManagedReverseRoute::EXPECTED_REVERSE_OUT_EVENT or service.controller.engine.machine.return_stack_pointer != ManagedReverseFrame::NEXT_OUT_DEPTH or service.controller.engine.machine.program_counter != ManagedReverseInstruction::RECURSIVE_CALL_INDEX.u64()
+    reverse_over_request: DebuggerProtocol::RequestEnvelope = DebuggerProtocol::RequestEnvelope{kind: DebuggerProtocol::MessageKind.Request, method: DebuggerProtocol::Method.ReverseStepOver, request_id: ManagedReverseRoute::REQUEST_ID, session_id: ManagedReverseRoute::NO_SESSION_ID, expected_stop_generation: ManagedReverseRoute::NO_EXPECTED_GENERATION, page_size: ManagedReverseRoute::NO_PAGE_SIZE, target_event: ManagedReverseRoute::NO_TARGET_EVENT}
+    reverse_over_response: DebuggerProtocol::ResponseEnvelope = DebuggerSessionService::service_handle_managed(service, reverse_over_request)
+    return ManagedReverseRoute::REVERSE_OVER_ROUTE_FAILURE if not reverse_over_response.ok or service.controller.engine.event_count != ManagedReverseRoute::EXPECTED_REVERSE_OVER_EVENT or service.controller.engine.machine.return_stack_pointer != ManagedReverseFrame::NEXT_OUT_DEPTH or service.controller.engine.machine.program_counter != ManagedReverseInstruction::BRANCH_INDEX.u64()
+    return ManagedReverseRoute::SUCCESS
 
 
 def managed_regression_source_span(line: u32, start_byte: u64) -> DebuggerIdentity::SourceSpan:
@@ -360,6 +412,8 @@ def main() -> i64:
     return Test::MANAGED_SOURCE_BREAKPOINT_RESUME_RESULT if source_breakpoint_resume_status != 0
     reverse_compound_status: i64 = check_managed_reverse_compound_steps()
     return ManagedReverseResult::CHECK_FAILURE_BASE + reverse_compound_status if reverse_compound_status != ManagedReverseResult::SUCCESS
+    reverse_route_status: i64 = check_managed_reverse_protocol_route()
+    return ManagedReverseRoute::CHECK_FAILURE_BASE + reverse_route_status if reverse_route_status != ManagedReverseRoute::SUCCESS
     top_level_step_out_status: i64 = check_managed_top_level_step_out()
     return Test::MANAGED_TOP_LEVEL_STEP_OUT_CHECK_RESULT if top_level_step_out_status != 0
     compound_step_breakpoint_status: i64 = check_managed_compound_step_breakpoints()

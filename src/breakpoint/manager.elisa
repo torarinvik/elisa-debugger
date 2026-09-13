@@ -11,12 +11,14 @@ module DebuggerBreakpointManager:
         const BREAKPOINT_MAX_ID: u64 = 18446744073709551615
         const BREAKPOINT_NO_SOURCE: u64 = 0
         const BREAKPOINT_NO_LINE: u64 = 0
+        const BREAKPOINT_NO_INSTRUCTION: u64 = 18446744073709551615
         const BREAKPOINT_KIND_MAX: u16 = 5
         const BREAKPOINT_STATUS_MAX: u16 = 3
 
     public:
         struct BreakpointTable:
             points: mutable DebuggerBreakpoints::Breakpoint[BREAKPOINT_CAPACITY]
+            resolved_instructions: mutable u64[BREAKPOINT_CAPACITY]
             count: mutable usize
             next_id: mutable u64
 
@@ -45,6 +47,7 @@ module DebuggerBreakpointManager:
             for index in 0..<table.count:
                 return updated if table.points[index].id.value == table.next_id
             updated.points[table.count] <- point
+            updated.resolved_instructions[table.count] <- BREAKPOINT_NO_INSTRUCTION
             updated.points[table.count].id <- DebuggerIdentity::debug_id(table.next_id)
             updated.points[table.count].status <- DebuggerBreakpoints::BreakpointStatus.Pending
             updated.count <- table.count + 1
@@ -71,6 +74,7 @@ module DebuggerBreakpointManager:
                 point: DebuggerBreakpoints::Breakpoint = table.points[index]
                 if point.kind != DebuggerBreakpoints::BreakpointKind.Source or point.source.file.value != source.value:
                     updated.points[updated.count] <- point
+                    updated.resolved_instructions[updated.count] <- table.resolved_instructions[index]
                     updated.count <- updated.count + 1
             for index in 0..<requested_count:
                 point: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{
@@ -88,6 +92,7 @@ module DebuggerBreakpointManager:
                     temporary: false
                 }
                 updated.points[updated.count] <- point
+                updated.resolved_instructions[updated.count] <- BREAKPOINT_NO_INSTRUCTION
                 replacement.results[index] <- BreakpointResult{id: point.id, line: lines[index], verified: false}
                 updated.count <- updated.count + 1
                 updated.next_id <- updated.next_id + 1
@@ -103,6 +108,18 @@ module DebuggerBreakpointManager:
             for index in 0..<table.count:
                 if table.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source and table.points[index].source.file.value == source.value and table.points[index].source.line == line:
                     updated.points[index].status <- DebuggerBreakpoints::BreakpointStatus.Verified
+            return updated
+
+        # Bind a verified source breakpoint to the exact executable instruction
+        # chosen by source resolution. IDs distinguish same-line locations.
+        def breakpoint_table_resolve_at_instruction(table: BreakpointTable, breakpoint: DebuggerIdentity::DebugId, instruction: u64) -> BreakpointTable:
+            updated: mutable BreakpointTable = table
+            return updated if table.count > BREAKPOINT_CAPACITY or breakpoint.value == 0 or instruction == BREAKPOINT_NO_INSTRUCTION
+            for index in 0..<table.count:
+                if table.points[index].id.value == breakpoint.value and table.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source:
+                    updated.points[index].status <- DebuggerBreakpoints::BreakpointStatus.Verified
+                    updated.resolved_instructions[index] <- instruction
+                    break
             return updated
 
         def breakpoint_table_count(table: BreakpointTable) -> usize:
@@ -129,6 +146,17 @@ module DebuggerBreakpointManager:
                     should_stop <- true if DebuggerBreakpoints::breakpoint_should_stop(observed, branch)
             return should_stop
 
+        def breakpoint_table_should_stop_at_instruction(table: mutable BreakpointTable&, branch: DebuggerIdentity::DebugId, source: DebuggerIdentity::SourceSpan, instruction: u64) -> bool:
+            return false if table.count > BREAKPOINT_CAPACITY or not DebuggerMetadata::source_span_is_valid(source)
+            return false if instruction == BREAKPOINT_NO_INSTRUCTION
+            should_stop: mutable bool = false
+            for index in 0..<table.count:
+                if table.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source and table.points[index].status == DebuggerBreakpoints::BreakpointStatus.Verified and table.resolved_instructions[index] == instruction and DebuggerMetadata::source_span_contains(source, table.points[index].source) and DebuggerBreakpoints::breakpoint_matches_branch(table.points[index], branch):
+                    observed: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::breakpoint_observe_hit(table.points[index], branch)
+                    table.points[index] <- observed
+                    should_stop <- true if DebuggerBreakpoints::breakpoint_should_stop(observed, branch)
+            return should_stop
+
         # Reverse navigation must inspect breakpoint policy without recording a
         # new hit.  Work on a local observed copy so the forward hit counter is
         # unchanged while still applying target/stride/logpoint rules.
@@ -137,6 +165,15 @@ module DebuggerBreakpointManager:
             for index in 0..<table.count:
                 point: DebuggerBreakpoints::Breakpoint = table.points[index]
                 if point.kind == DebuggerBreakpoints::BreakpointKind.Source and point.status == DebuggerBreakpoints::BreakpointStatus.Verified and DebuggerMetadata::source_span_contains(source, point.source) and DebuggerBreakpoints::breakpoint_matches_branch(point, branch):
+                    observed: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::breakpoint_observe_hit(point, branch)
+                    return true if DebuggerBreakpoints::breakpoint_should_stop(observed, branch)
+            return false
+
+        def breakpoint_table_would_stop_at_instruction(table: BreakpointTable, branch: DebuggerIdentity::DebugId, source: DebuggerIdentity::SourceSpan, instruction: u64) -> bool:
+            return false if table.count > BREAKPOINT_CAPACITY or not DebuggerMetadata::source_span_is_valid(source) or instruction == BREAKPOINT_NO_INSTRUCTION
+            for index in 0..<table.count:
+                point: DebuggerBreakpoints::Breakpoint = table.points[index]
+                if point.kind == DebuggerBreakpoints::BreakpointKind.Source and point.status == DebuggerBreakpoints::BreakpointStatus.Verified and table.resolved_instructions[index] == instruction and DebuggerMetadata::source_span_contains(source, point.source) and DebuggerBreakpoints::breakpoint_matches_branch(point, branch):
                     observed: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::breakpoint_observe_hit(point, branch)
                     return true if DebuggerBreakpoints::breakpoint_should_stop(observed, branch)
             return false

@@ -50,6 +50,8 @@ module DebuggerManagedEngine:
         const SOURCE_PATH_ASCII_UPPER_Z: u8 = 90
         const SOURCE_PATH_ASCII_CASE_OFFSET: u8 = 32
         const NO_SOURCE_FILE_ID: u64 = 0
+        const NO_BRANCH_ID: u64 = 0
+        const NO_INSTRUCTION_INDEX: u64 = 18446744073709551615
 
     public:
         struct ManagedController:
@@ -59,9 +61,13 @@ module DebuggerManagedEngine:
             last_error: mutable DebuggerErrors::DebuggerError
             source_path_root: mutable u8[DebuggerMetadata::SOURCE_PATH_CAPACITY]
             source_path_root_length: mutable usize
+            has_last_breakpoint_stop: mutable bool
+            last_breakpoint_event: mutable u64
+            last_breakpoint_instruction: mutable u64
+            last_breakpoint_branch: mutable DebuggerIdentity::DebugId
 
         def managed_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> ManagedController:
-            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error(), source_path_root: zeroed, source_path_root_length: SOURCE_PATH_ROOT_DISABLED_LENGTH}
+            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error(), source_path_root: zeroed, source_path_root_length: SOURCE_PATH_ROOT_DISABLED_LENGTH, has_last_breakpoint_stop: false, last_breakpoint_event: INITIAL_EVENT_INDEX.u64(), last_breakpoint_instruction: NO_INSTRUCTION_INDEX, last_breakpoint_branch: DebuggerIdentity::debug_id(NO_BRANCH_ID)}
 
         def managed_sync_position(controller: mutable ManagedController&) -> void:
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
@@ -103,7 +109,13 @@ module DebuggerManagedEngine:
             return false if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
             instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
             event_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
-            return DebuggerBreakpointManager::breakpoint_table_should_stop(controller.state.breakpoints, event_branch, instruction.source)
+            should_stop: bool = DebuggerBreakpointManager::breakpoint_table_should_stop_at_instruction(controller.state.breakpoints, event_branch, instruction.source, controller.engine.machine.program_counter)
+            if should_stop:
+                controller.has_last_breakpoint_stop <- true
+                controller.last_breakpoint_event <- controller.engine.event_count.u64()
+                controller.last_breakpoint_instruction <- controller.engine.machine.program_counter
+                controller.last_breakpoint_branch <- event_branch
+            return should_stop
 
         def managed_launch(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
@@ -121,10 +133,11 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
         def managed_continue(controller: mutable ManagedController&, max_steps: u64) -> DebuggerErrors::DebuggerError:
-            # A freshly launched managed session is already in Running state,
-            # but its EDIR machine has not executed yet. Treat Continue as the
-            # first run in that state; only stopped/replay sessions need a
-            # resume transition.
+            # Continue checks its current position except when that exact event
+            # and instruction already stopped on a breakpoint. This also lets
+            # reverse navigation rediscover breakpoints at event zero.
+            current_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
+            repeat_breakpoint_position: bool = controller.has_last_breakpoint_stop and controller.last_breakpoint_event == controller.engine.event_count.u64() and controller.last_breakpoint_instruction == controller.engine.machine.program_counter and controller.last_breakpoint_branch.value == current_branch.value
             if controller.session.state != DebuggerSession::SessionState.Running:
                 controller.session <- DebuggerSession::session_resume(controller.session)
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
@@ -133,9 +146,9 @@ module DebuggerManagedEngine:
             hit_breakpoint: mutable bool = false
             first_iteration: mutable bool = true
             while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count.u64() - start < max_steps:
-                # A Continue issued from a stopped position must advance past
-                # that position; otherwise a breakpoint is rediscovered forever.
-                if (not first_iteration or start == 0) and managed_breakpoint_should_stop(controller):
+                # Skip the exact position already reported as a breakpoint,
+                # but allow breakpoints after reverse navigation to be found.
+                if (not first_iteration or not repeat_breakpoint_position) and managed_breakpoint_should_stop(controller):
                     hit_breakpoint <- true
                     break
                 DebuggerReplayEngine::replay_engine_step(controller.engine)
@@ -248,7 +261,12 @@ module DebuggerManagedEngine:
                 if controller.engine.machine.program_counter < controller.engine.image.program.instruction_count:
                     instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
                     event_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
-                    return DebuggerErrors::no_error() if DebuggerBreakpointManager::breakpoint_table_would_stop(controller.state.breakpoints, event_branch, instruction.source)
+                    if DebuggerBreakpointManager::breakpoint_table_would_stop_at_instruction(controller.state.breakpoints, event_branch, instruction.source, controller.engine.machine.program_counter):
+                        controller.has_last_breakpoint_stop <- true
+                        controller.last_breakpoint_event <- controller.engine.event_count.u64()
+                        controller.last_breakpoint_instruction <- controller.engine.machine.program_counter
+                        controller.last_breakpoint_branch <- event_branch
+                        return DebuggerErrors::no_error()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count > 0
             return DebuggerErrors::no_error()
 
@@ -309,6 +327,7 @@ module DebuggerManagedEngine:
                 requested_line: u32 = replacement.results[request_index].line
                 resolved: mutable bool = false
                 resolved_column: mutable u32 = 0
+                resolved_instruction: mutable u64 = NO_INSTRUCTION_INDEX
                 for instruction_index in 0..<controller.engine.image.program.instruction_count.usize():
                     span: DebuggerIdentity::SourceSpan = controller.engine.image.instructions[instruction_index].source
                     if DebuggerMetadata::source_span_is_valid(span) and span.file.value == source.value and requested_line >= span.start_line and requested_line <= span.end_line:
@@ -317,11 +336,12 @@ module DebuggerManagedEngine:
                         if DebuggerMetadata::source_span_contains(span, candidate_location) and (not resolved or candidate_column < resolved_column):
                             resolved <- true
                             resolved_column <- candidate_column
+                            resolved_instruction <- instruction_index.u64()
                 if resolved:
                     for breakpoint_index in 0..<replacement.table.count:
                         if replacement.table.points[breakpoint_index].id.value == replacement.results[request_index].id.value:
                             replacement.table.points[breakpoint_index].source.column <- resolved_column
-                    replacement.table <- DebuggerBreakpointManager::breakpoint_table_resolve(replacement.table, source, requested_line.u64())
+                    replacement.table <- DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(replacement.table, replacement.results[request_index].id, resolved_instruction)
                     replacement.results[request_index].verified <- true
             controller.state.breakpoints <- replacement.table
             return replacement
@@ -449,7 +469,7 @@ module DebuggerManagedEngine:
             for instruction_index in 0..<controller.engine.image.program.instruction_count.usize():
                 span: DebuggerIdentity::SourceSpan = controller.engine.image.instructions[instruction_index].source
                 if DebuggerMetadata::source_span_contains(span, location):
-                    updated <- DebuggerBreakpointManager::breakpoint_table_resolve(updated, location.file, location.line.u64())
+                    updated <- DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(updated, DebuggerIdentity::debug_id(next_id), instruction_index.u64())
                     break
             controller.state.breakpoints <- updated
             return DebuggerIdentity::debug_id(next_id)

@@ -1,0 +1,285 @@
+# DWARF v2-v4 line-state machine for address-to-source lookup. The parser
+# validates the complete section before reporting a match and never relocates
+# addresses itself; callers pass addresses in the debug object's address space.
+
+include "./dwarf_line_format.elisa"
+
+module DebuggerNativeDwarfLine:
+    private:
+        const module Limit:
+            MAX_OPERATIONS: usize = 2097152
+            MAX_UNITS: usize = 4096
+
+        const module Integer:
+            ZERO_U64: u64 = 0
+            MAX_U64: u64 = 18446744073709551615
+            MAX_LINE: i64 = 2147483647
+            MIN_LINE: i64 = 0
+            MAX_LINE_DELTA: i64 = 2147483647
+            MIN_LINE_DELTA: i64 = -2147483648
+
+        const module Encoding:
+            ZERO_USIZE: usize = 0
+            ZERO_U64: u64 = 0
+            INITIAL_OPERATION_INDEX: u64 = 0
+            EXTENDED_OPCODE_PREFIX: u8 = 0
+            EXTENDED_OPCODE_BYTES: u64 = 1
+            STANDARD_OPCODE_ARRAY_OFFSET: usize = 1
+            BYTE_INCREMENT: usize = 1
+            BYTE_WIDTH: usize = 1
+            OPERATIONS_INCREMENT: usize = 1
+            ADDRESS_WIDTH_32: usize = 4
+            ADDRESS_WIDTH_64: usize = 8
+            FIXED_ADVANCE_PC_WIDTH: usize = 2
+            LINE_INITIAL: i64 = 1
+            FILE_INITIAL: u64 = 1
+            MAXIMUM_BYTE_VALUE: u32 = 255
+            FILE_INDEX_MINIMUM: u64 = 1
+
+        const module ExtendedOpcode:
+            END_SEQUENCE: u8 = 1
+            SET_ADDRESS: u8 = 2
+            DEFINE_FILE: u8 = 3
+            SET_DISCRIMINATOR: u8 = 4
+
+        const module StandardOpcode:
+            COPY: u8 = 1
+            ADVANCE_PC: u8 = 2
+            ADVANCE_LINE: u8 = 3
+            SET_FILE: u8 = 4
+            SET_COLUMN: u8 = 5
+            NEGATE_STATEMENT: u8 = 6
+            CONST_ADD_PC: u8 = 8
+            FIXED_ADVANCE_PC: u8 = 9
+
+        struct LineState:
+            address: mutable u64
+            operation_index: mutable u64
+            line: mutable i64
+            file_index: mutable u64
+            column: mutable u64
+            is_statement: mutable bool
+
+        struct LineRow:
+            valid: mutable bool
+            end_sequence: mutable bool
+            address: mutable u64
+            operation_index: mutable u64
+            line: mutable i64
+            file_index: mutable u64
+            column: mutable u64
+
+    public:
+        enum Status:
+            Invalid
+            NotFound
+            Found
+            UnsupportedVersion
+            UnsupportedFormat
+            UnsupportedAddressSize
+            UnsupportedFeature
+            TooLarge
+
+        struct Lookup:
+            status: mutable Status
+            address: mutable u64
+            operation_index: mutable u64
+            line: mutable i64
+            file_index: mutable u32
+            directory_index: mutable u32
+            column: mutable u64
+            filename_length: mutable usize
+            filename_truncated: mutable bool
+            filename: mutable u8[DebuggerNativeDwarfLineCapacity::FILENAME_BYTES]
+
+    private:
+        def byte_at(bytes: u8&, length: usize, offset: usize) -> u8:
+            return DebuggerNativeDwarfLineFormat::dwarf_line_read_uint(bytes, length, offset, Encoding::BYTE_WIDTH).value.u8()
+
+        def add_address(state: mutable LineState&, amount: u64) -> bool:
+            return false if state.address > Integer::MAX_U64 - amount
+            state.address <- state.address + amount
+            return true
+
+        def advance_operations(state: mutable LineState&, amount: u64, unit: DebuggerNativeDwarfLineFormat::Unit) -> bool:
+            total: u64 = state.operation_index + amount
+            return false if total < state.operation_index
+            operation_limit: u64 = unit.maximum_operations_per_instruction.u64()
+            address_units: u64 = total / operation_limit
+            scale: u64 = unit.minimum_instruction_length.u64()
+            return false if scale != Integer::ZERO_U64 and address_units > Integer::MAX_U64 / scale
+            return false if not add_address(state, address_units * scale)
+            state.operation_index <- total % operation_limit
+            return true
+
+        def add_line(state: mutable LineState&, amount: i64) -> bool:
+            return false if amount > Integer::MAX_LINE_DELTA or amount < Integer::MIN_LINE_DELTA
+            next_line: i64 = state.line + amount
+            return false if next_line > Integer::MAX_LINE or next_line < Integer::MIN_LINE
+            state.line <- next_line
+            return true
+
+        def row_from_state(state: LineState, end_sequence: bool) -> LineRow:
+            return LineRow{valid: true, end_sequence: end_sequence, address: state.address, operation_index: state.operation_index, line: state.line, file_index: state.file_index, column: state.column}
+
+        def store_match(bytes: u8&, length: usize, unit: DebuggerNativeDwarfLineFormat::Unit, row: LineRow, result: mutable Lookup&) -> bool:
+            file_info: DebuggerNativeDwarfLineFormat::FileInfo = DebuggerNativeDwarfLineFormat::dwarf_line_file_info(bytes, length, unit, row.file_index)
+            return false if not file_info.valid
+            result.status <- Status.Found
+            result.address <- row.address
+            result.operation_index <- row.operation_index
+            result.line <- row.line
+            result.file_index <- row.file_index.u32()
+            result.directory_index <- file_info.directory_index
+            result.column <- row.column
+            result.filename_length <- file_info.name.length
+            result.filename_truncated <- file_info.name.truncated
+            result.filename <- file_info.name.bytes
+            return true
+
+        def accept_row(bytes: u8&, length: usize, unit: DebuggerNativeDwarfLineFormat::Unit, row: LineRow, pending: mutable LineRow&, target_address: u64, result: mutable Lookup&) -> bool:
+            return false if row.file_index < Encoding::FILE_INDEX_MINIMUM or row.file_index > unit.file_count.u64()
+            if row.end_sequence:
+                if pending.valid:
+                    return false if row.address < pending.address or (row.address == pending.address and row.operation_index < pending.operation_index)
+                    if result.status != Status.Found and target_address >= pending.address and target_address < row.address:
+                        pending_row: LineRow = pending
+                        return false if not store_match(bytes, length, unit, pending_row, result)
+                pending.valid <- false
+                return true
+            if pending.valid:
+                return false if row.address < pending.address or (row.address == pending.address and row.operation_index < pending.operation_index)
+                if result.status != Status.Found and target_address >= pending.address and target_address < row.address:
+                    pending_row: LineRow = pending
+                    return false if not store_match(bytes, length, unit, pending_row, result)
+            pending <- row
+            return true
+
+        def format_status(status: DebuggerNativeDwarfLineFormat::UnitStatus) -> Status:
+            return Status.UnsupportedVersion if status == DebuggerNativeDwarfLineFormat::UnitStatus.UnsupportedVersion
+            return Status.UnsupportedFormat if status == DebuggerNativeDwarfLineFormat::UnitStatus.UnsupportedFormat
+            return Status.TooLarge if status == DebuggerNativeDwarfLineFormat::UnitStatus.TooLarge
+            return Status.Invalid
+
+        def run_unit(bytes: u8&, length: usize, unit: DebuggerNativeDwarfLineFormat::Unit, address_size: usize, target_address: u64, result: mutable Lookup&, operations: mutable usize&) -> Status:
+            cursor: mutable usize = unit.program_offset
+            state: mutable LineState = zeroed
+            state.line <- Encoding::LINE_INITIAL
+            state.file_index <- Encoding::FILE_INITIAL
+            state.is_statement <- unit.default_is_statement
+            pending: mutable LineRow = zeroed
+            while cursor < unit.unit_end:
+                operations <- operations + Encoding::OPERATIONS_INCREMENT
+                return Status.TooLarge if operations > Limit::MAX_OPERATIONS
+                opcode: u8 = byte_at(bytes, unit.unit_end, cursor)
+                cursor <- cursor + Encoding::BYTE_INCREMENT
+                if opcode == Encoding::EXTENDED_OPCODE_PREFIX:
+                    extended_length: DebuggerNativeDwarfLineFormat::UlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uleb(bytes, length, unit.unit_end, cursor)
+                    return Status.Invalid if not extended_length.valid or extended_length.value == Encoding::ZERO_U64
+                    extended_start: usize = extended_length.next_offset
+                    return Status.Invalid if extended_length.value > (unit.unit_end - extended_start).u64()
+                    extended_end: usize = extended_start + extended_length.value.usize()
+                    extended_opcode: u8 = byte_at(bytes, extended_end, extended_start)
+                    operand_offset: usize = extended_start + Encoding::BYTE_INCREMENT
+                    if extended_opcode == ExtendedOpcode::END_SEQUENCE:
+                        return Status.Invalid if extended_length.value != Encoding::EXTENDED_OPCODE_BYTES
+                        row: LineRow = row_from_state(state, true)
+                        return Status.Invalid if not accept_row(bytes, length, unit, row, pending, target_address, result)
+                        state <- zeroed
+                        state.line <- Encoding::LINE_INITIAL
+                        state.file_index <- Encoding::FILE_INITIAL
+                        state.is_statement <- unit.default_is_statement
+                    elif extended_opcode == ExtendedOpcode::SET_ADDRESS:
+                        return Status.Invalid if extended_length.value != (address_size + Encoding::BYTE_INCREMENT).u64()
+                        address: DebuggerNativeDwarfLineFormat::IntegerResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uint(bytes, extended_end, operand_offset, address_size)
+                        return Status.Invalid if not address.valid
+                        state.address <- address.value
+                        state.operation_index <- Encoding::INITIAL_OPERATION_INDEX
+                    elif extended_opcode == ExtendedOpcode::DEFINE_FILE:
+                        return Status.UnsupportedFeature
+                    elif extended_opcode == ExtendedOpcode::SET_DISCRIMINATOR:
+                        discriminator: DebuggerNativeDwarfLineFormat::UlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uleb(bytes, extended_end, extended_end, operand_offset)
+                        return Status.Invalid if not discriminator.valid or discriminator.next_offset != extended_end
+                    cursor <- extended_end
+                elif opcode < unit.opcode_base:
+                    if opcode == StandardOpcode::COPY:
+                        row: LineRow = row_from_state(state, false)
+                        return Status.Invalid if not accept_row(bytes, length, unit, row, pending, target_address, result)
+                    elif opcode == StandardOpcode::ADVANCE_PC:
+                        advance: DebuggerNativeDwarfLineFormat::UlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uleb(bytes, length, unit.unit_end, cursor)
+                        return Status.Invalid if not advance.valid
+                        cursor <- advance.next_offset
+                        return Status.Invalid if not advance_operations(state, advance.value, unit)
+                    elif opcode == StandardOpcode::ADVANCE_LINE:
+                        advance: DebuggerNativeDwarfLineFormat::SlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_sleb(bytes, length, unit.unit_end, cursor)
+                        return Status.Invalid if not advance.valid
+                        cursor <- advance.next_offset
+                        return Status.Invalid if not add_line(state, advance.value)
+                    elif opcode == StandardOpcode::SET_FILE:
+                        file_index: DebuggerNativeDwarfLineFormat::UlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uleb(bytes, length, unit.unit_end, cursor)
+                        return Status.Invalid if not file_index.valid or file_index.value < Encoding::FILE_INDEX_MINIMUM or file_index.value > unit.file_count.u64()
+                        cursor <- file_index.next_offset
+                        state.file_index <- file_index.value
+                    elif opcode == StandardOpcode::SET_COLUMN:
+                        column: DebuggerNativeDwarfLineFormat::UlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uleb(bytes, length, unit.unit_end, cursor)
+                        return Status.Invalid if not column.valid
+                        cursor <- column.next_offset
+                        state.column <- column.value
+                    elif opcode == StandardOpcode::NEGATE_STATEMENT:
+                        state.is_statement <- not state.is_statement
+                    elif opcode == StandardOpcode::CONST_ADD_PC:
+                        adjusted: u64 = (Encoding::MAXIMUM_BYTE_VALUE - unit.opcode_base.u32()).u64()
+                        return Status.Invalid if not advance_operations(state, adjusted / unit.line_range.u64(), unit)
+                    elif opcode == StandardOpcode::FIXED_ADVANCE_PC:
+                        advance: DebuggerNativeDwarfLineFormat::IntegerResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uint(bytes, unit.unit_end, cursor, Encoding::FIXED_ADVANCE_PC_WIDTH)
+                        return Status.Invalid if not advance.valid or not add_address(state, advance.value)
+                        cursor <- cursor + Encoding::FIXED_ADVANCE_PC_WIDTH
+                        state.operation_index <- Encoding::INITIAL_OPERATION_INDEX
+                    else:
+                        operand_count: usize = unit.standard_opcode_lengths[opcode.usize() - Encoding::STANDARD_OPCODE_ARRAY_OFFSET].usize()
+                        for operand_index in 0..<operand_count:
+                            ignored: DebuggerNativeDwarfLineFormat::UlebResult = DebuggerNativeDwarfLineFormat::dwarf_line_read_uleb(bytes, length, unit.unit_end, cursor)
+                            return Status.Invalid if not ignored.valid
+                            cursor <- ignored.next_offset
+                else:
+                    adjusted: u64 = (opcode - unit.opcode_base).u64()
+                    return Status.Invalid if not advance_operations(state, adjusted / unit.line_range.u64(), unit)
+                    line_increment: i64 = unit.line_base + (adjusted % unit.line_range.u64()).i64()
+                    return Status.Invalid if not add_line(state, line_increment)
+                    row: LineRow = row_from_state(state, false)
+                    return Status.Invalid if not accept_row(bytes, length, unit, row, pending, target_address, result)
+            return Status.Invalid if pending.valid
+            return Status.NotFound
+
+    public:
+        def dwarf_line_lookup(bytes: u8&, length: usize, address_size: usize, target_address: u64) -> Lookup:
+            result: mutable Lookup = zeroed
+            result.status <- Status.Invalid
+            if address_size != Encoding::ADDRESS_WIDTH_32 and address_size != Encoding::ADDRESS_WIDTH_64:
+                result.status <- Status.UnsupportedAddressSize
+                return result
+            return result if length == Encoding::ZERO_USIZE
+            result.status <- Status.NotFound
+            cursor: mutable usize = Encoding::ZERO_USIZE
+            unit_count: mutable usize = Encoding::ZERO_USIZE
+            operations: mutable usize = Encoding::ZERO_USIZE
+            while cursor < length:
+                unit: DebuggerNativeDwarfLineFormat::Unit = DebuggerNativeDwarfLineFormat::dwarf_line_parse_unit(bytes, length, cursor)
+                if unit.status != DebuggerNativeDwarfLineFormat::UnitStatus.Ready:
+                    result.status <- format_status(unit.status)
+                    return result
+                if unit.unit_end <= cursor:
+                    result.status <- Status.Invalid
+                    return result
+                unit_status: Status = run_unit(bytes, length, unit, address_size, target_address, result, operations)
+                if unit_status != Status.NotFound:
+                    if unit_status != Status.Found:
+                        result.status <- unit_status
+                        return result
+                cursor <- unit.unit_end
+                unit_count <- unit_count + Encoding::OPERATIONS_INCREMENT
+                if unit_count > Limit::MAX_UNITS:
+                    result.status <- Status.TooLarge
+                    return result
+            return result if unit_count == Encoding::ZERO_USIZE
+            return result

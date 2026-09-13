@@ -1,0 +1,316 @@
+# Bounds-checked DWARF32 line-table primitives and v2-v4 prologue reader.
+# The line-state machine lives in dwarf_line.elisa; this module exposes only
+# validated format records and bounded byte/LEB/string operations.
+
+const module DebuggerNativeDwarfLineCapacity:
+    FILENAME_BYTES: usize = 256
+
+module DebuggerNativeDwarfLineFormat:
+    private:
+        const module Limit:
+            MAX_SECTION_BYTES: usize = 16777216
+            NAME_CAPACITY: usize = DebuggerNativeDwarfLineCapacity::FILENAME_BYTES
+            TABLE_ENTRY_MAX: usize = 65536
+
+        const module Width:
+            BYTE: usize = 1
+            HALFWORD: usize = 2
+            WORD: usize = 4
+            DOUBLEWORD: usize = 8
+
+        const module Encoding:
+            DWARF64_LENGTH_MARKER: u32 = 4294967295
+            MINIMUM_VERSION: u64 = 2
+            MAXIMUM_VERSION: u64 = 4
+            DWARF4_VERSION: u64 = 4
+            INITIAL_LENGTH_BYTES: usize = 4
+            VERSION_BYTES: usize = 2
+            HEADER_LENGTH_BYTES: usize = 4
+            V2_V3_FIXED_PROLOGUE_BYTES: usize = 5
+            V4_FIXED_PROLOGUE_BYTES: usize = 6
+            V2_V3_HEADER_SUFFIX_BYTES: usize = 4
+            DIRECTORY_TERMINATOR_LENGTH: usize = 0
+            FILE_TERMINATOR_LENGTH: usize = 0
+            EMPTY_UNIT_LENGTH: u64 = 0
+            DEFAULT_MAXIMUM_OPERATIONS: u8 = 1
+            MINIMUM_INSTRUCTION_LENGTH: u8 = 1
+            MINIMUM_LINE_RANGE: u8 = 1
+            MINIMUM_OPCODE_BASE: u8 = 1
+            STANDARD_FIRST_OPCODE: u8 = 1
+            INITIAL_FILE_INDEX: u64 = 1
+            FILE_INDEX_INCREMENT: u64 = 1
+            NO_FILE_INDEX: u64 = 0
+            NULL_BYTE: u8 = 0
+            SIGNED_BYTE_HIGH_BIT: u8 = 128
+            SIGNED_BYTE_MODULUS: i64 = 256
+            OPCODE_TABLE_CAPACITY: usize = 255
+            BYTE_INCREMENT: usize = 1
+            BYTE_BITS: u64 = 8
+            TABLE_ENTRY_INCREMENT: usize = 1
+            MAX_U64: u64 = 18446744073709551615
+
+        const module Leb:
+            BYTE_CAPACITY: usize = 10
+            BITS_PER_BYTE: u32 = 7
+            U64_SIGN_BIT: u32 = 63
+            U64_WIDTH_BITS: u32 = 64
+            PAYLOAD_MASK: u8 = 127
+            CONTINUATION_MASK: u8 = 128
+            SIGN_MASK: u8 = 64
+            MAX_TOP_BIT_PAYLOAD: u64 = 1
+            MAX_SIGNED_POSITIVE_TOP_PAYLOAD: u64 = 0
+            MAX_SIGNED_NEGATIVE_TOP_PAYLOAD: u64 = 127
+
+    public:
+        enum UnitStatus:
+            Invalid
+            Ready
+            UnsupportedVersion
+            UnsupportedFormat
+            TooLarge
+
+        struct IntegerResult:
+            valid: mutable bool
+            value: mutable u64
+
+        struct UlebResult:
+            valid: mutable bool
+            value: mutable u64
+            next_offset: mutable usize
+
+        struct SlebResult:
+            valid: mutable bool
+            value: mutable i64
+            next_offset: mutable usize
+
+        struct StringResult:
+            valid: mutable bool
+            truncated: mutable bool
+            # length is the number of bytes copied into bytes. A truncated
+            # result always has length <= NAME_CAPACITY.
+            length: mutable usize
+            next_offset: mutable usize
+            bytes: mutable u8[Limit::NAME_CAPACITY]
+
+        struct Unit:
+            status: mutable UnitStatus
+            unit_end: mutable usize
+            program_offset: mutable usize
+            file_table_offset: mutable usize
+            directory_count: mutable u32
+            file_count: mutable u32
+            minimum_instruction_length: mutable u8
+            maximum_operations_per_instruction: mutable u8
+            default_is_statement: mutable bool
+            line_base: mutable i64
+            line_range: mutable u8
+            opcode_base: mutable u8
+            standard_opcode_lengths: mutable u8[Encoding::OPCODE_TABLE_CAPACITY]
+
+        struct FileInfo:
+            valid: mutable bool
+            directory_index: mutable u32
+            name: mutable StringResult
+
+    private:
+        def byte_at(bytes: u8&, offset: usize) -> u8:
+            return bytes[offset]
+
+    public:
+        def dwarf_line_read_uint(bytes: u8&, length: usize, offset: usize, width: usize) -> IntegerResult:
+            result: mutable IntegerResult = zeroed
+            return result if width != Width::BYTE and width != Width::HALFWORD and width != Width::WORD and width != Width::DOUBLEWORD
+            return result if offset > length
+            return result if width > length - offset
+            for index in 0..<width:
+                result.value <- result.value | (byte_at(bytes, offset + index).u64() << (index.u64() * Encoding::BYTE_BITS))
+            result.valid <- true
+            return result
+
+        def dwarf_line_read_uleb(bytes: u8&, length: usize, limit: usize, offset: usize) -> UlebResult:
+            result: mutable UlebResult = zeroed
+            return result if limit > length or offset > limit
+            cursor: mutable usize = offset
+            shift: mutable u32 = 0
+            for index in 0..<Leb::BYTE_CAPACITY:
+                return result if cursor >= limit
+                current: u8 = byte_at(bytes, cursor)
+                payload: u64 = (current & Leb::PAYLOAD_MASK).u64()
+                return result if shift == Leb::U64_SIGN_BIT and payload > Leb::MAX_TOP_BIT_PAYLOAD
+                result.value <- result.value | (payload << shift)
+                cursor <- cursor + Encoding::BYTE_INCREMENT
+                if (current & Leb::CONTINUATION_MASK) == 0:
+                    result.valid <- true
+                    result.next_offset <- cursor
+                    return result
+                shift <- shift + Leb::BITS_PER_BYTE
+            return result
+
+        def dwarf_line_read_sleb(bytes: u8&, length: usize, limit: usize, offset: usize) -> SlebResult:
+            result: mutable SlebResult = zeroed
+            return result if limit > length or offset > limit
+            cursor: mutable usize = offset
+            shift: mutable u32 = 0
+            raw: mutable u64 = 0
+            for index in 0..<Leb::BYTE_CAPACITY:
+                return result if cursor >= limit
+                current: u8 = byte_at(bytes, cursor)
+                payload: u64 = (current & Leb::PAYLOAD_MASK).u64()
+                if shift == Leb::U64_SIGN_BIT:
+                    return result if (current & Leb::SIGN_MASK) == 0 and payload != Leb::MAX_SIGNED_POSITIVE_TOP_PAYLOAD
+                    return result if (current & Leb::SIGN_MASK) != 0 and payload != Leb::MAX_SIGNED_NEGATIVE_TOP_PAYLOAD
+                raw <- raw | (payload << shift)
+                cursor <- cursor + Encoding::BYTE_INCREMENT
+                shift <- shift + Leb::BITS_PER_BYTE
+                if (current & Leb::CONTINUATION_MASK) == 0:
+                    if (current & Leb::SIGN_MASK) != 0 and shift < Leb::U64_WIDTH_BITS:
+                        raw <- raw | (Encoding::MAX_U64 << shift)
+                    result.value <- raw.i64()
+                    result.valid <- true
+                    result.next_offset <- cursor
+                    return result
+            return result
+
+        def dwarf_line_read_string(bytes: u8&, length: usize, limit: usize, offset: usize) -> StringResult:
+            result: mutable StringResult = zeroed
+            return result if limit > length or offset > limit
+            cursor: mutable usize = offset
+            while cursor < limit:
+                current: u8 = byte_at(bytes, cursor)
+                cursor <- cursor + Encoding::BYTE_INCREMENT
+                if current == Encoding::NULL_BYTE:
+                    result.valid <- true
+                    encoded_length: usize = cursor - offset - Encoding::BYTE_INCREMENT
+                    result.length <- encoded_length
+                    if result.length > Limit::NAME_CAPACITY:
+                        result.length <- Limit::NAME_CAPACITY
+                    result.next_offset <- cursor
+                    result.truncated <- encoded_length > Limit::NAME_CAPACITY
+                    for index in 0..<Limit::NAME_CAPACITY:
+                        continue if index >= encoded_length
+                        result.bytes[index] <- byte_at(bytes, offset + index)
+                    return result
+            return result
+
+        def dwarf_line_parse_unit(bytes: u8&, length: usize, unit_offset: usize) -> Unit:
+            unit: mutable Unit = zeroed
+            unit.status <- UnitStatus.Invalid
+            if length > Limit::MAX_SECTION_BYTES:
+                unit.status <- UnitStatus.TooLarge
+                return unit
+            return unit if unit_offset > length
+            return unit if length - unit_offset < Encoding::INITIAL_LENGTH_BYTES
+            initial_length: IntegerResult = dwarf_line_read_uint(bytes, length, unit_offset, Encoding::INITIAL_LENGTH_BYTES)
+            return unit if not initial_length.valid
+            if initial_length.value == Encoding::DWARF64_LENGTH_MARKER.u64():
+                unit.status <- UnitStatus.UnsupportedFormat
+                return unit
+            body_offset: usize = unit_offset + Encoding::INITIAL_LENGTH_BYTES
+            return unit if initial_length.value == Encoding::EMPTY_UNIT_LENGTH or initial_length.value > (length - body_offset).u64()
+            unit.unit_end <- body_offset + initial_length.value.usize()
+            minimum_unit_header_bytes: usize = Encoding::VERSION_BYTES + Encoding::HEADER_LENGTH_BYTES
+            return unit if initial_length.value < minimum_unit_header_bytes.u64()
+            version: IntegerResult = dwarf_line_read_uint(bytes, unit.unit_end, body_offset, Encoding::VERSION_BYTES)
+            return unit if not version.valid
+            if version.value < Encoding::MINIMUM_VERSION or version.value > Encoding::MAXIMUM_VERSION:
+                unit.status <- UnitStatus.UnsupportedVersion
+                return unit
+            fixed_prologue_bytes: mutable usize = Encoding::V2_V3_FIXED_PROLOGUE_BYTES
+            if version.value == Encoding::DWARF4_VERSION:
+                fixed_prologue_bytes <- Encoding::V4_FIXED_PROLOGUE_BYTES
+            minimum_unit_bytes: usize = minimum_unit_header_bytes + fixed_prologue_bytes
+            return unit if initial_length.value < minimum_unit_bytes.u64()
+            header_length: IntegerResult = dwarf_line_read_uint(bytes, unit.unit_end, body_offset + Encoding::VERSION_BYTES, Encoding::HEADER_LENGTH_BYTES)
+            return unit if not header_length.valid
+            header_offset: usize = body_offset + Encoding::VERSION_BYTES + Encoding::HEADER_LENGTH_BYTES
+            return unit if header_offset > unit.unit_end
+            return unit if header_length.value > (unit.unit_end - header_offset).u64()
+            header_end: usize = header_offset + header_length.value.usize()
+            cursor: mutable usize = header_offset
+            unit.minimum_instruction_length <- byte_at(bytes, cursor)
+            cursor <- cursor + Encoding::BYTE_INCREMENT
+            unit.maximum_operations_per_instruction <- Encoding::DEFAULT_MAXIMUM_OPERATIONS
+            if version.value == Encoding::DWARF4_VERSION:
+                return unit if cursor >= header_end
+                unit.maximum_operations_per_instruction <- byte_at(bytes, cursor)
+                cursor <- cursor + Encoding::BYTE_INCREMENT
+            return unit if cursor > header_end
+            return unit if header_end - cursor < Encoding::V2_V3_HEADER_SUFFIX_BYTES
+            unit.default_is_statement <- byte_at(bytes, cursor) != Encoding::NULL_BYTE
+            cursor <- cursor + Encoding::BYTE_INCREMENT
+            raw_line_base: u8 = byte_at(bytes, cursor)
+            unit.line_base <- raw_line_base.i64() - Encoding::SIGNED_BYTE_MODULUS if raw_line_base >= Encoding::SIGNED_BYTE_HIGH_BIT else raw_line_base.i64()
+            cursor <- cursor + Encoding::BYTE_INCREMENT
+            unit.line_range <- byte_at(bytes, cursor)
+            cursor <- cursor + Encoding::BYTE_INCREMENT
+            unit.opcode_base <- byte_at(bytes, cursor)
+            return unit if unit.minimum_instruction_length < Encoding::MINIMUM_INSTRUCTION_LENGTH or unit.maximum_operations_per_instruction < Encoding::DEFAULT_MAXIMUM_OPERATIONS or unit.line_range < Encoding::MINIMUM_LINE_RANGE or unit.opcode_base < Encoding::MINIMUM_OPCODE_BASE
+            cursor <- cursor + Encoding::BYTE_INCREMENT
+            standard_count: usize = unit.opcode_base.usize() - Encoding::STANDARD_FIRST_OPCODE.usize()
+            return unit if standard_count > header_end - cursor
+            for index in 0..<standard_count:
+                unit.standard_opcode_lengths[index] <- byte_at(bytes, cursor + index)
+            cursor <- cursor + standard_count
+            directory_terminated: mutable bool = false
+            directory_count: mutable usize = 0
+            for index in 0..<Limit::TABLE_ENTRY_MAX:
+                name: StringResult = dwarf_line_read_string(bytes, length, header_end, cursor)
+                return unit if not name.valid
+                cursor <- name.next_offset
+                if name.length == Encoding::DIRECTORY_TERMINATOR_LENGTH:
+                    directory_terminated <- true
+                    break
+                directory_count <- directory_count + Encoding::TABLE_ENTRY_INCREMENT
+            if not directory_terminated:
+                unit.status <- UnitStatus.TooLarge
+                return unit
+            unit.directory_count <- directory_count.u32()
+            unit.file_table_offset <- cursor
+            files_terminated: mutable bool = false
+            file_count: mutable usize = 0
+            for index in 0..<Limit::TABLE_ENTRY_MAX:
+                name: StringResult = dwarf_line_read_string(bytes, length, header_end, cursor)
+                return unit if not name.valid
+                cursor <- name.next_offset
+                if name.length == Encoding::FILE_TERMINATOR_LENGTH:
+                    files_terminated <- true
+                    break
+                directory: UlebResult = dwarf_line_read_uleb(bytes, length, header_end, cursor)
+                return unit if not directory.valid
+                return unit if directory.value > unit.directory_count.u64()
+                timestamp: UlebResult = dwarf_line_read_uleb(bytes, length, header_end, directory.next_offset)
+                return unit if not timestamp.valid
+                file_size: UlebResult = dwarf_line_read_uleb(bytes, length, header_end, timestamp.next_offset)
+                return unit if not file_size.valid
+                cursor <- file_size.next_offset
+                file_count <- file_count + Encoding::TABLE_ENTRY_INCREMENT
+            if not files_terminated:
+                unit.status <- UnitStatus.TooLarge
+                return unit
+            unit.file_count <- file_count.u32()
+            unit.program_offset <- header_end
+            unit.status <- UnitStatus.Ready
+            return unit
+
+        def dwarf_line_file_info(bytes: u8&, length: usize, unit: Unit, file_index: u64) -> FileInfo:
+            result: mutable FileInfo = zeroed
+            return result if unit.status != UnitStatus.Ready or file_index == Encoding::NO_FILE_INDEX or file_index > unit.file_count.u64()
+            cursor: mutable usize = unit.file_table_offset
+            current_index: mutable u64 = Encoding::INITIAL_FILE_INDEX
+            while cursor < unit.program_offset:
+                name: StringResult = dwarf_line_read_string(bytes, length, unit.program_offset, cursor)
+                return result if not name.valid or name.length == Encoding::FILE_TERMINATOR_LENGTH
+                directory: UlebResult = dwarf_line_read_uleb(bytes, length, unit.program_offset, name.next_offset)
+                return result if not directory.valid or directory.value > unit.directory_count.u64()
+                timestamp: UlebResult = dwarf_line_read_uleb(bytes, length, unit.program_offset, directory.next_offset)
+                return result if not timestamp.valid
+                file_size: UlebResult = dwarf_line_read_uleb(bytes, length, unit.program_offset, timestamp.next_offset)
+                return result if not file_size.valid
+                if current_index == file_index:
+                    result.valid <- true
+                    result.directory_index <- directory.value.u32()
+                    result.name <- name
+                    return result
+                current_index <- current_index + Encoding::FILE_INDEX_INCREMENT
+                cursor <- file_size.next_offset
+            return result

@@ -68,6 +68,7 @@ ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
 .PHONY: remote-authorization-check server-version-check compiler-edir-loop-check
 .PHONY: protocol-client-ordering-check
+.PHONY: build-runner-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -84,7 +85,7 @@ cli: $(BUILD)/elisa-debugger-cli
 cli-flush-check: $(BUILD)/elisa-debugger-cli
 	sh tests/cli_flush_check.sh "$(BUILD)/elisa-debugger-cli"
 
-module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-edir-codec-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-managed-trace-service-check $(BUILD)/elisa-debugger-managed-memory-write-history-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-protocol-encoding-check $(BUILD)/elisa-debugger-protocol-framing-check $(BUILD)/elisa-debugger-remote-authentication-check $(BUILD)/elisa-debugger-remote-authorization-check $(BUILD)/elisa-debugger-trace-storage-decode-check $(BUILD)/elisa-debugger-trace-reader-encoded-check $(BUILD)/elisa-debugger-checkpoint-state-check $(BUILD)/elisa-debugger-trace-manifest-status-check $(BUILD)/elisa-debugger-adapter-recording-bounds-check $(BUILD)/elisa-debugger-runtime-status-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-request-operands-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-query-evaluator-check $(BUILD)/elisa-debugger-breakpoint-manager-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-integration-surface-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check $(BUILD)/elisa-debugger-dap-payload-check $(BUILD)/elisa-debugger-ffi-probe $(BUILD)/elisa-debugger-path-policy-check $(BUILD)/elisa-debugger-process-spawn-check
+module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-edir-codec-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-managed-trace-service-check $(BUILD)/elisa-debugger-managed-memory-write-history-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-protocol-encoding-check $(BUILD)/elisa-debugger-protocol-framing-check $(BUILD)/elisa-debugger-remote-authentication-check $(BUILD)/elisa-debugger-remote-authorization-check $(BUILD)/elisa-debugger-trace-storage-decode-check $(BUILD)/elisa-debugger-trace-reader-encoded-check $(BUILD)/elisa-debugger-checkpoint-state-check $(BUILD)/elisa-debugger-trace-manifest-status-check $(BUILD)/elisa-debugger-adapter-recording-bounds-check $(BUILD)/elisa-debugger-runtime-status-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-request-operands-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-query-evaluator-check $(BUILD)/elisa-debugger-breakpoint-manager-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-integration-surface-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check $(BUILD)/elisa-debugger-dap-payload-check $(BUILD)/elisa-debugger-ffi-probe $(BUILD)/elisa-debugger-path-policy-check $(BUILD)/elisa-debugger-process-spawn-check $(BUILD)/elisa-debugger-build-runner-check
 module-check: concurrency-scheduler-check
 module-check: native-breakpoint-lifecycle-check
 
@@ -160,6 +161,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-dap-payload-check"
 	"$(BUILD)/elisa-debugger-path-policy-check"
 	"$(BUILD)/elisa-debugger-process-spawn-check" $(PROCESS_SPAWN_CHECK_PARENT_MODE) $(PROCESS_SPAWN_CHECK_RESERVED_FIRST) $(PROCESS_SPAWN_CHECK_RESERVED_SECOND)
+	"$(BUILD)/elisa-debugger-build-runner-check"
 	test "$$(printf 'ELI' | "$(BUILD)/elisa-debugger-ffi-probe")" = 'ELI'
 
 managed-inspection-check: $(BUILD)/elisa-debugger-managed-inspection-check
@@ -344,6 +346,13 @@ $(BUILD)/elisa-debugger-process-spawn-check: tests/process_spawn_check.elisa $(E
 
 process-spawn-check: $(BUILD)/elisa-debugger-process-spawn-check
 	"$(BUILD)/elisa-debugger-process-spawn-check" $(PROCESS_SPAWN_CHECK_PARENT_MODE) $(PROCESS_SPAWN_CHECK_RESERVED_FIRST) $(PROCESS_SPAWN_CHECK_RESERVED_SECOND)
+
+$(BUILD)/elisa-debugger-build-runner-check: tests/build_runner_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+build-runner-check: $(BUILD)/elisa-debugger-build-runner-check
+	"$(BUILD)/elisa-debugger-build-runner-check"
 
 $(BUILD)/elisa-debugger: $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

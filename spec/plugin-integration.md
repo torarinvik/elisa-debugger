@@ -83,6 +83,11 @@ stdin/stdout, independently from target output. It accepts request IDs as
 unsigned JSON integers or decimal strings and returns them as strings; event
 ordinals are strings. The broader typed target contract uses string IDs.
 Clients must not coerce returned IDs or ordinals to floating-point numbers.
+Before protocol negotiation, send `discover` and use its feature flags to
+decide which controls to expose. Validate its wire shape against the
+[discovery schema](../schemas/session-protocol-v1.discover.schema.json); the
+protocol specification includes a replayable request/response transcript for
+clients in any language.
 
 Clients using the typed Elisa service must handle its cancellation, stale
 generation, capability, and bounded-history results. The current compact

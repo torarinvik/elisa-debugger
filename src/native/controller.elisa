@@ -11,6 +11,7 @@ module DebuggerNative:
         const DETAIL_AGENT_IDENTITY: u32 = 2
         const DETAIL_PROVIDER_KIND: u32 = 3
         const DETAIL_STATE: u32 = 4
+        const CRASH_DETAIL_NONE: u32 = 0
 
     public:
         enum NativeStopStatus:
@@ -19,6 +20,7 @@ module DebuggerNative:
             Pausing
             Stopped
             Crashed
+            AgentFailed
             Unsupported
 
         struct AgentIdentity:
@@ -30,10 +32,11 @@ module DebuggerNative:
             agent: mutable AgentIdentity
             status: mutable NativeStopStatus
             provider: mutable DebuggerEngine::Provider
+            crash_detail: mutable u32
             last_error: mutable DebuggerErrors::DebuggerError
 
         def native_controller_new(provider: DebuggerEngine::Provider) -> NativeController:
-            return NativeController{agent: AgentIdentity{protocol_major: 0, build: 0, target: 0}, status: NativeStopStatus.Detached, provider: provider, last_error: DebuggerErrors::no_error()}
+            return NativeController{agent: AgentIdentity{protocol_major: 0, build: 0, target: 0}, status: NativeStopStatus.Detached, provider: provider, crash_detail: CRASH_DETAIL_NONE, last_error: DebuggerErrors::no_error()}
 
         def native_attach(controller: NativeController, agent: AgentIdentity) -> NativeController:
             updated: mutable NativeController = controller
@@ -54,7 +57,31 @@ module DebuggerNative:
                 return updated
             updated.agent <- agent
             updated.status <- NativeStopStatus.Attached
+            updated.crash_detail <- CRASH_DETAIL_NONE
             updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        # Preserve target faults separately from controller/agent transport
+        # failure. A crashed target can still expose its captured stop state.
+        def native_target_crashed(controller: NativeController, detail: u32) -> NativeController:
+            updated: mutable NativeController = controller
+            if controller.status != NativeStopStatus.Attached and controller.status != NativeStopStatus.Pausing and controller.status != NativeStopStatus.Stopped and controller.status != NativeStopStatus.AgentFailed:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE)
+                return updated
+            updated.status <- NativeStopStatus.Crashed
+            updated.crash_detail <- detail
+            updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        # An agent transport failure makes live target state unsafe to inspect;
+        # it must not be surfaced as a target crash or a successful stop.
+        def native_agent_failed(controller: NativeController, detail: u32) -> NativeController:
+            updated: mutable NativeController = controller
+            if controller.status != NativeStopStatus.Attached and controller.status != NativeStopStatus.Pausing and controller.status != NativeStopStatus.Stopped:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_STATE)
+                return updated
+            updated.status <- NativeStopStatus.AgentFailed
+            updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, false, detail)
             return updated
 
         def native_pause(controller: NativeController) -> NativeController:
@@ -96,10 +123,14 @@ module DebuggerNative:
                 return updated
             if controller.status == NativeStopStatus.Unsupported:
                 return updated
+            if controller.status == NativeStopStatus.AgentFailed:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, false, controller.last_error.detail)
+                return updated
             updated.status <- NativeStopStatus.Detached
             updated.agent.protocol_major <- 0
             updated.agent.build <- 0
             updated.agent.target <- 0
+            updated.crash_detail <- CRASH_DETAIL_NONE
             updated.last_error <- DebuggerErrors::no_error()
             return updated
 

@@ -52,8 +52,10 @@ when both are supplied they must identify the same EDIR source entry.
 
 Run `build/elisa-debugger-server` with one process per client session. The
 transport is a decimal UTF-8 byte length, one space, the JSON request, then a
-newline. Send `discover`, then negotiate protocol major/minor with
-`initialize` before session methods. The compact process currently supports
+newline. Send `discover`, validate its response with the
+[discovery schema](../schemas/session-protocol-v1.discover.schema.json), then
+negotiate protocol major/minor with `initialize` before session methods. The
+protocol guide includes a complete discovery transcript. The compact process currently supports
 protocol `1.0`; see the [initialize schema](../schemas/session-protocol-v1.initialize.schema.json)
 and [wire specification](../spec/session-protocol.md) for exact framing,
 fields, and errors.

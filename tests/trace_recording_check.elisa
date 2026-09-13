@@ -15,15 +15,19 @@ const TEST_BAD_SCHEMA: u32 = 2
 const TEST_EVENT_OFFSET: usize = 36
 const TEST_CHECKPOINT_BRANCH: u64 = 0
 const TEST_NON_ROOT_BRANCH: u64 = 1
+const TEST_WRONG_RECORDING: u64 = TEST_RECORDING + 100
 const TEST_CHECKPOINT_STATE_HASH_SEED: u64 = 0
+const TEST_FIRST_CHECKPOINT_EVENT: u64 = 0
 const TEST_CHECKPOINT_EVENT: u64 = 1
 const TEST_CHECKPOINT_ID_OFFSET: u64 = 1
-const TEST_CHECKPOINT_COUNT: u64 = 1
+const TEST_CHECKPOINT_COUNT: u64 = 2
 const TEST_MANIFEST_SEQUENCE: u64 = 0
 const TEST_FIRST_EVENT: u64 = 0
+const TEST_FINAL_EVENT_BOUNDARY: u64 = TEST_CHECKPOINT_EVENT + 1
+const TEST_OUTSIDE_FINAL_EVENT_BOUNDARY: u64 = TEST_FINAL_EVENT_BOUNDARY + 1
 const TEST_RECORDED_EVENT_COUNT: usize = 2
-const TEST_RECORDED_CHUNK_COUNT: usize = 3
-const TEST_RECORDED_CHECKPOINT_COUNT: usize = 1
+const TEST_RECORDED_CHUNK_COUNT: usize = 4
+const TEST_RECORDED_CHECKPOINT_COUNT: usize = 2
 const TEST_FOOTER_SEQUENCE_OFFSET: u64 = 1
 const TEST_FIRST_CHECKPOINT_INDEX: usize = 0
 const TEST_RESOURCE_LIMIT_EVENT_COUNT: u64 = 128
@@ -34,6 +38,7 @@ const TEST_RESOURCE_LIMIT_PENDING_EVENT_COUNT: usize = 0
 const TEST_FIRST_EVENT_CHUNK_INDEX: usize = 0
 const TEST_CHECKPOINT_CHUNK_INDEX: usize = 1
 const TEST_SECOND_EVENT_CHUNK_INDEX: usize = 2
+const TEST_SECOND_CHECKPOINT_CHUNK_INDEX: usize = 3
 const RESULT_FIRST_CHECKPOINT_EVENT_APPEND_FAILED: i64 = 12
 const RESULT_CHECKPOINT_APPEND_FAILED: i64 = 13
 const RESULT_SECOND_CHECKPOINT_EVENT_APPEND_FAILED: i64 = 14
@@ -58,6 +63,7 @@ const RESULT_TORN_NEXT_HEADER_FOOTER: i64 = 33
 const RESULT_NON_ROOT_EVENT_ACCEPTED: i64 = 34
 const RESULT_NON_ROOT_CHECKPOINT_ACCEPTED: i64 = 35
 const RESULT_UNSTORABLE_EVENT_ACCEPTED: i64 = 36
+const RESULT_CHECKPOINT_SELECTION_MISMATCH: i64 = 37
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(TEST_BUILD), runtime: DebuggerIdentity::debug_id(TEST_BUILD + 1), source: DebuggerIdentity::debug_id(TEST_BUILD + 2), target: DebuggerIdentity::debug_id(TEST_BUILD + 3), metadata_version: 1}
@@ -106,19 +112,34 @@ def check_record_and_read_full_checkpoint() -> i64:
     first: DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, TEST_FIRST_EVENT)
     second: DebuggerEvents::EventEnvelope = make_event(TEST_RECORDING, TEST_EVENT_SCHEMA, TEST_CHECKPOINT_EVENT)
     return RESULT_FIRST_CHECKPOINT_EVENT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, first))
+    first_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint(TEST_RECORDING, TEST_FIRST_CHECKPOINT_EVENT)
+    return RESULT_CHECKPOINT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append_checkpoint(recorder, first_checkpoint))
+    return RESULT_SECOND_CHECKPOINT_EVENT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, second))
     checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint(TEST_RECORDING, TEST_CHECKPOINT_EVENT)
     return RESULT_CHECKPOINT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint))
-    return RESULT_SECOND_CHECKPOINT_EVENT_APPEND_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, second))
     return RESULT_CHECKPOINT_RECORDER_FINALIZE_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(recorder))
     return RESULT_CHECKPOINT_RECORDER_NOT_EXACT if recorder.chunk_count != TEST_RECORDED_CHUNK_COUNT or recorder.manifest.checkpoint_count != TEST_CHECKPOINT_COUNT or not DebuggerTraceRecorder::recorder_is_exact(recorder)
-    return RESULT_CHECKPOINT_CHUNK_ORDER_MISMATCH if recorder.chunks[TEST_FIRST_EVENT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Events or recorder.chunks[TEST_CHECKPOINT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Checkpoint or recorder.chunks[TEST_SECOND_EVENT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Events
+    return RESULT_CHECKPOINT_CHUNK_ORDER_MISMATCH if recorder.chunks[TEST_FIRST_EVENT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Events or recorder.chunks[TEST_CHECKPOINT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Checkpoint or recorder.chunks[TEST_SECOND_EVENT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Events or recorder.chunks[TEST_SECOND_CHECKPOINT_CHUNK_INDEX].header.kind != DebuggerTrace::ChunkKind.Checkpoint
     reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
     return RESULT_CHECKPOINT_MANIFEST_INGEST_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, make_manifest_chunk(recorder.manifest)))
     for index in 0..<recorder.chunk_count:
         return RESULT_CHECKPOINT_CHUNK_INGEST_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, recorder.chunks[index]))
     return RESULT_CHECKPOINT_READER_NOT_EXACT if DebuggerTraceReader::reader_event_count(reader) != TEST_RECORDED_EVENT_COUNT or DebuggerTraceReader::reader_full_checkpoint_count(reader) != TEST_RECORDED_CHECKPOINT_COUNT or not DebuggerTraceReader::reader_is_exact(reader)
-    found: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_full_checkpoint_at(reader, TEST_FIRST_CHECKPOINT_INDEX)
-    return RESULT_CHECKPOINT_LOOKUP_MISMATCH if not found.found or found.checkpoint.event != TEST_CHECKPOINT_EVENT or found.checkpoint.recording.value != TEST_RECORDING
+    first_found: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_full_checkpoint_at(reader, TEST_FIRST_CHECKPOINT_INDEX)
+    return RESULT_CHECKPOINT_LOOKUP_MISMATCH if not first_found.found or first_found.checkpoint.event != TEST_FIRST_CHECKPOINT_EVENT or first_found.checkpoint.recording.value != TEST_RECORDING
+    before_first: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, TEST_FIRST_CHECKPOINT_EVENT)
+    at_second: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, TEST_CHECKPOINT_EVENT)
+    at_final_boundary: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, TEST_FINAL_EVENT_BOUNDARY)
+    after_final_boundary: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, TEST_OUTSIDE_FINAL_EVENT_BOUNDARY)
+    return RESULT_CHECKPOINT_SELECTION_MISMATCH if not before_first.found or before_first.checkpoint.event != TEST_FIRST_CHECKPOINT_EVENT or not at_second.found or at_second.checkpoint.event != TEST_CHECKPOINT_EVENT or not at_final_boundary.found or at_final_boundary.checkpoint.event != TEST_CHECKPOINT_EVENT or after_final_boundary.found
+    partial_reader: mutable DebuggerTraceReader::TraceReader = reader
+    partial_reader.manifest.status <- DebuggerTraceManifest::ManifestStatus.Partial
+    partial_selection: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(partial_reader, TEST_CHECKPOINT_EVENT)
+    return RESULT_CHECKPOINT_SELECTION_MISMATCH if partial_selection.found
+    incompatible_reader: mutable DebuggerTraceReader::TraceReader = reader
+    incompatible_reader.full_checkpoints[TEST_RECORDED_CHECKPOINT_COUNT - TEST_CHECKPOINT_ID_OFFSET.usize()].recording <- DebuggerIdentity::debug_id(TEST_WRONG_RECORDING)
+    compatible_fallback: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(incompatible_reader, TEST_CHECKPOINT_EVENT)
+    return RESULT_CHECKPOINT_SELECTION_MISMATCH if not compatible_fallback.found or compatible_fallback.checkpoint.event != TEST_FIRST_CHECKPOINT_EVENT
     trace: mutable DebuggerTraceBinary::ByteWriter = DebuggerTraceBinary::writer_new()
     append_trace_chunk(trace, make_manifest_chunk(recorder.manifest))
     for index in 0..<recorder.chunk_count:

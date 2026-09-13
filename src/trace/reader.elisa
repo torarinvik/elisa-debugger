@@ -339,3 +339,27 @@ module DebuggerTraceReader:
         def reader_full_checkpoint_at(reader: TraceReader, index: usize) -> FullCheckpointLookup:
             return FullCheckpointLookup{found: false, checkpoint: zeroed} if index >= reader.full_checkpoint_count
             return FullCheckpointLookup{found: true, checkpoint: reader.full_checkpoints[index]}
+
+        # Replay starts from the latest validated full checkpoint that does not
+        # lie after the requested boundary.  A raw index lookup is useful for
+        # inspection, but it is not sufficient for replay: partial traces,
+        # another recording, or a checkpoint from the future must never seed
+        # reconstruction.
+        def reader_nearest_checkpoint_at_or_before(reader: TraceReader, event: u64) -> FullCheckpointLookup:
+            result: mutable FullCheckpointLookup = zeroed
+            return result if reader.full_checkpoint_count > READER_FULL_CHECKPOINT_CAPACITY or reader.event_count > READER_EVENT_CAPACITY or reader.chunk_count > READER_CHUNK_CAPACITY
+            return result if not reader_is_exact(reader)
+            final_boundary: mutable u64 = reader.manifest.last_event
+            final_boundary <- final_boundary + READER_EVENT_INDEX_OFFSET.u64() if final_boundary != READER_MAX_EVENT
+            return result if event < reader.manifest.first_event or event > final_boundary
+            selected_event: mutable u64 = 0
+            for index in 0..<reader.full_checkpoint_count:
+                checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = reader.full_checkpoints[index]
+                continue if checkpoint.event < reader.manifest.first_event or checkpoint.event > final_boundary or checkpoint.event > event
+                continue if checkpoint.recording.value != reader.recording.value or checkpoint.branch.value != READER_ROOT_BRANCH
+                continue if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+                if not result.found or checkpoint.event >= selected_event:
+                    result.found <- true
+                    result.checkpoint <- checkpoint
+                    selected_event <- checkpoint.event
+            return result

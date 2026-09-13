@@ -45,6 +45,9 @@ Until a native provider is wired to a real target, instrumented-native,
 attached-native, and postmortem capability sets identify the requested engine
 kind but advertise no native operations. The DAP adapter only advertises
 termination for the managed engine and does not advertise native disassembly.
+The native controller model retains a reported target-crash detail separately
+from an agent transport failure, but no process monitor or target-agent transport
+currently supplies those transitions.
 
 The headless process advertises its smaller wire surface through discovery.
 Memory reads, source breakpoints, checkpoints, branches, comparison, and trace

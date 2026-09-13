@@ -74,6 +74,25 @@ trace artifact transfer are not wired to this process. Clients must honor the
 process's discovery result; method names in the typed in-process API or the
 protocol vocabulary alone do not imply wire support.
 
+The compact `discover` request and response are described by
+[`schemas/session-protocol-v1.discover.schema.json`](../schemas/session-protocol-v1.discover.schema.json).
+The request may omit `id`; in that case the process returns response ID `"1"`.
+An explicit positive unsigned 64-bit ID may be a JSON integer or decimal
+string, and the response always represents it as a decimal string. The schema
+requires every currently published feature flag while allowing additional
+fields so clients can preserve additive protocol extensions.
+
+Example payloads (each is one frame body; framing adds the decimal UTF-8 byte
+length, one space, and a newline):
+
+```json
+{"method":"discover","id":7}
+```
+
+```json
+{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":false,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":false,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+```
+
 ## Target lifecycle
 
 The client sends `initialize` with `protocolMajor`, `protocolMinor`, `client`,

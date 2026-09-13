@@ -156,6 +156,10 @@ module DebuggerDAPPayload:
         const UTF8_FOUR_BYTE_LENGTH: usize = 4
         const UNICODE_SURROGATE_RANGE_START: u64 = 55296
         const UNICODE_SURROGATE_RANGE_END: u64 = 57343
+        const MAX_JSON_NESTING: usize = 64
+        const JSON_ROOT_DELIMITER_INDEX: usize = 0
+        const JSON_INITIAL_NESTING_DEPTH: usize = 1
+        const JSON_EMPTY_NESTING_DEPTH: usize = 0
 
         struct ParsedValue:
             valid: mutable bool
@@ -492,10 +496,12 @@ module DebuggerDAPPayload:
             return NO_INDEX if start >= length
             return json_string_end(payload, length, start) if payload[start] == ASCII_QUOTE
             if payload[start] == ASCII_BRACE_OPEN or payload[start] == ASCII_BRACKET_OPEN:
-                depth: mutable usize = 0
+                delimiters: mutable u8[MAX_JSON_NESTING] = zeroed
+                delimiters[JSON_ROOT_DELIMITER_INDEX] <- payload[start]
+                depth: mutable usize = JSON_INITIAL_NESTING_DEPTH
                 in_string: mutable bool = false
                 escaped: mutable bool = false
-                index: mutable usize = start
+                index: mutable usize = start + 1
                 while index < length:
                     byte: u8 = payload[index]
                     if in_string:
@@ -511,11 +517,16 @@ module DebuggerDAPPayload:
                             in_string <- true
                         else:
                             if byte == ASCII_BRACE_OPEN or byte == ASCII_BRACKET_OPEN:
+                                return NO_INDEX if depth >= MAX_JSON_NESTING
+                                delimiters[depth] <- byte
                                 depth <- depth + 1
                             else:
                                 if byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE:
-                                    return index + 1 if depth == 1
+                                    return NO_INDEX if depth == JSON_EMPTY_NESTING_DEPTH
+                                    opener: u8 = delimiters[depth - 1]
+                                    return NO_INDEX if (opener == ASCII_BRACE_OPEN and byte != ASCII_BRACE_CLOSE) or (opener == ASCII_BRACKET_OPEN and byte != ASCII_BRACKET_CLOSE)
                                     depth <- depth - 1
+                                    return index + 1 if depth == JSON_EMPTY_NESTING_DEPTH
                     index <- index + 1
                 return NO_INDEX
             index: mutable usize = start

@@ -44,7 +44,7 @@ check_server_flush() {
 check_server_flush \
     'session server' \
     "$SESSION_SERVER" \
-    '30 {"method":"initialize","id":1}\n' \
+    '66 {"method":"initialize","id":1,"protocolMajor":1,"protocolMinor":0}\n' \
     '"id":"1"'
 check_server_flush \
     'DAP server' \

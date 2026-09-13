@@ -64,6 +64,7 @@ module DebuggerProtocolRequest:
         const REQUEST_PROGRAM_PATH_CAPACITY: usize = 1024
         const REQUEST_PAGE_SIZE_MAX: u64 = 256
         const REQUEST_PAGE_START_MAX: u64 = MAX_REQUEST_INTEGER
+        const REQUEST_PROTOCOL_VERSION_MAX: u64 = 4294967295
         const REQUEST_JSON_HEX_BASE: u64 = 16
         const REQUEST_JSON_HEX_LETTER_OFFSET: u64 = 10
         const REQUEST_UNICODE_MAX_CODEPOINT: u64 = 1114111
@@ -211,6 +212,10 @@ module DebuggerProtocolRequest:
             valid: mutable bool
             program: mutable ProgramPath
             has_program: mutable bool
+            protocol_major: mutable u64
+            has_protocol_major: mutable bool
+            protocol_minor: mutable u64
+            has_protocol_minor: mutable bool
             variables_reference: mutable u64
             has_variables_reference: mutable bool
             page_size: mutable u64
@@ -844,6 +849,24 @@ module DebuggerProtocolRequest:
                 operands.has_page_start <- true
             return true
 
+        # The headless initialize request must negotiate the wire version
+        # before clients issue session operations. Versions are JSON integers
+        # bounded to the protocol's u32 representation.
+        def request_initialization_version_parse(payload: u8&, length: usize, root_start: usize, method: RequestMethod, operands: mutable RequestOperands&) -> bool:
+            return true if method != RequestMethod.Initialize
+            major_start: usize = request_object_field_value_start(payload, length, root_start, "protocolMajor", 0)
+            minor_start: usize = request_object_field_value_start(payload, length, root_start, "protocolMinor", 0)
+            return false if major_start == JSON_NO_INDEX or minor_start == JSON_NO_INDEX
+            return false if request_object_field_value_start(payload, length, root_start, "protocolMajor", 1) != JSON_NO_INDEX or request_object_field_value_start(payload, length, root_start, "protocolMinor", 1) != JSON_NO_INDEX
+            major: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, major_start, REQUEST_PROTOCOL_VERSION_MAX, false)
+            minor: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, minor_start, REQUEST_PROTOCOL_VERSION_MAX, false)
+            return false if not major.valid or not minor.valid
+            operands.protocol_major <- major.value
+            operands.has_protocol_major <- true
+            operands.protocol_minor <- minor.value
+            operands.has_protocol_minor <- true
+            return true
+
     public:
         def request_has_object_shape(payload: u8&, length: usize) -> bool:
             return false if length < 2
@@ -1164,6 +1187,7 @@ module DebuggerProtocolRequest:
                 return operands if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
             return operands if request.method == RequestMethod.Launch and not operands.has_program
             return operands if request.method == RequestMethod.Variables and not operands.has_variables_reference
+            return operands if not request_initialization_version_parse(payload, length, root_start, request.method, operands)
             return operands if not request_pagination_operands_parse(payload, length, root_start, operands)
             operands.valid <- true
             return operands

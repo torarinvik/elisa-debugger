@@ -101,21 +101,28 @@ or adapter regressions.
 
 `build/elisa-debugger-server` is a headless Elisa process endpoint. It accepts
 the framed request shape in [spec/session-protocol.md](spec/session-protocol.md)
-and can launch a verified EDIR artifact through `arguments.program`, control the
-managed execution, and return stack, scope, and paged local snapshots. Its
-standard output is protocol-only, which makes it safe for an editor, test
-runner, or another process to launch and supervise. The request parser and EDIR
-file loader are bounded, and an invalid artifact is rejected before execution.
+and first negotiates protocol major/minor versions through `initialize`; an
+incompatible major receives an explicit error, and session methods require a
+successful negotiation. It can launch a verified EDIR
+artifact through `arguments.program`, control the managed execution, and return
+stack, scope, and paged local snapshots. Its standard output is protocol-only,
+which makes it safe for an editor, test runner, or another process to launch
+and supervise. The request parser and EDIR file loader are bounded, and an
+invalid artifact is rejected before execution. The initialize wire schema is
+published at
+[schemas/session-protocol-v1.initialize.schema.json](schemas/session-protocol-v1.initialize.schema.json).
 
 `build/elisa-debugger-dap-server` is the standard DAP transport entrypoint. It
 accepts `Content-Length` framed messages and dispatches initialize, launch,
 configuration, continue, next, reverse-step, pause, threads, stack, scopes,
 variables, evaluate, breakpoint, `readMemory`, and lifecycle commands. It
 correlates every response with the request sequence and applies the shared
-session state machine. Managed capability negotiation advertises reverse
-execution, watchpoints, hover evaluation, and bounded logical-memory reads;
-unavailable values remain explicit in the response body rather than being
-fabricated.
+session state machine. Its current `initialize` response advertises
+`configurationDone`, `stepBack`, `terminate`, and bounded `readMemory` support
+for the managed provider. It reports function, conditional, hit-conditional,
+and data breakpoints; hover evaluation; restart; set-variable; and disassembly
+as unsupported. Plugins should use the actual capability response rather
+than the broader typed Elisa module surface.
 
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
@@ -138,12 +145,13 @@ VS Code and JetBrains integrations should launch the headless process and use
 the documented protocol. They do not import private modules, parse CLI text,
 or duplicate replay policy. The DAP adapter and advanced session service share
 the same `DebuggerSession` state and stop-generation semantics. See the
-protocol specification for framing, IDs, coordinates, version negotiation,
-pagination, cancellation, and error behavior.
+[plugin-author guide](spec/plugin-integration.md) for DAP launch setup and the
+current attach limitation, and the protocol specification for framing, IDs,
+coordinates, version negotiation, pagination, cancellation, and error behavior.
 
-Clients can call `DebuggerDiscovery::discovery_for` (or the `discover` service
-method) before creating a session to select only advertised operations. The
-same session service exposes `DebuggerTimeline` coordinates, `DebuggerMemory`
-reads, and `DebuggerProtocolEvents` notifications, so a VS Code extension,
-JetBrains plugin, CLI, or another host can add time-travel panels without
-coupling itself to the replay engine's private state.
+The source also contains typed `DebuggerTimeline`, `DebuggerMemory`, and
+`DebuggerProtocolEvents` contracts for integrations that can call the Elisa
+service in-process. The current compact headless process does not serialize
+those advanced surfaces or share a running session with a second connection.
+External plugins should enable panels only when their selected transport
+advertises and implements the corresponding operations.

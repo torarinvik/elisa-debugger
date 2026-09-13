@@ -45,6 +45,16 @@ bookmarks use `DebuggerTimeline`; managed heap and stack reads use
 `DebuggerProtocolEvents`. These public modules keep editor adapters independent
 of private replay and storage representations.
 
+For the headless process, send `initialize` with required numeric
+`protocolMajor` and `protocolMinor` before session requests. The server rejects
+an unsupported major with `INCOMPATIBLE_VERSION` and otherwise returns the
+selected compatible minor. Until then, only `discover` is accepted; session
+methods return `INITIALIZE_REQUIRED`. Call `discover` before or after
+initialization to read the current feature set. The current process handshake does not create a
+session or exchange an ownership token. Its exact fields and error shapes are
+described by the [initialize JSON Schema](../schemas/session-protocol-v1.initialize.schema.json)
+and the [wire specification](../spec/session-protocol.md#target-lifecycle).
+
 `DebuggerProtocolIntegration` is the typed contract for clients that need the
 full discovery and session handshake. Its discovery document includes product
 version, trace schema, installation health, per-session capabilities, and

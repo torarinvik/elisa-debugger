@@ -31,6 +31,16 @@ module DebuggerProtocolServer:
         const DETAIL_STALE_VARIABLE_REFERENCE: u32 = 5
         const DETAIL_INVALID_LAUNCH_STATE: u32 = 6
         const DETAIL_STALE_LAUNCH_GENERATION: u32 = 7
+        const INITIALIZE_NOT_REQUESTED: u8 = 0
+        const INITIALIZE_COMPATIBLE: u8 = 1
+        const INITIALIZE_INVALID_REQUEST: u8 = 2
+        const INITIALIZE_INCOMPATIBLE_MAJOR: u8 = 3
+        const INITIALIZE_REQUIRED_FOR_SESSION: u8 = 4
+
+        struct InitializationResponse:
+            status: mutable u8
+            requested_major: mutable u64
+            requested_minor: mutable u64
         const RESPONSE_ID_PREFIX: cstr = "{\"kind\":\"response\",\"id\":\""
         const RESPONSE_UNSUPPORTED_SUFFIX: cstr = "\",\"ok\":false,\"error\":{\"code\":\"UNSUPPORTED\",\"message\":\"method is not implemented\"}}"
         const RESPONSE_UNSUPPORTED_SUFFIX_LENGTH: usize = 82
@@ -113,7 +123,23 @@ module DebuggerProtocolServer:
             return true if method == DebuggerProtocolRequest::RequestMethod.Threads or method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
             return false
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse) -> void can[Console, Unsafe.PointerCast]:
+            if initialization.status == INITIALIZE_COMPATIBLE:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_response_encode(id, initialization.requested_minor)
+                write_json_buffer_response(encoded) can Console
+                return
+            if initialization.status == INITIALIZE_INVALID_REQUEST:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_arguments_error_encode(id)
+                write_json_buffer_response(encoded) can Console
+                return
+            if initialization.status == INITIALIZE_INCOMPATIBLE_MAJOR:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_version_error_encode(id, initialization.requested_major)
+                write_json_buffer_response(encoded) can Console
+                return
+            if initialization.status == INITIALIZE_REQUIRED_FOR_SESSION:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_required_error_encode(id)
+                write_json_buffer_response(encoded) can Console
+                return
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Discover:
                 write_discovery_response(id, capabilities) can Console
                 return
@@ -219,6 +245,7 @@ module DebuggerProtocolServer:
             }
             session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
             service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
+            protocol_initialized: mutable bool = false
             while true:
                 count: isize = read(STDIN_FD, (&chunk[0]).cast[void&], READ_CHUNK_SIZE) can Console
                 break if count <= 0
@@ -229,23 +256,47 @@ module DebuggerProtocolServer:
                         return SERVER_INVALID_FRAME_EXIT_CODE if not request.valid and not request.has_id
                         operands: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(decoder.payload[0], DebuggerProtocolFraming::frame_decoder_length(decoder))
                         result: mutable DebuggerProtocolDispatcher::DispatchResult = zeroed
-                        if not operands.valid:
-                            failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_LAUNCH_CONFIGURATION)
-                            result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
-                        else:
-                            if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Launch:
-                                result <- dispatch_launch(service, request, operands) can Blocking.IO, Unsafe.PointerCast
+                        initialization: mutable InitializationResponse = zeroed
+                        if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Initialize:
+                            if not operands.valid or not operands.has_protocol_major or not operands.has_protocol_minor:
+                                initialization.status <- INITIALIZE_INVALID_REQUEST
+                                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_LAUNCH_CONFIGURATION)
+                                result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
                             else:
-                                if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
-                                    stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_VARIABLE_REFERENCE)
-                                    result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                server_protocol: DebuggerProtocol::ProtocolVersion = DebuggerProtocol::protocol_version()
+                                if operands.protocol_major != server_protocol.major.u64():
+                                    initialization.status <- INITIALIZE_INCOMPATIBLE_MAJOR
+                                    initialization.requested_major <- operands.protocol_major
+                                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_INVALID_LAUNCH_CONFIGURATION)
+                                    result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
                                 else:
+                                    initialization.status <- INITIALIZE_COMPATIBLE
+                                    initialization.requested_minor <- operands.protocol_minor
                                     result <- dispatch_request(service, request)
+                                    protocol_initialized <- true if result.accepted
+                        else:
+                            if request.valid and request.method != DebuggerProtocolRequest::RequestMethod.Discover and not protocol_initialized:
+                                initialization.status <- INITIALIZE_REQUIRED_FOR_SESSION
+                                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_INVALID_LAUNCH_STATE)
+                                result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
+                            else:
+                                if not operands.valid:
+                                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_INVALID_LAUNCH_CONFIGURATION)
+                                    result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
+                                else:
+                                    if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Launch:
+                                        result <- dispatch_launch(service, request, operands) can Blocking.IO, Unsafe.PointerCast
+                                    else:
+                                        if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
+                                            stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, DETAIL_STALE_VARIABLE_REFERENCE)
+                                            result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                        else:
+                                            result <- dispatch_request(service, request)
                         session <- result.session
                         response_id: u64 = request.id if request.has_id else FALLBACK_RESPONSE_ID
                         page_size: u64 = operands.page_size if operands.has_page_size else DEFAULT_PAGE_SIZE
                         page_start: u64 = operands.page_start if operands.has_page_start else DEFAULT_PAGE_START
-                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start) can Console, Unsafe.PointerCast
+                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization) can Console, Unsafe.PointerCast
                         _ = fflush(null) can Console
                         DebuggerProtocolFraming::frame_decoder_reset(decoder)
                     return SERVER_INVALID_FRAME_EXIT_CODE if DebuggerProtocolFraming::frame_decoder_is_failed(decoder)

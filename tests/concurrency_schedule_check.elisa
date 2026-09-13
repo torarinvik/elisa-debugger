@@ -1,0 +1,80 @@
+include "../src/concurrency/runtime.elisa"
+include "../src/concurrency/checkpoint.elisa"
+
+const ROOT_TASK_ID: u64 = 0
+const FIRST_TASK_ID: u64 = 1
+const SECOND_TASK_ID: u64 = 2
+const OWNER_TASK_INDEX: usize = 0
+const WAITER_TASK_INDEX: usize = 1
+const FIRST_RESOURCE_ID: u64 = 100
+const WRONG_RESOURCE_ID: u64 = 101
+const FIRST_SCHEDULE_INDEX: usize = 0
+const SECOND_SCHEDULE_INDEX: usize = 1
+const ONE_SCHEDULE_DECISION: usize = 1
+const TWO_SCHEDULE_DECISIONS: usize = 2
+const FIRST_WAIT_RESULT: i64 = 1
+const SECOND_WAIT_RESULT: i64 = 2
+const WAIT_RECORD_RESULT: i64 = 3
+const WAIT_CHECKPOINT_RESULT: i64 = 4
+const RESTORE_BLOCKED_RESULT: i64 = 5
+const WAKE_RECORD_RESULT: i64 = 6
+const WAKE_CHECKPOINT_RESULT: i64 = 7
+const REPLAY_WAIT_RESULT: i64 = 8
+const REPLAY_WAKE_RESULT: i64 = 9
+const REPLAY_EXACT_RESULT: i64 = 10
+const WAIT_DIVERGENCE_RESULT: i64 = 11
+const WAKE_DIVERGENCE_RESULT: i64 = 12
+const INVALID_WAKE_STATE_RESULT: i64 = 13
+
+def runtime_with_running_owner_and_waiter(replaying: bool) -> DebuggerConcurrencyRuntime::TaskRuntime:
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(replaying)
+    owner: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(ROOT_TASK_ID))
+    waiter: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(ROOT_TASK_ID))
+    _ = DebuggerConcurrencyRuntime::runtime_transition(runtime, owner, DebuggerConcurrency::TaskState.Running)
+    _ = DebuggerConcurrencyRuntime::runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Running)
+    return runtime
+
+def main() -> i64:
+    recorded: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(false)
+    owner: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(FIRST_TASK_ID)
+    waiter: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(SECOND_TASK_ID)
+    resource: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(FIRST_RESOURCE_ID)
+    return FIRST_WAIT_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(recorded, waiter, owner, resource, DebuggerConcurrency::SynchronizationKind.Mutex)
+    return WAIT_RECORD_RESULT if recorded.scheduler.count != ONE_SCHEDULE_DECISION or recorded.scheduler.decisions[FIRST_SCHEDULE_INDEX].kind != DebuggerScheduler::ScheduleKind.Wait or recorded.scheduler.decisions[FIRST_SCHEDULE_INDEX].task.id.value != waiter.value or recorded.scheduler.decisions[FIRST_SCHEDULE_INDEX].task.state != DebuggerConcurrency::TaskState.Running or recorded.scheduler.decisions[FIRST_SCHEDULE_INDEX].synchronization != resource.value
+
+    blocked_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(recorded)
+    return WAIT_CHECKPOINT_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(blocked_snapshot)
+    restored_blocked: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    DebuggerConcurrencyCheckpoint::task_snapshot_restore(restored_blocked, blocked_snapshot)
+    return RESTORE_BLOCKED_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_matches(restored_blocked, blocked_snapshot) or restored_blocked.tasks[OWNER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Running or restored_blocked.tasks[WAITER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Blocked or restored_blocked.wait_count != ONE_SCHEDULE_DECISION
+
+    return SECOND_WAIT_RESULT if not DebuggerConcurrencyRuntime::runtime_wake(recorded, waiter)
+    return WAKE_RECORD_RESULT if recorded.scheduler.count != TWO_SCHEDULE_DECISIONS or recorded.scheduler.decisions[SECOND_SCHEDULE_INDEX].kind != DebuggerScheduler::ScheduleKind.Wake or recorded.scheduler.decisions[SECOND_SCHEDULE_INDEX].task.id.value != waiter.value or recorded.scheduler.decisions[SECOND_SCHEDULE_INDEX].task.state != DebuggerConcurrency::TaskState.Blocked or recorded.scheduler.decisions[SECOND_SCHEDULE_INDEX].synchronization != resource.value
+    return REPLAY_EXACT_RESULT if not DebuggerScheduler::scheduler_is_exact(recorded.scheduler) or recorded.scheduler.cursor != 0
+    wake_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(recorded)
+    return WAKE_CHECKPOINT_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(wake_snapshot)
+    invalid_wake_state: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = wake_snapshot
+    invalid_wake_state.scheduler_decisions[SECOND_SCHEDULE_INDEX].task.state <- DebuggerConcurrency::TaskState.Running
+    return INVALID_WAKE_STATE_RESULT if DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(invalid_wake_state)
+
+    replayed: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(true)
+    replayed.scheduler.count <- recorded.scheduler.count
+    replayed.scheduler.decisions <- recorded.scheduler.decisions
+    return REPLAY_WAIT_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(replayed, waiter, owner, resource, DebuggerConcurrency::SynchronizationKind.Mutex)
+    return REPLAY_WAKE_RESULT if not DebuggerConcurrencyRuntime::runtime_wake(replayed, waiter)
+    return REPLAY_EXACT_RESULT if replayed.scheduler.cursor != recorded.scheduler.count or not DebuggerScheduler::scheduler_is_exact(replayed.scheduler) or not DebuggerConcurrencyRuntime::runtime_is_valid(replayed)
+    replayed_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(replayed)
+    return WAKE_CHECKPOINT_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(replayed_snapshot)
+
+    wrong_wait: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(true)
+    wrong_wait.scheduler.count <- recorded.scheduler.count
+    wrong_wait.scheduler.decisions <- recorded.scheduler.decisions
+    return WAIT_DIVERGENCE_RESULT if DebuggerConcurrencyRuntime::runtime_wait(wrong_wait, waiter, owner, DebuggerIdentity::debug_id(WRONG_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex) or not wrong_wait.scheduler.diverged or wrong_wait.status != DebuggerConcurrencyRuntime::RuntimeStatus.Diverged or wrong_wait.wait_count != 0 or wrong_wait.tasks[WAITER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Running
+
+    wrong_wake: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(true)
+    wrong_wake.scheduler.count <- recorded.scheduler.count
+    wrong_wake.scheduler.decisions <- recorded.scheduler.decisions
+    return WAKE_DIVERGENCE_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(wrong_wake, waiter, owner, resource, DebuggerConcurrency::SynchronizationKind.Mutex)
+    wrong_wake.scheduler.decisions[SECOND_SCHEDULE_INDEX].synchronization <- WRONG_RESOURCE_ID
+    return WAKE_DIVERGENCE_RESULT if DebuggerConcurrencyRuntime::runtime_wake(wrong_wake, waiter) or not wrong_wake.scheduler.diverged or wrong_wake.status != DebuggerConcurrencyRuntime::RuntimeStatus.Diverged or wrong_wake.wait_count != ONE_SCHEDULE_DECISION or wrong_wake.tasks[WAITER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Blocked
+    return 0

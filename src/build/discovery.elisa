@@ -11,6 +11,8 @@ module DebuggerCompilerDiscovery:
         const DETAIL_TOOL_MISSING: u32 = 1
         const DETAIL_VERSION_MISMATCH: u32 = 2
         const DETAIL_IDENTITY_MISSING: u32 = 3
+        const DETAIL_SELECTION_SOURCE: u32 = 4
+        const TOOLCHAIN_SOURCE_MAX: u16 = 1
 
     public:
         struct ToolIdentity:
@@ -24,6 +26,14 @@ module DebuggerCompilerDiscovery:
             runtime: mutable ToolIdentity
             compatible: mutable bool
 
+        enum ToolchainSource:
+            ExplicitOverride
+            Discovered
+
+        struct ToolchainSelection:
+            toolchain: mutable Toolchain
+            source: mutable ToolchainSource
+
         def toolchain_new() -> Toolchain:
             empty: ToolIdentity = ToolIdentity{path_id: 0, revision: 0, major: 0, present: false}
             return Toolchain{compiler: empty, runtime: empty, compatible: false}
@@ -35,6 +45,17 @@ module DebuggerCompilerDiscovery:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_VERSION_MISMATCH) if toolchain.compiler.revision != toolchain.runtime.revision
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_VERSION_MISMATCH) if not toolchain.compatible
             return DebuggerErrors::no_error()
+
+        # An explicit override is authoritative. If it is absent or
+        # incompatible, return its failure to the caller rather than silently
+        # falling back to a different compiler/runtime pair.
+        def toolchain_select(has_explicit_override: bool, explicit_override: Toolchain, discovered: Toolchain) -> ToolchainSelection:
+            return ToolchainSelection{toolchain: explicit_override, source: ToolchainSource.ExplicitOverride} if has_explicit_override
+            return ToolchainSelection{toolchain: discovered, source: ToolchainSource.Discovered}
+
+        def toolchain_selection_validate(selection: ToolchainSelection) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SELECTION_SOURCE) if selection.source.u16() > TOOLCHAIN_SOURCE_MAX
+            return toolchain_validate(selection.toolchain)
 
         def toolchain_is_compatible(toolchain: Toolchain) -> bool:
             return DebuggerErrors::error_is_ok(toolchain_validate(toolchain))

@@ -7,73 +7,116 @@ replay, checkpoints, branches, and capability decisions.
 ## VS Code
 
 Register a debugger type whose adapter executable is
-`build/elisa-debugger-dap-server` (or the installed equivalent). Launch it with
-standard input/output transport. For the current managed provider, pass a
-verified `.edir` artifact path in `arguments.program`. The adapter opens and
-verifies that artifact before launching the managed session. It does not yet
-compile Elisa source or apply `args`, `cwd`, `env`, or `stopOnEntry`; do not
-present those options as active until their execution path is implemented.
-Do not invoke a shell to assemble a command line.
+`build/elisa-debugger-dap-server` (or the installed equivalent) and connect
+its standard input/output streams using DAP `Content-Length` framing. A launch
+configuration for a plugin type named `elisa` can look like this:
 
-The adapter must be started once per debug session. The plugin should keep the
-returned session identity and use the normal DAP request/event lifecycle. The
-managed adapter routes launch, pause, continue, next, step back, and stack
-positions through the same EDIR session engine used by the Elisa facade. A
-timeline or branch panel may open a second connection to the session service,
-but it must use the same session and stop generation rather than launch a
-second target.
+```json
+{
+  "type": "elisa",
+  "request": "launch",
+  "name": "Debug EDIR artifact",
+  "program": "${workspaceFolder}/build/program.edir",
+  "sourcePathRoot": "${workspaceFolder}"
+}
+```
+
+The plugin supplies its own debugger `type`; `request` must be `launch`.
+`program` must identify a complete, supported EDIR artifact. The adapter
+checks the artifact bytes before starting the managed session; it does not
+compile `.elisa` source and does not require the filename to end in `.edir`.
+`sourcePathRoot` is optional and maps absolute editor paths to EDIR's relative
+logical source paths. Without it, the client must use the exact logical path
+stored in the artifact. The [launch-configuration schema](../schemas/dap-launch-configuration.schema.json)
+documents these fields. It also lists `args`, `cwd`, `env`, and `stopOnEntry`
+as ignored because the current adapter does not apply them.
+
+The adapter does not implement DAP `attach`. The
+[attach-configuration schema](../schemas/dap-attach-configuration.schema.json)
+intentionally rejects every attach configuration so a plugin can disable that
+mode instead of offering a nonfunctional choice. The separate Elisa native
+attach model is not connected to this DAP endpoint.
+
+Start one adapter process for each debug session. Send DAP `initialize`, then
+`launch`; process `initialized` and later stop/termination events according
+to their DAP sequence numbers. Read capabilities from the `initialize`
+response and offer only the operations it advertises. Use `configurationDone`
+and the ordinary DAP breakpoint, thread, frame, scope, and variable requests
+supported by that response. Do not invoke a shell to assemble a command line
+or treat DAP's `program` as an Elisa source file.
+
+The DAP process does not return a cross-connection session identity. A second
+process cannot attach to or share the running DAP session. Timeline and branch
+controls that need more than the DAP operations must use an integration that
+already owns the same in-process managed service; the standalone session
+process does not yet expose the typed ownership-token/session-creation
+transport.
 
 ## JetBrains
 
-Use the same DAP process when the host's DAP integration is available. If the
-target JetBrains platform requires a native debugger bridge, keep that bridge
-thin: map run configuration, breakpoint, frame, scope, variable, evaluate,
-pause, resume, and termination actions to the session protocol. The bridge
-must not parse human CLI output or reimplement replay policy.
+Use the same DAP executable and launch fields when the JetBrains host supports
+DAP. Map the plugin's run configuration to `request=launch`, `program`, and,
+when required, `sourcePathRoot`; do not expose attach for this adapter. If a
+JetBrains platform needs a native debugger bridge, keep it thin: translate
+host requests to the public Elisa session API and let the backend make
+capability, generation, and replay decisions. Do not parse human CLI output or
+reimplement debugger policy.
 
-The host integration should check `discover`/`initialize` version negotiation,
-surface `UNSUPPORTED` as a capability limitation, and preserve source/build
-content identities when mapping paths between the project and debug host.
-Use the discovery capability and limit fields to enable timeline, checkpoint,
-memory, and trace panels only when the active provider advertises them. Event
-notifications are ordered by sequence and acknowledged explicitly, which lets
-the bridge reconnect without replaying stale UI state.
+The DAP adapter uses standard DAP `initialize` capabilities. The headless
+process has a separate `discover`/`initialize` version handshake; its current
+`initialize` request requires numeric `protocolMajor` and `protocolMinor`.
+Do not assume headless-session semantics such as `createSession`, session
+ownership tokens, progress notifications, or event acknowledgements: those
+belong to typed Elisa contracts and are not implemented on the current compact
+process transport.
 
 ## Other clients
 
 Use `spec/session-protocol.md` for headless tools, test runners, CI, and custom
-frontends. The request/response protocol is JSON and framed independently from
-the target's stdout/stderr. IDs and event ordinals are strings; clients must
-not coerce them to floating-point numbers.
+frontends. The compact process protocol uses length-prefixed UTF-8 JSON on
+stdin/stdout, independently from target output. It accepts request IDs as
+unsigned JSON integers or decimal strings and returns them as strings; event
+ordinals are strings. The broader typed target contract uses string IDs.
+Clients must not coerce returned IDs or ordinals to floating-point numbers.
 
-All clients must handle cancellation, progress, stale stop generations,
-truncated history, missing source artifacts, and capability changes. A client
-that only supports ordinary debugging can ignore timeline extensions while
-using the same launch/stack/variables operations.
+Clients using the typed Elisa service must handle its cancellation, stale
+generation, capability, and bounded-history results. The current compact
+headless process does not emit progress/events or route cancellation. A client
+that only supports ordinary DAP debugging should use the advertised DAP
+capabilities and avoid assuming that a method name in the broader session
+protocol is wired to that process.
 
-The reference Elisa client can issue advanced operations without opening the
-interactive CLI. Plugin panels should retain the session ownership token and
-expected stop generation they received from `initialize`; a second panel must
-reuse that session rather than launch another debuggee. When a trace is
-partial, the plugin should show the last verified event and disable reverse
-actions beyond it. When a value is unavailable, the plugin should render the
-reported state verbatim instead of displaying a numeric zero.
+The typed in-process service can issue advanced operations without opening the
+interactive CLI. Where a transport actually supplies a session ownership token
+and stop generation, clients must preserve them and reject stale handles. When
+a trace is partial, show the last verified event and disable reverse actions
+beyond it. When a value is unavailable, render its availability state instead
+of displaying a numeric zero.
 
-The optional `timeline`, `memory`, and `events` surfaces are public protocol
+The optional `timeline`, `memory`, and `events` surfaces have public Elisa
 contracts backed by `DebuggerTimeline`, `DebuggerMemory`, and
-`DebuggerProtocolEvents`. They return typed unavailable, stale, corrupt, and
-resource-limit states so clients can degrade gracefully without inspecting
-private module data.
+`DebuggerProtocolEvents`. Their presence in the source does not mean the
+headless process serializes them. Clients should use a transport only when it
+advertises and implements the required capability.
 
 ## Remote artifact transfer
 
-Remote clients transfer traces and build artifacts through the authenticated
-session channel. Start a transfer with the byte length and the canonical Elisa
-checksum returned by `DebuggerRemoteArtifacts::transfer_checksum`. Send chunks
-in zero-based sequence order; each chunk is bounded by the advertised transfer
-limit, and a missing, duplicated, or oversized chunk fails the transfer. Finish
-only after all declared bytes have arrived. The artifact becomes readable only
-when the final checksum matches. Transfer failures are surfaced in both the
-artifact state and the channel's public error field, and remote quota usage
-includes every accepted chunk. Clients should discard incomplete transfers on
-disconnect and restart them after reconnecting.
+The Elisa source defines an authenticated-channel policy and bounded remote
+artifact-transfer state machine. It does not ship a network listener, tunnel,
+or cryptographic handshake. A host that supplies those pieces can start a
+transfer with the byte length and canonical checksum, send bounded chunks in
+zero-based sequence order, and finish only after all bytes arrive and the
+checksum matches. The backend rechecks transfer authorization at each step;
+the host remains responsible for reconnect and incomplete-transfer handling.
+
+Before forwarding a remote operation, the agent must call
+`DebuggerRemote::remote_authorize` for its `RemoteOperation`. Authorization
+requires a connected, authenticated, non-quota-exceeded channel and applies a
+separate policy bit for inspection, execution control, debugger mutation,
+external process execution, or artifact transfer. Debugger mutation is
+controlled by `Policy.mutate` and defaults off; it is distinct from writing
+files. External process execution uses `spawn_process`, and artifact transfer
+uses `export_trace`. Artifact begin, chunk, and finish operations recheck the
+artifact-transfer permission so changing or revoking policy during a transfer
+cannot bypass the gate. A host must still provision the authenticated tunnel
+or local IPC peer; this API does not supply cryptography.

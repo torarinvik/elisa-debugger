@@ -16,6 +16,7 @@ module DebuggerQueryEngine:
         const QUERY_DETAIL_CANCELLED: u32 = 2
         const QUERY_DETAIL_CAPACITY: u32 = 3
         const QUERY_DETAIL_OVERFLOW: u32 = 4
+        const QUERY_DETAIL_FIRST_CHANGE: u32 = 5
         const QUERY_MAX_EVENT: u64 = 18446744073709551615
         const QUERY_INITIAL_TICK: u64 = 1
 
@@ -42,13 +43,19 @@ module DebuggerQueryEngine:
             next_index: mutable usize
             complete: mutable bool
             cancelled: mutable bool
+            first_change_search: mutable bool
+            has_first_change: mutable bool
+            first_change: mutable QueryMatch
             failure: mutable DebuggerErrors::DebuggerError
 
         def query_execution_new(window: DebuggerHistory::QueryWindow) -> QueryExecution:
-            return QueryExecution{window: window, matches: zeroed, count: 0, scanned: 0, next_event: window.first_event, next_index: 0, complete: false, cancelled: false, failure: DebuggerErrors::no_error()}
+            return QueryExecution{window: window, matches: zeroed, count: 0, scanned: 0, next_event: window.first_event, next_index: 0, complete: false, cancelled: false, first_change_search: false, has_first_change: false, first_change: zeroed, failure: DebuggerErrors::no_error()}
 
         def query_execution_is_valid(execution: QueryExecution) -> bool:
-            return DebuggerHistory::query_window_is_valid(execution.window) and execution.count <= QUERY_RESULT_CAPACITY and execution.next_event >= execution.window.first_event and execution.scanned <= execution.window.max_steps and not (execution.complete and execution.cancelled)
+            return false if not DebuggerHistory::query_window_is_valid(execution.window) or execution.count > QUERY_RESULT_CAPACITY or execution.next_event < execution.window.first_event or execution.scanned > execution.window.max_steps or (execution.complete and execution.cancelled)
+            return false if execution.has_first_change and not execution.first_change_search
+            return false if execution.first_change_search and execution.has_first_change != (execution.count == 1)
+            return true
 
         def query_record(execution: QueryExecution, mutation: DebuggerProvenance::Mutation) -> QueryExecution:
             updated: mutable QueryExecution = execution
@@ -137,28 +144,45 @@ module DebuggerQueryEngine:
                     found <- true
             return result
 
-        def query_first_change(index: DebuggerProvenance::ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, window: DebuggerHistory::QueryWindow, previous_hash: u64, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
-            result: QueryExecution = query_find_writes(index, binding, window, token)
-            return result if result.cancelled or not DebuggerErrors::error_is_ok(result.failure)
-            # A result cap can stop the scan before the complete history has
-            # been examined.  The first differing sample is only definitive
-            # after the underlying write query reaches the end of its window.
-            return result if not result.complete
-            first_match: mutable QueryMatch = zeroed
-            found: mutable bool = false
-            for position in 0..<result.count:
-                if result.matches[position].mutation.value_hash != previous_hash and (not found or result.matches[position].event < first_match.event):
-                    first_match <- result.matches[position]
-                    found <- true
-            if found:
+        private:
+            def query_first_change_consider_page(result: QueryExecution, previous_hash: u64) -> QueryExecution:
                 updated: mutable QueryExecution = result
-                updated.matches[0] <- first_match
-                updated.count <- 1
-                updated.complete <- true
+                updated.first_change_search <- true
+                for position in 0..<result.count:
+                    candidate: QueryMatch = result.matches[position]
+                    if candidate.mutation.value_hash != previous_hash and (not updated.has_first_change or candidate.event < updated.first_change.event):
+                        updated.first_change <- candidate
+                        updated.has_first_change <- true
+                if updated.has_first_change:
+                    updated.matches[0] <- updated.first_change
+                    updated.count <- 1
+                else:
+                    updated.count <- 0
                 return updated
-            empty: mutable QueryExecution = result
-            empty.count <- 0
-            return empty
+
+        public:
+            def query_first_change(index: DebuggerProvenance::ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, window: DebuggerHistory::QueryWindow, previous_hash: u64, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
+                result: QueryExecution = query_find_writes(index, binding, window, token)
+                return result if result.cancelled or not DebuggerErrors::error_is_ok(result.failure)
+                # Keep the earliest candidate found so far in the cursor. It is
+                # provisional until every bounded page has been inspected.
+                return query_first_change_consider_page(result, previous_hash)
+
+            def query_resume_first_change(execution: QueryExecution, index: DebuggerProvenance::ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, previous_hash: u64, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
+                if not execution.first_change_search:
+                    invalid: mutable QueryExecution = execution
+                    invalid.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, QUERY_DETAIL_FIRST_CHANGE)
+                    return invalid
+                return execution if execution.complete or execution.cancelled
+                write_cursor: mutable QueryExecution = execution
+                write_cursor.count <- 0
+                write_cursor.first_change_search <- false
+                write_cursor.has_first_change <- false
+                resumed: mutable QueryExecution = query_resume_writes(write_cursor, index, binding, token)
+                resumed.first_change_search <- true
+                resumed.first_change <- execution.first_change
+                resumed.has_first_change <- execution.has_first_change
+                return query_first_change_consider_page(resumed, previous_hash)
 
         def query_compare(left: StateSample, right: StateSample) -> StateDifference:
             return StateDifference{left: left, right: right, different: left.value_hash != right.value_hash}

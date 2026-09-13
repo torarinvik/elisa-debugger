@@ -78,11 +78,29 @@ and requested extensions. The server returns its versions, `server`, supported
 engines, target/platform support, and feature capabilities. An incompatible
 major version is an explicit error. Minor versions are additive only.
 
+The current headless process implements a narrower version handshake. Send
+`{"method":"initialize","id":1,"protocolMajor":1,"protocolMinor":0}`
+before using the endpoint. `discover` is the only session-service method that
+may be called before a compatible `initialize`; all other methods return
+`INITIALIZE_REQUIRED` until negotiation succeeds. Both version fields are required canonical unsigned
+JSON integers in the u32 range; aliases, decimal strings, duplicates, and
+nested lookalikes are rejected. The response reports the selected major and
+minor, server name, product version, and installation health. A major mismatch
+returns `INCOMPATIBLE_VERSION` with the requested and supported versions and
+does not change session state. A newer requested minor negotiates down to the
+highest minor supported by the server; the current process supports `1.0`.
+`discover` remains safe before initialization and supplies the endpoint's
+current capabilities. Initialization does not create a session or ownership
+token, and the compact process handshake does not yet consume client identity
+or extension requests. The request/response shapes are published in
+[`schemas/session-protocol-v1.initialize.schema.json`](../schemas/session-protocol-v1.initialize.schema.json).
+
 The Elisa source defines a typed discovery document containing product
 version, trace schema, installation health, resource limits, and capabilities.
 It also defines ownership-token validation for typed session requests. The
-standalone process does not currently implement the `createSession` token
-exchange or enforce that token on its compact requests.
+standalone process implements protocol-major/minor negotiation but does not
+currently implement the `createSession` token exchange or enforce ownership
+tokens on its compact requests.
 
 The client then sends `createSession` or `openTrace`, followed by `launch`,
 `attach`, or `replay`. State-changing requests carry `session`, `requestId`,

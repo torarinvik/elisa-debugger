@@ -142,6 +142,18 @@ module DebuggerConcurrencyRuntime:
             runtime.status <- RuntimeStatus.Running if has_running
             return true
 
+        # Wait and wake are synchronization events, not task dispatches. Record
+        # and replay them without changing current-task selection or logical
+        # time; the following state transition accounts for that separately.
+        def runtime_record_sync(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, kind: DebuggerScheduler::ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> bool:
+            index: usize = runtime_find_index(runtime, id)
+            return false if index == NO_TASK_INDEX
+            runtime.scheduler <- DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
+            if runtime.scheduler.diverged:
+                runtime.status <- RuntimeStatus.Diverged
+                return false
+            return true
+
         def runtime_schedule(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, kind: DebuggerScheduler::ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> bool:
             index: usize = runtime_find_index(runtime, id)
             return false if index == NO_TASK_INDEX
@@ -165,6 +177,7 @@ module DebuggerConcurrencyRuntime:
             return false if runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Runnable and runtime.tasks[waiter_index].state != DebuggerConcurrency::TaskState.Running
             for edge_index in 0..<runtime.wait_count:
                 return false if runtime.waits[edge_index].waiter.value == waiter.value
+            return false if not runtime_record_sync(runtime, waiter, DebuggerScheduler::ScheduleKind.Wait, resource)
             return false if not runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Blocked)
             runtime.waits[runtime.wait_count] <- DebuggerConcurrency::WaitEdge{waiter: waiter, owner: owner, resource: resource, kind: kind}
             runtime.wait_count <- runtime.wait_count + 1
@@ -189,6 +202,8 @@ module DebuggerConcurrencyRuntime:
                     edge_index <- candidate
                     break
             return false if edge_index == NO_WAIT_EDGE_INDEX
+            resource: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(runtime.waits[edge_index].resource.value)
+            return false if not runtime_record_sync(runtime, waiter, DebuggerScheduler::ScheduleKind.Wake, resource)
             return false if not runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Runnable)
             return true
 

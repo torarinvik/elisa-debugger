@@ -26,14 +26,17 @@ module DebuggerProtocolEncoding:
         const ASCII_SPACE: u8 = 32
         const JSON_TRUE: cstr = "true"
         const JSON_FALSE: cstr = "false"
-        const PROTOCOL_MAJOR: u64 = 1
-        const PROTOCOL_MINOR: u64 = 0
         const MAX_PAGE_SIZE: u64 = 256
         const MAX_TRACE_EVENTS: u64 = 1024
         const TRACE_SCHEMA: u64 = 1
         const SERVER_NAME: cstr = "elisa-debugger"
         const PRODUCT_VERSION: cstr = "0.1.0"
         const MANAGED_ENGINE_NAME: cstr = "managed"
+        const INCOMPATIBLE_VERSION_CODE: cstr = "INCOMPATIBLE_VERSION"
+        const INCOMPATIBLE_VERSION_MESSAGE: cstr = "requested protocol major is not supported"
+        const INVALID_INITIALIZE_MESSAGE: cstr = "initialize requires unsigned integer protocolMajor and protocolMinor"
+        const INITIALIZE_REQUIRED_CODE: cstr = "INITIALIZE_REQUIRED"
+        const INITIALIZE_REQUIRED_MESSAGE: cstr = "initialize a compatible protocol version before using session methods"
         const NO_PAGE: u64 = 0
         const NO_REQUEST_ID: u64 = 0
         const REQUEST_KIND_PREFIX: cstr = "{\"kind\":\"request\",\"method\":"
@@ -188,10 +191,11 @@ module DebuggerProtocolEncoding:
             buffer_put_id_string(buffer, next_page)
 
         def buffer_put_discovery_result(buffer: mutable JsonBuffer&, capabilities: DebuggerCapabilities::CapabilitySet) -> void:
+            protocol: DebuggerProtocol::ProtocolVersion = DebuggerProtocol::protocol_version()
             buffer_put_cstr(buffer, ",\"ok\":true,\"result\":{\"protocolMajor\":")
-            buffer_put_u64(buffer, PROTOCOL_MAJOR)
+            buffer_put_u64(buffer, protocol.major.u64())
             buffer_put_cstr(buffer, ",\"protocolMinor\":")
-            buffer_put_u64(buffer, PROTOCOL_MINOR)
+            buffer_put_u64(buffer, protocol.minor.u64())
             buffer_put_cstr(buffer, ",\"server\":")
             buffer_put_json_string(buffer, SERVER_NAME)
             buffer_put_cstr(buffer, ",\"productVersion\":")
@@ -300,6 +304,77 @@ module DebuggerProtocolEncoding:
             buffer_put_id_string(buffer, request_id)
             buffer_put_discovery_result(buffer, capabilities)
             buffer_put_byte(buffer, ASCII_BRACE_CLOSE)
+            return buffer
+
+        # Initialize pins the client's wire contract before session requests.
+        # A newer minor is safe because minor additions are backward
+        # compatible; the server selects the highest minor it implements.
+        def initialize_response_encode(request_id: u64, requested_minor: u64) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID:
+                buffer.failed <- true
+                return buffer
+            protocol: DebuggerProtocol::ProtocolVersion = DebuggerProtocol::protocol_version()
+            server_minor: u64 = protocol.minor.u64()
+            negotiated_minor: u64 = server_minor if requested_minor > server_minor else requested_minor
+            buffer_put_cstr(buffer, "{\"kind\":\"response\",\"id\":")
+            buffer_put_id_string(buffer, request_id)
+            buffer_put_cstr(buffer, ",\"ok\":true,\"result\":{\"protocolMajor\":")
+            buffer_put_u64(buffer, protocol.major.u64())
+            buffer_put_cstr(buffer, ",\"protocolMinor\":")
+            buffer_put_u64(buffer, negotiated_minor)
+            buffer_put_cstr(buffer, ",\"server\":")
+            buffer_put_json_string(buffer, SERVER_NAME)
+            buffer_put_cstr(buffer, ",\"productVersion\":")
+            buffer_put_json_string(buffer, PRODUCT_VERSION)
+            buffer_put_cstr(buffer, ",\"installationHealthy\":true}}")
+            return buffer
+
+        def initialize_version_error_encode(request_id: u64, requested_major: u64) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID:
+                buffer.failed <- true
+                return buffer
+            protocol: DebuggerProtocol::ProtocolVersion = DebuggerProtocol::protocol_version()
+            buffer_put_cstr(buffer, "{\"kind\":\"response\",\"id\":")
+            buffer_put_id_string(buffer, request_id)
+            buffer_put_cstr(buffer, ",\"ok\":false,\"error\":{\"code\":")
+            buffer_put_json_string(buffer, INCOMPATIBLE_VERSION_CODE)
+            buffer_put_cstr(buffer, ",\"message\":")
+            buffer_put_json_string(buffer, INCOMPATIBLE_VERSION_MESSAGE)
+            buffer_put_cstr(buffer, ",\"requestedProtocolMajor\":")
+            buffer_put_u64(buffer, requested_major)
+            buffer_put_cstr(buffer, ",\"serverProtocolMajor\":")
+            buffer_put_u64(buffer, protocol.major.u64())
+            buffer_put_cstr(buffer, ",\"serverProtocolMinor\":")
+            buffer_put_u64(buffer, protocol.minor.u64())
+            buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        def initialize_arguments_error_encode(request_id: u64) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID:
+                buffer.failed <- true
+                return buffer
+            buffer_put_cstr(buffer, "{\"kind\":\"response\",\"id\":")
+            buffer_put_id_string(buffer, request_id)
+            buffer_put_cstr(buffer, ",\"ok\":false,\"error\":{\"code\":\"INVALID_ARGUMENT\",\"message\":")
+            buffer_put_json_string(buffer, INVALID_INITIALIZE_MESSAGE)
+            buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        def initialize_required_error_encode(request_id: u64) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == NO_REQUEST_ID:
+                buffer.failed <- true
+                return buffer
+            buffer_put_cstr(buffer, "{\"kind\":\"response\",\"id\":")
+            buffer_put_id_string(buffer, request_id)
+            buffer_put_cstr(buffer, ",\"ok\":false,\"error\":{\"code\":")
+            buffer_put_json_string(buffer, INITIALIZE_REQUIRED_CODE)
+            buffer_put_cstr(buffer, ",\"message\":")
+            buffer_put_json_string(buffer, INITIALIZE_REQUIRED_MESSAGE)
+            buffer_put_cstr(buffer, "}}")
             return buffer
 
         def managed_result_prefix(buffer: mutable JsonBuffer&, request_id: u64, generation: u64) -> void:

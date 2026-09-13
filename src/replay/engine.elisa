@@ -31,9 +31,26 @@ module DebuggerReplayEngine:
         const REPLAY_ROOT_FORK_EVENT: u64 = 0
         const REPLAY_ROOT_FORK_HASH: u64 = 0
         const REPLAY_MAX_BRANCH_ID: u64 = 18446744073709551615
+        const REPLAY_INVALID_LINEAGE_INDEX: usize = REPLAY_BRANCH_LINEAGE_CAPACITY
         const REPLAY_CHECKPOINT_ID_OFFSET: u64 = 1
         const HASH_FALSE: u64 = 0
         const HASH_TRUE: u64 = 1
+
+        def replay_engine_intervention_applies(engine: ReplayEngine&, index: usize, event: u64) -> bool:
+            return false if index >= engine.intervention_count
+            return false if engine.intervention_events[index] != event
+            return false if engine.branch_lineage_count == 0 or engine.branch_lineage_count > REPLAY_BRANCH_LINEAGE_CAPACITY
+            intervention_branch: u64 = engine.intervention_branches[index].value
+            active_branch: u64 = replay_engine_branch_at(engine, event).value
+            intervention_lineage_index: mutable usize = REPLAY_INVALID_LINEAGE_INDEX
+            active_lineage_index: mutable usize = REPLAY_INVALID_LINEAGE_INDEX
+            for lineage_index in 0..<engine.branch_lineage_count:
+                intervention_lineage_index <- lineage_index if engine.branch_lineage[lineage_index].value == intervention_branch
+                active_lineage_index <- lineage_index if engine.branch_lineage[lineage_index].value == active_branch
+            return false if intervention_lineage_index == REPLAY_INVALID_LINEAGE_INDEX or active_lineage_index == REPLAY_INVALID_LINEAGE_INDEX
+            return true if intervention_lineage_index == active_lineage_index
+            return false if intervention_lineage_index + REPLAY_FIRST_CHILD_LINEAGE_INDEX >= engine.branch_lineage_count
+            return engine.branch_fork_events[intervention_lineage_index + REPLAY_FIRST_CHILD_LINEAGE_INDEX] == event
 
     public:
         enum EngineError:
@@ -148,7 +165,7 @@ module DebuggerReplayEngine:
         def replay_engine_apply_interventions(engine: mutable ReplayEngine&, event: u64) -> bool:
             return false if engine.intervention_count > REPLAY_INTERVENTION_CAPACITY
             for index in 0..<engine.intervention_count:
-                if engine.intervention_events[index] == event:
+                if replay_engine_intervention_applies(engine, index, event):
                     engine.machine.accumulator <- engine.intervention_accumulators[index]
             return true
 
@@ -336,7 +353,7 @@ module DebuggerReplayEngine:
                 return false if not replay_engine_snapshot_is_valid(engine, index, engine.history[index])
                 replay_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[index])
                 for intervention_index in 0..<engine.intervention_count:
-                    replay_machine.accumulator <- engine.intervention_accumulators[intervention_index] if engine.intervention_events[intervention_index] == index.u64()
+                    replay_machine.accumulator <- engine.intervention_accumulators[intervention_index] if replay_engine_intervention_applies(engine, intervention_index, index.u64())
                 DebuggerEDIR::machine_step_in_place(replay_machine, engine.image.instructions[replay_machine.program_counter.usize()])
                 return false if event.position.statement.value != replay_machine.program_counter
                 return false if event.payload_hash != replay_engine_machine_state_hash(replay_machine, index.u64())
@@ -346,7 +363,7 @@ module DebuggerReplayEngine:
                 final_event_hash: u64 = replay_engine_machine_state_hash(final_machine, engine.event_count.u64() - REPLAY_CHECKPOINT_ID_OFFSET)
                 return false if engine.events[engine.event_count - 1].payload_hash != final_event_hash
                 for intervention_index in 0..<engine.intervention_count:
-                    final_machine.accumulator <- engine.intervention_accumulators[intervention_index] if engine.intervention_events[intervention_index] == engine.event_count.u64()
+                    final_machine.accumulator <- engine.intervention_accumulators[intervention_index] if replay_engine_intervention_applies(engine, intervention_index, engine.event_count.u64())
                 return false if replay_engine_machine_state_hash(final_machine, engine.event_count.u64() - REPLAY_CHECKPOINT_ID_OFFSET) != replay_engine_machine_state_hash(engine.machine, engine.event_count.u64() - REPLAY_CHECKPOINT_ID_OFFSET)
             return true
 

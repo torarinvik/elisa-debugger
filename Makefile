@@ -25,6 +25,15 @@ COMPILER_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_arithmetic_native
 COMPILER_EDIR_INTEGRATION_CHECK := $(BUILD)/elisa-debugger-compiler-edir-integration-check
 COMPILER_EDIR_EXPECTED_EXIT := 42
 COMPILER_EDIR_DAP_LOCAL_REFERENCE := 5
+COMPILER_EDIR_LOOP_FIXTURE := tests/compiler_edir_counted_loop_fixture.elisa
+COMPILER_EDIR_LOOP_ARTIFACT := $(BUILD)/compiler_edir_counted_loop.edir
+COMPILER_EDIR_LOOP_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_counted_loop_native
+COMPILER_EDIR_LOOP_INTEGRATION_CHECK := $(BUILD)/elisa-debugger-compiler-edir-counted-loop-check
+COMPILER_EDIR_LOOP_EXPECTED_EXIT := 10
+COMPILER_EDIR_LOOP_BREAKPOINT_LINE := 5
+COMPILER_EDIR_LOOP_DAP_INITIAL_LOCALS_REFERENCE := 1
+COMPILER_EDIR_LOOP_DAP_STEPPED_LOCALS_REFERENCE := 4
+COMPILER_EDIR_LOOP_DAP_REVERSED_LOCALS_REFERENCE := 5
 PROCESS_SPAWN_CHECK_PARENT_MODE := --process-check-parent
 PROCESS_SPAWN_CHECK_RESERVED_FIRST := reserved-first
 PROCESS_SPAWN_CHECK_RESERVED_SECOND := reserved-second
@@ -57,7 +66,7 @@ ELISA_ALLOW_STALE_STAGE1 ?= 1
 ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
-.PHONY: remote-authorization-check server-version-check
+.PHONY: remote-authorization-check server-version-check compiler-edir-loop-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -301,6 +310,20 @@ compiler-edir-check: $(COMPILER_EDIR_INTEGRATION_CHECK) $(BUILD)/elisa-debugger-
 	compiler_dap_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize"}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"$(COMPILER_EDIR_ARTIFACT)"}}' '{"seq":3,"type":"request","command":"pause"}' '{"seq":4,"type":"request","command":"stepIn"}' '{"seq":5,"type":"request","command":"stepIn"}' '{"seq":6,"type":"request","command":"stepIn"}' '{"seq":7,"type":"request","command":"stepIn"}' '{"seq":8,"type":"request","command":"scopes","arguments":{"frameId":1}}' '{"seq":9,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_DAP_LOCAL_REFERENCE)}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); compiler_dap_output=$$(printf %s "$$compiler_dap_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$compiler_dap_output" | grep -F '"name":"local0","value":"40","type":"i64"'
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
 	native_status=0; "$(COMPILER_NATIVE_ARTIFACT)" || native_status=$$?; test "$$native_status" -eq "$(COMPILER_EDIR_EXPECTED_EXIT)"
+
+$(COMPILER_EDIR_LOOP_INTEGRATION_CHECK): tests/compiler_edir_counted_loop_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+# Compile the same counted loop to EDIR and native code, then exercise the VM and
+# DAP reverse stepping against the compiler-emitted source spans and branches.
+compiler-edir-loop-check: $(COMPILER_EDIR_LOOP_INTEGRATION_CHECK) $(BUILD)/elisa-debugger-dap-server
+	mkdir -p $(BUILD)
+	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_LOOP_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
+	"$(COMPILER_EDIR_LOOP_INTEGRATION_CHECK)"
+	loop_dap_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize"}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"$(COMPILER_EDIR_LOOP_ARTIFACT)","sourcePathRoot":"$(CURDIR)"}}' '{"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"$(CURDIR)/$(COMPILER_EDIR_LOOP_FIXTURE)"},"breakpoints":[{"line":$(COMPILER_EDIR_LOOP_BREAKPOINT_LINE)}]}}' '{"seq":4,"type":"request","command":"continue"}' '{"seq":5,"type":"request","command":"scopes","arguments":{"frameId":1}}' '{"seq":6,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_LOOP_DAP_INITIAL_LOCALS_REFERENCE)}}' '{"seq":7,"type":"request","command":"stepIn"}' '{"seq":8,"type":"request","command":"stepIn"}' '{"seq":9,"type":"request","command":"stepIn"}' '{"seq":10,"type":"request","command":"scopes","arguments":{"frameId":1}}' '{"seq":11,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_LOOP_DAP_STEPPED_LOCALS_REFERENCE)}}' '{"seq":12,"type":"request","command":"stepBack"}' '{"seq":13,"type":"request","command":"scopes","arguments":{"frameId":1}}' '{"seq":14,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_LOOP_DAP_REVERSED_LOCALS_REFERENCE)}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); loop_dap_output=$$(printf %s "$$loop_dap_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$loop_dap_output" | grep -F '"reason":"breakpoint"'; echo "$$loop_dap_output" | grep -F '"name":"local0","value":"0","type":"i64"'; echo "$$loop_dap_output" | grep -F '"name":"local1","value":"0","type":"i64"'; echo "$$loop_dap_output" | grep -F '"name":"local1","value":"2","type":"i64"'; test "$$(printf '%s\n' "$$loop_dap_output" | grep -F -c '"name":"local1","value":"0","type":"i64"')" -ge 2
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
+	loop_native_status=0; "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" || loop_native_status=$$?; test "$$loop_native_status" -eq "$(COMPILER_EDIR_LOOP_EXPECTED_EXIT)"
 
 $(BUILD)/elisa-debugger-timeline-capability-check: tests/timeline_capability_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

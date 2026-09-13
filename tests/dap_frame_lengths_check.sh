@@ -44,3 +44,17 @@ Content-Length:/g' |
             }
         }
     '
+
+header_padding_width=128
+header_padding=$(printf '%*s' "$header_padding_width" '')
+initialize_length=$(printf '%s' "$initialize_payload" | wc -c | tr -d ' ')
+if printf 'Content-Length:%s%s\r\n\r\n%s' "$header_padding" "$initialize_length" "$initialize_payload" | "$server" >/dev/null; then
+    printf '%s\n' "DAP server accepted an oversized Content-Length header" >"/dev/stderr"
+    exit 1
+else
+    server_status=$?
+    if [ "$server_status" -ne 2 ]; then
+        printf '%s\n' "DAP server returned an unexpected status for an oversized header" >"/dev/stderr"
+        exit 1
+    fi
+fi

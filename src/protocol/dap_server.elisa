@@ -24,6 +24,7 @@ module DebuggerDAPServer:
     private:
         const STDIN_FD: int = 0
         const MAX_DAP_PAYLOAD: usize = 65536
+        const MAX_DAP_HEADER_BYTES: usize = 64
         const MAX_DAP_HEADER_DIGITS: usize = 10
         const MAX_DAP_SEQUENCE_DIGITS: usize = 20
         const FIRST_DAP_SEQUENCE_DIGIT_COUNT: usize = 1
@@ -197,6 +198,7 @@ module DebuggerDAPServer:
         const DAP_DECIMAL_BASE: u64 = 10
         const DAP_DECIMAL_INCREMENT: u64 = 1
         const DAP_DIGIT_COUNT_INCREMENT: usize = 1
+        const DAP_HEADER_BYTE_INCREMENT: usize = 1
         const DAP_INIT_COMMAND: cstr = "initialize"
         const DAP_INIT_COMMAND_LENGTH: usize = 10
         const DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsConditionalBreakpoints\":false,\"supportsHitConditionalBreakpoints\":false,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":false,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false}}"
@@ -401,6 +403,7 @@ module DebuggerDAPServer:
             state: mutable u8
             header_tail: mutable u8
             content_length: mutable usize
+            header_bytes: mutable usize
             header_digits: mutable usize
             payload_received: mutable usize
             command_prefix_position: mutable u8
@@ -1107,6 +1110,10 @@ module DebuggerDAPServer:
         def decoder_accept(decoder: mutable Decoder&, byte: u8) -> bool:
             return false if decoder.state == DECODER_FAILED_STATE
             if decoder.state == DECODER_HEADER_STATE:
+                if decoder.header_bytes >= MAX_DAP_HEADER_BYTES:
+                    decoder_fail(decoder)
+                    return false
+                decoder.header_bytes <- decoder.header_bytes + DAP_HEADER_BYTE_INCREMENT
                 if decoder.header_prefix_position < HEADER_PREFIX_LENGTH:
                     if not header_prefix_matches(decoder.header_prefix_position, byte):
                         decoder_fail(decoder)
@@ -1149,6 +1156,7 @@ module DebuggerDAPServer:
                     decoder.state <- DECODER_PAYLOAD_STATE
                     decoder.payload_received <- 0
                     decoder.header_tail <- HEADER_TAIL_NONE
+                    decoder.header_bytes <- 0
                     return false
                 decoder_fail(decoder)
                 return false
@@ -1168,6 +1176,7 @@ module DebuggerDAPServer:
                     decoder.state <- DECODER_HEADER_STATE
                     decoder.header_tail <- HEADER_TAIL_NONE
                     decoder.content_length <- 0
+                    decoder.header_bytes <- 0
                     decoder.header_digits <- 0
                     decoder.header_prefix_position <- 0
                     decoder.payload_received <- 0

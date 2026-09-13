@@ -1,0 +1,157 @@
+# Bounded read-only macOS task memory access. It never suspends or writes to
+# the target. The task port is acquired only for one call and always released.
+
+include "../core/errors.elisa"
+include "./macos_resources.elisa"
+
+@link_name("mach_task_self_")
+extern debugger_macos_task_self: u32
+@link_name("task_for_pid")
+extern debugger_macos_task_for_pid(task_self: u32, process_id: i32, task: mutable u32&) -> i32 can[Unsafe.PointerCast]
+@link_name("mach_port_deallocate")
+extern debugger_macos_mach_port_deallocate(task_self: u32, port: u32) -> i32 can[Unsafe.PointerCast]
+@link_name("mach_vm_read_overwrite")
+extern debugger_macos_mach_vm_read_overwrite(task: u32, address: u64, length: u64, destination: u64, copied: mutable u64&) -> i32 can[Unsafe.PointerCast]
+
+module DebuggerNativeMacOSMemory:
+    private:
+        const module Limits:
+            READ_CAPACITY: usize = 4096
+            MAX_PROCESS_ID: u64 = 2147483647
+            MAX_ADDRESS: u64 = 18446744073709551615
+            NULL_PROCESS_ID: u64 = 0
+            NULL_ADDRESS: u64 = 0
+            NULL_PORT: u32 = 0
+            EMPTY_LENGTH: usize = 0
+
+        const module Kernel:
+            SUCCESS: i32 = 0
+            PROTECTION_FAILURE: i32 = 2
+
+        const module Detail:
+            INVALID_PROCESS: u32 = 1
+            INVALID_RANGE: u32 = 2
+            READ_LIMIT: u32 = 3
+            IDENTITY_UNAVAILABLE: u32 = 4
+            MEMORY_READ_FAILED: u32 = 6
+            PROCESS_IDENTITY_CHANGED: u32 = 8
+            INVALID_KERNEL_RESULT: u32 = 9
+
+        const module Counters:
+            MINIMUM_READ_LENGTH: usize = 1
+
+        def read_failure(status: MemoryReadStatus, process_id: u64, address: u64, length: usize, code: DebuggerErrors::ErrorCode, detail: u32, retryable: bool) -> ProcessMemoryRead:
+            result: mutable ProcessMemoryRead = zeroed
+            result.status <- status
+            result.process_id <- process_id
+            result.address <- address
+            result.requested_length <- length
+            result.failure <- DebuggerErrors::make_error(code, retryable, detail)
+            return result
+
+        def clear_read_bytes(result: mutable ProcessMemoryRead&) -> void:
+            for index in 0..<Limits::READ_CAPACITY:
+                result.bytes[index] <- 0
+            result.length <- Limits::EMPTY_LENGTH
+            result.complete <- false
+
+    public:
+        enum MemoryReadStatus:
+            Ready
+            InvalidArgument
+            ResourceLimit
+            IdentityUnavailable
+            PermissionDenied
+            Unavailable
+            Partial
+            IdentityChanged
+            PortReleaseFailure
+
+        struct ProcessMemoryRead:
+            status: mutable MemoryReadStatus
+            process_id: mutable u64
+            process_start_seconds: mutable u64
+            process_start_microseconds: mutable u64
+            address: mutable u64
+            requested_length: mutable usize
+            bytes: mutable u8[Limits::READ_CAPACITY]
+            length: mutable usize
+            complete: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def macos_memory_read_capacity() -> usize:
+            return Limits::READ_CAPACITY
+
+        def macos_read_process_memory(process_id: u64, address: u64, length: usize) -> ProcessMemoryRead can[Unsafe.PointerCast]:
+            return read_failure(MemoryReadStatus.InvalidArgument, process_id, address, length, DebuggerErrors::ErrorCode.InvalidArgument, Detail::INVALID_PROCESS, false) if process_id == Limits::NULL_PROCESS_ID or process_id > Limits::MAX_PROCESS_ID
+            return read_failure(MemoryReadStatus.InvalidArgument, process_id, address, length, DebuggerErrors::ErrorCode.InvalidArgument, Detail::INVALID_RANGE, false) if address == Limits::NULL_ADDRESS or length < Counters::MINIMUM_READ_LENGTH
+            return read_failure(MemoryReadStatus.ResourceLimit, process_id, address, length, DebuggerErrors::ErrorCode.ResourceLimit, Detail::READ_LIMIT, false) if length > Limits::READ_CAPACITY
+            return read_failure(MemoryReadStatus.InvalidArgument, process_id, address, length, DebuggerErrors::ErrorCode.InvalidArgument, Detail::INVALID_RANGE, false) if length.u64() > Limits::MAX_ADDRESS - address
+
+            before: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(process_id) can Unsafe.PointerCast
+            return read_failure(MemoryReadStatus.IdentityUnavailable, process_id, address, length, DebuggerErrors::ErrorCode.Unavailable, Detail::IDENTITY_UNAVAILABLE, true) if not DebuggerNativeMacOSResources::macos_sample_is_valid(before)
+
+            task_port: mutable u32 = Limits::NULL_PORT
+            task_status: i32 = debugger_macos_task_for_pid(debugger_macos_task_self, process_id.i32(), &task_port) can Unsafe.PointerCast
+            if task_status != Kernel::SUCCESS:
+                if task_port != Limits::NULL_PORT:
+                    cleanup_status: i32 = debugger_macos_mach_port_deallocate(debugger_macos_task_self, task_port) can Unsafe.PointerCast
+                    return read_failure(MemoryReadStatus.PortReleaseFailure, process_id, address, length, DebuggerErrors::ErrorCode.Internal, cleanup_status.u32(), false) if cleanup_status != Kernel::SUCCESS
+                error_code: DebuggerErrors::ErrorCode = DebuggerErrors::ErrorCode.PermissionDenied if task_status == Kernel::PROTECTION_FAILURE else DebuggerErrors::ErrorCode.Unavailable
+                error_status: MemoryReadStatus = MemoryReadStatus.PermissionDenied if task_status == Kernel::PROTECTION_FAILURE else MemoryReadStatus.Unavailable
+                return read_failure(error_status, process_id, address, length, error_code, task_status.u32(), task_status != Kernel::PROTECTION_FAILURE)
+            return read_failure(MemoryReadStatus.Unavailable, process_id, address, length, DebuggerErrors::ErrorCode.Corrupt, Detail::INVALID_KERNEL_RESULT, false) if task_port == Limits::NULL_PORT
+
+            result: mutable ProcessMemoryRead = zeroed
+            result.status <- MemoryReadStatus.Unavailable
+            result.process_id <- process_id
+            result.process_start_seconds <- before.start_seconds
+            result.process_start_microseconds <- before.start_microseconds
+            result.address <- address
+            result.requested_length <- length
+            copied: mutable u64 = 0
+            destination: u64 = (&result.bytes[0]).cast[u64] can Unsafe.PointerCast
+            read_status: i32 = debugger_macos_mach_vm_read_overwrite(task_port, address, length.u64(), destination, &copied) can Unsafe.PointerCast
+            release_status: i32 = debugger_macos_mach_port_deallocate(debugger_macos_task_self, task_port) can Unsafe.PointerCast
+
+            if copied > length.u64():
+                clear_read_bytes(result)
+                result.status <- MemoryReadStatus.Unavailable
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INVALID_KERNEL_RESULT)
+                return result
+
+            if release_status != Kernel::SUCCESS:
+                clear_read_bytes(result)
+                result.status <- MemoryReadStatus.PortReleaseFailure
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Internal, false, release_status.u32())
+                return result
+
+            after: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(process_id) can Unsafe.PointerCast
+            if not DebuggerNativeMacOSResources::macos_sample_is_valid(after) or before.start_seconds != after.start_seconds or before.start_microseconds != after.start_microseconds:
+                clear_read_bytes(result)
+                result.status <- MemoryReadStatus.IdentityChanged
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::PROCESS_IDENTITY_CHANGED)
+                return result
+
+            result.length <- copied.usize()
+            if read_status != Kernel::SUCCESS:
+                result.status <- MemoryReadStatus.Partial if copied > 0 else MemoryReadStatus.Unavailable
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, read_status.u32())
+                return result
+
+            if copied != length.u64():
+                result.status <- MemoryReadStatus.Partial
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::MEMORY_READ_FAILED)
+                return result
+
+            result.status <- MemoryReadStatus.Ready
+            result.complete <- true
+            result.failure <- DebuggerErrors::no_error()
+            return result
+
+        def macos_memory_read_is_valid(result: ProcessMemoryRead) -> bool:
+            return false if result.status != MemoryReadStatus.Ready or not result.complete or not DebuggerErrors::error_is_ok(result.failure)
+            return false if result.process_id == Limits::NULL_PROCESS_ID or result.process_id > Limits::MAX_PROCESS_ID or result.address == Limits::NULL_ADDRESS
+            return false if result.requested_length == Limits::EMPTY_LENGTH or result.requested_length > Limits::READ_CAPACITY
+            return false if result.requested_length.u64() > Limits::MAX_ADDRESS - result.address
+            return result.length == result.requested_length

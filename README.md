@@ -143,6 +143,18 @@ and the process start identity. It does not suspend the target, read its memory,
 trace allocations, or integrate with an interactive debugger session. Verify
 the sampler with `make ELISA_ALLOW_STALE_STAGE1=0 native-macos-resources-check`.
 
+`build/elisa-debugger-memread <pid> <0x-address> <length>` performs one bounded,
+read-only macOS task-memory read (1–4096 bytes). Build it with
+`make ELISA_ALLOW_STALE_STAGE1=0 native-macos-memory-tool`; run its focused
+self-read and bounds regression with
+`make ELISA_ALLOW_STALE_STAGE1=0 native-macos-memory-check`. It never suspends
+or writes to the target, and it is not yet connected to DAP or a persistent
+attach session. macOS may refuse `task_for_pid`; reading another hardened app
+can require debugger signing entitlements and target authorization, and
+protected system processes remain unavailable. Treat the hex output as
+sensitive process data. This primitive is a foundation for attach inspection,
+not an allocation profiler or proof of the cause of a memory spike.
+
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
 `checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`) and reports

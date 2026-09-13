@@ -1,0 +1,47 @@
+include "../src/native/macos_memory.elisa"
+
+@link_name("getpid")
+extern debugger_macos_memory_getpid() -> i32
+
+const module TestResult:
+    SELF_READ_FAILURE: i64 = 1
+    ZERO_PID_FAILURE: i64 = 2
+    OVERSIZED_READ_FAILURE: i64 = 3
+    ADDRESS_OVERFLOW_FAILURE: i64 = 4
+    SUCCESS: i64 = 0
+
+const module TestInput:
+    NO_PROCESS_ID: u64 = 0
+    PAYLOAD_LENGTH: usize = 4
+    OVERSIZED_LENGTH: usize = 4097
+    FIRST_BYTE: u8 = 17
+    SECOND_BYTE: u8 = 34
+    THIRD_BYTE: u8 = 51
+    FOURTH_BYTE: u8 = 68
+    MAX_ADDRESS: u64 = 18446744073709551615
+
+def main() -> i64 can[Unsafe.PointerCast]:
+    current_pid: i32 = debugger_macos_memory_getpid()
+    return TestResult::SELF_READ_FAILURE if current_pid <= 0
+
+    payload: mutable u8[TestInput::PAYLOAD_LENGTH] = [TestInput::FIRST_BYTE, TestInput::SECOND_BYTE, TestInput::THIRD_BYTE, TestInput::FOURTH_BYTE]
+    payload_address: u64 = (&payload[0]).cast[u64] can Unsafe.PointerCast
+    identity: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(current_pid.u64())
+    return TestResult::SELF_READ_FAILURE if not DebuggerNativeMacOSResources::macos_sample_is_valid(identity)
+    self_read: DebuggerNativeMacOSMemory::ProcessMemoryRead = DebuggerNativeMacOSMemory::macos_read_process_memory(current_pid.u64(), payload_address, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
+    return TestResult::SELF_READ_FAILURE if not DebuggerNativeMacOSMemory::macos_memory_read_is_valid(self_read)
+    return TestResult::SELF_READ_FAILURE if self_read.process_start_seconds != identity.start_seconds or self_read.process_start_microseconds != identity.start_microseconds
+    return TestResult::SELF_READ_FAILURE if self_read.bytes[0] != TestInput::FIRST_BYTE or self_read.bytes[1] != TestInput::SECOND_BYTE or self_read.bytes[2] != TestInput::THIRD_BYTE or self_read.bytes[3] != TestInput::FOURTH_BYTE
+
+    zero_pid: DebuggerNativeMacOSMemory::ProcessMemoryRead = DebuggerNativeMacOSMemory::macos_read_process_memory(TestInput::NO_PROCESS_ID, payload_address, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
+    return TestResult::ZERO_PID_FAILURE if zero_pid.status != DebuggerNativeMacOSMemory::MemoryReadStatus.InvalidArgument or zero_pid.length != 0
+    return TestResult::ZERO_PID_FAILURE if zero_pid.bytes[0] != 0
+
+    oversized: DebuggerNativeMacOSMemory::ProcessMemoryRead = DebuggerNativeMacOSMemory::macos_read_process_memory(current_pid.u64(), payload_address, TestInput::OVERSIZED_LENGTH) can Unsafe.PointerCast
+    return TestResult::OVERSIZED_READ_FAILURE if oversized.status != DebuggerNativeMacOSMemory::MemoryReadStatus.ResourceLimit or oversized.length != 0
+    return TestResult::OVERSIZED_READ_FAILURE if oversized.bytes[0] != 0
+
+    overflow: DebuggerNativeMacOSMemory::ProcessMemoryRead = DebuggerNativeMacOSMemory::macos_read_process_memory(current_pid.u64(), TestInput::MAX_ADDRESS, 2) can Unsafe.PointerCast
+    return TestResult::ADDRESS_OVERFLOW_FAILURE if overflow.status != DebuggerNativeMacOSMemory::MemoryReadStatus.InvalidArgument or overflow.length != 0
+    return TestResult::ADDRESS_OVERFLOW_FAILURE if overflow.bytes[0] != 0
+    return TestResult::SUCCESS

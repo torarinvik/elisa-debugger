@@ -1,0 +1,90 @@
+# One-shot read-only macOS process-memory inspector. Each request is bounded to
+# the API's fixed 4 KiB ceiling; this command does not suspend or write targets.
+
+include "./macos_memory.elisa"
+
+@link_name("printf")
+extern debugger_macos_memory_printf(format: cstr, ...) -> int can[Console]
+
+module DebuggerNativeMacOSMemoryCLI:
+    private:
+        const module Limits:
+            MAX_PID: u64 = 2147483647
+            MAX_PID_DIGITS: usize = 10
+            MAX_ADDRESS_DIGITS: usize = 16
+            MAX_LENGTH_DIGITS: usize = 4
+            DECIMAL_BASE: u64 = 10
+            HEX_BASE: u64 = 16
+            MAX_ADDRESS: u64 = 18446744073709551615
+            ADDRESS_PREFIX_LENGTH: usize = 2
+            PID_INDEX: usize = 1
+            ADDRESS_INDEX: usize = 2
+            LENGTH_INDEX: usize = 3
+            EXPECTED_ARGUMENT_COUNT: i64 = 4
+            OUTPUT_LINE_BYTES: usize = 16
+
+        def parse_decimal(value: cstr, max_digits: usize, maximum: u64) -> u64:
+            parsed: mutable u64 = 0
+            digits: mutable usize = 0
+            while digits < max_digits and value[digits].u8() >= 48 and value[digits].u8() <= 57:
+                digit: u64 = (value[digits].u8() - 48).u64()
+                return 0 if parsed > (maximum - digit) / Limits::DECIMAL_BASE
+                parsed <- parsed * Limits::DECIMAL_BASE + digit
+                digits <- digits + 1
+            return 0 if digits == 0 or value[digits].u8() != 0 or parsed == 0
+            return parsed
+
+        def hex_digit(value: u8) -> u64:
+            return (value - 48).u64() if value >= 48 and value <= 57
+            return (value - 65 + 10).u64() if value >= 65 and value <= 70
+            return (value - 97 + 10).u64() if value >= 97 and value <= 102
+            return Limits::MAX_ADDRESS
+
+        def parse_address(value: cstr) -> u64:
+            return 0 if value[0].u8() != 48 or (value[1].u8() != 120 and value[1].u8() != 88)
+            parsed: mutable u64 = 0
+            digits: mutable usize = 0
+            while digits < Limits::MAX_ADDRESS_DIGITS:
+                character: u8 = value[Limits::ADDRESS_PREFIX_LENGTH + digits].u8()
+                break if character == 0
+                digit: u64 = hex_digit(character)
+                return 0 if digit == Limits::MAX_ADDRESS or parsed > (Limits::MAX_ADDRESS - digit) / Limits::HEX_BASE
+                parsed <- parsed * Limits::HEX_BASE + digit
+                digits <- digits + 1
+            return 0 if digits == 0 or value[Limits::ADDRESS_PREFIX_LENGTH + digits].u8() != 0 or parsed == 0
+            return parsed
+
+        def print_bytes(result: DebuggerNativeMacOSMemory::ProcessMemoryRead) -> void can[Console]:
+            return if result.length == 0
+            _ = debugger_macos_memory_printf("bytes=\n") can Console
+            index: mutable usize = 0
+            while index < result.length:
+                _ = debugger_macos_memory_printf("%02x", result.bytes[index].u32()) can Console
+                index <- index + 1
+                if index % Limits::OUTPUT_LINE_BYTES == 0 or index == result.length:
+                    _ = debugger_macos_memory_printf("\n") can Console
+                else:
+                    _ = debugger_macos_memory_printf(" ") can Console
+
+    public:
+        def run(argc: i64, argv: mutable void&) -> i64 can[Console, Unsafe.PointerCast]:
+            if argc != Limits::EXPECTED_ARGUMENT_COUNT:
+                _ = debugger_macos_memory_printf("usage: elisa-debugger-memread <pid> <0x-address> <length-1..4096>\n") can Console
+                return 2
+
+            arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+            process_id: u64 = parse_decimal(arguments[Limits::PID_INDEX].cast[cstr], Limits::MAX_PID_DIGITS, Limits::MAX_PID)
+            address: u64 = parse_address(arguments[Limits::ADDRESS_INDEX].cast[cstr])
+            length: u64 = parse_decimal(arguments[Limits::LENGTH_INDEX].cast[cstr], Limits::MAX_LENGTH_DIGITS, DebuggerNativeMacOSMemory::macos_memory_read_capacity().u64())
+            if process_id == 0 or address == 0 or length == 0:
+                _ = debugger_macos_memory_printf("error: invalid pid, address, or length\n") can Console
+                return 2
+
+            result: DebuggerNativeMacOSMemory::ProcessMemoryRead = DebuggerNativeMacOSMemory::macos_read_process_memory(process_id, address, length.usize()) can Unsafe.PointerCast
+            _ = debugger_macos_memory_printf("pid=%llu start=%llu.%06llu address=0x%llx requested=%llu read=%llu status=%d complete=%d error=%d detail=%u\n", result.process_id, result.process_start_seconds, result.process_start_microseconds, result.address, result.requested_length.u64(), result.length.u64(), result.status, result.complete, result.failure.code, result.failure.detail) can Console
+            print_bytes(result) can Console
+            return 0 if DebuggerNativeMacOSMemory::macos_memory_read_is_valid(result)
+            return 3
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Console, Unsafe.PointerCast]:
+    return DebuggerNativeMacOSMemoryCLI::run(argc, argv) can Console, Unsafe.PointerCast

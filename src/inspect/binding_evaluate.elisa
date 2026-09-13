@@ -16,8 +16,15 @@ module DebuggerBindingEvaluate:
         def evaluate_binding(store: mutable DebuggerValueStore::ValueStore&, handle: DebuggerValues::ValueHandle, budget: usize) -> DebuggerEvaluate::Evaluation:
             return DebuggerEvaluate::Evaluation{value: EVALUATION_ZERO, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, DETAIL_BINDING), consumed: budget} if budget == EVALUATION_BUDGET_ZERO
             node: DebuggerValueStore::ValueNode = DebuggerValueStore::value_store_read(store, handle)
+            return DebuggerEvaluate::Evaluation{value: EVALUATION_ZERO, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_BINDING), consumed: EVALUATION_COST_LITERAL} if node.state == DebuggerValues::ValueState.Invalid
             return DebuggerEvaluate::Evaluation{value: EVALUATION_ZERO, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_BINDING), consumed: EVALUATION_COST_LITERAL} if node.state != DebuggerValues::ValueState.Available
             return DebuggerEvaluate::evaluate_literal(node.signed_value) if node.kind == DebuggerValues::ValueKind.Signed or node.kind == DebuggerValues::ValueKind.Boolean
-            return DebuggerEvaluate::Evaluation{value: EVALUATION_ZERO, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_BINDING), consumed: EVALUATION_COST_LITERAL} if node.kind == DebuggerValues::ValueKind.Unsigned and node.unsigned_value > EVALUATION_I64_MAX
+            return DebuggerEvaluate::Evaluation{value: EVALUATION_ZERO, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_BINDING), consumed: EVALUATION_COST_LITERAL} if node.kind == DebuggerValues::ValueKind.Unsigned and node.unsigned_value > EVALUATION_I64_MAX
             return DebuggerEvaluate::Evaluation{value: node.unsigned_value.i64(), failure: DebuggerErrors::no_error(), consumed: EVALUATION_COST_LITERAL} if node.kind == DebuggerValues::ValueKind.Unsigned
             return DebuggerEvaluate::Evaluation{value: EVALUATION_ZERO, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, DETAIL_BINDING), consumed: EVALUATION_COST_LITERAL}
+
+        # Resolve binding expressions against the stop-scoped value store. All
+        # other expression kinds retain the pure arithmetic evaluator.
+        def evaluate_expression_with_store(expression: DebuggerEvaluate::Expression, store: mutable DebuggerValueStore::ValueStore&, budget: usize) -> DebuggerEvaluate::Evaluation:
+            return evaluate_binding(store, expression.binding, budget) if expression.kind == DebuggerEvaluate::EvaluationKind.Binding
+            return DebuggerEvaluate::evaluate_expression(expression, budget)

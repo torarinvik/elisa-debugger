@@ -14,6 +14,8 @@ module DebuggerReplayAdapters:
         const ADAPTER_MODE_MAX: u16 = 2
         const CONSOLE_CHANNEL_MAX: u16 = 1
         const CONSOLE_RECORD_KIND_MAX: u16 = 1
+        const ADAPTER_ERROR_CODE_MAX: u16 = 12
+        const ADAPTER_ERROR_SEVERITY_MAX: u16 = 2
         const ADAPTER_NO_ID: u64 = 0
         const DETAIL_MODE: u32 = 1
         const DETAIL_ID: u32 = 2
@@ -99,6 +101,14 @@ module DebuggerReplayAdapters:
             accepted: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        # Logical adapter state captured by a managed checkpoint. Keeping the
+        # three streams together prevents callers from restoring only some of
+        # the nondeterministic inputs and then claiming an exact replay.
+        struct AdapterSnapshot:
+            clock: mutable Clock
+            random: mutable Random
+            console: mutable Console
+
         def adapter_mode_is_valid(mode: AdapterMode) -> bool:
             return mode.u16() <= ADAPTER_MODE_MAX
 
@@ -111,12 +121,15 @@ module DebuggerReplayAdapters:
         def adapter_error(code: DebuggerErrors::ErrorCode, detail: u32, retryable: bool) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(code, retryable, detail)
 
+        def adapter_error_state_is_valid(adapter_failure: DebuggerErrors::DebuggerError) -> bool:
+            return adapter_failure.code.u16() <= ADAPTER_ERROR_CODE_MAX and adapter_failure.severity.u16() <= ADAPTER_ERROR_SEVERITY_MAX
+
         def clock_new(mode: AdapterMode) -> Clock:
             clock: mutable Clock = zeroed
             clock.mode <- mode
-            clock.exact <- adapter_mode_is_valid(mode)
+            clock.exact <- adapter_mode_is_valid(mode) and mode != AdapterMode.Recording
             clock.last_error <- DebuggerErrors::no_error()
-            clock.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not clock.exact
+            clock.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not adapter_mode_is_valid(mode)
             return clock
 
         def clock_record(clock: mutable Clock&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
@@ -139,6 +152,7 @@ module DebuggerReplayAdapters:
                 return failure
             clock.samples[clock.count] <- AdapterSample{sequence: clock.count.u64(), source: source, value: value}
             clock.count <- clock.count + 1
+            clock.exact <- true
             return DebuggerErrors::no_error()
 
         def clock_read(clock: mutable Clock&, source: DebuggerIdentity::DebugId) -> ClockRead:
@@ -180,9 +194,9 @@ module DebuggerReplayAdapters:
         def random_new(mode: AdapterMode) -> Random:
             random: mutable Random = zeroed
             random.mode <- mode
-            random.exact <- adapter_mode_is_valid(mode)
+            random.exact <- adapter_mode_is_valid(mode) and mode != AdapterMode.Recording
             random.last_error <- DebuggerErrors::no_error()
-            random.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not random.exact
+            random.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not adapter_mode_is_valid(mode)
             return random
 
         def random_record(random: mutable Random&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
@@ -205,6 +219,7 @@ module DebuggerReplayAdapters:
                 return failure
             random.samples[random.count] <- AdapterSample{sequence: random.count.u64(), source: source, value: value}
             random.count <- random.count + 1
+            random.exact <- true
             return DebuggerErrors::no_error()
 
         def random_read(random: mutable Random&, source: DebuggerIdentity::DebugId) -> RandomRead:
@@ -246,10 +261,10 @@ module DebuggerReplayAdapters:
         def console_new(mode: AdapterMode) -> Console:
             console: mutable Console = zeroed
             console.mode <- mode
-            console.exact <- adapter_mode_is_valid(mode)
+            console.exact <- adapter_mode_is_valid(mode) and mode != AdapterMode.Recording
             console.output_suppressed <- mode == AdapterMode.Replaying or mode == AdapterMode.Branch
             console.last_error <- DebuggerErrors::no_error()
-            console.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not console.exact
+            console.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, DETAIL_MODE, false) if not adapter_mode_is_valid(mode)
             return console
 
         def console_record(console: mutable Console&, kind: ConsoleRecordKind, channel: ConsoleChannel, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
@@ -274,6 +289,7 @@ module DebuggerReplayAdapters:
             for index in 0..<length:
                 console.records[console.count].bytes[index] <- bytes[index]
             console.count <- console.count + 1
+            console.exact <- true
             return DebuggerErrors::no_error()
 
         def console_read_input(console: mutable Console&, channel: ConsoleChannel, output: mutable u8&, requested: usize) -> ConsoleRead:
@@ -344,7 +360,7 @@ module DebuggerReplayAdapters:
             updated.failure <- failure
             return updated if not DebuggerErrors::error_is_ok(failure)
             updated.transferred <- length
-            updated.suppressed <- console.output_suppressed
+            updated.suppressed <- console.output_suppressed or console.mode == AdapterMode.Branch
             updated.accepted <- true
             return updated
 
@@ -378,6 +394,7 @@ module DebuggerReplayAdapters:
 
         def console_is_exact(console: Console) -> bool:
             return false if not console.exact or not DebuggerErrors::error_is_ok(console.last_error) or console.count > CONSOLE_RECORD_CAPACITY or console.cursor > console.count or (console.mode != AdapterMode.Replaying and console.mode != AdapterMode.Branch)
+            return false if (console.mode == AdapterMode.Replaying or console.mode == AdapterMode.Branch) and not console.output_suppressed
             for index in 0..<console.count:
                 record: ConsoleRecord = console.records[index]
                 return false if record.sequence != index.u64() or not console_channel_is_valid(record.channel) or not console_record_kind_is_valid(record.kind) or record.length > CONSOLE_CHUNK_CAPACITY
@@ -387,3 +404,44 @@ module DebuggerReplayAdapters:
 
         def console_replay_complete(console: Console) -> bool:
             return console_is_exact(console) and console.cursor == console.count
+
+        def adapter_snapshot_empty_replay() -> AdapterSnapshot:
+            return AdapterSnapshot{
+                clock: clock_new(AdapterMode.Replaying),
+                random: random_new(AdapterMode.Replaying),
+                console: console_new(AdapterMode.Replaying)
+            }
+
+        def clock_checkpoint_state_is_valid(clock: Clock) -> bool:
+            return false if not adapter_mode_is_valid(clock.mode) or not clock.exact or not DebuggerErrors::error_is_ok(clock.last_error) or not adapter_error_state_is_valid(clock.last_error) or clock.count > ADAPTER_SAMPLE_CAPACITY or clock.cursor > clock.count
+            return false if clock.mode == AdapterMode.Recording and clock.count == 0
+            return false if clock.mode == AdapterMode.Recording and clock.cursor != 0
+            return false if clock.mode != AdapterMode.Recording and clock.mode != AdapterMode.Replaying and clock.mode != AdapterMode.Branch
+            for index in 0..<clock.count:
+                return false if clock.samples[index].sequence != index.u64() or clock.samples[index].source.value == ADAPTER_NO_ID
+            return true
+
+        def random_checkpoint_state_is_valid(random: Random) -> bool:
+            return false if not adapter_mode_is_valid(random.mode) or not random.exact or not DebuggerErrors::error_is_ok(random.last_error) or not adapter_error_state_is_valid(random.last_error) or random.count > ADAPTER_SAMPLE_CAPACITY or random.cursor > random.count
+            return false if random.mode == AdapterMode.Recording and random.count == 0
+            return false if random.mode == AdapterMode.Recording and random.cursor != 0
+            return false if random.mode != AdapterMode.Recording and random.mode != AdapterMode.Replaying and random.mode != AdapterMode.Branch
+            for index in 0..<random.count:
+                return false if random.samples[index].sequence != index.u64() or random.samples[index].source.value == ADAPTER_NO_ID
+            return true
+
+        def console_checkpoint_state_is_valid(console: Console) -> bool:
+            return false if not adapter_mode_is_valid(console.mode) or not console.exact or not DebuggerErrors::error_is_ok(console.last_error) or not adapter_error_state_is_valid(console.last_error) or console.count > CONSOLE_RECORD_CAPACITY or console.cursor > console.count
+            return false if console.mode == AdapterMode.Recording and console.count == 0
+            return false if console.mode == AdapterMode.Recording and console.cursor != 0
+            return false if console.mode != AdapterMode.Recording and console.mode != AdapterMode.Replaying and console.mode != AdapterMode.Branch
+            return false if (console.mode == AdapterMode.Replaying or console.mode == AdapterMode.Branch) and not console.output_suppressed
+            for index in 0..<console.count:
+                record: ConsoleRecord = console.records[index]
+                return false if record.sequence != index.u64() or not console_channel_is_valid(record.channel) or not console_record_kind_is_valid(record.kind) or record.length > CONSOLE_CHUNK_CAPACITY
+                return false if record.kind == ConsoleRecordKind.Input and (record.requested > CONSOLE_CHUNK_CAPACITY or record.length > record.requested)
+                return false if record.kind == ConsoleRecordKind.Output and (record.requested != record.length or record.eof)
+            return true
+
+        def adapter_snapshot_is_valid(snapshot: AdapterSnapshot) -> bool:
+            return clock_checkpoint_state_is_valid(snapshot.clock) and random_checkpoint_state_is_valid(snapshot.random) and console_checkpoint_state_is_valid(snapshot.console)

@@ -77,6 +77,10 @@ const INVALID_VALUE_NODE_RESULT: i64 = 120
 const INVALID_VALUE_CHILDREN_RESULT: i64 = 121
 const INVALID_VALUE_STATE_RESULT: i64 = 122
 const INVALID_VALUE_CHILD_COUNT: usize = 17
+const BINDING_EXPRESSION_RESULT_FAILURE: i64 = 168
+const INVALID_BINDING_RESULT_FAILURE: i64 = 169
+const UNSUPPORTED_UNSIGNED_RESULT_FAILURE: i64 = 170
+const BINDING_UNSIGNED_VALUE: u64 = 9223372036854775808
 const TAMPERED_LIVE_EXACT_RESULT: i64 = 123
 const UNSUPPORTED_EFFECT_EXACT_RESULT: i64 = 126
 const UNSUPPORTED_EFFECT_REPLAY_RESULT: i64 = 127
@@ -117,7 +121,7 @@ const FULL_CHECKPOINT_EVENT: u64 = 3
 const FULL_CHECKPOINT_HASH: u64 = 991
 const FULL_CHECKPOINT_RESULT_FAILURE: i64 = 146
 const INVALID_FULL_RESTORE_RESULT: i64 = 147
-const INVALID_FULL_CHECKPOINT_SCHEMA: u32 = 2
+const INVALID_FULL_CHECKPOINT_SCHEMA: u32 = 3
 const INVALID_FULL_CHECKPOINT_ID: u64 = 99
 const INVALID_FULL_CHECKPOINT_BRANCH: u64 = 18446744073709551615
 const FULL_CHECKPOINT_TAMPER_HASH_DELTA: u64 = 1
@@ -213,6 +217,7 @@ def check_managed_adapters() -> i64:
     return ADAPTER_REPLAY_RESULT_FAILURE if not recorded_write.accepted or recorded_write.transferred != ADAPTER_OUTPUT_LENGTH or recorded_write.suppressed
     console_replay: mutable DebuggerReplayAdapters::Console = console_recording
     console_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    console_replay.output_suppressed <- true
     replay_input: mutable u8[ADAPTER_INPUT_LENGTH] = zeroed
     replay_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(console_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, replay_input[0], ADAPTER_INPUT_LENGTH)
     return ADAPTER_REPLAY_RESULT_FAILURE if not replay_read.accepted or replay_read.transferred != ADAPTER_INPUT_LENGTH or replay_input[0] != ADAPTER_INPUT_FIRST or replay_input[1] != ADAPTER_INPUT_SECOND
@@ -223,10 +228,12 @@ def check_managed_adapters() -> i64:
     return 143 if DebuggerReplayAdapters::console_is_exact(malformed_console)
     console_mismatch: mutable DebuggerReplayAdapters::Console = console_recording
     console_mismatch.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    console_mismatch.output_suppressed <- true
     mismatch_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console_mismatch, DebuggerReplayAdapters::ConsoleChannel.Stdout, output_bytes[0], ADAPTER_OUTPUT_LENGTH)
     return ADAPTER_REPLAY_RESULT_FAILURE if mismatch_write.accepted or mismatch_write.failure.code != DebuggerErrors::ErrorCode.Diverged or DebuggerReplayAdapters::console_is_exact(console_mismatch)
     branch_console: mutable DebuggerReplayAdapters::Console = console_recording
     branch_console.mode <- DebuggerReplayAdapters::AdapterMode.Branch
+    branch_console.output_suppressed <- true
     branch_input: mutable u8[ADAPTER_INPUT_LENGTH] = zeroed
     branch_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(branch_console, DebuggerReplayAdapters::ConsoleChannel.Stdout, branch_input[0], ADAPTER_INPUT_LENGTH)
     return ADAPTER_REPLAY_RESULT_FAILURE if not branch_read.accepted or branch_input[0] != ADAPTER_INPUT_FIRST or branch_input[1] != ADAPTER_INPUT_SECOND or not DebuggerReplayAdapters::console_is_exact(branch_console)
@@ -235,6 +242,7 @@ def check_managed_adapters() -> i64:
     return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::console_record_input_outcome(short_recording, DebuggerReplayAdapters::ConsoleChannel.Stdout, input_bytes[0], ADAPTER_OUTPUT_LENGTH, ADAPTER_SHORT_READ_TRANSFERRED, false))
     short_replay: mutable DebuggerReplayAdapters::Console = short_recording
     short_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    short_replay.output_suppressed <- true
     short_output: mutable u8[ADAPTER_OUTPUT_LENGTH] = zeroed
     short_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(short_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, short_output[0], ADAPTER_OUTPUT_LENGTH)
     return ADAPTER_REPLAY_RESULT_FAILURE if not short_read.accepted or short_read.transferred != ADAPTER_SHORT_READ_TRANSFERRED or short_read.eof or short_output[0] != ADAPTER_INPUT_FIRST or short_output[1] != ADAPTER_INPUT_SECOND
@@ -243,6 +251,7 @@ def check_managed_adapters() -> i64:
     return ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::console_record_input_outcome(eof_recording, DebuggerReplayAdapters::ConsoleChannel.Stdout, output_bytes[0], ADAPTER_OUTPUT_LENGTH, 0, ADAPTER_READ_EOF))
     eof_replay: mutable DebuggerReplayAdapters::Console = eof_recording
     eof_replay.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    eof_replay.output_suppressed <- true
     eof_output: mutable u8[ADAPTER_OUTPUT_LENGTH] = zeroed
     eof_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(eof_replay, DebuggerReplayAdapters::ConsoleChannel.Stdout, eof_output[0], ADAPTER_OUTPUT_LENGTH)
     return ADAPTER_REPLAY_RESULT_FAILURE if not eof_read.accepted or eof_read.transferred != 0 or not eof_read.eof or not DebuggerReplayAdapters::console_replay_complete(eof_replay)
@@ -254,7 +263,8 @@ def check_full_checkpoint() -> i64:
     tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
     effects: DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
     resources: DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording)
-    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerFullCheckpoint::full_checkpoint_capture(machine, tasks, effects, resources, DebuggerIdentity::debug_id(FULL_CHECKPOINT_RECORDING_ID), DebuggerIdentity::debug_id(FULL_CHECKPOINT_BRANCH_ID), FULL_CHECKPOINT_EVENT, FULL_CHECKPOINT_HASH)
+    adapters: DebuggerReplayAdapters::AdapterSnapshot = DebuggerReplayAdapters::adapter_snapshot_empty_replay()
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerFullCheckpoint::full_checkpoint_capture_with_adapters(machine, tasks, effects, resources, adapters, DebuggerIdentity::debug_id(FULL_CHECKPOINT_RECORDING_ID), DebuggerIdentity::debug_id(FULL_CHECKPOINT_BRANCH_ID), FULL_CHECKPOINT_EVENT, FULL_CHECKPOINT_HASH)
     checkpoint.state_hash <- DebuggerCheckpoint::snapshot_state_hash(checkpoint.machine)
     checkpoint.machine.state_hash <- checkpoint.state_hash
     return FULL_CHECKPOINT_RESULT_FAILURE if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
@@ -301,6 +311,17 @@ def main() -> i64:
     binding_handle: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_scalar(binding_store, DebuggerIdentity::debug_id(VALUE_NAME_ID), DebuggerIdentity::debug_id(VALUE_TYPE_ID), 12)
     binding_expression: DebuggerEvaluate::Evaluation = DebuggerBindingEvaluate::evaluate_binding(binding_store, binding_handle, 4)
     return 27 if binding_expression.value != 12 or not DebuggerErrors::error_is_ok(binding_expression.failure)
+    binding_ast: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Binding, left: 0, right: 0, binding: binding_handle}
+    binding_ast_result: DebuggerEvaluate::Evaluation = DebuggerBindingEvaluate::evaluate_expression_with_store(binding_ast, binding_store, 4)
+    return BINDING_EXPRESSION_RESULT_FAILURE if binding_ast_result.value != 12 or binding_ast_result.consumed != 1 or not DebuggerErrors::error_is_ok(binding_ast_result.failure)
+    stale_binding: DebuggerValues::ValueHandle = binding_handle
+    stale_binding.stop_generation <- VALUE_STORE_GENERATION + 1
+    stale_binding_ast: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Binding, left: 0, right: 0, binding: stale_binding}
+    stale_binding_result: DebuggerEvaluate::Evaluation = DebuggerBindingEvaluate::evaluate_expression_with_store(stale_binding_ast, binding_store, 4)
+    return INVALID_BINDING_RESULT_FAILURE if stale_binding_result.failure.code != DebuggerErrors::ErrorCode.InvalidArgument or stale_binding_result.consumed != 1
+    unsigned_binding: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_unsigned(binding_store, DebuggerIdentity::debug_id(VALUE_NAME_ID + 1), DebuggerIdentity::debug_id(VALUE_TYPE_ID), BINDING_UNSIGNED_VALUE)
+    unsigned_binding_result: DebuggerEvaluate::Evaluation = DebuggerBindingEvaluate::evaluate_binding(binding_store, unsigned_binding, 4)
+    return UNSUPPORTED_UNSIGNED_RESULT_FAILURE if unsigned_binding_result.failure.code != DebuggerErrors::ErrorCode.Unsupported or unsigned_binding_result.consumed != 1
     oracle: mutable DebuggerEffects::EffectOracle = DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording)
     oracle <- DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.NetworkWrite, 11, 22, 3)
     return 2 if oracle.count != 1 or not oracle.records[0].suppress_external_write or oracle.exactness != DebuggerEffects::Exactness.Incomplete or oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported

@@ -6,6 +6,7 @@ include "../replay/full_checkpoint.elisa"
 include "../replay/branches.elisa"
 include "../replay/effects.elisa"
 include "../replay/resources.elisa"
+include "../replay/adapters.elisa"
 include "../concurrency/checkpoint.elisa"
 include "../concurrency/runtime.elisa"
 include "../breakpoint/manager.elisa"
@@ -21,6 +22,7 @@ module DebuggerManagedState:
             tasks: mutable DebuggerConcurrencyRuntime::TaskRuntime
             effects: mutable DebuggerEffects::EffectOracle
             resources: mutable DebuggerVirtualResources::ResourceStore
+            adapters: mutable DebuggerReplayAdapters::AdapterSnapshot
             branches: mutable DebuggerBranches::BranchStore
             breakpoints: mutable DebuggerBreakpointManager::BreakpointTable
             watchpoints: mutable DebuggerWatchpoints::WatchpointTable
@@ -31,6 +33,7 @@ module DebuggerManagedState:
                 tasks: DebuggerConcurrencyRuntime::runtime_new(false),
                 effects: DebuggerEffects::effect_oracle_new(DebuggerEffects::EffectMode.Recording),
                 resources: DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording),
+                adapters: DebuggerReplayAdapters::adapter_snapshot_empty_replay(),
                 branches: DebuggerBranches::branches_new(),
                 breakpoints: DebuggerBreakpointManager::breakpoint_table_new(),
                 watchpoints: DebuggerWatchpoints::watchpoints_new(),
@@ -42,7 +45,7 @@ module DebuggerManagedState:
 
         def state_capture(state: mutable State&, machine: DebuggerEDIR::Machine, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> DebuggerFullCheckpoint::ManagedCheckpoint:
             tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(state.tasks)
-            return DebuggerFullCheckpoint::full_checkpoint_capture(machine, tasks, state.effects, state.resources, recording, branch, event, state_hash)
+            return DebuggerFullCheckpoint::full_checkpoint_capture_with_adapters(machine, tasks, state.effects, state.resources, state.adapters, recording, branch, event, state_hash)
 
         def state_restore(state: mutable State&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
@@ -51,8 +54,10 @@ module DebuggerManagedState:
             return failure if not DebuggerErrors::error_is_ok(failure)
             state.effects <- DebuggerFullCheckpoint::full_checkpoint_effects(checkpoint)
             state.resources <- DebuggerFullCheckpoint::full_checkpoint_resources(checkpoint)
+            failure <- DebuggerFullCheckpoint::full_checkpoint_restore_adapters(state.adapters, checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
             return DebuggerErrors::no_error()
 
         def state_is_valid(state: mutable State&) -> bool:
             tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(state.tasks)
-            return DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(tasks) and DebuggerEffects::effect_oracle_is_exact(state.effects) and DebuggerVirtualResources::resources_is_valid(state.resources) and DebuggerBranches::branches_is_valid(state.branches) and DebuggerBreakpointManager::breakpoint_table_is_valid(state.breakpoints) and DebuggerWatchpoints::watchpoints_is_valid(state.watchpoints) and DebuggerValueStore::value_store_is_valid(state.values)
+            return DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(tasks) and DebuggerEffects::effect_oracle_is_exact(state.effects) and DebuggerVirtualResources::resources_is_valid(state.resources) and DebuggerReplayAdapters::adapter_snapshot_is_valid(state.adapters) and DebuggerBranches::branches_is_valid(state.branches) and DebuggerBreakpointManager::breakpoint_table_is_valid(state.breakpoints) and DebuggerWatchpoints::watchpoints_is_valid(state.watchpoints) and DebuggerValueStore::value_store_is_valid(state.values)

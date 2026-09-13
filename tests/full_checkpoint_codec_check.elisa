@@ -2,6 +2,7 @@
 
 include "../src/trace/storage.elisa"
 include "../src/trace/reader.elisa"
+include "../src/engine/state.elisa"
 
 const TEST_RECORDING_ID: u64 = 901
 const TEST_BRANCH_ID: u64 = 7
@@ -83,6 +84,20 @@ const TEST_FNV64_LEGACY_OFFSET_BASIS: u64 = 1469598103934665603
 const TEST_STANDARD_CHECKSUM_FAILURE: i64 = 19
 const TEST_LEGACY_CHECKPOINT_FAILURE: i64 = 20
 const TEST_LEGACY_TRACE_SCAN_FAILURE: i64 = 21
+const TEST_ADAPTER_SOURCE_ID: u64 = 701
+const TEST_ADAPTER_CLOCK_FIRST: u64 = 702
+const TEST_ADAPTER_CLOCK_SECOND: u64 = 703
+const TEST_ADAPTER_RANDOM_FIRST: u64 = 704
+const TEST_ADAPTER_RANDOM_SECOND: u64 = 705
+const TEST_ADAPTER_INPUT_BYTE: u8 = 81
+const TEST_ADAPTER_OUTPUT_BYTE: u8 = 82
+const TEST_ADAPTER_INPUT_LENGTH: usize = 1
+const TEST_ADAPTER_OUTPUT_LENGTH: usize = 1
+const TEST_ADAPTER_CURSOR: usize = 1
+const TEST_ADAPTER_RESTORE_FAILURE: i64 = 22
+const TEST_ADAPTER_TAMPER_ACCEPTED: i64 = 23
+const TEST_REPLAY_WRITE_UNSUPPRESSED_ACCEPTED: i64 = 24
+const TEST_BRANCH_WRITE_NOT_SUPPRESSED: i64 = 25
 
 def test_checksum_with_basis(bytes: u8&, length: usize, basis: u64) -> u64:
     checksum: mutable u64 = basis
@@ -145,9 +160,41 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     _ = DebuggerVirtualResources::resources_seed(resources, handle, data[0], TEST_RESOURCE_BYTES)
     _ = DebuggerVirtualResources::resources_seek(resources, handle, TEST_RESOURCE_CURSOR)
 
+    source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(TEST_ADAPTER_SOURCE_ID)
+    clock: mutable DebuggerReplayAdapters::Clock = DebuggerReplayAdapters::clock_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    _ = DebuggerReplayAdapters::clock_record(clock, source, TEST_ADAPTER_CLOCK_FIRST)
+    _ = DebuggerReplayAdapters::clock_record(clock, source, TEST_ADAPTER_CLOCK_SECOND)
+    clock.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    first_clock_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(clock, source)
+    if not first_clock_read.accepted:
+        clock.exact <- false
+
+    random: mutable DebuggerReplayAdapters::Random = DebuggerReplayAdapters::random_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    _ = DebuggerReplayAdapters::random_record(random, source, TEST_ADAPTER_RANDOM_FIRST)
+    _ = DebuggerReplayAdapters::random_record(random, source, TEST_ADAPTER_RANDOM_SECOND)
+    random.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    first_random_read: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read(random, source)
+    if not first_random_read.accepted:
+        random.exact <- false
+
+    input: mutable u8[TEST_ADAPTER_INPUT_LENGTH] = [TEST_ADAPTER_INPUT_BYTE]
+    output: mutable u8[TEST_ADAPTER_OUTPUT_LENGTH] = [TEST_ADAPTER_OUTPUT_BYTE]
+    console: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    _ = DebuggerReplayAdapters::console_record_input(console, DebuggerReplayAdapters::ConsoleChannel.Stdout, input[0], TEST_ADAPTER_INPUT_LENGTH)
+    recorded_output: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], TEST_ADAPTER_OUTPUT_LENGTH)
+    if not recorded_output.accepted:
+        console.exact <- false
+    console.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    console.output_suppressed <- true
+    replay_input: mutable u8[TEST_ADAPTER_INPUT_LENGTH] = zeroed
+    first_input_read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(console, DebuggerReplayAdapters::ConsoleChannel.Stdout, replay_input[0], TEST_ADAPTER_INPUT_LENGTH)
+    if not first_input_read.accepted:
+        console.exact <- false
+    adapters: DebuggerReplayAdapters::AdapterSnapshot = DebuggerReplayAdapters::AdapterSnapshot{clock: clock, random: random, console: console}
+
     machine_probe: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(TEST_CHECKPOINT_EVENT + 1), TEST_CHECKPOINT_EVENT, 0)
     state_hash: u64 = DebuggerCheckpoint::snapshot_state_hash(machine_probe)
-    return DebuggerFullCheckpoint::full_checkpoint_capture(machine, tasks, effects, resources, DebuggerIdentity::debug_id(TEST_RECORDING_ID), DebuggerIdentity::debug_id(TEST_BRANCH_ID), TEST_CHECKPOINT_EVENT, state_hash)
+    return DebuggerFullCheckpoint::full_checkpoint_capture_with_adapters(machine, tasks, effects, resources, adapters, DebuggerIdentity::debug_id(TEST_RECORDING_ID), DebuggerIdentity::debug_id(TEST_BRANCH_ID), TEST_CHECKPOINT_EVENT, state_hash)
 
 def checkpoint_manifest_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerTraceStorage::StoredChunk:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -214,6 +261,28 @@ def machine_snapshot_is_equal(left: DebuggerCheckpoint::MachineSnapshot, right: 
 def task_info_is_equal(left: DebuggerConcurrency::TaskInfo, right: DebuggerConcurrency::TaskInfo) -> bool:
     return left.id.value == right.id.value and left.parent.value == right.parent.value and left.state == right.state and left.logical_time == right.logical_time and left.os_thread == right.os_thread
 
+def adapter_error_is_equal(left: DebuggerErrors::DebuggerError, right: DebuggerErrors::DebuggerError) -> bool:
+    return left.code == right.code and left.severity == right.severity and left.retryable == right.retryable and left.detail == right.detail
+
+def adapter_sample_is_equal(left: DebuggerReplayAdapters::AdapterSample, right: DebuggerReplayAdapters::AdapterSample) -> bool:
+    return left.sequence == right.sequence and left.source.value == right.source.value and left.value == right.value
+
+def adapter_snapshot_is_equal(left: DebuggerReplayAdapters::AdapterSnapshot, right: DebuggerReplayAdapters::AdapterSnapshot) -> bool:
+    return false if left.clock.count != right.clock.count or left.clock.cursor != right.clock.cursor or left.clock.mode != right.clock.mode or left.clock.exact != right.clock.exact or not adapter_error_is_equal(left.clock.last_error, right.clock.last_error)
+    return false if left.random.count != right.random.count or left.random.cursor != right.random.cursor or left.random.mode != right.random.mode or left.random.exact != right.random.exact or not adapter_error_is_equal(left.random.last_error, right.random.last_error)
+    return false if left.console.count != right.console.count or left.console.cursor != right.console.cursor or left.console.mode != right.console.mode or left.console.exact != right.console.exact or left.console.output_suppressed != right.console.output_suppressed or not adapter_error_is_equal(left.console.last_error, right.console.last_error)
+    for index in 0..<left.clock.count:
+        return false if not adapter_sample_is_equal(left.clock.samples[index], right.clock.samples[index])
+    for index in 0..<left.random.count:
+        return false if not adapter_sample_is_equal(left.random.samples[index], right.random.samples[index])
+    for index in 0..<left.console.count:
+        lrecord: DebuggerReplayAdapters::ConsoleRecord = left.console.records[index]
+        rrecord: DebuggerReplayAdapters::ConsoleRecord = right.console.records[index]
+        return false if lrecord.sequence != rrecord.sequence or lrecord.channel != rrecord.channel or lrecord.kind != rrecord.kind or lrecord.requested != rrecord.requested or lrecord.length != rrecord.length or lrecord.eof != rrecord.eof
+        for byte_index in 0..<lrecord.length:
+            return false if lrecord.bytes[byte_index] != rrecord.bytes[byte_index]
+    return true
+
 def checkpoints_are_equal(left: DebuggerFullCheckpoint::ManagedCheckpoint, right: DebuggerFullCheckpoint::ManagedCheckpoint) -> bool:
     return false if left.schema != right.schema or left.recording.value != right.recording.value or left.branch.value != right.branch.value or left.event != right.event or left.state_hash != right.state_hash or left.side_state_hash != right.side_state_hash
     return false if not machine_snapshot_is_equal(left.machine, right.machine)
@@ -241,13 +310,14 @@ def checkpoints_are_equal(left: DebuggerFullCheckpoint::ManagedCheckpoint, right
         return false if lfile.handle.value != rfile.handle.value or lfile.path.value != rfile.path.value or lfile.length != rfile.length or lfile.cursor != rfile.cursor or lfile.writable != rfile.writable or lfile.generation != rfile.generation
         for byte_index in 0..<lfile.length:
             return false if lfile.bytes[byte_index] != rfile.bytes[byte_index]
-    return true
+    return adapter_snapshot_is_equal(left.adapters, right.adapters)
 
 def check_round_trip() -> i64:
     checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
     return TEST_TASK_ROUND_TRIP_FAILURE if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
     return TEST_EFFECT_ROUND_TRIP_FAILURE if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or checkpoint.effects.count != 2 or checkpoint.effects.records[0].kind.u16() != TEST_EFFECT_KIND_CLOCK_CODE or checkpoint.effects.records[1].kind.u16() != TEST_EFFECT_KIND_CLOCK_CODE
     return TEST_RESOURCE_ROUND_TRIP_FAILURE if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+    return TEST_ADAPTER_RESTORE_FAILURE if not DebuggerReplayAdapters::adapter_snapshot_is_valid(checkpoint.adapters) or checkpoint.adapters.clock.cursor != TEST_ADAPTER_CURSOR or checkpoint.adapters.random.cursor != TEST_ADAPTER_CURSOR or checkpoint.adapters.console.cursor != TEST_ADAPTER_CURSOR
     encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
     return TEST_DECODE_ROUND_TRIP_FAILURE if encoded.failed or encoded.length <= 0 or encoded.length > DebuggerFullCheckpointCodec::FULL_CHECKPOINT_CODEC_CAPACITY
     encoded_standard_checksum: u64 = test_get_u64(encoded.bytes[0], encoded.length - TEST_CODEC_CHECKSUM_BYTES)
@@ -256,6 +326,23 @@ def check_round_trip() -> i64:
     decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length)
     return TEST_DECODE_ROUND_TRIP_FAILURE if decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not DebuggerFullCheckpoint::full_checkpoint_is_valid(decoded.checkpoint)
     return TEST_DECODE_ROUND_TRIP_FAILURE if not checkpoints_are_equal(checkpoint, decoded.checkpoint)
+    restored_adapters: mutable DebuggerReplayAdapters::AdapterSnapshot = zeroed
+    return TEST_ADAPTER_RESTORE_FAILURE if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_restore_adapters(restored_adapters, decoded.checkpoint)) or not adapter_snapshot_is_equal(checkpoint.adapters, restored_adapters)
+    source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(TEST_ADAPTER_SOURCE_ID)
+    next_clock: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(restored_adapters.clock, source)
+    next_random: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read(restored_adapters.random, source)
+    output: mutable u8[TEST_ADAPTER_OUTPUT_LENGTH] = [TEST_ADAPTER_OUTPUT_BYTE]
+    next_console_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(restored_adapters.console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], TEST_ADAPTER_OUTPUT_LENGTH)
+    return TEST_ADAPTER_RESTORE_FAILURE if not next_clock.accepted or next_clock.value != TEST_ADAPTER_CLOCK_SECOND or not next_random.accepted or next_random.value != TEST_ADAPTER_RANDOM_SECOND or not next_console_write.accepted or not next_console_write.suppressed or not DebuggerReplayAdapters::console_replay_complete(restored_adapters.console)
+    branch_console: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Branch)
+    branch_console.output_suppressed <- false
+    branch_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(branch_console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], TEST_ADAPTER_OUTPUT_LENGTH)
+    return TEST_BRANCH_WRITE_NOT_SUPPRESSED if not branch_write.accepted or not branch_write.suppressed
+    managed_state: mutable DebuggerManagedState::State = DebuggerManagedState::state_new()
+    return TEST_ADAPTER_RESTORE_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedState::state_restore(managed_state, decoded.checkpoint)) or not adapter_snapshot_is_equal(managed_state.adapters, checkpoint.adapters)
+    restored_machine: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(decoded.checkpoint)
+    recaptured: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedState::state_capture(managed_state, restored_machine, decoded.checkpoint.recording, decoded.checkpoint.branch, decoded.checkpoint.event, decoded.checkpoint.state_hash)
+    return TEST_ADAPTER_RESTORE_FAILURE if not checkpoints_are_equal(checkpoint, recaptured)
     legacy_checkpoint: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = encoded
     legacy_inner_checksum: u64 = test_legacy_checksum(legacy_checkpoint.bytes[0], legacy_checkpoint.length - TEST_CODEC_CHECKSUM_BYTES)
     test_put_u64(legacy_checkpoint.bytes[0], legacy_checkpoint.length - TEST_CODEC_CHECKSUM_BYTES, legacy_inner_checksum)
@@ -316,6 +403,12 @@ def check_rejects_malformed_inputs() -> i64:
     malformed.branch <- DebuggerIdentity::debug_id(18446744073709551615)
     rejected: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(malformed)
     return TEST_INVALID_ENCODE_ACCEPTED if not rejected.failed or rejected.length != 0
+    tampered_adapters: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    tampered_adapters.adapters.clock.cursor <- tampered_adapters.adapters.clock.cursor + 1
+    return TEST_ADAPTER_TAMPER_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(tampered_adapters)
+    tampered_replay_suppression: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    tampered_replay_suppression.adapters.console.output_suppressed <- false
+    return TEST_REPLAY_WRITE_UNSUPPRESSED_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(tampered_replay_suppression)
     rejected_trace_chunk: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(malformed, TEST_TRACE_SEQUENCE)
     return TEST_TRACE_INVALID_CHECKPOINT_ACCEPTED if rejected_trace_chunk.status != DebuggerTraceStorage::StorageStatus.Invalid
     return 0

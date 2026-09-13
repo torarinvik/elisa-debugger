@@ -4,6 +4,7 @@
 include "./checkpoint.elisa"
 include "./effects.elisa"
 include "./resources.elisa"
+include "./adapters.elisa"
 include "../concurrency/checkpoint.elisa"
 include "../concurrency/runtime.elisa"
 include "../core/errors.elisa"
@@ -12,7 +13,7 @@ include "../vm/edir.elisa"
 
 module DebuggerFullCheckpoint:
     private:
-        const FULL_CHECKPOINT_SCHEMA: u32 = 1
+        const FULL_CHECKPOINT_SCHEMA: u32 = 2
         const FULL_CHECKPOINT_NO_ID: u64 = 0
         const FULL_CHECKPOINT_MAX_EVENT: u64 = 18446744073709551615
         const FULL_CHECKPOINT_MAX_BRANCH: u64 = 18446744073709551615
@@ -35,6 +36,9 @@ module DebuggerFullCheckpoint:
         const DETAIL_EFFECTS: u32 = 6
         const DETAIL_RESOURCES: u32 = 7
         const DETAIL_INTEGRITY: u32 = 8
+        const DETAIL_ADAPTERS: u32 = 9
+        const FULL_CHECKPOINT_MAX_ERROR_CODE: u16 = 12
+        const FULL_CHECKPOINT_MAX_ERROR_SEVERITY: u16 = 2
 
         def checkpoint_hash_byte(hash: u64, byte: u8) -> u64:
             return (hash ^ byte.u64()) * FULL_CHECKPOINT_HASH_PRIME
@@ -67,8 +71,57 @@ module DebuggerFullCheckpoint:
             updated <- checkpoint_hash_u64(updated, task.logical_time)
             return checkpoint_hash_u64(updated, task.os_thread)
 
+        def checkpoint_hash_adapter_error(hash: u64, adapter_failure: DebuggerErrors::DebuggerError) -> u64:
+            updated: mutable u64 = checkpoint_hash_u16(hash, adapter_failure.code.u16())
+            updated <- checkpoint_hash_u16(updated, adapter_failure.severity.u16())
+            updated <- checkpoint_hash_bool(updated, adapter_failure.retryable)
+            return checkpoint_hash_u32(updated, adapter_failure.detail)
+
+        def checkpoint_hash_adapter_sample(hash: u64, sample: DebuggerReplayAdapters::AdapterSample) -> u64:
+            updated: mutable u64 = checkpoint_hash_u64(hash, sample.sequence)
+            updated <- checkpoint_hash_u64(updated, sample.source.value)
+            return checkpoint_hash_u64(updated, sample.value)
+
+        def checkpoint_hash_adapter_snapshot(hash: u64, snapshot: DebuggerReplayAdapters::AdapterSnapshot) -> u64:
+            clock: DebuggerReplayAdapters::Clock = snapshot.clock
+            updated: mutable u64 = checkpoint_hash_u64(hash, clock.count.u64())
+            updated <- checkpoint_hash_u64(updated, clock.cursor.u64())
+            updated <- checkpoint_hash_u16(updated, clock.mode.u16())
+            updated <- checkpoint_hash_bool(updated, clock.exact)
+            updated <- checkpoint_hash_adapter_error(updated, clock.last_error)
+            for index in 0..<clock.count:
+                updated <- checkpoint_hash_adapter_sample(updated, clock.samples[index])
+
+            random: DebuggerReplayAdapters::Random = snapshot.random
+            updated <- checkpoint_hash_u64(updated, random.count.u64())
+            updated <- checkpoint_hash_u64(updated, random.cursor.u64())
+            updated <- checkpoint_hash_u16(updated, random.mode.u16())
+            updated <- checkpoint_hash_bool(updated, random.exact)
+            updated <- checkpoint_hash_adapter_error(updated, random.last_error)
+            for index in 0..<random.count:
+                updated <- checkpoint_hash_adapter_sample(updated, random.samples[index])
+
+            console: DebuggerReplayAdapters::Console = snapshot.console
+            updated <- checkpoint_hash_u64(updated, console.count.u64())
+            updated <- checkpoint_hash_u64(updated, console.cursor.u64())
+            updated <- checkpoint_hash_u16(updated, console.mode.u16())
+            updated <- checkpoint_hash_bool(updated, console.exact)
+            updated <- checkpoint_hash_bool(updated, console.output_suppressed)
+            updated <- checkpoint_hash_adapter_error(updated, console.last_error)
+            for index in 0..<console.count:
+                record: DebuggerReplayAdapters::ConsoleRecord = console.records[index]
+                updated <- checkpoint_hash_u64(updated, record.sequence)
+                updated <- checkpoint_hash_u16(updated, record.channel.u16())
+                updated <- checkpoint_hash_u16(updated, record.kind.u16())
+                updated <- checkpoint_hash_u64(updated, record.requested.u64())
+                updated <- checkpoint_hash_u64(updated, record.length.u64())
+                updated <- checkpoint_hash_bool(updated, record.eof)
+                for byte_index in 0..<record.length:
+                    updated <- checkpoint_hash_byte(updated, record.bytes[byte_index])
+            return updated
+
         def checkpoint_hash_side_state(checkpoint: ManagedCheckpoint) -> u64:
-            return FULL_CHECKPOINT_INVALID_HASH if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks) or not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+            return FULL_CHECKPOINT_INVALID_HASH if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks) or not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or not DebuggerVirtualResources::resources_is_valid(checkpoint.resources) or not DebuggerReplayAdapters::adapter_snapshot_is_valid(checkpoint.adapters)
             hash: mutable u64 = FULL_CHECKPOINT_HASH_OFFSET_BASIS
             hash <- checkpoint_hash_u32(hash, checkpoint.schema)
             hash <- checkpoint_hash_u64(hash, checkpoint.recording.value)
@@ -134,7 +187,7 @@ module DebuggerFullCheckpoint:
                 hash <- checkpoint_hash_u64(hash, file.generation)
                 for byte_index in 0..<file.length:
                     hash <- checkpoint_hash_byte(hash, file.bytes[byte_index])
-            return hash
+            return checkpoint_hash_adapter_snapshot(hash, checkpoint.adapters)
 
     public:
         struct ManagedCheckpoint:
@@ -149,6 +202,7 @@ module DebuggerFullCheckpoint:
             tasks: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot
             effects: mutable DebuggerEffects::EffectOracle
             resources: mutable DebuggerVirtualResources::ResourceStore
+            adapters: mutable DebuggerReplayAdapters::AdapterSnapshot
 
         def full_checkpoint_validate(checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DETAIL_SCHEMA) if checkpoint.schema != FULL_CHECKPOINT_SCHEMA
@@ -162,10 +216,12 @@ module DebuggerFullCheckpoint:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_EFFECTS) if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_RESOURCES) if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ADAPTERS) if not DebuggerReplayAdapters::adapter_snapshot_is_valid(checkpoint.adapters)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_INTEGRITY) if checkpoint.adapters.clock.last_error.code.u16() > FULL_CHECKPOINT_MAX_ERROR_CODE or checkpoint.adapters.clock.last_error.severity.u16() > FULL_CHECKPOINT_MAX_ERROR_SEVERITY or checkpoint.adapters.random.last_error.code.u16() > FULL_CHECKPOINT_MAX_ERROR_CODE or checkpoint.adapters.random.last_error.severity.u16() > FULL_CHECKPOINT_MAX_ERROR_SEVERITY or checkpoint.adapters.console.last_error.code.u16() > FULL_CHECKPOINT_MAX_ERROR_CODE or checkpoint.adapters.console.last_error.severity.u16() > FULL_CHECKPOINT_MAX_ERROR_SEVERITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, DETAIL_INTEGRITY) if checkpoint.side_state_hash != checkpoint_hash_side_state(checkpoint)
             return DebuggerErrors::no_error()
 
-        def full_checkpoint_capture(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> ManagedCheckpoint:
+        def full_checkpoint_capture_with_adapters(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, adapters: DebuggerReplayAdapters::AdapterSnapshot, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> ManagedCheckpoint:
             checkpoint: mutable ManagedCheckpoint = ManagedCheckpoint{
                 schema: FULL_CHECKPOINT_SCHEMA,
                 recording: recording,
@@ -176,7 +232,8 @@ module DebuggerFullCheckpoint:
                 machine: DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(FULL_CHECKPOINT_MAX_EVENT if event == FULL_CHECKPOINT_MAX_EVENT else event + FULL_CHECKPOINT_ID_OFFSET), event, state_hash),
                 tasks: tasks,
                 effects: effects,
-                resources: resources
+                resources: resources,
+                adapters: adapters
             }
             checkpoint.side_state_hash <- checkpoint_hash_side_state(checkpoint)
             return checkpoint
@@ -212,3 +269,14 @@ module DebuggerFullCheckpoint:
             result: mutable DebuggerVirtualResources::ResourceStore = zeroed
             return result if not full_checkpoint_is_valid(checkpoint)
             return checkpoint.resources
+
+        def full_checkpoint_adapters(checkpoint: ManagedCheckpoint) -> DebuggerReplayAdapters::AdapterSnapshot:
+            result: mutable DebuggerReplayAdapters::AdapterSnapshot = zeroed
+            return result if not full_checkpoint_is_valid(checkpoint)
+            return checkpoint.adapters
+
+        def full_checkpoint_restore_adapters(adapters: mutable DebuggerReplayAdapters::AdapterSnapshot&, checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+            failure: DebuggerErrors::DebuggerError = full_checkpoint_validate(checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            adapters <- checkpoint.adapters
+            return DebuggerErrors::no_error()

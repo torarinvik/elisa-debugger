@@ -204,11 +204,14 @@ module DebuggerManagedEngine:
                 current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
                 call_is_active: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
                 same_source_position: bool = managed_source_position_matches(initial_source, current_source)
-                # Stay in the original source span, or in a called frame, until a boundary or breakpoint.
-                break if not call_is_active and not same_source_position
                 if managed_compound_breakpoint_should_stop(controller, initial_source):
                     hit_breakpoint <- true
                     break
+                # A breakpoint at the destination boundary takes precedence
+                # over completing the source step at that same position.
+                # Stay in the original source span, or in a called frame,
+                # until a boundary or breakpoint.
+                break if not call_is_active and not same_source_position
                 failure <- managed_step(controller)
                 return failure if not DebuggerErrors::error_is_ok(failure)
             call_is_active_after_limit: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
@@ -224,10 +227,11 @@ module DebuggerManagedEngine:
             hit_breakpoint: mutable bool = false
             failure: mutable DebuggerErrors::DebuggerError = managed_step(controller)
             return failure if not DebuggerErrors::error_is_ok(failure)
-            while (initial_depth == 0 or controller.engine.machine.return_stack_pointer >= initial_depth) and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < COMPOUND_STEP_LIMIT:
                 if managed_compound_breakpoint_should_stop(controller, initial_source):
                     hit_breakpoint <- true
                     break
+                break if initial_depth > 0 and controller.engine.machine.return_stack_pointer < initial_depth
                 failure <- managed_step(controller)
                 return failure if not DebuggerErrors::error_is_ok(failure)
             frame_has_not_returned: bool = initial_depth == 0 or controller.engine.machine.return_stack_pointer >= initial_depth

@@ -50,8 +50,10 @@ const MANAGED_REGRESSION_SOURCE_STEP_INSTRUCTION_COUNT: u64 = 4
 const MANAGED_REGRESSION_CALL_INSTRUCTION_COUNT: u64 = 5
 const MANAGED_REGRESSION_CALL_TARGET: i64 = 3
 const MANAGED_REGRESSION_NEXT_INSTRUCTION: usize = 2
+const MANAGED_REGRESSION_CALLER_RESUME_INSTRUCTION: usize = 1
 const MANAGED_REGRESSION_CALLEE_INSTRUCTION: usize = 3
 const MANAGED_REGRESSION_RETURN_INSTRUCTION: usize = 4
+const MANAGED_STEP_OUT_DESTINATION_EXPECTED_EVENTS: usize = 3
 const MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS: u64 = 8
 const MANAGED_SOURCE_STEP_CHECK_RESULT: i64 = 50
 const MANAGED_COMPOUND_BREAKPOINT_CHECK_RESULT: i64 = 51
@@ -69,6 +71,8 @@ const TRACE_LIFECYCLE_UNSUPPORTED_RESULT: i64 = 38
 const MANAGED_TOP_LEVEL_STEP_OUT_CHECK_RESULT: i64 = 55
 const MANAGED_THREAD_BEFORE_LAUNCH_RESULT: i64 = 56
 const MANAGED_THREAD_RUNNING_RESULT: i64 = 57
+const MANAGED_STEP_OVER_DESTINATION_BREAKPOINT_RESULT: i64 = 58
+const MANAGED_STEP_OUT_DESTINATION_BREAKPOINT_RESULT: i64 = 59
 
 def managed_regression_source_span(line: u32, start_byte: u64) -> DebuggerIdentity::SourceSpan:
     return DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(MANAGED_REGRESSION_SOURCE_FILE_ID), start_byte: start_byte, end_byte: start_byte + MANAGED_REGRESSION_SOURCE_SPAN_WIDTH, start_line: line, start_column: MANAGED_REGRESSION_SOURCE_COLUMN, end_line: line, end_column: MANAGED_REGRESSION_SOURCE_END_COLUMN, discriminator: 0}
@@ -105,6 +109,29 @@ def check_managed_source_step_over() -> i64:
     return 2 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
     failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_over(controller)
     return 3 if not DebuggerErrors::error_is_ok(failure) or controller.engine.event_count != MANAGED_REGRESSION_NEXT_INSTRUCTION or controller.engine.machine.program_counter != MANAGED_REGRESSION_NEXT_INSTRUCTION.u64()
+    return 0
+
+def check_managed_step_over_destination_breakpoint() -> i64:
+    controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(managed_source_step_image())
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(MANAGED_REGRESSION_SOURCE_FILE_ID), line: MANAGED_REGRESSION_LATER_SOURCE_LINE, column: MANAGED_REGRESSION_SOURCE_COLUMN, discriminator: 0}
+    breakpoint: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(controller, location)
+    return 2 if breakpoint.value == 0 or controller.state.breakpoints.points[0].status != DebuggerBreakpoints::BreakpointStatus.Verified
+    failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_over(controller)
+    return 3 if not DebuggerErrors::error_is_ok(failure) or controller.engine.event_count != MANAGED_REGRESSION_NEXT_INSTRUCTION.u64() or controller.engine.machine.program_counter != MANAGED_REGRESSION_NEXT_INSTRUCTION.u64()
+    return 4 if controller.state.breakpoints.points[0].hit_count != 1
+    return 0
+
+def check_managed_step_out_destination_breakpoint() -> i64:
+    controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(managed_call_breakpoint_image())
+    return 1 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    return 2 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller)) or controller.engine.machine.return_stack_pointer == 0
+    location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(MANAGED_REGRESSION_SOURCE_FILE_ID), line: MANAGED_REGRESSION_LATER_SOURCE_LINE, column: MANAGED_REGRESSION_SOURCE_COLUMN, discriminator: 0}
+    breakpoint: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(controller, location)
+    return 3 if breakpoint.value == 0 or controller.state.breakpoints.points[0].status != DebuggerBreakpoints::BreakpointStatus.Verified
+    failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_out(controller)
+    return 4 if not DebuggerErrors::error_is_ok(failure) or controller.engine.event_count != MANAGED_STEP_OUT_DESTINATION_EXPECTED_EVENTS or controller.engine.machine.program_counter != MANAGED_REGRESSION_CALLER_RESUME_INSTRUCTION.u64()
+    return 5 if controller.state.breakpoints.points[0].hit_count != 1
     return 0
 
 def check_managed_top_level_step_out() -> i64:
@@ -192,6 +219,10 @@ def check_continue_history_limit_error() -> i64:
 def main() -> i64:
     source_step_over_status: i64 = check_managed_source_step_over()
     return MANAGED_SOURCE_STEP_CHECK_RESULT if source_step_over_status != 0
+    destination_breakpoint_status: i64 = check_managed_step_over_destination_breakpoint()
+    return MANAGED_STEP_OVER_DESTINATION_BREAKPOINT_RESULT if destination_breakpoint_status != 0
+    step_out_destination_breakpoint_status: i64 = check_managed_step_out_destination_breakpoint()
+    return MANAGED_STEP_OUT_DESTINATION_BREAKPOINT_RESULT if step_out_destination_breakpoint_status != 0
     top_level_step_out_status: i64 = check_managed_top_level_step_out()
     return MANAGED_TOP_LEVEL_STEP_OUT_CHECK_RESULT if top_level_step_out_status != 0
     compound_step_breakpoint_status: i64 = check_managed_compound_step_breakpoints()

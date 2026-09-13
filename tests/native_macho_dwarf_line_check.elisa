@@ -1,0 +1,79 @@
+include "../src/native/macho_dwarf_line.elisa"
+
+const module Fixture:
+    IMAGE_BYTES: usize = 250
+    HEADER_BYTES: usize = 32
+    SEGMENT_COMMAND_OFFSET: usize = 32
+    SECTION_OFFSET: usize = 104
+    SECTION_ADDRESS_OFFSET: usize = 136
+    SECTION_SIZE_OFFSET: usize = 144
+    SECTION_FILE_OFFSET_FIELD: usize = 152
+    SECTION_FLAGS_OFFSET: usize = 168
+    LINE_TABLE_OFFSET: usize = 184
+    LINE_TABLE_BYTES: usize = 66
+    SEGMENT_COMMAND_BYTES: u32 = 152
+    LINK_ADDRESS: u64 = 4294968024
+    END_ADDRESS: u64 = 4294968036
+
+const module TestResult:
+    INVALID_IMAGE: i64 = 1
+    LINE_MAPPING: i64 = 2
+    END_ADDRESS: i64 = 3
+    MISSING_SECTION: i64 = 4
+    INVALID_SECTION_BOUNDS: i64 = 5
+    ZERO_FILL_SECTION: i64 = 6
+
+def put_u32(bytes: mutable u8&, offset: usize, value: u32) -> void:
+    bytes[offset] <- value.u8()
+    bytes[offset + 1] <- (value >> 8).u8()
+    bytes[offset + 2] <- (value >> 16).u8()
+    bytes[offset + 3] <- (value >> 24).u8()
+
+def put_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+    for index in 0..<8:
+        bytes[offset + index] <- (value >> (index.u64() * 8)).u8()
+
+def main() -> i64:
+    image: mutable u8[Fixture::IMAGE_BYTES] = zeroed
+    image[0] <- 207
+    image[1] <- 250
+    image[2] <- 237
+    image[3] <- 254
+    put_u32(image[0], 4, 16777228)
+    put_u32(image[0], 12, 10)
+    put_u32(image[0], 16, 1)
+    put_u32(image[0], 20, Fixture::SEGMENT_COMMAND_BYTES)
+    put_u32(image[0], Fixture::SEGMENT_COMMAND_OFFSET, 25)
+    put_u32(image[0], Fixture::SEGMENT_COMMAND_OFFSET + 4, Fixture::SEGMENT_COMMAND_BYTES)
+    put_u32(image[0], Fixture::SEGMENT_COMMAND_OFFSET + 64, 1)
+    section_name: u8[12] = [95, 95, 100, 101, 98, 117, 103, 95, 108, 105, 110, 101]
+    for index in 0..<12:
+        image[Fixture::SECTION_OFFSET + index] <- section_name[index]
+    put_u64(image[0], Fixture::SECTION_ADDRESS_OFFSET, 4294967296)
+    put_u64(image[0], Fixture::SECTION_SIZE_OFFSET, Fixture::LINE_TABLE_BYTES.u64())
+    put_u32(image[0], Fixture::SECTION_FILE_OFFSET_FIELD, Fixture::LINE_TABLE_OFFSET.u32())
+    compiler_table: u8[Fixture::LINE_TABLE_BYTES] = [62, 0, 0, 0, 4, 0, 36, 0, 0, 0, 1, 1, 1, 251, 14, 13, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 115, 116, 97, 103, 101, 49, 46, 101, 108, 105, 115, 97, 0, 0, 0, 0, 0, 0, 9, 2, 216, 2, 0, 0, 1, 0, 0, 0, 5, 5, 10, 22, 2, 12, 0, 1, 1]
+    for index in 0..<Fixture::LINE_TABLE_BYTES:
+        image[Fixture::LINE_TABLE_OFFSET + index] <- compiler_table[index]
+
+    header: DebuggerNativeMachO::MachOHeader = DebuggerNativeMachO::macho_parse(image[0], Fixture::IMAGE_BYTES)
+    return TestResult::INVALID_IMAGE if not header.valid or not header.debug_symbols
+    row: DebuggerNativeDwarfLine::Lookup = DebuggerNativeMachODwarfLine::macho_dwarf_line_lookup_link_address(image[0], Fixture::IMAGE_BYTES, Fixture::LINK_ADDRESS)
+    return TestResult::LINE_MAPPING if row.status != DebuggerNativeDwarfLine::Status.Found or row.line != 5 or row.column != 5 or row.filename_length != 12
+    end: DebuggerNativeDwarfLine::Lookup = DebuggerNativeMachODwarfLine::macho_dwarf_line_lookup_link_address(image[0], Fixture::IMAGE_BYTES, Fixture::END_ADDRESS)
+    return TestResult::END_ADDRESS if end.status != DebuggerNativeDwarfLine::Status.NotFound
+    truncated_image: DebuggerNativeDwarfLine::Lookup = DebuggerNativeMachODwarfLine::macho_dwarf_line_lookup_link_address(image[0], Fixture::HEADER_BYTES, Fixture::LINK_ADDRESS)
+    return TestResult::INVALID_IMAGE if truncated_image.status != DebuggerNativeDwarfLine::Status.Invalid
+
+    image[Fixture::SECTION_OFFSET] <- 120
+    missing_section: DebuggerNativeDwarfLine::Lookup = DebuggerNativeMachODwarfLine::macho_dwarf_line_lookup_link_address(image[0], Fixture::IMAGE_BYTES, Fixture::LINK_ADDRESS)
+    return TestResult::MISSING_SECTION if missing_section.status != DebuggerNativeDwarfLine::Status.NotFound
+    image[Fixture::SECTION_OFFSET] <- 95
+    put_u32(image[0], Fixture::SECTION_FILE_OFFSET_FIELD, (Fixture::IMAGE_BYTES - 1).u32())
+    invalid_bounds: DebuggerNativeDwarfLine::Lookup = DebuggerNativeMachODwarfLine::macho_dwarf_line_lookup_link_address(image[0], Fixture::IMAGE_BYTES, Fixture::LINK_ADDRESS)
+    return TestResult::INVALID_SECTION_BOUNDS if invalid_bounds.status != DebuggerNativeDwarfLine::Status.NotFound
+    put_u32(image[0], Fixture::SECTION_FILE_OFFSET_FIELD, Fixture::LINE_TABLE_OFFSET.u32())
+    put_u32(image[0], Fixture::SECTION_FLAGS_OFFSET, 1)
+    zero_fill: DebuggerNativeDwarfLine::Lookup = DebuggerNativeMachODwarfLine::macho_dwarf_line_lookup_link_address(image[0], Fixture::IMAGE_BYTES, Fixture::LINK_ADDRESS)
+    return TestResult::ZERO_FILL_SECTION if zero_fill.status != DebuggerNativeDwarfLine::Status.NotFound
+    return 0

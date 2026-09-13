@@ -1,0 +1,45 @@
+# Mach-O/dSYM adapter for the DWARF line-table reader. The caller supplies an
+# unslid link-time address; runtime-ASLR translation belongs at the process
+# mapping boundary, where the executable's actual load bias is known.
+
+include "./macho.elisa"
+include "./dwarf_line.elisa"
+
+module DebuggerNativeMachODwarfLine:
+    private:
+        const module SectionName:
+            BYTE_COUNT: usize = 12
+            BYTE_0: u8 = 95
+            BYTE_1: u8 = 95
+            BYTE_2: u8 = 100
+            BYTE_3: u8 = 101
+            BYTE_4: u8 = 98
+            BYTE_5: u8 = 117
+            BYTE_6: u8 = 103
+            BYTE_7: u8 = 95
+            BYTE_8: u8 = 108
+            BYTE_9: u8 = 105
+            BYTE_10: u8 = 110
+            BYTE_11: u8 = 101
+
+        const module Address:
+            ADDRESS_WIDTH_64: usize = 8
+            EMPTY_SECTION_SIZE: u64 = 0
+
+        def debug_line_name() -> u8[SectionName::BYTE_COUNT]:
+            return [SectionName::BYTE_0, SectionName::BYTE_1, SectionName::BYTE_2, SectionName::BYTE_3, SectionName::BYTE_4, SectionName::BYTE_5, SectionName::BYTE_6, SectionName::BYTE_7, SectionName::BYTE_8, SectionName::BYTE_9, SectionName::BYTE_10, SectionName::BYTE_11]
+
+    public:
+        def macho_dwarf_line_lookup_link_address(image_bytes: u8&, image_length: usize, link_address: u64) -> DebuggerNativeDwarfLine::Lookup:
+            result: mutable DebuggerNativeDwarfLine::Lookup = zeroed
+            result.status <- DebuggerNativeDwarfLine::Status.Invalid
+            header: DebuggerNativeMachO::MachOHeader = DebuggerNativeMachO::macho_parse(image_bytes, image_length)
+            return result if not DebuggerNativeMachO::macho_machine_is_supported(header)
+            name: u8[SectionName::BYTE_COUNT] = debug_line_name()
+            result.status <- DebuggerNativeDwarfLine::Status.NotFound
+            section: DebuggerNativeMachO::MachOSection = DebuggerNativeMachO::macho_find_section(header, image_bytes, image_length, name[0], SectionName::BYTE_COUNT)
+            return result if not section.valid or not section.file_backed or section.size == Address::EMPTY_SECTION_SIZE
+            result.status <- DebuggerNativeDwarfLine::Status.Invalid
+            section_offset: usize = section.file_offset.usize()
+            return result if section_offset >= image_length or section.size > (image_length - section_offset).u64()
+            return DebuggerNativeDwarfLine::dwarf_line_lookup(image_bytes[section_offset], section.size.usize(), Address::ADDRESS_WIDTH_64, link_address)

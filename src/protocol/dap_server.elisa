@@ -100,6 +100,25 @@ module DebuggerDAPServer:
         const ASCII_BACKSPACE: u8 = 8
         const ASCII_FORM_FEED: u8 = 12
         const JSON_ASCII_MAX: u8 = 127
+        const JSON_UTF8_CONTINUATION_MIN: u8 = 128
+        const JSON_UTF8_CONTINUATION_MAX: u8 = 191
+        const JSON_UTF8_TWO_BYTE_LEAD_MIN: u8 = 194
+        const JSON_UTF8_TWO_BYTE_LEAD_MAX: u8 = 223
+        const JSON_UTF8_THREE_BYTE_LEAD_MIN: u8 = 224
+        const JSON_UTF8_THREE_BYTE_LEAD_MAX: u8 = 239
+        const JSON_UTF8_FOUR_BYTE_LEAD_MIN: u8 = 240
+        const JSON_UTF8_FOUR_BYTE_LEAD_MAX: u8 = 244
+        const JSON_UTF8_CONTINUATIONS_TWO_BYTE: u8 = 1
+        const JSON_UTF8_CONTINUATIONS_THREE_BYTE: u8 = 2
+        const JSON_UTF8_CONTINUATIONS_FOUR_BYTE: u8 = 3
+        const JSON_UTF8_E0_LEAD: u8 = 224
+        const JSON_UTF8_ED_LEAD: u8 = 237
+        const JSON_UTF8_F0_LEAD: u8 = 240
+        const JSON_UTF8_F4_LEAD: u8 = 244
+        const JSON_UTF8_E0_CONTINUATION_MIN: u8 = 160
+        const JSON_UTF8_ED_CONTINUATION_MAX: u8 = 159
+        const JSON_UTF8_F0_CONTINUATION_MIN: u8 = 144
+        const JSON_UTF8_F4_CONTINUATION_MAX: u8 = 143
         const JSON_HEX_ALPHA_BASE: u64 = 10
         const JSON_HEX_BASE: u64 = 16
         const JSON_UNICODE_ESCAPE_DIGITS: usize = 4
@@ -140,6 +159,12 @@ module DebuggerDAPServer:
         const TYPE_REQUEST_HASH: u64 = 104174908047
         const SEQUENCE_PREFIX_LENGTH: u8 = 6
         const SEQUENCE_PREFIX_FINAL_POSITION: u8 = 5
+        const ROOT_SEQ_KEY: cstr = "seq"
+        const ROOT_SEQ_KEY_LENGTH: usize = 3
+        const ROOT_TYPE_KEY: cstr = "type"
+        const ROOT_TYPE_KEY_LENGTH: usize = 4
+        const ROOT_COMMAND_KEY: cstr = "command"
+        const ROOT_COMMAND_KEY_LENGTH: usize = 7
         const COMMAND_HASH_INITIALIZE: u64 = 2872973214862224
         const COMMAND_HASH_LAUNCH: u64 = 3185124275
         const COMMAND_HASH_CONFIGURATION_DONE: u64 = 7082032881039876504
@@ -409,6 +434,10 @@ module DebuggerDAPServer:
             json_string_is_key: mutable bool
             json_escaped: mutable bool
             json_unicode_digits: mutable u8
+            json_utf8_continuations_remaining: mutable u8
+            json_utf8_next_byte_min: mutable u8
+            json_utf8_next_byte_max: mutable u8
+            json_key_value_start: mutable usize
             json_in_primitive: mutable bool
             json_primitive_kind: mutable u8
             json_primitive_number_state: mutable u8
@@ -559,6 +588,47 @@ module DebuggerDAPServer:
                 return false if character != expected[expected_index].u64()
                 expected_index <- expected_index + 1
             return expected_index == expected_length
+
+        def decoder_json_prepare_top_level_key(decoder: mutable Decoder&, start: usize, end: usize) -> void:
+            decoder.command_prefix_position <- 0
+            decoder.type_prefix_position <- 0
+            decoder.sequence_prefix_position <- 0
+            if dap_json_string_matches_ascii(decoder.payload[0], start, end, ROOT_SEQ_KEY, ROOT_SEQ_KEY_LENGTH):
+                decoder.sequence_prefix_position <- SEQUENCE_PREFIX_FINAL_POSITION - 1
+            else:
+                if dap_json_string_matches_ascii(decoder.payload[0], start, end, ROOT_TYPE_KEY, ROOT_TYPE_KEY_LENGTH):
+                    decoder.type_prefix_position <- TYPE_PREFIX_FINAL_POSITION - 2
+                else:
+                    if dap_json_string_matches_ascii(decoder.payload[0], start, end, ROOT_COMMAND_KEY, ROOT_COMMAND_KEY_LENGTH):
+                        decoder.command_prefix_position <- COMMAND_PREFIX_FINAL_POSITION - 2
+
+        def decoder_json_accept_raw_utf8_byte(decoder: mutable Decoder&, byte: u8) -> bool:
+            if decoder.json_utf8_continuations_remaining > 0:
+                return false if byte < decoder.json_utf8_next_byte_min or byte > decoder.json_utf8_next_byte_max
+                decoder.json_utf8_continuations_remaining <- decoder.json_utf8_continuations_remaining - 1
+                decoder.json_utf8_next_byte_min <- JSON_UTF8_CONTINUATION_MIN
+                decoder.json_utf8_next_byte_max <- JSON_UTF8_CONTINUATION_MAX
+                return true
+            if byte >= JSON_UTF8_TWO_BYTE_LEAD_MIN and byte <= JSON_UTF8_TWO_BYTE_LEAD_MAX:
+                decoder.json_utf8_continuations_remaining <- JSON_UTF8_CONTINUATIONS_TWO_BYTE
+                decoder.json_utf8_next_byte_min <- JSON_UTF8_CONTINUATION_MIN
+                decoder.json_utf8_next_byte_max <- JSON_UTF8_CONTINUATION_MAX
+                return true
+            if byte >= JSON_UTF8_THREE_BYTE_LEAD_MIN and byte <= JSON_UTF8_THREE_BYTE_LEAD_MAX:
+                decoder.json_utf8_continuations_remaining <- JSON_UTF8_CONTINUATIONS_THREE_BYTE
+                decoder.json_utf8_next_byte_min <- JSON_UTF8_CONTINUATION_MIN
+                decoder.json_utf8_next_byte_max <- JSON_UTF8_CONTINUATION_MAX
+                decoder.json_utf8_next_byte_min <- JSON_UTF8_E0_CONTINUATION_MIN if byte == JSON_UTF8_E0_LEAD
+                decoder.json_utf8_next_byte_max <- JSON_UTF8_ED_CONTINUATION_MAX if byte == JSON_UTF8_ED_LEAD
+                return true
+            if byte >= JSON_UTF8_FOUR_BYTE_LEAD_MIN and byte <= JSON_UTF8_FOUR_BYTE_LEAD_MAX:
+                decoder.json_utf8_continuations_remaining <- JSON_UTF8_CONTINUATIONS_FOUR_BYTE
+                decoder.json_utf8_next_byte_min <- JSON_UTF8_CONTINUATION_MIN
+                decoder.json_utf8_next_byte_max <- JSON_UTF8_CONTINUATION_MAX
+                decoder.json_utf8_next_byte_min <- JSON_UTF8_F0_CONTINUATION_MIN if byte == JSON_UTF8_F0_LEAD
+                decoder.json_utf8_next_byte_max <- JSON_UTF8_F4_CONTINUATION_MAX if byte == JSON_UTF8_F4_LEAD
+                return true
+            return false
 
         def exact_dap_command_hash(payload: u8&, start: usize, end: usize, candidate_hash: u64) -> u64:
             return COMMAND_HASH_INITIALIZE if candidate_hash == COMMAND_HASH_INITIALIZE and dap_json_string_matches_ascii(payload, start, end, DAP_INIT_COMMAND, DAP_INIT_COMMAND_LENGTH)
@@ -760,24 +830,34 @@ module DebuggerDAPServer:
                                 return
                         decoder.json_escaped <- false
                     else:
-                        if byte == ASCII_BACKSLASH:
-                            decoder.json_escaped <- true
+                        if decoder.json_utf8_continuations_remaining > 0 or byte > JSON_ASCII_MAX:
+                            if not decoder_json_accept_raw_utf8_byte(decoder, byte):
+                                decoder_json_fail(decoder)
+                                return
                         else:
-                            if byte == ASCII_QUOTE:
-                                decoder.json_in_string <- false
-                                if decoder.json_string_is_key:
-                                    if decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN or decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_OR_END and decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_REQUIRED:
+                            if byte == ASCII_BACKSLASH:
+                                decoder.json_escaped <- true
+                            else:
+                                if byte == ASCII_QUOTE:
+                                    decoder.json_in_string <- false
+                                    if decoder.json_utf8_continuations_remaining != 0:
                                         decoder_json_fail(decoder)
                                         return
-                                    decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_OBJECT_COLON
-                                else:
-                                    if decoder.json_nesting_count == 0:
-                                        decoder.json_root_state <- JSON_STATE_ROOT_DONE
-                                        decoder.json_closed <- true
+                                    if decoder.json_string_is_key:
+                                        if decoder.json_nesting_count == 0 or decoder.json_nesting[decoder.json_nesting_count - 1] != ASCII_BRACE_OPEN or decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_OR_END and decoder.json_states[decoder.json_nesting_count - 1] != JSON_STATE_OBJECT_KEY_REQUIRED:
+                                            decoder_json_fail(decoder)
+                                            return
+                                        if decoder.json_nesting_count == 1:
+                                            decoder_json_prepare_top_level_key(decoder, decoder.json_key_value_start, decoder.payload_received)
+                                        decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_OBJECT_COLON
                                     else:
-                                        decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
-                            else:
-                                decoder_json_fail(decoder) if byte < ASCII_SPACE
+                                        if decoder.json_nesting_count == 0:
+                                            decoder.json_root_state <- JSON_STATE_ROOT_DONE
+                                            decoder.json_closed <- true
+                                        else:
+                                            decoder.json_states[decoder.json_nesting_count - 1] <- JSON_STATE_COMMA_OR_END
+                                else:
+                                    decoder_json_fail(decoder) if byte < ASCII_SPACE
                 return
             if decoder.json_in_primitive:
                 if is_json_whitespace(byte):
@@ -823,6 +903,7 @@ module DebuggerDAPServer:
                     return
                 decoder.json_in_string <- true if byte == ASCII_QUOTE
                 decoder.json_string_is_key <- false if byte == ASCII_QUOTE
+                decoder.json_utf8_continuations_remaining <- 0 if byte == ASCII_QUOTE
                 if byte != ASCII_QUOTE:
                     if not decoder_json_primitive_start(decoder, byte):
                         decoder_json_fail(decoder)
@@ -846,6 +927,7 @@ module DebuggerDAPServer:
                 if byte == ASCII_QUOTE:
                     decoder.json_in_string <- true
                     decoder.json_string_is_key <- true
+                    decoder.json_key_value_start <- decoder.payload_received + 1
                     return
                 decoder_json_fail(decoder)
                 return
@@ -891,6 +973,7 @@ module DebuggerDAPServer:
             if byte == ASCII_QUOTE:
                 decoder.json_in_string <- true
                 decoder.json_string_is_key <- false
+                decoder.json_utf8_continuations_remaining <- 0
                 return
             if byte == ASCII_COMMA or byte == ASCII_BRACE_CLOSE or byte == ASCII_BRACKET_CLOSE or byte == ASCII_COLON:
                 decoder_json_fail(decoder)
@@ -1078,7 +1161,7 @@ module DebuggerDAPServer:
                 return false if decoder.state == DECODER_FAILED_STATE
                 decoder.payload_received <- decoder.payload_received + 1
                 if decoder.payload_received == decoder.content_length:
-                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.request_sequence < DAP_MIN_REQUEST_SEQUENCE or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or decoder.json_unicode_digits != 0 or decoder.json_in_primitive or not decoder.json_closed or decoder.json_structural_invalid:
+                    if not decoder.command_seen or not decoder.type_seen or not decoder.sequence_seen or decoder.request_sequence < DAP_MIN_REQUEST_SEQUENCE or decoder.in_command or decoder.in_type or decoder.in_sequence or not decoder.json_has_content or decoder.json_first != ASCII_BRACE_OPEN or decoder.json_last != ASCII_BRACE_CLOSE or decoder.json_object_depth != 0 or decoder.json_array_depth != 0 or decoder.json_nesting_count != 0 or decoder.json_in_string or decoder.json_escaped or decoder.json_unicode_digits != 0 or decoder.json_utf8_continuations_remaining != 0 or decoder.json_in_primitive or not decoder.json_closed or decoder.json_structural_invalid:
                         decoder_fail(decoder)
                         return false
                     decoder.last_payload_length <- decoder.content_length
@@ -1109,6 +1192,10 @@ module DebuggerDAPServer:
                     decoder.json_string_is_key <- false
                     decoder.json_escaped <- false
                     decoder.json_unicode_digits <- 0
+                    decoder.json_utf8_continuations_remaining <- 0
+                    decoder.json_utf8_next_byte_min <- 0
+                    decoder.json_utf8_next_byte_max <- 0
+                    decoder.json_key_value_start <- 0
                     decoder.json_in_primitive <- false
                     decoder.json_primitive_kind <- 0
                     decoder.json_primitive_number_state <- 0
@@ -1514,11 +1601,15 @@ module DebuggerDAPServer:
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
             recording: DebuggerIdentity::DebugId = service.controller.engine.recording
             session: DebuggerSession::Session = service.controller.session
-            service <- DebuggerManagedService::service_new(session, loaded.image, recording)
-            if source_root.has_root and not DebuggerManagedEngine::managed_set_source_path_root(service.controller, source_root.root.bytes[0], source_root.root.length):
+            candidate: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, loaded.image, recording)
+            if source_root.has_root and not DebuggerManagedEngine::managed_set_source_path_root(candidate.controller, source_root.root.bytes[0], source_root.root.length):
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, DAP_MEMORY_DETAIL_ARGUMENT)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
-            return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
+            result: DebuggerProtocolDispatcher::DispatchResult = dispatch_managed(candidate, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
+            if not result.accepted:
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: result.failure}
+            service <- candidate
+            return result
 
         def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if command_hash == COMMAND_HASH_INITIALIZE:

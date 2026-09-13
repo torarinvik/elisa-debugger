@@ -161,7 +161,19 @@ module DebuggerManagedEngine:
             before_event: usize = controller.engine.event_count
             DebuggerReplayEngine::replay_engine_step(controller.engine)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
-                managed_sync_position(controller)
+                # A faulting EDIR instruction is still recorded as an event.
+                # Keep the session coordinate and generation-scoped handles in
+                # sync with that committed state change.
+                if controller.engine.event_count > before_event:
+                    controller.session <- DebuggerSession::session_step(controller.session)
+                    if controller.session.last_error != DebuggerSession::SessionError.None:
+                        controller.engine <- original_engine
+                        controller.session <- original_session
+                        return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, DETAIL_ENGINE_FAULT)
+                    managed_sync_position(controller)
+                    managed_refresh_values(controller)
+                else:
+                    managed_sync_position(controller)
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, DETAIL_ENGINE_FAULT)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.event_count == before_event
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, DETAIL_HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable

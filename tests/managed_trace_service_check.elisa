@@ -13,6 +13,8 @@ const module TraceServiceTestIdentity:
     RECORDING_MISMATCH_SESSION_ID: u64 = 80
     IMAGE_MISMATCH_SESSION_ID: u64 = 81
     INTERIOR_SESSION_ID: u64 = 82
+    FRESH_RESTORE_SESSION_ID: u64 = 87
+    FRESH_RESTORE_NO_CHECKPOINTS_SESSION_ID: u64 = 88
 
 const module TraceServiceTestRequest:
     ID: u64 = 1
@@ -38,6 +40,8 @@ const module TraceServiceTestTrace:
     CHUNK_SEQUENCE_OFFSET: u64 = 1
     END_BOUNDARY_OFFSET: u64 = 1
     NO_CHUNKS: usize = 0
+    FIRST_EVENT_INDEX: usize = 0
+    SECOND_EVENT_INDEX: usize = 1
     FIRST_STORAGE_BYTE_INDEX: usize = 0
 
 const module TraceServiceTestFailure:
@@ -67,6 +71,11 @@ const module TraceServiceTestFailure:
     SOURCE_BREAKPOINT: i64 = 23
     CONFIGURATION_LOST: i64 = 24
     GENERATION_NOT_ADVANCED: i64 = 25
+    FRESH_CHECKPOINT_RESTORE_FAILED: i64 = 26
+    FRESH_CHECKPOINT_STATE_MISMATCH: i64 = 27
+    FRESH_CHECKPOINT_CONFIGURATION_LOST: i64 = 28
+    FRESH_CHECKPOINT_REVERSE_FAILED: i64 = 29
+    FRESH_CHECKPOINT_CAPABILITY_IGNORED: i64 = 30
 
 const module TraceServiceTestRestore:
     BUILD_SOURCE_OFFSET: u64 = 1
@@ -91,6 +100,10 @@ const module TraceServiceTestConfiguration:
     SOURCE_ROOT_T: u8 = 116
     SOURCE_ROOT_M: u8 = 109
     SOURCE_ROOT_P: u8 = 112
+    WATCHPOINT_ALLOCATION_ID: u64 = 86
+    WATCHPOINT_GENERATION: u64 = 1
+    WATCHPOINT_OFFSET: u64 = 0
+    NO_WATCHPOINT_ID: u64 = 0
     BOOKMARK_LABEL_ID: u64 = 84
     BOOKMARK_NOTE_ID: u64 = 85
     NO_BRANCH: u64 = 0
@@ -99,9 +112,20 @@ const module TraceServiceTestConfiguration:
     NO_HIT_STRIDE: u64 = 0
     NO_TASK: u64 = 0
 
+const module TraceServiceTestCheckpointIndex:
+    FIRST_CLOCK_SAMPLE: usize = 0
+    FIRST_RANDOM_SAMPLE: usize = 0
+    FIRST_CONSOLE_RECORD: usize = 0
+    FIRST_CONFIGURATION: usize = 0
+    SOURCE_ROOT_FIRST_BYTE: usize = 0
+    SOURCE_ROOT_SECOND_BYTE: usize = 1
+    SOURCE_ROOT_THIRD_BYTE: usize = 2
+    SOURCE_ROOT_FOURTH_BYTE: usize = 3
+
 const module TraceServiceTestDispatch:
     PAUSE_REQUEST_ID: u64 = 2
     STEP_REQUEST_ID: u64 = 3
+    FRESH_CHECKPOINT_REVERSE_REQUEST_ID: u64 = 4
     NO_EXPECTED_GENERATION: u64 = 0
     INITIAL_EVENT: u64 = 0
 
@@ -156,14 +180,14 @@ def manifest_chunk_for_bundle(bundle: DebuggerTraceBundle::TraceBundle&) -> Debu
     chunk.header <- DebuggerTrace::ChunkHeader{schema: bundle.manifest.schema.u32(), kind: DebuggerTrace::ChunkKind.Manifest, sequence: TraceServiceTestTrace::MANIFEST_SEQUENCE, first_event: bundle.manifest.first_event, last_event: bundle.manifest.last_event, payload_length: payload.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(payload)}
     chunk.payload_length <- payload.length
     chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
-    for index in 0..<payload.length:
+    for index in TraceServiceTestAdapter::FIRST_BYTE_INDEX..<payload.length:
         chunk.payload[index] <- payload.bytes[index]
     return chunk
 
 def reopen_bundle(reader: mutable DebuggerTraceReader::TraceReader&, bundle: DebuggerTraceBundle::TraceBundle&) -> bool:
     failure: mutable DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(reader, manifest_chunk_for_bundle(bundle))
     return false if not DebuggerErrors::error_is_ok(failure)
-    for index in 0..<bundle.chunk_count:
+    for index in TraceServiceTestTrace::NO_CHUNKS..<bundle.chunk_count:
         chunk: mutable DebuggerTraceStorage::StoredChunk = bundle.chunks[index]
         chunk.header.sequence <- index.u64() + TraceServiceTestTrace::CHUNK_SEQUENCE_OFFSET
         failure <- DebuggerTraceReader::reader_ingest(reader, chunk)
@@ -199,6 +223,14 @@ def new_trace_service(session_id: u64, build: DebuggerIdentity::BuildIdentity, i
 def service_remains_fresh(service: DebuggerManagedService::Service, expected_recording: u64, expected_hash: u64) -> bool:
     return service.controller.session.state == DebuggerSession::SessionState.Created and service.controller.engine.event_count == TraceServiceTestRestore::NO_EVENTS and service.controller.engine.recording.value == expected_recording and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == expected_hash and service.recorded_event_count == TraceServiceTestRestore::NO_EVENTS and not service.trace_partial
 
+def fresh_checkpoint_capability_is_enforced(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> bool:
+    service: mutable DebuggerManagedService::Service = new_trace_service(TraceServiceTestIdentity::FRESH_RESTORE_NO_CHECKPOINTS_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
+    service.controller.session.capabilities.checkpoints <- false
+    original_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine)
+    restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_restore_fresh_checkpoint(service, checkpoint)
+    return false if restored.accepted or restored.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    return service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, original_hash)
+
 def run_service_to_event(service: mutable DebuggerManagedService::Service&, target_event: u64) -> bool:
     launch_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: TraceServiceTestRequest::ID, has_id: true, expected_generation: TraceServiceTestDispatch::NO_EXPECTED_GENERATION, target_event: TraceServiceTestDispatch::INITIAL_EVENT, valid: true}
     launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, launch_request)
@@ -212,20 +244,88 @@ def run_service_to_event(service: mutable DebuggerManagedService::Service&, targ
         return false if not stepped.accepted
     return service.controller.engine.event_count.u64() == target_event
 
-def prepare_existing_service_for_restore(service: mutable DebuggerManagedService::Service&) -> bool:
-    return false if not run_service_to_event(service, TraceServiceTestConfiguration::EXISTING_EVENT)
+def seed_restore_configuration(service: mutable DebuggerManagedService::Service&) -> bool:
     source_root: mutable u8[TraceServiceTestConfiguration::SOURCE_ROOT_LENGTH] = [TraceServiceTestConfiguration::SOURCE_ROOT_SLASH, TraceServiceTestConfiguration::SOURCE_ROOT_T, TraceServiceTestConfiguration::SOURCE_ROOT_M, TraceServiceTestConfiguration::SOURCE_ROOT_P]
-    return false if not DebuggerManagedEngine::managed_set_source_path_root(service.controller, source_root[0], TraceServiceTestConfiguration::SOURCE_ROOT_LENGTH)
+    return false if not DebuggerManagedEngine::managed_set_source_path_root(service.controller, source_root[TraceServiceTestCheckpointIndex::SOURCE_ROOT_FIRST_BYTE], TraceServiceTestConfiguration::SOURCE_ROOT_LENGTH)
     source: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(TraceServiceTestConfiguration::SOURCE_FILE_ID), line: TraceServiceTestConfiguration::SOURCE_LINE, column: TraceServiceTestConfiguration::SOURCE_COLUMN, discriminator: TraceServiceTestConfiguration::SOURCE_DISCRIMINATOR}
     breakpoint: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{id: DebuggerIdentity::debug_id(TraceServiceTestConfiguration::NO_BRANCH), branch: DebuggerIdentity::debug_id(TraceServiceTestConfiguration::NO_BRANCH), kind: DebuggerBreakpoints::BreakpointKind.Source, status: DebuggerBreakpoints::BreakpointStatus.Pending, source: source, condition: DebuggerIdentity::debug_id(TraceServiceTestConfiguration::NO_BRANCH), hit_target: TraceServiceTestConfiguration::NO_HIT_TARGET, hit_count: TraceServiceTestConfiguration::NO_HIT_COUNT, hit_stride: TraceServiceTestConfiguration::NO_HIT_STRIDE, task: DebuggerIdentity::debug_id(TraceServiceTestConfiguration::NO_TASK), logpoint: false, temporary: false}
     breakpoints: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_new()
     breakpoints <- DebuggerBreakpointManager::breakpoint_table_add(breakpoints, breakpoint)
     return false if not DebuggerBreakpointManager::breakpoint_table_is_valid(breakpoints) or breakpoints.count != TraceServiceTestConfiguration::ONE_ENTRY
     service.controller.state.breakpoints <- breakpoints
+    allocation: DebuggerIdentity::AllocationIdentity = DebuggerIdentity::AllocationIdentity{allocation: DebuggerIdentity::debug_id(TraceServiceTestConfiguration::WATCHPOINT_ALLOCATION_ID), generation: TraceServiceTestConfiguration::WATCHPOINT_GENERATION, offset: TraceServiceTestConfiguration::WATCHPOINT_OFFSET}
+    watchpoint_id: DebuggerIdentity::DebugId = DebuggerWatchpoints::watchpoints_add(service.controller.state.watchpoints, allocation, DebuggerWatchpoints::AccessKind.Write, TraceServiceTestConfiguration::WATCHPOINT_GENERATION)
+    return false if watchpoint_id.value == TraceServiceTestConfiguration::NO_WATCHPOINT_ID or not DebuggerWatchpoints::watchpoints_is_valid(service.controller.state.watchpoints)
     bookmark: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_add_bookmark(service.timeline, DebuggerIdentity::debug_id(TraceServiceTestConfiguration::BOOKMARK_LABEL_ID), DebuggerIdentity::debug_id(TraceServiceTestConfiguration::BOOKMARK_NOTE_ID), false)
     return false if not bookmark.accepted
     service.timeline <- bookmark.timeline
     return true
+
+def prepare_existing_service_for_restore(service: mutable DebuggerManagedService::Service&) -> bool:
+    return false if not run_service_to_event(service, TraceServiceTestConfiguration::EXISTING_EVENT)
+    return seed_restore_configuration(service)
+
+def fresh_checkpoint_machine_matches(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, service: DebuggerManagedService::Service&) -> bool:
+    return false if service.controller.session.state != DebuggerSession::SessionState.Stopped
+    return false if service.controller.engine.event_count.u64() != checkpoint.event
+    return false if DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) != checkpoint.state_hash
+    return false if service.controller.engine.machine.program_counter != checkpoint.machine.program_counter
+    return false if service.controller.engine.machine.accumulator != checkpoint.machine.accumulator or service.controller.engine.machine.steps != checkpoint.machine.steps
+    return false if service.controller.engine.machine.halted != checkpoint.machine.halted or service.controller.engine.machine.faulted != checkpoint.machine.faulted
+    return false if service.controller.engine.machine.result != checkpoint.machine.result
+    return DebuggerValueStore::value_store_is_valid(service.controller.state.values)
+
+def fresh_checkpoint_side_state_matches(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, service: mutable DebuggerManagedService::Service&) -> bool:
+    return false if service.controller.state.tasks.task_count != checkpoint.tasks.task_count or service.controller.state.tasks.next_id != checkpoint.tasks.next_id
+    return false if service.controller.state.tasks.status != checkpoint.tasks.status or service.controller.state.tasks.current.value != checkpoint.tasks.current.value
+    return false if service.controller.state.tasks.wait_count != checkpoint.tasks.wait_count or service.controller.state.tasks.scheduler.count != checkpoint.tasks.scheduler_count
+    return false if service.controller.state.tasks.scheduler.cursor != checkpoint.tasks.scheduler_cursor
+    return false if service.controller.state.tasks.scheduler.replaying != checkpoint.tasks.scheduler_replaying or service.controller.state.tasks.scheduler.diverged != checkpoint.tasks.scheduler_diverged or service.controller.state.tasks.scheduler.overflowed != checkpoint.tasks.scheduler_overflowed
+    return false if service.controller.state.effects.count != checkpoint.effects.count or service.controller.state.effects.mode != checkpoint.effects.mode
+    return false if service.controller.state.resources.count != checkpoint.resources.count or service.controller.state.resources.mode != checkpoint.resources.mode
+    return false if service.controller.state.resources.next_handle != checkpoint.resources.next_handle
+    return false if service.controller.state.adapters.clock.count != checkpoint.adapters.clock.count or service.controller.state.adapters.random.count != checkpoint.adapters.random.count
+    return false if service.controller.state.adapters.console.count != checkpoint.adapters.console.count
+    return false if service.controller.state.adapters.clock.count < TraceServiceTestConfiguration::ONE_ENTRY or service.controller.state.adapters.random.count < TraceServiceTestConfiguration::ONE_ENTRY
+    return false if service.controller.state.adapters.clock.samples[TraceServiceTestCheckpointIndex::FIRST_CLOCK_SAMPLE].value != checkpoint.adapters.clock.samples[TraceServiceTestCheckpointIndex::FIRST_CLOCK_SAMPLE].value
+    return false if service.controller.state.adapters.random.samples[TraceServiceTestCheckpointIndex::FIRST_RANDOM_SAMPLE].value != checkpoint.adapters.random.samples[TraceServiceTestCheckpointIndex::FIRST_RANDOM_SAMPLE].value
+    return false if service.controller.state.adapters.console.count < TraceServiceTestRestore::CONSOLE_RECORD_COUNT
+    return false if service.controller.state.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].length != checkpoint.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].length
+    return false if checkpoint.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].length < TraceServiceTestAdapter::INPUT_TRANSFERRED_LENGTH
+    return false if service.controller.state.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].bytes[TraceServiceTestAdapter::FIRST_BYTE_INDEX] != checkpoint.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].bytes[TraceServiceTestAdapter::FIRST_BYTE_INDEX]
+    return false if service.controller.state.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].bytes[TraceServiceTestAdapter::SECOND_BYTE_INDEX] != checkpoint.adapters.console.records[TraceServiceTestCheckpointIndex::FIRST_CONSOLE_RECORD].bytes[TraceServiceTestAdapter::SECOND_BYTE_INDEX]
+    return true
+
+def fresh_checkpoint_configuration_is_preserved(service: DebuggerManagedService::Service&, checkpoint_event: u64) -> bool:
+    return false if service.controller.state.breakpoints.count != TraceServiceTestConfiguration::ONE_ENTRY
+    return false if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints)
+    breakpoint: DebuggerBreakpoints::Breakpoint = service.controller.state.breakpoints.points[TraceServiceTestCheckpointIndex::FIRST_CONFIGURATION]
+    return false if breakpoint.source.file.value != TraceServiceTestConfiguration::SOURCE_FILE_ID or breakpoint.source.line != TraceServiceTestConfiguration::SOURCE_LINE
+    return false if service.controller.state.watchpoints.count != TraceServiceTestConfiguration::ONE_ENTRY or not DebuggerWatchpoints::watchpoints_is_valid(service.controller.state.watchpoints)
+    watchpoint: DebuggerWatchpoints::DataBreakpoint = service.controller.state.watchpoints.points[TraceServiceTestCheckpointIndex::FIRST_CONFIGURATION]
+    return false if watchpoint.allocation.allocation.value != TraceServiceTestConfiguration::WATCHPOINT_ALLOCATION_ID
+    return false if watchpoint.allocation.generation != TraceServiceTestConfiguration::WATCHPOINT_GENERATION or watchpoint.allocation.offset != TraceServiceTestConfiguration::WATCHPOINT_OFFSET
+    return false if service.controller.source_path_root_length != TraceServiceTestConfiguration::SOURCE_ROOT_LENGTH
+    return false if service.controller.source_path_root[TraceServiceTestCheckpointIndex::SOURCE_ROOT_FIRST_BYTE] != TraceServiceTestConfiguration::SOURCE_ROOT_SLASH
+    return false if service.controller.source_path_root[TraceServiceTestCheckpointIndex::SOURCE_ROOT_SECOND_BYTE] != TraceServiceTestConfiguration::SOURCE_ROOT_T
+    return false if service.controller.source_path_root[TraceServiceTestCheckpointIndex::SOURCE_ROOT_THIRD_BYTE] != TraceServiceTestConfiguration::SOURCE_ROOT_M
+    return false if service.controller.source_path_root[TraceServiceTestCheckpointIndex::SOURCE_ROOT_FOURTH_BYTE] != TraceServiceTestConfiguration::SOURCE_ROOT_P
+    return false if service.timeline.bookmark_count != TraceServiceTestConfiguration::ONE_ENTRY
+    bookmark: DebuggerTimeline::Bookmark = service.timeline.bookmarks[TraceServiceTestCheckpointIndex::FIRST_CONFIGURATION]
+    return false if bookmark.label.value != TraceServiceTestConfiguration::BOOKMARK_LABEL_ID or bookmark.note.value != TraceServiceTestConfiguration::BOOKMARK_NOTE_ID
+    return false if bookmark.position.recording.value != service.controller.engine.recording.value or bookmark.position.branch.value != TraceServiceTestConfiguration::NO_BRANCH
+    return false if bookmark.position.event != TraceServiceTestRestore::INITIAL_EVENT or bookmark.pinned
+    return false if not DebuggerTimeline::history_bounds_is_valid(service.timeline.bounds)
+    return service.recorded_event_count == checkpoint_event.usize()
+
+def fresh_checkpoint_reverse_step_has_prefix(service: mutable DebuggerManagedService::Service&, checkpoint_event: u64) -> bool:
+    request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.ReverseStep, id: TraceServiceTestDispatch::FRESH_CHECKPOINT_REVERSE_REQUEST_ID, has_id: true, expected_generation: TraceServiceTestDispatch::NO_EXPECTED_GENERATION, target_event: TraceServiceTestDispatch::INITIAL_EVENT, valid: true}
+    reversed: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
+    return false if not reversed.accepted
+    expected_event: u64 = checkpoint_event - TraceServiceTestTrace::PREVIOUS_EVENT_OFFSET.u64()
+    return false if service.controller.engine.event_count.u64() != expected_event
+    historical: DebuggerCheckpoint::MachineSnapshot = service.controller.engine.history[service.controller.engine.event_count]
+    return DebuggerCheckpoint::snapshot_matches_machine(historical, service.controller.engine.machine)
 
 def build_interior_checkpoint_bundle(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, bundle: mutable DebuggerTraceBundle::TraceBundle&) -> bool:
     interior_service: mutable DebuggerManagedService::Service = new_trace_service(TraceServiceTestIdentity::INTERIOR_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
@@ -237,7 +337,7 @@ def build_interior_checkpoint_bundle(build: DebuggerIdentity::BuildIdentity, ima
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build, DebuggerIdentity::debug_id(TraceServiceTestIdentity::RECORDING_ID))
     failure: mutable DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestRestore::NO_EVENTS])
     return false if not DebuggerErrors::error_is_ok(failure)
-    failure <- DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestRestore::NO_EVENTS + 1])
+    failure <- DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestTrace::SECOND_EVENT_INDEX])
     return false if not DebuggerErrors::error_is_ok(failure)
     failure <- DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
     return false if not DebuggerErrors::error_is_ok(failure)
@@ -284,14 +384,23 @@ def interior_checkpoint_restore_is_exact(build: DebuggerIdentity::BuildIdentity,
     service: mutable DebuggerManagedService::Service = new_trace_service(TraceServiceTestIdentity::RESTORE_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
     return TraceServiceTestFailure::SOURCE_BREAKPOINT if not prepare_existing_service_for_restore(service)
     previous_generation: u64 = service.controller.session.stop_generation
-    restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, TraceServiceTestTrace::EVENT_COUNT.u64())
+    restored: mutable DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, TraceServiceTestTrace::EVENT_COUNT.u64())
     return TraceServiceTestFailure::COLD_RESTORE if not restored.accepted
     return TraceServiceTestFailure::COLD_RESTORE_STATE if service.controller.session.state != DebuggerSession::SessionState.Stopped or service.controller.engine.event_count != TraceServiceTestTrace::EVENT_COUNT or service.controller.engine.machine.result != TraceServiceTestProgram::RESULT or service.recorded_event_count != TraceServiceTestTrace::EVENT_COUNT or service.controller.state.adapters.clock.count != TraceServiceTestRestore::CLOCK_SAMPLE_COUNT or service.controller.state.adapters.random.count != TraceServiceTestRestore::RANDOM_SAMPLE_COUNT or service.controller.state.adapters.console.count != TraceServiceTestRestore::CONSOLE_RECORD_COUNT
-    return TraceServiceTestFailure::CONFIGURATION_LOST if service.controller.state.breakpoints.count != TraceServiceTestConfiguration::ONE_ENTRY or not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints) or service.controller.source_path_root_length != TraceServiceTestConfiguration::SOURCE_ROOT_LENGTH or service.controller.source_path_root[0] != TraceServiceTestConfiguration::SOURCE_ROOT_SLASH or service.controller.source_path_root[1] != TraceServiceTestConfiguration::SOURCE_ROOT_T or service.controller.source_path_root[2] != TraceServiceTestConfiguration::SOURCE_ROOT_M or service.controller.source_path_root[3] != TraceServiceTestConfiguration::SOURCE_ROOT_P or service.timeline.bookmark_count != TraceServiceTestConfiguration::ONE_ENTRY or service.timeline.bookmarks[0].label.value != TraceServiceTestConfiguration::BOOKMARK_LABEL_ID
+    return TraceServiceTestFailure::CONFIGURATION_LOST if not fresh_checkpoint_configuration_is_preserved(service, TraceServiceTestTrace::EVENT_COUNT.u64())
     return TraceServiceTestFailure::GENERATION_NOT_ADVANCED if service.controller.session.stop_generation <= previous_generation
     exported: DebuggerTraceExport::ExportResult = DebuggerManagedTraceService::service_trace_export(service)
     storage_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[TraceServiceTestTrace::FIRST_STORAGE_BYTE_INDEX], exported.bytes.length)
     return TraceServiceTestFailure::COLD_RESTORE_EXPORT if not DebuggerErrors::error_is_ok(exported.failure) or storage_report.state != DebuggerTraceVerify::VerificationState.Exact or not storage_report.replayable
+
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_CAPABILITY_IGNORED if not fresh_checkpoint_capability_is_enforced(build, image, checkpoint.checkpoint)
+    service <- new_trace_service(TraceServiceTestIdentity::FRESH_RESTORE_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_CONFIGURATION_LOST if not seed_restore_configuration(service)
+    restored <- DebuggerManagedTraceService::service_restore_fresh_checkpoint(service, checkpoint.checkpoint)
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_RESTORE_FAILED if not restored.accepted
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_STATE_MISMATCH if not fresh_checkpoint_machine_matches(checkpoint.checkpoint, service) or not fresh_checkpoint_side_state_matches(checkpoint.checkpoint, service)
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_CONFIGURATION_LOST if not fresh_checkpoint_configuration_is_preserved(service, checkpoint.checkpoint.event)
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_REVERSE_FAILED if not fresh_checkpoint_reverse_step_has_prefix(service, checkpoint.checkpoint.event)
     return TraceServiceTestRestore::SUCCESS
 
 
@@ -325,7 +434,7 @@ def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image
     storage_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[TraceServiceTestTrace::FIRST_STORAGE_BYTE_INDEX], exported.bytes.length)
     return TraceServiceTestFailure::STORAGE_VERIFY if storage_report.state != DebuggerTraceVerify::VerificationState.Exact or not storage_report.replayable or storage_report.verified_event != TraceServiceTestTrace::LAST_EVENT
     return TraceServiceTestFailure::RECORDING if service.trace_partial or service.recorded_event_count != TraceServiceTestTrace::EVENT_COUNT
-    for index in 0..<TraceServiceTestTrace::EVENT_COUNT:
+    for index in TraceServiceTestTrace::FIRST_EVENT_INDEX..<TraceServiceTestTrace::EVENT_COUNT:
         return TraceServiceTestFailure::RECORDING if service.recorded_events[index].ordinal != index.u64() or service.recorded_events[index].position.recording.value != TraceServiceTestIdentity::RECORDING_ID
     reverse_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.ReverseStep, id: TraceServiceTestRequest::ID, has_id: true, expected_generation: TraceServiceTestRequest::INITIAL_GENERATION, target_event: TraceServiceTestRequest::INITIAL_EVENT, valid: true}
     reversed: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, reverse_request)

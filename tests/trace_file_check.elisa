@@ -20,6 +20,7 @@ const module Test:
     EVENT_SCHEMA: u32 = 1
     FIRST_EVENT: u64 = 0
     EVENT_HASH: u64 = 406
+    ALTERNATE_EVENT_HASH: u64 = 407
     PATH_BUFFER_CAPACITY: usize = 64
     EXPECTED_MAX_PATH_BYTES: usize = 1024
     FIRST_BYTE_INDEX: usize = 0
@@ -54,6 +55,11 @@ const module TestResult:
     TRUNCATED_READ: i64 = 11
     PREFLIGHT: i64 = 12
     PRESERVED_FILE: i64 = 13
+    ALTERNATE_TRACE: i64 = 14
+    PARTIAL_WRITE_INJECTION: i64 = 15
+    PARTIAL_WRITE_PRESERVATION: i64 = 16
+    COMMIT_INJECTION: i64 = 17
+    COMMIT_PRESERVATION: i64 = 18
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{
@@ -138,4 +144,31 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     return TestResult::PRESERVED_FILE if not preserved.accepted or preserved.bytes_read != exported.bytes.length or not preserved.scan.footer_verified
     for index in Test::FIRST_BYTE_INDEX..<preserved.bytes_read:
         return TestResult::PRESERVED_FILE if read_buffer[index] != exported.bytes.bytes[index]
+
+    alternate_recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(Test::RECORDING_ID))
+    alternate_event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::FIRST_EVENT, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::ALTERNATE_EVENT_HASH)
+    return TestResult::ALTERNATE_TRACE if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(alternate_recorder, alternate_event))
+    alternate_bundle: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(alternate_recorder)
+    return TestResult::ALTERNATE_TRACE if not alternate_bundle.accepted
+    alternate_export: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(alternate_bundle.bundle)
+    return TestResult::ALTERNATE_TRACE if not DebuggerErrors::error_is_ok(alternate_export.failure) or not DebuggerTraceBinary::writer_is_valid(alternate_export.bytes)
+    return TestResult::ALTERNATE_TRACE if alternate_export.bytes.length != exported.bytes.length
+    alternate_differs: mutable bool = false
+    for index in Test::FIRST_BYTE_INDEX..<exported.bytes.length:
+        alternate_differs <- true if alternate_export.bytes.bytes[index] != exported.bytes.bytes[index]
+    return TestResult::ALTERNATE_TRACE if not alternate_differs
+
+    partial_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.AfterPartialWrite) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARTIAL_WRITE_INJECTION if partial_failure.accepted or partial_failure.status != DebuggerTraceFile::FileStatus.WriteFailure
+    after_partial_failure: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARTIAL_WRITE_PRESERVATION if not after_partial_failure.accepted or after_partial_failure.bytes_read != exported.bytes.length
+    for index in Test::FIRST_BYTE_INDEX..<after_partial_failure.bytes_read:
+        return TestResult::PARTIAL_WRITE_PRESERVATION if read_buffer[index] != exported.bytes.bytes[index]
+
+    commit_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.BeforeCommit) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::COMMIT_INJECTION if commit_failure.accepted or commit_failure.status != DebuggerTraceFile::FileStatus.CommitFailure
+    after_commit_failure: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::COMMIT_PRESERVATION if not after_commit_failure.accepted or after_commit_failure.bytes_read != exported.bytes.length
+    for index in Test::FIRST_BYTE_INDEX..<after_commit_failure.bytes_read:
+        return TestResult::COMMIT_PRESERVATION if read_buffer[index] != exported.bytes.bytes[index]
     return TestResult::OK

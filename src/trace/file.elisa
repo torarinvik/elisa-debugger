@@ -1,0 +1,184 @@
+# Bounded local trace-file I/O. The file remains canonical bytes; existing
+# storage codecs validate chunks and footers before a write is accepted.
+
+extern open(path: cstr, flags: int) -> int can[Blocking.IO]
+extern creat(path: cstr, mode: int) -> int can[Blocking.IO]
+extern close(fd: int) -> int can[Blocking.IO]
+extern read(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
+
+include "./storage.elisa"
+include "../core/errors.elisa"
+
+const module DebuggerTraceFileLimits:
+    PATH_CAPACITY_BYTES: usize = 1024
+    MAX_FILE_BYTES: usize = DebuggerTraceStorageLimits::MAX_FILE_BYTES
+
+module DebuggerTraceFile:
+    private:
+        const module Path:
+            EMPTY_LENGTH: usize = 0
+            TERMINATOR_BYTES: usize = 1
+            FIRST_BYTE_INDEX: usize = 0
+            NUL: u8 = 0
+
+        const module FileSystem:
+            READ_ONLY: int = 0
+            OWNER_READ_PERMISSION: int = 256
+            OWNER_WRITE_PERMISSION: int = 128
+            OWNER_READ_WRITE_MODE: int = FileSystem::OWNER_READ_PERMISSION + FileSystem::OWNER_WRITE_PERMISSION
+            SYSCALL_FAILURE_RESULT: int = -1
+
+        const module Buffer:
+            EMPTY_CAPACITY: usize = 0
+            PROBE_BYTES: usize = 1
+            PROBE_INDEX: usize = 0
+
+        const module Loop:
+            EOF: isize = 0
+            FIRST_BYTE_INDEX: usize = 0
+
+        const module Detail:
+            INVALID_PATH: u32 = 1
+            INVALID_CAPACITY: u32 = 2
+            OPEN: u32 = 3
+            READ: u32 = 4
+            WRITE: u32 = 5
+            CLOSE: u32 = 6
+            TOO_LARGE: u32 = 7
+            INVALID_TRACE: u32 = 8
+            TRUNCATED_TRACE: u32 = 9
+
+        const module ErrorPolicy:
+            RETRYABLE_IO: bool = true
+            NON_RETRYABLE: bool = false
+
+        def file_error(code: DebuggerErrors::ErrorCode, retryable: bool, detail: u32) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(code, retryable, detail)
+
+        def invalid_read(status: FileStatus, detail: u32, code: DebuggerErrors::ErrorCode, retryable: bool) -> ReadResult:
+            return ReadResult{accepted: false, bytes_read: Buffer::EMPTY_CAPACITY, status: status, scan: zeroed, failure: file_error(code, retryable, detail)}
+
+        def invalid_read_with_count(status: FileStatus, detail: u32, code: DebuggerErrors::ErrorCode, retryable: bool, bytes_read: usize) -> ReadResult:
+            return ReadResult{accepted: false, bytes_read: bytes_read, status: status, scan: zeroed, failure: file_error(code, retryable, detail)}
+
+        def invalid_write(status: FileStatus, detail: u32, code: DebuggerErrors::ErrorCode, retryable: bool, scan: DebuggerTraceStorage::StorageScan) -> WriteResult:
+            return WriteResult{accepted: false, status: status, scan: scan, failure: file_error(code, retryable, detail)}
+
+        def path_is_valid(path: u8&, path_length: usize) -> bool:
+            return false if path_length == Path::EMPTY_LENGTH or path_length > DebuggerTraceFileLimits::PATH_CAPACITY_BYTES
+            for index in Path::FIRST_BYTE_INDEX..<path_length:
+                return false if path[index] == Path::NUL
+            return true
+
+        def path_terminate(path: u8&, path_length: usize, output: mutable u8&) -> void:
+            for index in Path::FIRST_BYTE_INDEX..<path_length:
+                output[index] <- path[index]
+            output[path_length] <- Path::NUL
+
+        def trace_file_scan_status(scan: DebuggerTraceStorage::StorageScan) -> FileStatus:
+            return FileStatus.TooLarge if scan.status == DebuggerTraceStorage::StorageStatus.Oversized
+            return FileStatus.InvalidTrace if scan.status == DebuggerTraceStorage::StorageStatus.Invalid or scan.status == DebuggerTraceStorage::StorageStatus.IoFailure
+            return FileStatus.TruncatedTrace if scan.status == DebuggerTraceStorage::StorageStatus.Truncated or not scan.footer_verified
+            return FileStatus.Ready
+
+        def trace_file_scan_failure(status: FileStatus) -> DebuggerErrors::DebuggerError:
+            return file_error(DebuggerErrors::ErrorCode.ResourceLimit, ErrorPolicy::NON_RETRYABLE, Detail::TOO_LARGE) if status == FileStatus.TooLarge
+            return file_error(DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO, Detail::TRUNCATED_TRACE) if status == FileStatus.TruncatedTrace
+            return file_error(DebuggerErrors::ErrorCode.Corrupt, ErrorPolicy::NON_RETRYABLE, Detail::INVALID_TRACE)
+
+    public:
+        enum FileStatus:
+            Ready
+            InvalidPath
+            InvalidCapacity
+            OpenFailure
+            ReadFailure
+            WriteFailure
+            CloseFailure
+            TooLarge
+            InvalidTrace
+            TruncatedTrace
+
+        struct ReadResult:
+            accepted: mutable bool
+            bytes_read: mutable usize
+            status: mutable FileStatus
+            scan: mutable DebuggerTraceStorage::StorageScan
+            failure: mutable DebuggerErrors::DebuggerError
+
+        struct WriteResult:
+            accepted: mutable bool
+            status: mutable FileStatus
+            scan: mutable DebuggerTraceStorage::StorageScan
+            failure: mutable DebuggerErrors::DebuggerError
+
+        # Read into caller-owned bounded storage. A structurally valid but
+        # footerless/torn file returns its verified StorageScan prefix and an
+        # explicit TruncatedTrace status; callers must not treat it as exact.
+        def trace_file_read(path: u8&, path_length: usize, output: mutable u8&, output_capacity: usize) -> ReadResult can[Blocking.IO, Unsafe.PointerCast]:
+            return invalid_read(FileStatus.InvalidPath, Detail::INVALID_PATH, DebuggerErrors::ErrorCode.InvalidArgument, ErrorPolicy::NON_RETRYABLE) if not path_is_valid(path, path_length)
+            return invalid_read(FileStatus.InvalidCapacity, Detail::INVALID_CAPACITY, DebuggerErrors::ErrorCode.InvalidArgument, ErrorPolicy::NON_RETRYABLE) if output_capacity == Buffer::EMPTY_CAPACITY or output_capacity > DebuggerTraceFileLimits::MAX_FILE_BYTES
+
+            terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
+            path_terminate(path, path_length, terminated_path[Loop::FIRST_BYTE_INDEX])
+            descriptor: int = open((&terminated_path[Loop::FIRST_BYTE_INDEX]).cast[cstr], FileSystem::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
+            return invalid_read(FileStatus.OpenFailure, Detail::OPEN, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO) if descriptor == FileSystem::SYSCALL_FAILURE_RESULT
+
+            bytes_read: mutable usize = Buffer::EMPTY_CAPACITY
+            read_failed: mutable bool = false
+            too_large: mutable bool = false
+            while bytes_read < output_capacity:
+                requested: usize = output_capacity - bytes_read
+                received: isize = read(descriptor, (&output[bytes_read]).cast[void&], requested) can Blocking.IO, Unsafe.PointerCast
+                if received < Loop::EOF:
+                    read_failed <- true
+                    break
+                break if received == Loop::EOF
+                received_bytes: usize = received.usize()
+                if received_bytes > requested:
+                    read_failed <- true
+                    break
+                bytes_read <- bytes_read + received_bytes
+
+            if not read_failed and bytes_read == output_capacity:
+                probe: mutable u8[Buffer::PROBE_BYTES] = zeroed
+                probe_count: isize = read(descriptor, (&probe[Buffer::PROBE_INDEX]).cast[void&], Buffer::PROBE_BYTES) can Blocking.IO, Unsafe.PointerCast
+                read_failed <- true if probe_count < Loop::EOF
+                too_large <- true if probe_count > Loop::EOF
+
+            close_result: int = close(descriptor) can Blocking.IO
+            return invalid_read_with_count(FileStatus.ReadFailure, Detail::READ, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, bytes_read) if read_failed
+            return invalid_read_with_count(FileStatus.CloseFailure, Detail::CLOSE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, bytes_read) if close_result == FileSystem::SYSCALL_FAILURE_RESULT
+            return invalid_read_with_count(FileStatus.TooLarge, Detail::TOO_LARGE, DebuggerErrors::ErrorCode.ResourceLimit, ErrorPolicy::NON_RETRYABLE, bytes_read) if too_large
+
+            scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(output[Loop::FIRST_BYTE_INDEX], bytes_read)
+            status: FileStatus = trace_file_scan_status(scan)
+            return ReadResult{accepted: status == FileStatus.Ready, bytes_read: bytes_read, status: status, scan: scan, failure: DebuggerErrors::no_error()} if status == FileStatus.Ready
+            return ReadResult{accepted: false, bytes_read: bytes_read, status: status, scan: scan, failure: trace_file_scan_failure(status)}
+
+        # Only a complete trace with a verified footer is written. Validation
+        # occurs before creat() so invalid input cannot truncate an existing
+        # artifact. A failed write may leave a prefix; a subsequent read marks
+        # it truncated and exposes the verified boundary.
+        def trace_file_write(path: u8&, path_length: usize, bytes: u8&, length: usize) -> WriteResult can[Blocking.IO, Unsafe.PointerCast]:
+            empty_scan: DebuggerTraceStorage::StorageScan = zeroed
+            return invalid_write(FileStatus.InvalidPath, Detail::INVALID_PATH, DebuggerErrors::ErrorCode.InvalidArgument, ErrorPolicy::NON_RETRYABLE, empty_scan) if not path_is_valid(path, path_length)
+            return invalid_write(FileStatus.InvalidCapacity, Detail::INVALID_CAPACITY, DebuggerErrors::ErrorCode.InvalidArgument, ErrorPolicy::NON_RETRYABLE, empty_scan) if length == Buffer::EMPTY_CAPACITY
+            return invalid_write(FileStatus.TooLarge, Detail::TOO_LARGE, DebuggerErrors::ErrorCode.ResourceLimit, ErrorPolicy::NON_RETRYABLE, empty_scan) if length > DebuggerTraceFileLimits::MAX_FILE_BYTES
+
+            scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(bytes, length)
+            scan_status: FileStatus = trace_file_scan_status(scan)
+            return invalid_write(scan_status, Detail::TOO_LARGE, DebuggerErrors::ErrorCode.ResourceLimit, ErrorPolicy::NON_RETRYABLE, scan) if scan_status == FileStatus.TooLarge
+            return invalid_write(scan_status, Detail::TRUNCATED_TRACE, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO, scan) if scan_status == FileStatus.TruncatedTrace
+            return invalid_write(FileStatus.InvalidTrace, Detail::INVALID_TRACE, DebuggerErrors::ErrorCode.Corrupt, ErrorPolicy::NON_RETRYABLE, scan) if scan_status != FileStatus.Ready
+
+            terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
+            path_terminate(path, path_length, terminated_path[Loop::FIRST_BYTE_INDEX])
+            descriptor: int = creat((&terminated_path[Loop::FIRST_BYTE_INDEX]).cast[cstr], FileSystem::OWNER_READ_WRITE_MODE) can Blocking.IO, Unsafe.PointerCast
+            return invalid_write(FileStatus.OpenFailure, Detail::OPEN, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO, scan) if descriptor == FileSystem::SYSCALL_FAILURE_RESULT
+
+            write_status: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_all(descriptor, bytes, length) can Blocking.IO
+            close_result: int = close(descriptor) can Blocking.IO
+            return invalid_write(FileStatus.WriteFailure, Detail::WRITE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan) if write_status != DebuggerTraceStorage::StorageStatus.Ready
+            return invalid_write(FileStatus.CloseFailure, Detail::CLOSE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan) if close_result == FileSystem::SYSCALL_FAILURE_RESULT
+            return WriteResult{accepted: true, status: FileStatus.Ready, scan: scan, failure: DebuggerErrors::no_error()}

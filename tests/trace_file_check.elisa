@@ -1,0 +1,141 @@
+# Bounded on-disk trace round trip and torn-footer recovery classification.
+
+include "../src/trace/file.elisa"
+include "../src/trace/binary.elisa"
+include "../src/trace/recorder.elisa"
+include "../src/trace/pipeline.elisa"
+include "../src/trace/export.elisa"
+
+extern creat(path: cstr, mode: int) -> int can[Blocking.IO]
+extern close(fd: int) -> int can[Blocking.IO]
+extern write(fd: int, buffer: void&, count: usize) -> isize can[Blocking.IO]
+
+const module Test:
+    BUILD_COMPILER_ID: u64 = 401
+    BUILD_RUNTIME_ID: u64 = 402
+    BUILD_SOURCE_ID: u64 = 403
+    BUILD_TARGET_ID: u64 = 404
+    BUILD_METADATA_VERSION: u32 = 1
+    RECORDING_ID: u64 = 405
+    EVENT_SCHEMA: u32 = 1
+    FIRST_EVENT: u64 = 0
+    EVENT_HASH: u64 = 406
+    PATH_BUFFER_CAPACITY: usize = 64
+    EXPECTED_MAX_PATH_BYTES: usize = 1024
+    FIRST_BYTE_INDEX: usize = 0
+    BYTE_INCREMENT: usize = 1
+    PATH_NUL: u8 = 0
+    FILE_MODE_OWNER_READ_WRITE: int = 384
+    FILE_OPEN_FAILURE: int = -1
+    FILE_CLOSE_FAILURE: int = -1
+    WRITE_FAILURE: isize = -1
+    WRITE_NO_PROGRESS: isize = 0
+    FIRST_WRITE_OFFSET: usize = 0
+    EVENT_COUNT: usize = 1
+    MINIMUM_TRACE_BYTES: usize = 1
+
+const module TestPaths:
+    VALID_TRACE: cstr = "build/trace-file-roundtrip.eltr"
+    TRUNCATED_TRACE: cstr = "build/trace-file-truncated.eltr"
+    MISSING_TRACE: cstr = "/__elisa_debugger_trace_file_missing__/trace.eltr"
+
+const module TestResult:
+    OK: i64 = 0
+    LIMITS: i64 = 1
+    RECORD: i64 = 2
+    BUNDLE: i64 = 3
+    EXPORT: i64 = 4
+    WRITE: i64 = 5
+    READ: i64 = 6
+    OPEN_FAILURE: i64 = 7
+    ROUND_TRIP_BYTES: i64 = 8
+    SMALL_BUFFER: i64 = 9
+    TRUNCATED_SETUP: i64 = 10
+    TRUNCATED_READ: i64 = 11
+    PREFLIGHT: i64 = 12
+    PRESERVED_FILE: i64 = 13
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(Test::BUILD_COMPILER_ID),
+        runtime: DebuggerIdentity::debug_id(Test::BUILD_RUNTIME_ID),
+        source: DebuggerIdentity::debug_id(Test::BUILD_SOURCE_ID),
+        target: DebuggerIdentity::debug_id(Test::BUILD_TARGET_ID),
+        metadata_version: Test::BUILD_METADATA_VERSION
+    }
+
+def copy_path(source: cstr, output: mutable u8&) -> usize:
+    length: mutable usize = Test::FIRST_BYTE_INDEX
+    while length < Test::PATH_BUFFER_CAPACITY:
+        byte: u8 = source[length].u8()
+        break if byte == Test::PATH_NUL
+        output[length] <- byte
+        length <- length + Test::BYTE_INCREMENT
+    return length
+
+def write_prefix(fd: int, bytes: u8&, length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    offset: mutable usize = Test::FIRST_WRITE_OFFSET
+    while offset < length:
+        written: isize = write(fd, (&bytes[offset]).cast[void&], length - offset) can Blocking.IO, Unsafe.PointerCast
+        return false if written <= Test::WRITE_NO_PROGRESS or written == Test::WRITE_FAILURE
+        return false if written.usize() > length - offset
+        offset <- offset + written.usize()
+    return true
+
+def write_truncated_fixture(path: u8&, path_length: usize, bytes: u8&, length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    terminated_path: mutable u8[Test::PATH_BUFFER_CAPACITY + Test::BYTE_INCREMENT] = zeroed
+    for index in Test::FIRST_BYTE_INDEX..<path_length:
+        terminated_path[index] <- path[index]
+    terminated_path[path_length] <- Test::PATH_NUL
+    descriptor: int = creat((&terminated_path[Test::FIRST_BYTE_INDEX]).cast[cstr], Test::FILE_MODE_OWNER_READ_WRITE) can Blocking.IO, Unsafe.PointerCast
+    return false if descriptor == Test::FILE_OPEN_FAILURE
+    written: bool = write_prefix(descriptor, bytes, length) can Blocking.IO, Unsafe.PointerCast
+    close_status: int = close(descriptor) can Blocking.IO
+    return written and close_status != Test::FILE_CLOSE_FAILURE
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    return TestResult::LIMITS if DebuggerTraceFileLimits::PATH_CAPACITY_BYTES != Test::EXPECTED_MAX_PATH_BYTES or DebuggerTraceFileLimits::MAX_FILE_BYTES != DebuggerTraceStorageLimits::MAX_FILE_BYTES
+
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(Test::RECORDING_ID))
+    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::RECORDING_ID))
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::FIRST_EVENT, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_HASH)
+    return TestResult::RECORD if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
+    built: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
+    return TestResult::BUNDLE if not built.accepted
+    exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(built.bundle)
+    return TestResult::EXPORT if not DebuggerErrors::error_is_ok(exported.failure) or not DebuggerTraceBinary::writer_is_valid(exported.bytes)
+    return TestResult::EXPORT if exported.bytes.length <= Test::MINIMUM_TRACE_BYTES or exported.chunk_count != Test::EVENT_COUNT
+
+    valid_path: mutable u8[Test::PATH_BUFFER_CAPACITY] = zeroed
+    valid_path_length: usize = copy_path(TestPaths::VALID_TRACE, valid_path[Test::FIRST_BYTE_INDEX])
+    read_buffer: mutable u8[DebuggerTraceFileLimits::MAX_FILE_BYTES] = zeroed
+    missing_path: mutable u8[Test::PATH_BUFFER_CAPACITY] = zeroed
+    missing_path_length: usize = copy_path(TestPaths::MISSING_TRACE, missing_path[Test::FIRST_BYTE_INDEX])
+    missing: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(missing_path[Test::FIRST_BYTE_INDEX], missing_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::OPEN_FAILURE if missing.status != DebuggerTraceFile::FileStatus.OpenFailure
+
+    written: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::WRITE if not written.accepted or written.status != DebuggerTraceFile::FileStatus.Ready or not written.scan.footer_verified
+
+    loaded: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::READ if not loaded.accepted or loaded.status != DebuggerTraceFile::FileStatus.Ready or loaded.bytes_read != exported.bytes.length or not loaded.scan.footer_verified
+    for index in Test::FIRST_BYTE_INDEX..<loaded.bytes_read:
+        return TestResult::ROUND_TRIP_BYTES if read_buffer[index] != exported.bytes.bytes[index]
+
+    too_small: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], exported.bytes.length - Test::BYTE_INCREMENT) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::SMALL_BUFFER if too_small.status != DebuggerTraceFile::FileStatus.TooLarge or too_small.bytes_read != exported.bytes.length - Test::BYTE_INCREMENT
+
+    truncated_path: mutable u8[Test::PATH_BUFFER_CAPACITY] = zeroed
+    truncated_path_length: usize = copy_path(TestPaths::TRUNCATED_TRACE, truncated_path[Test::FIRST_BYTE_INDEX])
+    truncated_length: usize = exported.bytes.length - DebuggerTraceStorageLimits::FOOTER_BYTES
+    return TestResult::TRUNCATED_SETUP if truncated_length <= Test::MINIMUM_TRACE_BYTES or not write_truncated_fixture(truncated_path[Test::FIRST_BYTE_INDEX], truncated_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], truncated_length) can Blocking.IO, Unsafe.PointerCast
+    truncated: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(truncated_path[Test::FIRST_BYTE_INDEX], truncated_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::TRUNCATED_READ if truncated.accepted or truncated.status != DebuggerTraceFile::FileStatus.TruncatedTrace or truncated.bytes_read != truncated_length or truncated.scan.verified_chunks == Test::FIRST_BYTE_INDEX or truncated.scan.footer_verified
+
+    preflight: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], truncated_length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PREFLIGHT if preflight.accepted or preflight.status != DebuggerTraceFile::FileStatus.TruncatedTrace
+    preserved: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PRESERVED_FILE if not preserved.accepted or preserved.bytes_read != exported.bytes.length or not preserved.scan.footer_verified
+    for index in Test::FIRST_BYTE_INDEX..<preserved.bytes_read:
+        return TestResult::PRESERVED_FILE if read_buffer[index] != exported.bytes.bytes[index]
+    return TestResult::OK

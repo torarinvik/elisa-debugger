@@ -16,6 +16,11 @@ const module TraceServiceTestIdentity:
     FRESH_RESTORE_SESSION_ID: u64 = 87
     FRESH_RESTORE_NO_CHECKPOINTS_SESSION_ID: u64 = 88
     FRESH_RESTORE_FUTURE_IMAGE_SESSION_ID: u64 = 89
+    UNJOURNALED_EFFECTS_SESSION_ID: u64 = 90
+    UNJOURNALED_RESOURCE_SESSION_ID: u64 = 91
+    UNJOURNALED_ADAPTERS_SESSION_ID: u64 = 92
+    UNJOURNALED_TASKS_SESSION_ID: u64 = 94
+    UNJOURNALED_BRANCH_SESSION_ID: u64 = 95
 
 const module TraceServiceTestRequest:
     ID: u64 = 1
@@ -59,13 +64,11 @@ const module TraceServiceTestFailure:
     REWIND_INVALIDATED: i64 = 10
     REEXECUTION_MISMATCH: i64 = 11
     BRANCH_NOT_PARTIAL: i64 = 12
-    ADAPTER_SEED: i64 = 13
     CHECKPOINT_COUNT: i64 = 14
     CHECKPOINT_REOPEN: i64 = 15
-    CHECKPOINT_REPLAY: i64 = 16
     COLD_RESTORE: i64 = 17
     COLD_RESTORE_STATE: i64 = 18
-    COLD_RESTORE_EXPORT: i64 = 19
+    COLD_RESTORE_EXACTNESS_BARRIER: i64 = 19
     BUILD_MISMATCH_ATOMIC: i64 = 20
     RECORDING_MISMATCH_ATOMIC: i64 = 21
     IMAGE_MISMATCH_ATOMIC: i64 = 22
@@ -78,6 +81,24 @@ const module TraceServiceTestFailure:
     FRESH_CHECKPOINT_REVERSE_FAILED: i64 = 29
     FRESH_CHECKPOINT_CAPABILITY_IGNORED: i64 = 30
     FRESH_CHECKPOINT_FUTURE_IMAGE_MISMATCH_ACCEPTED: i64 = 31
+    UNJOURNALED_SIDE_STATE: i64 = 32
+
+const module TraceServiceTestUnjournaledState:
+    EFFECTS: u16 = 0
+    RESOURCE: u16 = 1
+    ADAPTERS: u16 = 2
+    TASKS: u16 = 3
+    BRANCHES: u16 = 4
+    ROOT_TASK_ID: u64 = 0
+    NO_TASK_ID: u64 = 0
+    NO_BRANCH_ID: u64 = 0
+    EFFECT_REQUEST_HASH: u64 = 123
+    EFFECT_RESULT_HASH: u64 = 456
+    EFFECT_RESULT_VALUE: i64 = 789
+    RESOURCE_PATH_ID: u64 = 93
+    RESOURCE_GENERATION: u64 = 1
+    NO_RESOURCE_HANDLE: u64 = 0
+    EXPECTED_DETAIL: u32 = 3
 
 const module TraceServiceTestRestore:
     BUILD_SOURCE_OFFSET: u64 = 1
@@ -136,7 +157,6 @@ const module TraceServiceTestAdapter:
     CLOCK_SAMPLE: u64 = 123456
     RANDOM_SAMPLE: u64 = 48879
     INPUT_STORAGE_CAPACITY: usize = 2
-    INPUT_BUFFER_CAPACITY: usize = 3
     INPUT_REQUESTED_LENGTH: usize = 3
     INPUT_TRANSFERRED_LENGTH: usize = 2
     OUTPUT_STORAGE_CAPACITY: usize = 2
@@ -147,15 +167,6 @@ const module TraceServiceTestAdapter:
     OUTPUT_BYTE_1: u8 = 75
     FIRST_BYTE_INDEX: usize = 0
     SECOND_BYTE_INDEX: usize = 1
-
-const module TraceServiceTestAdapterCheck:
-    OK: i64 = 0
-    INVALID_SNAPSHOT: i64 = 1
-    CLOCK: i64 = 2
-    RANDOM: i64 = 3
-    INPUT: i64 = 4
-    OUTPUT: i64 = 5
-
 
 def seed_recorded_adapter_state(service: mutable DebuggerManagedService::Service&) -> bool:
     source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(TraceServiceTestIdentity::ADAPTER_SOURCE_ID)
@@ -196,28 +207,6 @@ def reopen_bundle(reader: mutable DebuggerTraceReader::TraceReader&, bundle: Deb
         failure <- DebuggerTraceReader::reader_ingest(reader, chunk)
         return false if not DebuggerErrors::error_is_ok(failure)
     return DebuggerTraceReader::reader_is_exact(reader)
-
-def checkpoint_adapters_replay(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> i64:
-    adapters: mutable DebuggerReplayAdapters::AdapterSnapshot = checkpoint.adapters
-    adapters.clock.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
-    adapters.random.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
-    adapters.console.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
-    adapters.console.output_suppressed <- true
-    return TraceServiceTestAdapterCheck::INVALID_SNAPSHOT if not DebuggerReplayAdapters::adapter_snapshot_is_valid(adapters)
-    source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(TraceServiceTestIdentity::ADAPTER_SOURCE_ID)
-    clock: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(adapters.clock, source)
-    random: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read(adapters.random, source)
-    return TraceServiceTestAdapterCheck::CLOCK if not clock.accepted or clock.value != TraceServiceTestAdapter::CLOCK_SAMPLE
-    return TraceServiceTestAdapterCheck::RANDOM if not random.accepted or random.value != TraceServiceTestAdapter::RANDOM_SAMPLE
-    input: mutable u8[TraceServiceTestAdapter::INPUT_BUFFER_CAPACITY] = zeroed
-    read: DebuggerReplayAdapters::ConsoleRead = DebuggerReplayAdapters::console_read_input(adapters.console, DebuggerReplayAdapters::ConsoleChannel.Stdout, input[TraceServiceTestAdapter::FIRST_BYTE_INDEX], TraceServiceTestAdapter::INPUT_REQUESTED_LENGTH)
-    return TraceServiceTestAdapterCheck::INPUT if not read.accepted or read.transferred != TraceServiceTestAdapter::INPUT_TRANSFERRED_LENGTH or input[TraceServiceTestAdapter::FIRST_BYTE_INDEX] != TraceServiceTestAdapter::INPUT_BYTE_0 or input[TraceServiceTestAdapter::SECOND_BYTE_INDEX] != TraceServiceTestAdapter::INPUT_BYTE_1 or read.eof
-    output: mutable u8[TraceServiceTestAdapter::OUTPUT_STORAGE_CAPACITY] = zeroed
-    output[TraceServiceTestAdapter::FIRST_BYTE_INDEX] <- TraceServiceTestAdapter::OUTPUT_BYTE_0
-    output[TraceServiceTestAdapter::SECOND_BYTE_INDEX] <- TraceServiceTestAdapter::OUTPUT_BYTE_1
-    write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(adapters.console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[TraceServiceTestAdapter::FIRST_BYTE_INDEX], TraceServiceTestAdapter::OUTPUT_LENGTH)
-    return TraceServiceTestAdapterCheck::OUTPUT if not write.accepted or not write.suppressed or not DebuggerReplayAdapters::console_replay_complete(adapters.console)
-    return TraceServiceTestAdapterCheck::OK
 
 def new_trace_service(session_id: u64, build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, recording: u64) -> DebuggerManagedService::Service:
     session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(session_id), build, DebuggerCapabilities::managed_capabilities())
@@ -407,7 +396,7 @@ def restore_rejects_future_image_mismatch(build: DebuggerIdentity::BuildIdentity
     return false if restored.accepted or restored.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
     return service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, initial_hash)
 
-def interior_checkpoint_restore_is_exact(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64:
+def interior_checkpoint_restore_preserves_exactness_barrier(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64:
     bundle: mutable DebuggerTraceBundle::TraceBundle = zeroed
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not build_interior_checkpoint_bundle(build, image, bundle)
     reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
@@ -424,8 +413,9 @@ def interior_checkpoint_restore_is_exact(build: DebuggerIdentity::BuildIdentity,
     return TraceServiceTestFailure::CONFIGURATION_LOST if not fresh_checkpoint_configuration_is_preserved(service, TraceServiceTestTrace::EVENT_COUNT.u64(), TraceServiceTestConfiguration::EXISTING_EVENT)
     return TraceServiceTestFailure::GENERATION_NOT_ADVANCED if service.controller.session.stop_generation <= previous_generation
     exported: DebuggerTraceExport::ExportResult = DebuggerManagedTraceService::service_trace_export(service)
-    storage_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[TraceServiceTestTrace::FIRST_STORAGE_BYTE_INDEX], exported.bytes.length)
-    return TraceServiceTestFailure::COLD_RESTORE_EXPORT if not DebuggerErrors::error_is_ok(exported.failure) or storage_report.state != DebuggerTraceVerify::VerificationState.Exact or not storage_report.replayable
+    return TraceServiceTestFailure::COLD_RESTORE_EXACTNESS_BARRIER if DebuggerErrors::error_is_ok(exported.failure) or exported.failure.code != DebuggerErrors::ErrorCode.Unavailable or exported.failure.detail != TraceServiceTestUnjournaledState::EXPECTED_DETAIL
+    restored_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TraceServiceTestFailure::COLD_RESTORE_EXACTNESS_BARRIER if restored_report.state != DebuggerTraceVerify::VerificationState.Partial or restored_report.replayable
 
     return TraceServiceTestFailure::FRESH_CHECKPOINT_CAPABILITY_IGNORED if not fresh_checkpoint_capability_is_enforced(build, image, checkpoint.checkpoint)
     service <- new_trace_service(TraceServiceTestIdentity::FRESH_RESTORE_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
@@ -437,6 +427,36 @@ def interior_checkpoint_restore_is_exact(build: DebuggerIdentity::BuildIdentity,
     return TraceServiceTestFailure::FRESH_CHECKPOINT_REVERSE_FAILED if not fresh_checkpoint_reverse_step_has_prefix(service, checkpoint.checkpoint.event)
     return TraceServiceTestRestore::SUCCESS
 
+def unjournaled_side_state_is_partial(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, session_id: u64, side_state: u16) -> bool:
+    service: mutable DebuggerManagedService::Service = new_trace_service(session_id, build, image, TraceServiceTestIdentity::RECORDING_ID)
+    return false if not run_service_to_event(service, TraceServiceTestTrace::EVENT_COUNT.u64())
+    if side_state == TraceServiceTestUnjournaledState::EFFECTS:
+        service.controller.state.effects <- DebuggerEffects::effect_oracle_record(service.controller.state.effects, DebuggerEffects::EffectKind.Clock, TraceServiceTestUnjournaledState::EFFECT_REQUEST_HASH, TraceServiceTestUnjournaledState::EFFECT_RESULT_HASH, TraceServiceTestUnjournaledState::EFFECT_RESULT_VALUE)
+        return false if service.controller.state.effects.count == TraceServiceTestRestore::NO_EVENTS
+    if side_state == TraceServiceTestUnjournaledState::RESOURCE:
+        handle: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(service.controller.state.resources, DebuggerIdentity::debug_id(TraceServiceTestUnjournaledState::RESOURCE_PATH_ID), false, TraceServiceTestUnjournaledState::RESOURCE_GENERATION)
+        return false if handle.value == TraceServiceTestUnjournaledState::NO_RESOURCE_HANDLE
+    if side_state == TraceServiceTestUnjournaledState::ADAPTERS:
+        return false if not seed_recorded_adapter_state(service)
+    if side_state == TraceServiceTestUnjournaledState::TASKS:
+        task_id: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(service.controller.state.tasks, DebuggerIdentity::debug_id(TraceServiceTestUnjournaledState::ROOT_TASK_ID))
+        return false if task_id.value == TraceServiceTestUnjournaledState::NO_TASK_ID
+    if side_state == TraceServiceTestUnjournaledState::BRANCHES:
+        branch_id: DebuggerIdentity::DebugId = DebuggerManagedService::service_create_branch(service)
+        return false if branch_id.value == TraceServiceTestUnjournaledState::NO_BRANCH_ID
+    report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return false if report.state != DebuggerTraceVerify::VerificationState.Partial or report.replayable
+    return false if report.failure.code != DebuggerErrors::ErrorCode.Unavailable or report.failure.detail != TraceServiceTestUnjournaledState::EXPECTED_DETAIL
+    return service.trace_partial and not DebuggerErrors::error_is_ok(service.trace_failure)
+
+def unjournaled_side_state_checks(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64:
+    return TraceServiceTestFailure::UNJOURNALED_SIDE_STATE if not unjournaled_side_state_is_partial(build, image, TraceServiceTestIdentity::UNJOURNALED_EFFECTS_SESSION_ID, TraceServiceTestUnjournaledState::EFFECTS)
+    return TraceServiceTestFailure::UNJOURNALED_SIDE_STATE if not unjournaled_side_state_is_partial(build, image, TraceServiceTestIdentity::UNJOURNALED_RESOURCE_SESSION_ID, TraceServiceTestUnjournaledState::RESOURCE)
+    return TraceServiceTestFailure::UNJOURNALED_SIDE_STATE if not unjournaled_side_state_is_partial(build, image, TraceServiceTestIdentity::UNJOURNALED_ADAPTERS_SESSION_ID, TraceServiceTestUnjournaledState::ADAPTERS)
+    return TraceServiceTestFailure::UNJOURNALED_SIDE_STATE if not unjournaled_side_state_is_partial(build, image, TraceServiceTestIdentity::UNJOURNALED_TASKS_SESSION_ID, TraceServiceTestUnjournaledState::TASKS)
+    return TraceServiceTestFailure::UNJOURNALED_SIDE_STATE if not unjournaled_side_state_is_partial(build, image, TraceServiceTestIdentity::UNJOURNALED_BRANCH_SESSION_ID, TraceServiceTestUnjournaledState::BRANCHES)
+    return TraceServiceTestFailure::OK
+
 
 def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64:
     session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(TraceServiceTestIdentity::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
@@ -447,15 +467,12 @@ def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image
     continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: TraceServiceTestRequest::ID, has_id: true, expected_generation: TraceServiceTestRequest::INITIAL_GENERATION, target_event: TraceServiceTestRequest::INITIAL_EVENT, valid: true}
     continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return TraceServiceTestFailure::CONTINUE if not continued.accepted or service.recorded_event_count != TraceServiceTestTrace::EVENT_COUNT
-    return TraceServiceTestFailure::ADAPTER_SEED if not seed_recorded_adapter_state(service)
     trace_bundle: DebuggerTracePipeline::BundleBuildResult = DebuggerManagedTraceService::service_trace_bundle(service)
     return TraceServiceTestFailure::CHECKPOINT_COUNT if not trace_bundle.accepted or trace_bundle.bundle.manifest.checkpoint_count != TraceServiceTestTrace::END_BOUNDARY_OFFSET or trace_bundle.bundle.chunk_count < TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
     reopened: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not reopen_bundle(reopened, trace_bundle.bundle) or DebuggerTraceReader::reader_full_checkpoint_count(reopened) != TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
     checkpoint: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reopened, TraceServiceTestTrace::EVENT_COUNT.u64())
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not checkpoint.found or checkpoint.checkpoint.event != TraceServiceTestTrace::EVENT_COUNT.u64() or checkpoint.checkpoint.machine.result != TraceServiceTestProgram::RESULT
-    adapter_replay_result: i64 = checkpoint_adapters_replay(checkpoint.checkpoint)
-    return TraceServiceTestFailure::CHECKPOINT_REPLAY + adapter_replay_result if adapter_replay_result != TraceServiceTestAdapterCheck::OK
 
     return TraceServiceTestFailure::BUILD_MISMATCH_ATOMIC if not build_mismatch_is_atomic(build, image, reopened)
     return TraceServiceTestFailure::RECORDING_MISMATCH_ATOMIC if not recording_mismatch_is_atomic(build, image, reopened)
@@ -508,4 +525,6 @@ def main() -> i64:
     image.instructions[TraceServiceTestProgram::RETURN_INSTRUCTION_INDEX] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: TraceServiceTestProgram::UNUSED_OPERAND, b: TraceServiceTestProgram::UNUSED_OPERAND, source: zeroed}
     recording_result: i64 = trace_service_recording_checks(build, image)
     return recording_result if recording_result != TraceServiceTestFailure::OK
-    return interior_checkpoint_restore_is_exact(build, image)
+    unjournaled_state_result: i64 = unjournaled_side_state_checks(build, image)
+    return unjournaled_state_result if unjournaled_state_result != TraceServiceTestFailure::OK
+    return interior_checkpoint_restore_preserves_exactness_barrier(build, image)

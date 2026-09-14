@@ -1,27 +1,26 @@
 # Compiler integration boundary
 
 This records the compiler dependency and the narrow compiler-to-debugger seam
-observed on 2026-09-13. It is a compatibility record, not a claim that arbitrary
+observed on 2026-09-14. It is a compatibility record, not a claim that arbitrary
 Elisa programs can be compiled to EDIR.
 
 ## Compiler revision
 
-The adjacent `../Elisa-compiler` checkout is on
-`da64c5103228721385466e894b864c886584821e` (`fix/stage0-parity-try-regions-privacy`)
-and has 22 modified or untracked paths. Its checked-in stage1 driver does not
-list `edir` in `cli_emit_mode_supported`; this checkout cannot produce EDIR.
-The debugger Makefile's default `ELISA_EDIR_COMPILER` points at that adjacent
-checkout, so compiler integration targets must be given an EDIR-capable compiler
-explicitly.
+The adjacent `../Elisa-compiler` checkout was clean at
+`9791a8e1cd924bb03e43cb46da2d3530b4c9fbb0` on `main` (also referenced by
+`codex/wasm-sdk`). Its checked-in source lists `edir` in
+`cli_emit_mode_supported`, and includes the bounded EDIR emitter. The emitter's
+initial implementation was introduced by `91d63d51e91e382bdfbfc3ed1e73455dcf9d29a5`,
+which is an ancestor of the current revision.
 
-The compatible compiler source observed in this workspace is the clean local
-revision `91d63d51e91e382bdfbfc3ed1e73455dcf9d29a5` on branch
-`codex/debugger-edir` in the Elisa-compiler repository. That commit adds bounded
-counted-loop EDIR emission. It is currently a local commit without a remote
-branch or release tag; projects and CI need to make this exact source revision
-available before treating it as a reproducible external dependency. Build or
-seed its stage1 product from that revision, and keep the worktree clean for
-integration validation.
+The adjacent stage1 product is stale relative to the current compiler source.
+On 2026-09-14 the strict EDIR emit command below exited with status 2 and named
+`src/driver/elisac.elisa` as newer than `bin/elisac-stage1`. Do not set
+`ELISA_ALLOW_STALE_STAGE1=1` for integration qualification: it only bypasses
+the freshness check and does not prove the product matches this revision. Seed
+or rebuild stage1 from the pinned clean source revision before claiming a fresh
+artifact build. Keep that build and any compiler changes in an isolated
+compiler worktree.
 
 The wrapper `scripts/elisac_stage1.sh` rejects a product binary older than any
 compiler `.elisa` or `.elisai` source. The guard is timestamp based, not a Git
@@ -43,10 +42,13 @@ ELISA_EDIR_SOURCE_ROOT="$PWD" ELISA_ALLOW_STALE_STAGE1=0 \
   tests/compiler_edir_arithmetic_fixture.elisa
 ```
 
-The exact compiler invocation was exercised against revision
-`91d63d51e91e382bdfbfc3ed1e73455dcf9d29a5`; the artifact header reported codec
-schema 2, program version 1, five instructions, and one local. To run the
-repository's broader arithmetic/native parity check, use:
+Historical evidence from 2026-09-13: the exact compiler invocation was exercised
+against revision `91d63d51e91e382bdfbfc3ed1e73455dcf9d29a5`; the artifact
+header reported codec schema 2, program version 1, five instructions, and one
+local. That revision is an ancestor of the current compiler source, but this
+does not replace rebuilding and rerunning the command against the current
+stage1 product. To run the repository's broader arithmetic/native parity
+check after rebuilding, use:
 
 ```sh
 make compiler-edir-check \

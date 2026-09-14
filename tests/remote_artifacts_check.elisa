@@ -2,12 +2,33 @@ include "../src/protocol/artifacts.elisa"
 include "../src/protocol/remote.elisa"
 
 const module Test:
+    SUCCESS: i64 = 0
     ARTIFACT_SIZE: usize = 5
     SEQUENCE_ERROR: i64 = 1
     SIZE_ERROR: i64 = 2
     CHECKSUM_ERROR: i64 = 3
+    INVALID_EMPTY_TRANSFER: i64 = 4
+    COPY_COMPLETE: i64 = 5
+    REMOTE_ARTIFACT_COMPLETE: i64 = 6
+    INVALID_SEQUENCE_ERROR: i64 = 7
     DUPLICATE_BEGIN_ERROR: i64 = 8
+    INVALID_FAILED_STATE: i64 = 9
+    TAMPERED_STATE_ERROR: i64 = 10
     TAMPERED_COMPLETE_ERROR: i64 = 11
+    PUSH_BEFORE_BEGIN_ERROR: i64 = 12
+    PUSH_EMPTY_TRANSFER_ERROR: i64 = 13
+    INVALID_SIZE_TRANSFER: i64 = 14
+    FAILED_CHUNK_CHARGED: i64 = 15
+    QUOTA_REJECTION_RESULT: i64 = 16
+
+const module TransferInput:
+    ZERO_RECEIVED_SIZE: usize = 0
+    ZERO_PAYLOAD_QUOTA: u64 = 0
+    FIRST_SEQUENCE: u64 = 0
+    INVALID_SEQUENCE: u64 = 1
+    FIRST_BYTE_INDEX: usize = 0
+    SINGLE_BYTE_CHUNK_LENGTH: usize = 1
+    INVALID_SEQUENCE_CHUNK_LENGTH: usize = 2
 
 
 def main() -> i64:
@@ -18,17 +39,19 @@ def main() -> i64:
     bytes[3] <- 68
     bytes[4] <- 69
     transfer: mutable DebuggerRemoteArtifacts::ArtifactTransfer = DebuggerRemoteArtifacts::transfer_new()
-    return 4 if not DebuggerRemoteArtifacts::transfer_is_valid(transfer)
+    empty_push: DebuggerRemoteArtifacts::ArtifactTransfer = DebuggerRemoteArtifacts::transfer_push(transfer, TransferInput::FIRST_SEQUENCE, bytes[TransferInput::FIRST_BYTE_INDEX], TransferInput::SINGLE_BYTE_CHUNK_LENGTH)
+    return Test::PUSH_EMPTY_TRANSFER_ERROR if empty_push.state != DebuggerRemoteArtifacts::TransferState.Empty or empty_push.received_size != TransferInput::ZERO_RECEIVED_SIZE or empty_push.last_error.code != DebuggerErrors::ErrorCode.InvalidState
+    return Test::INVALID_EMPTY_TRANSFER if not DebuggerRemoteArtifacts::transfer_is_valid(transfer)
     rejected_transfer: DebuggerRemoteArtifacts::ArtifactTransfer = DebuggerRemoteArtifacts::transfer_begin(transfer, 0, 0)
-    return 8 if rejected_transfer.state != DebuggerRemoteArtifacts::TransferState.Failed or not DebuggerRemoteArtifacts::transfer_is_valid(rejected_transfer)
+    return Test::INVALID_SIZE_TRANSFER if rejected_transfer.state != DebuggerRemoteArtifacts::TransferState.Failed or not DebuggerRemoteArtifacts::transfer_is_valid(rejected_transfer)
     malformed_failed: mutable DebuggerRemoteArtifacts::ArtifactTransfer = DebuggerRemoteArtifacts::transfer_begin(transfer, Test::ARTIFACT_SIZE, 0)
     malformed_failed.state <- DebuggerRemoteArtifacts::TransferState.Failed
     malformed_failed.last_error <- DebuggerErrors::no_error()
-    return 9 if DebuggerRemoteArtifacts::transfer_is_valid(malformed_failed)
+    return Test::INVALID_FAILED_STATE if DebuggerRemoteArtifacts::transfer_is_valid(malformed_failed)
     tampered: mutable DebuggerRemoteArtifacts::ArtifactTransfer = DebuggerRemoteArtifacts::transfer_begin(transfer, Test::ARTIFACT_SIZE, 0)
     tampered <- DebuggerRemoteArtifacts::transfer_push(tampered, 0, bytes[0], 2)
     tampered.checksum <- tampered.checksum + 1
-    return 10 if DebuggerRemoteArtifacts::transfer_is_valid(tampered)
+    return Test::TAMPERED_STATE_ERROR if DebuggerRemoteArtifacts::transfer_is_valid(tampered)
     transfer <- DebuggerRemoteArtifacts::transfer_begin(transfer, Test::ARTIFACT_SIZE, DebuggerRemoteArtifacts::transfer_checksum(bytes[0], Test::ARTIFACT_SIZE))
     transfer <- DebuggerRemoteArtifacts::transfer_push(transfer, 1, bytes[0], 2)
     return Test::SEQUENCE_ERROR if transfer.state != DebuggerRemoteArtifacts::TransferState.Failed
@@ -38,7 +61,7 @@ def main() -> i64:
     transfer <- DebuggerRemoteArtifacts::transfer_finish(transfer)
     return Test::SIZE_ERROR if not DebuggerRemoteArtifacts::transfer_is_complete(transfer)
     copied: mutable u8[Test::ARTIFACT_SIZE] = zeroed
-    return 5 if not DebuggerErrors::error_is_ok(DebuggerRemoteArtifacts::transfer_copy(transfer, copied[0], Test::ARTIFACT_SIZE)) or copied[4] != bytes[4]
+    return Test::COPY_COMPLETE if not DebuggerErrors::error_is_ok(DebuggerRemoteArtifacts::transfer_copy(transfer, copied[0], Test::ARTIFACT_SIZE)) or copied[4] != bytes[4]
     tampered_complete: mutable DebuggerRemoteArtifacts::ArtifactTransfer = transfer
     tampered_complete.chunks[0] <- tampered_complete.chunks[0] + 1
     tampered_copy: mutable u8[Test::ARTIFACT_SIZE] = zeroed
@@ -50,17 +73,27 @@ def main() -> i64:
     channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
     channel <- DebuggerRemote::remote_authenticate(channel, 1, 1)
     channel <- DebuggerRemote::remote_accept_handshake(channel, DebuggerRemote::RemoteHandshake{protocol_major: 1, protocol_minor: 0, engine: 1, trace_schema: 1, authenticated: true})
+    push_before_begin: DebuggerRemote::RemoteChannel = DebuggerRemote::remote_push_artifact(channel, TransferInput::FIRST_SEQUENCE, bytes[TransferInput::FIRST_BYTE_INDEX], TransferInput::SINGLE_BYTE_CHUNK_LENGTH)
+    return Test::PUSH_BEFORE_BEGIN_ERROR if push_before_begin.last_error.code != DebuggerErrors::ErrorCode.InvalidState or push_before_begin.bytes_received != channel.bytes_received or push_before_begin.artifact.state != DebuggerRemoteArtifacts::TransferState.Empty or push_before_begin.artifact.received_size != TransferInput::ZERO_RECEIVED_SIZE
     channel <- DebuggerRemote::remote_begin_artifact(channel, Test::ARTIFACT_SIZE, DebuggerRemoteArtifacts::transfer_checksum(bytes[0], Test::ARTIFACT_SIZE))
     duplicate_begin: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin_artifact(channel, Test::ARTIFACT_SIZE + 1, 0)
     return Test::DUPLICATE_BEGIN_ERROR if duplicate_begin.last_error.code != DebuggerErrors::ErrorCode.InvalidState or not DebuggerRemoteArtifacts::transfer_is_receiving(duplicate_begin.artifact)
     channel <- DebuggerRemote::remote_push_artifact(channel, 0, bytes[0], 2)
     channel <- DebuggerRemote::remote_push_artifact(channel, 1, bytes[2], 3)
     channel <- DebuggerRemote::remote_finish_artifact(channel)
-    return 6 if not DebuggerRemoteArtifacts::transfer_is_complete(channel.artifact) or channel.bytes_received != Test::ARTIFACT_SIZE.u64()
+    return Test::REMOTE_ARTIFACT_COMPLETE if not DebuggerRemoteArtifacts::transfer_is_complete(channel.artifact) or channel.bytes_received != Test::ARTIFACT_SIZE.u64()
     invalid_channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
     invalid_channel <- DebuggerRemote::remote_authenticate(invalid_channel, 1, 1)
     invalid_channel <- DebuggerRemote::remote_accept_handshake(invalid_channel, DebuggerRemote::RemoteHandshake{protocol_major: 1, protocol_minor: 0, engine: 1, trace_schema: 1, authenticated: true})
     invalid_channel <- DebuggerRemote::remote_begin_artifact(invalid_channel, Test::ARTIFACT_SIZE, DebuggerRemoteArtifacts::transfer_checksum(bytes[0], Test::ARTIFACT_SIZE))
-    invalid_channel <- DebuggerRemote::remote_push_artifact(invalid_channel, 1, bytes[0], 2)
-    return 7 if invalid_channel.last_error.code != DebuggerErrors::ErrorCode.Corrupt
-    return 0
+    invalid_channel <- DebuggerRemote::remote_push_artifact(invalid_channel, TransferInput::INVALID_SEQUENCE, bytes[TransferInput::FIRST_BYTE_INDEX], TransferInput::INVALID_SEQUENCE_CHUNK_LENGTH)
+    return Test::INVALID_SEQUENCE_ERROR if invalid_channel.last_error.code != DebuggerErrors::ErrorCode.Corrupt
+    return Test::FAILED_CHUNK_CHARGED if invalid_channel.bytes_received != TransferInput::INVALID_SEQUENCE_CHUNK_LENGTH.u64() or invalid_channel.artifact.received_size != TransferInput::ZERO_RECEIVED_SIZE
+    quota_channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
+    quota_channel <- DebuggerRemote::remote_authenticate(quota_channel, 1, 1)
+    quota_channel <- DebuggerRemote::remote_accept_handshake(quota_channel, DebuggerRemote::RemoteHandshake{protocol_major: 1, protocol_minor: 0, engine: 1, trace_schema: 1, authenticated: true})
+    quota_channel <- DebuggerRemote::remote_begin_artifact(quota_channel, Test::ARTIFACT_SIZE, DebuggerRemoteArtifacts::transfer_checksum(bytes[0], Test::ARTIFACT_SIZE))
+    quota_channel.policy.quotas.remote_payload_bytes <- TransferInput::ZERO_PAYLOAD_QUOTA
+    quota_rejection: DebuggerRemote::RemoteChannel = DebuggerRemote::remote_push_artifact(quota_channel, TransferInput::FIRST_SEQUENCE, bytes[TransferInput::FIRST_BYTE_INDEX], TransferInput::SINGLE_BYTE_CHUNK_LENGTH)
+    return Test::QUOTA_REJECTION_RESULT if quota_rejection.last_error.code != DebuggerErrors::ErrorCode.ResourceLimit or quota_rejection.bytes_received != TransferInput::ZERO_PAYLOAD_QUOTA or quota_rejection.artifact.received_size != TransferInput::ZERO_RECEIVED_SIZE or quota_rejection.artifact.state != DebuggerRemoteArtifacts::TransferState.Receiving
+    return Test::SUCCESS

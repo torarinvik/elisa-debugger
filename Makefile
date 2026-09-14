@@ -134,6 +134,7 @@ module-check: $(BUILD)/elisa-debugger-trace-checkpoint-validation-check
 module-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
 module-check: $(BUILD)/elisa-debugger-managed-memory-write-history-check
 module-check: $(BUILD)/elisa-debugger-dap-events-check $(BUILD)/elisa-debugger-dap-continue-partial-check
+module-check: dap-column-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-protocol-client-ordering-check
 module-check: edir-file-loader-check
 
@@ -328,6 +329,18 @@ dap-stack-frame-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 
 dap-payload-check: $(BUILD)/elisa-debugger-dap-payload-check
 	"$(BUILD)/elisa-debugger-dap-payload-check"
+
+.PHONY: dap-column-breakpoints-check
+$(BUILD)/elisa-debugger-dap-column-fixture-writer: tests/dap_column_fixture_writer.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-dap-column-breakpoints-check: tests/dap_column_breakpoints_check.elisa $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+dap-column-breakpoints-check: $(BUILD)/elisa-debugger-dap-server $(BUILD)/elisa-debugger-dap-column-fixture-writer $(BUILD)/elisa-debugger-dap-column-breakpoints-check
+	sh tests/dap_column_breakpoints_check.sh "$(BUILD)/elisa-debugger-dap-column-fixture-writer" "$(BUILD)/elisa-debugger-dap-column-breakpoints-check" "$(BUILD)/elisa-debugger-dap-server"
 
 $(BUILD)/elisa-debugger-edir-fixture-writer: tests/edir_fixture_writer.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

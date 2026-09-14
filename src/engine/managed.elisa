@@ -75,6 +75,11 @@ module DebuggerManagedEngine:
             NO_BRANCH: u64 = 0
             ENGINE_MANAGED_IDENTITY_NO_INSTRUCTION: u64 = 18446744073709551615
 
+        const module SourceBreakpoint:
+            ENGINE_MANAGED_SOURCE_BREAKPOINT_CAPACITY: usize = 256
+            ENGINE_MANAGED_SOURCE_BREAKPOINT_NO_COLUMN: u32 = 0
+            ENGINE_MANAGED_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX: usize = 0
+
     public:
         struct ManagedController:
             session: mutable DebuggerSession::Session
@@ -425,20 +430,29 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
         def managed_replace_source_breakpoints(controller: mutable ManagedController&, source: DebuggerIdentity::DebugId, lines: u32&, requested_count: usize) -> DebuggerBreakpointManager::BreakpointReplacement:
+            columns: mutable u32[SourceBreakpoint::ENGINE_MANAGED_SOURCE_BREAKPOINT_CAPACITY] = zeroed
+            has_columns: mutable bool[SourceBreakpoint::ENGINE_MANAGED_SOURCE_BREAKPOINT_CAPACITY] = zeroed
+            return managed_replace_source_breakpoints_with_columns(controller, source, lines, columns[SourceBreakpoint::ENGINE_MANAGED_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX], has_columns[SourceBreakpoint::ENGINE_MANAGED_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX], requested_count)
+
+        def managed_replace_source_breakpoints_with_columns(controller: mutable ManagedController&, source: DebuggerIdentity::DebugId, lines: u32&, columns: u32&, has_columns: bool&, requested_count: usize) -> DebuggerBreakpointManager::BreakpointReplacement:
             return zeroed if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
-            replacement: mutable DebuggerBreakpointManager::BreakpointReplacement = DebuggerBreakpointManager::breakpoint_table_replace_source(controller.state.breakpoints, source, controller.engine.branch, lines, requested_count)
+            replacement: mutable DebuggerBreakpointManager::BreakpointReplacement = DebuggerBreakpointManager::breakpoint_table_replace_source_with_columns(controller.state.breakpoints, source, controller.engine.branch, lines, columns, has_columns, requested_count)
             return replacement if not replacement.accepted
             for request_index in 0..<replacement.count:
                 requested_line: u32 = replacement.results[request_index].line
+                requested_column: u32 = replacement.results[request_index].column
+                has_requested_column: bool = replacement.results[request_index].has_column
                 resolved: mutable bool = false
-                resolved_column: mutable u32 = 0
+                resolved_column: mutable u32 = SourceBreakpoint::ENGINE_MANAGED_SOURCE_BREAKPOINT_NO_COLUMN
                 resolved_instruction: mutable u64 = Identity::ENGINE_MANAGED_IDENTITY_NO_INSTRUCTION
                 for instruction_index in 0..<controller.engine.image.program.instruction_count.usize():
                     span: DebuggerIdentity::SourceSpan = controller.engine.image.instructions[instruction_index].source
                     if DebuggerMetadata::source_span_is_valid(span) and span.file.value == source.value and requested_line >= span.start_line and requested_line <= span.end_line:
-                        candidate_column: u32 = span.start_column if requested_line == span.start_line else 0
+                        candidate_column: mutable u32 = SourceBreakpoint::ENGINE_MANAGED_SOURCE_BREAKPOINT_NO_COLUMN
+                        candidate_column <- requested_column if has_requested_column
+                        candidate_column <- span.start_column if not has_requested_column and requested_line == span.start_line
                         candidate_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: source, line: requested_line, column: candidate_column, discriminator: 0}
-                        if DebuggerMetadata::source_span_contains(span, candidate_location) and (not resolved or candidate_column < resolved_column):
+                        if DebuggerMetadata::source_span_contains(span, candidate_location) and (not resolved or (not has_requested_column and candidate_column < resolved_column)):
                             resolved <- true
                             resolved_column <- candidate_column
                             resolved_instruction <- instruction_index.u64()
@@ -446,6 +460,7 @@ module DebuggerManagedEngine:
                     for breakpoint_index in 0..<replacement.table.count:
                         if replacement.table.points[breakpoint_index].id.value == replacement.results[request_index].id.value:
                             replacement.table.points[breakpoint_index].source.column <- resolved_column
+                            replacement.results[request_index].column <- resolved_column if not has_requested_column
                     replacement.table <- DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(replacement.table, replacement.results[request_index].id, resolved_instruction)
                     replacement.results[request_index].verified <- true
             controller.state.breakpoints <- replacement.table

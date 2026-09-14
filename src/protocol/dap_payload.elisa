@@ -136,6 +136,9 @@ module DebuggerDAPPayload:
 
         const module SourcePaths:
             NO_SOURCE_REFERENCE: u64 = 0
+            DAP_SOURCE_BREAKPOINT_NO_COLUMN: u64 = 0
+            DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX: usize = 0
+            DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX: usize = 1
             PATH_COMPONENT_CAPACITY: usize = DebuggerMetadataSourcePath::SOURCE_PATH_CAPACITY
             PROGRAM_PATH_CAPACITY: usize = DebuggerMetadataSourcePath::MAPPED_SOURCE_PATH_CAPACITY
             SOURCE_BREAKPOINT_LIMIT: usize = 256
@@ -852,6 +855,8 @@ module DebuggerDAPPayload:
             source_path: mutable ProgramPath
             has_source_path: mutable bool
             lines: mutable u32[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            columns: mutable u32[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            has_columns: mutable bool[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
             count: mutable usize
 
         struct SourcePathRootRequest:
@@ -867,9 +872,11 @@ module DebuggerDAPPayload:
             parsed: ParsedValue = request_handle_value_parse(payload, length, DapFields::FRAME_ID)
             return ReferenceRequest{valid: parsed.valid, reference: parsed.value}
 
-        def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64) -> bool:
-            return false if request.count >= SourcePaths::SOURCE_BREAKPOINT_LIMIT or line > NumberFormat::MAX_U32
+        def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64, column: u64, has_column: bool) -> bool:
+            return false if request.count >= SourcePaths::SOURCE_BREAKPOINT_LIMIT or line > NumberFormat::MAX_U32 or column > NumberFormat::MAX_U32
             request.lines[request.count] <- line.u32()
+            request.columns[request.count] <- column.u32()
+            request.has_columns[request.count] <- has_column
             request.count <- request.count + 1
             return true
 
@@ -883,22 +890,31 @@ module DebuggerDAPPayload:
                 if payload[cursor] == Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACKET_CLOSE:
                     return true
                 line: mutable ParsedValue = invalid_value()
+                column: mutable u64 = SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN
+                has_column: mutable bool = false
                 if object_items:
                     return false if payload[cursor] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
                     # Reject semantics the engine cannot honor instead of
                     # silently turning conditional or log breakpoints into
                     # ordinary line breakpoints.
-                    return false if object_field_value_start(payload, length, cursor, DapFields::COLUMN, 0) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::CONDITION, 0) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::HIT_CONDITION, 0) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, 0) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
-                    line_start: usize = object_field_value_start(payload, length, cursor, DapFields::LINE, 0)
-                    return false if line_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LINE, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                    return false if object_field_value_start(payload, length, cursor, DapFields::CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::HIT_CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                    line_start: usize = object_field_value_start(payload, length, cursor, DapFields::LINE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+                    return false if line_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LINE, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
                     line <- parse_unsigned_bounded(payload, length, line_start, NumberFormat::MAX_U32)
-                    return false if not line.valid or not source_breakpoints_append(request, line.value)
+                    column_start: usize = object_field_value_start(payload, length, cursor, DapFields::COLUMN, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+                    if column_start != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
+                        return false if object_field_value_start(payload, length, cursor, DapFields::COLUMN, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                        parsed_column: ParsedValue = parse_unsigned_bounded(payload, length, column_start, NumberFormat::MAX_U32)
+                        return false if not parsed_column.valid
+                        column <- parsed_column.value
+                        has_column <- true
+                    return false if not line.valid or not source_breakpoints_append(request, line.value, column, has_column)
                     item_end: usize = json_value_end(payload, length, cursor)
                     return false if item_end == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
                     cursor <- item_end
                 else:
                     line <- parse_unsigned_bounded(payload, length, cursor, NumberFormat::MAX_U32)
-                    return false if not line.valid or not source_breakpoints_append(request, line.value)
+                    return false if not line.valid or not source_breakpoints_append(request, line.value, SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN, false)
                     cursor <- line.end
                 while cursor < length and is_whitespace(payload[cursor]):
                     cursor <- cursor + 1
@@ -920,18 +936,18 @@ module DebuggerDAPPayload:
             root_start: mutable usize = 0
             while root_start < length and is_whitespace(payload[root_start]):
                 root_start <- root_start + 1
-            arguments: usize = object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, 0)
-            return request if arguments == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            arguments: usize = object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+            return request if arguments == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
             return request if arguments >= length or payload[arguments] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
-            source: usize = object_field_value_start(payload, length, arguments, DapFields::SOURCE, 0)
-            breakpoints: usize = object_field_value_start(payload, length, arguments, DapFields::BREAKPOINTS, 0)
-            lines: usize = object_field_value_start(payload, length, arguments, DapFields::LINES, 0)
+            source: usize = object_field_value_start(payload, length, arguments, DapFields::SOURCE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+            breakpoints: usize = object_field_value_start(payload, length, arguments, DapFields::BREAKPOINTS, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+            lines: usize = object_field_value_start(payload, length, arguments, DapFields::LINES, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
             return request if source == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or payload[source] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
-            return request if object_field_value_start(payload, length, arguments, DapFields::SOURCE, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::BREAKPOINTS, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::LINES, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            return request if object_field_value_start(payload, length, arguments, DapFields::SOURCE, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::BREAKPOINTS, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::LINES, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
             return request if breakpoints != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX and lines != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
-            source_reference: usize = object_field_value_start(payload, length, source, DapFields::SOURCE_REFERENCE, 0)
-            source_path_start: usize = object_field_value_start(payload, length, source, DapFields::DAP_PAYLOAD_DAPFIELDS_SOURCE_PATH, 0)
-            return request if object_field_value_start(payload, length, source, DapFields::SOURCE_REFERENCE, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, source, DapFields::DAP_PAYLOAD_DAPFIELDS_SOURCE_PATH, 1) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            source_reference: usize = object_field_value_start(payload, length, source, DapFields::SOURCE_REFERENCE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+            source_path_start: usize = object_field_value_start(payload, length, source, DapFields::DAP_PAYLOAD_DAPFIELDS_SOURCE_PATH, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+            return request if object_field_value_start(payload, length, source, DapFields::SOURCE_REFERENCE, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, source, DapFields::DAP_PAYLOAD_DAPFIELDS_SOURCE_PATH, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
             if source_reference != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
                 parsed_reference: ParsedValue = parse_source_reference(payload, length, source_reference)
                 return request if not parsed_reference.valid

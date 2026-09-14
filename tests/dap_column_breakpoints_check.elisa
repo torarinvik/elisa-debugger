@@ -1,0 +1,187 @@
+# Elisa-owned DAP transcript generator and response verifier for source columns.
+
+extern write(fd: int, buffer: void&, count: usize) -> isize can[Blocking.IO]
+extern open(path: cstr, flags: int) -> int can[Blocking.IO]
+extern close(fd: int) -> int can[Blocking.IO]
+extern read(fd: int, buffer: void&, count: usize) -> isize can[Blocking.IO]
+
+const module DapColumnTest:
+    DAP_COLUMN_TEST_STDOUT_FD: int = 1
+    DAP_COLUMN_TEST_OUTPUT_PATH: cstr = "build/dap-column-response.jsonl"
+    DAP_COLUMN_TEST_OUTPUT_READ_ONLY: int = 0
+    DAP_COLUMN_TEST_OUTPUT_CAPACITY: usize = 8192
+    DAP_COLUMN_TEST_OUTPUT_EMPTY: usize = 0
+    DAP_COLUMN_TEST_OUTPUT_READ_EOF: isize = 0
+    DAP_COLUMN_TEST_OUTPUT_READ_FAILURE: isize = -1
+    DAP_COLUMN_TEST_NO_SYSTEM_ERROR: int = 0
+    DAP_COLUMN_TEST_SUCCESS: i64 = 0
+    DAP_COLUMN_TEST_FAILURE: i64 = 1
+    DAP_COLUMN_TEST_IO_FAILURE: i64 = 2
+    DAP_COLUMN_TEST_BAD_ARGUMENTS: i64 = 3
+    DAP_COLUMN_TEST_CHILD_ARGUMENT_COUNT: i64 = 2
+    DAP_COLUMN_TEST_MODE_ARGUMENT_INDEX: usize = 1
+    DAP_COLUMN_TEST_C_STRING_TERMINATOR: u8 = 0
+    DAP_COLUMN_TEST_INDEX_INCREMENT: usize = 1
+    DAP_COLUMN_TEST_LENGTH_INCREMENT: usize = 1
+    DAP_COLUMN_TEST_FIRST_BUFFER_INDEX: usize = 0
+    DAP_COLUMN_TEST_DECIMAL_BASE: u64 = 10
+    DAP_COLUMN_TEST_ASCII_ZERO: u8 = 48
+    DAP_COLUMN_TEST_ASCII_NINE: u8 = 57
+    DAP_COLUMN_TEST_DECIMAL_BUFFER_CAPACITY: usize = 20
+    DAP_COLUMN_TEST_HEADER_PREFIX: cstr = "Content-Length: "
+    DAP_COLUMN_TEST_HEADER_SEPARATOR: cstr = "\r\n\r\n"
+    DAP_COLUMN_TEST_DEFAULT_MODE: cstr = "--default-input"
+    DAP_COLUMN_TEST_ZERO_BASED_MODE: cstr = "--zero-based-input"
+    DAP_COLUMN_TEST_DEFAULT_CHECK_MODE: cstr = "--check-default"
+    DAP_COLUMN_TEST_ZERO_BASED_CHECK_MODE: cstr = "--check-zero-based"
+    DAP_COLUMN_TEST_INITIALIZE_DEFAULT: cstr = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\"}"
+    DAP_COLUMN_TEST_INITIALIZE_ZERO_BASED: cstr = "{\"seq\":1,\"type\":\"request\",\"command\":\"initialize\",\"arguments\":{\"columnsStartAt1\":false}}"
+    DAP_COLUMN_TEST_LAUNCH: cstr = "{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{\"program\":\"build/dap-column-fixture.edir\"}}"
+    DAP_COLUMN_TEST_DEFAULT_COLUMNS: cstr = "{\"seq\":3,\"type\":\"request\",\"command\":\"setBreakpoints\",\"arguments\":{\"source\":{\"sourceReference\":7},\"breakpoints\":[{\"line\":41,\"column\":4},{\"line\":41,\"column\":9}]}}"
+    DAP_COLUMN_TEST_DEFAULT_UNRESOLVED_COLUMN: cstr = "{\"seq\":4,\"type\":\"request\",\"command\":\"setBreakpoints\",\"arguments\":{\"source\":{\"sourceReference\":7},\"breakpoints\":[{\"line\":41,\"column\":6}]}}"
+    DAP_COLUMN_TEST_DEFAULT_ZERO_COLUMN: cstr = "{\"seq\":5,\"type\":\"request\",\"command\":\"setBreakpoints\",\"arguments\":{\"source\":{\"sourceReference\":7},\"breakpoints\":[{\"line\":41,\"column\":0}]}}"
+    DAP_COLUMN_TEST_DEFAULT_LINE_ONLY: cstr = "{\"seq\":6,\"type\":\"request\",\"command\":\"setBreakpoints\",\"arguments\":{\"source\":{\"sourceReference\":7},\"breakpoints\":[{\"line\":41}]}}"
+    DAP_COLUMN_TEST_ZERO_BASED_COLUMNS: cstr = "{\"seq\":3,\"type\":\"request\",\"command\":\"setBreakpoints\",\"arguments\":{\"source\":{\"sourceReference\":7},\"breakpoints\":[{\"line\":41,\"column\":3},{\"line\":41,\"column\":8}]}}"
+    DAP_COLUMN_TEST_DEFAULT_FIRST_RESPONSE: cstr = "\"body\":{\"breakpoints\":[{\"id\":1,\"verified\":true,\"line\":41,\"column\":4},{\"id\":2,\"verified\":true,\"line\":41,\"column\":9}]}}"
+    DAP_COLUMN_TEST_DEFAULT_UNRESOLVED_RESPONSE: cstr = "\"body\":{\"breakpoints\":[{\"id\":3,\"verified\":false,\"line\":41,\"column\":6}]}}"
+    DAP_COLUMN_TEST_DEFAULT_LINE_ONLY_RESPONSE: cstr = "\"body\":{\"breakpoints\":[{\"id\":4,\"verified\":true,\"line\":41}]}}"
+    DAP_COLUMN_TEST_DEFAULT_ZERO_COLUMN_RESPONSE: cstr = "\"command\":\"setBreakpoints\",\"success\":false"
+    DAP_COLUMN_TEST_ZERO_BASED_RESPONSE: cstr = "\"body\":{\"breakpoints\":[{\"id\":1,\"verified\":true,\"line\":41,\"column\":3},{\"id\":2,\"verified\":true,\"line\":41,\"column\":8}]}}"
+    DAP_COLUMN_TEST_DEFAULT_MINIMUM_FRAME_COUNT: usize = 6
+    DAP_COLUMN_TEST_ZERO_BASED_MINIMUM_FRAME_COUNT: usize = 3
+
+def dap_column_test_cstr_length(value: cstr) -> usize:
+    length: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    while value[length].u8() != DapColumnTest::DAP_COLUMN_TEST_C_STRING_TERMINATOR:
+        length <- length + DapColumnTest::DAP_COLUMN_TEST_LENGTH_INCREMENT
+    return length
+
+def dap_column_test_cstr_matches(left: cstr, right: cstr) -> bool:
+    index: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    while left[index].u8() == right[index].u8():
+        return true if left[index].u8() == DapColumnTest::DAP_COLUMN_TEST_C_STRING_TERMINATOR
+        index <- index + DapColumnTest::DAP_COLUMN_TEST_INDEX_INCREMENT
+    return false
+
+def dap_column_test_write_all(bytes: u8&, length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    offset: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    while offset < length:
+        written: isize = write(DapColumnTest::DAP_COLUMN_TEST_STDOUT_FD, (&bytes[offset]).cast[void&], length - offset) can Blocking.IO, Unsafe.PointerCast
+        return false if written <= DapColumnTest::DAP_COLUMN_TEST_OUTPUT_READ_EOF
+        return false if written.usize() > length - offset
+        offset <- offset + written.usize()
+    return true
+
+def dap_column_test_write_text(value: cstr) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    return dap_column_test_write_all(value.cast[u8&], dap_column_test_cstr_length(value)) can Blocking.IO, Unsafe.PointerCast
+
+def dap_column_test_write_decimal(value: u64) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    digits: mutable u8[DapColumnTest::DAP_COLUMN_TEST_DECIMAL_BUFFER_CAPACITY] = zeroed
+    remaining: mutable u64 = value
+    digit_count: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    while remaining > DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY.u64():
+        digits[digit_count] <- (remaining % DapColumnTest::DAP_COLUMN_TEST_DECIMAL_BASE).u8() + DapColumnTest::DAP_COLUMN_TEST_ASCII_ZERO
+        remaining <- remaining / DapColumnTest::DAP_COLUMN_TEST_DECIMAL_BASE
+        digit_count <- digit_count + DapColumnTest::DAP_COLUMN_TEST_LENGTH_INCREMENT
+    while digit_count > DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY:
+        digit_count <- digit_count - DapColumnTest::DAP_COLUMN_TEST_LENGTH_INCREMENT
+        return false if not dap_column_test_write_all((&digits[digit_count]).cast[u8&], DapColumnTest::DAP_COLUMN_TEST_LENGTH_INCREMENT)
+    return true
+
+def dap_column_test_write_frame(payload: cstr) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    payload_length: usize = dap_column_test_cstr_length(payload)
+    return false if not dap_column_test_write_text(DapColumnTest::DAP_COLUMN_TEST_HEADER_PREFIX) can Blocking.IO, Unsafe.PointerCast
+    return false if not dap_column_test_write_decimal(payload_length.u64()) can Blocking.IO, Unsafe.PointerCast
+    return false if not dap_column_test_write_text(DapColumnTest::DAP_COLUMN_TEST_HEADER_SEPARATOR) can Blocking.IO, Unsafe.PointerCast
+    return dap_column_test_write_text(payload) can Blocking.IO, Unsafe.PointerCast
+
+def dap_column_test_write_input(zero_based: bool) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    initialize: cstr = DapColumnTest::DAP_COLUMN_TEST_INITIALIZE_DEFAULT if not zero_based else DapColumnTest::DAP_COLUMN_TEST_INITIALIZE_ZERO_BASED
+    breakpoints: cstr = DapColumnTest::DAP_COLUMN_TEST_DEFAULT_COLUMNS if not zero_based else DapColumnTest::DAP_COLUMN_TEST_ZERO_BASED_COLUMNS
+    return false if not dap_column_test_write_frame(initialize) can Blocking.IO, Unsafe.PointerCast
+    return false if not dap_column_test_write_frame(DapColumnTest::DAP_COLUMN_TEST_LAUNCH) can Blocking.IO, Unsafe.PointerCast
+    return false if not dap_column_test_write_frame(breakpoints) can Blocking.IO, Unsafe.PointerCast
+    if not zero_based:
+        return false if not dap_column_test_write_frame(DapColumnTest::DAP_COLUMN_TEST_DEFAULT_UNRESOLVED_COLUMN) can Blocking.IO, Unsafe.PointerCast
+        return false if not dap_column_test_write_frame(DapColumnTest::DAP_COLUMN_TEST_DEFAULT_ZERO_COLUMN) can Blocking.IO, Unsafe.PointerCast
+        return false if not dap_column_test_write_frame(DapColumnTest::DAP_COLUMN_TEST_DEFAULT_LINE_ONLY) can Blocking.IO, Unsafe.PointerCast
+    return true
+
+def dap_column_test_buffer_matches(bytes: u8&, length: usize, start: usize, expected: cstr) -> bool:
+    expected_length: usize = dap_column_test_cstr_length(expected)
+    return false if start > length or expected_length > length - start
+    for index in 0..<expected_length:
+        return false if bytes[start + index] != expected[index].u8()
+    return true
+
+def dap_column_test_find(bytes: u8&, length: usize, start: usize, expected: cstr) -> usize:
+    return length if start > length
+    cursor: mutable usize = start
+    while cursor <= length:
+        return cursor if dap_column_test_buffer_matches(bytes, length, cursor, expected)
+        cursor <- cursor + DapColumnTest::DAP_COLUMN_TEST_INDEX_INCREMENT
+    return length
+
+def dap_column_test_frame_lengths_valid(bytes: u8&, length: usize, minimum_frames: usize) -> bool:
+    cursor: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    frame_count: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    header_prefix_length: usize = dap_column_test_cstr_length(DapColumnTest::DAP_COLUMN_TEST_HEADER_PREFIX)
+    header_separator_length: usize = dap_column_test_cstr_length(DapColumnTest::DAP_COLUMN_TEST_HEADER_SEPARATOR)
+    while cursor < length:
+        return false if not dap_column_test_buffer_matches(bytes, length, cursor, DapColumnTest::DAP_COLUMN_TEST_HEADER_PREFIX)
+        cursor <- cursor + header_prefix_length
+        declared_length: mutable u64 = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY.u64()
+        digit_count: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+        while cursor < length and bytes[cursor] >= DapColumnTest::DAP_COLUMN_TEST_ASCII_ZERO and bytes[cursor] <= DapColumnTest::DAP_COLUMN_TEST_ASCII_NINE:
+            digit: u64 = (bytes[cursor] - DapColumnTest::DAP_COLUMN_TEST_ASCII_ZERO).u64()
+            declared_length <- declared_length * DapColumnTest::DAP_COLUMN_TEST_DECIMAL_BASE + digit
+            digit_count <- digit_count + DapColumnTest::DAP_COLUMN_TEST_LENGTH_INCREMENT
+            cursor <- cursor + DapColumnTest::DAP_COLUMN_TEST_INDEX_INCREMENT
+        return false if digit_count == DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+        return false if not dap_column_test_buffer_matches(bytes, length, cursor, DapColumnTest::DAP_COLUMN_TEST_HEADER_SEPARATOR)
+        cursor <- cursor + header_separator_length
+        body_start: usize = cursor
+        next_header: usize = dap_column_test_find(bytes, length, body_start, DapColumnTest::DAP_COLUMN_TEST_HEADER_PREFIX)
+        body_end: usize = length if next_header == length else next_header
+        return false if declared_length != (body_end - body_start).u64()
+        return false if body_end == body_start
+        frame_count <- frame_count + DapColumnTest::DAP_COLUMN_TEST_LENGTH_INCREMENT
+        cursor <- body_end
+    return frame_count >= minimum_frames
+
+def dap_column_test_check_output(zero_based: bool) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    descriptor: int = open(DapColumnTest::DAP_COLUMN_TEST_OUTPUT_PATH, DapColumnTest::DAP_COLUMN_TEST_OUTPUT_READ_ONLY) can Blocking.IO
+    return false if descriptor < DapColumnTest::DAP_COLUMN_TEST_NO_SYSTEM_ERROR
+    bytes: mutable u8[DapColumnTest::DAP_COLUMN_TEST_OUTPUT_CAPACITY] = zeroed
+    length: mutable usize = DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY
+    read_failed: mutable bool = false
+    while length < DapColumnTest::DAP_COLUMN_TEST_OUTPUT_CAPACITY:
+        received: isize = read(descriptor, (&bytes[length]).cast[void&], DapColumnTest::DAP_COLUMN_TEST_OUTPUT_CAPACITY - length) can Blocking.IO, Unsafe.PointerCast
+        if received <= DapColumnTest::DAP_COLUMN_TEST_OUTPUT_READ_FAILURE:
+            read_failed <- true
+            break
+        break if received == DapColumnTest::DAP_COLUMN_TEST_OUTPUT_READ_EOF
+        length <- length + received.usize()
+    close_result: int = close(descriptor) can Blocking.IO
+    return false if read_failed or close_result < DapColumnTest::DAP_COLUMN_TEST_NO_SYSTEM_ERROR or length == DapColumnTest::DAP_COLUMN_TEST_OUTPUT_CAPACITY
+    return false if not dap_column_test_frame_lengths_valid(bytes[DapColumnTest::DAP_COLUMN_TEST_FIRST_BUFFER_INDEX], length, DapColumnTest::DAP_COLUMN_TEST_ZERO_BASED_MINIMUM_FRAME_COUNT if zero_based else DapColumnTest::DAP_COLUMN_TEST_DEFAULT_MINIMUM_FRAME_COUNT)
+    if zero_based:
+        return dap_column_test_find(bytes[DapColumnTest::DAP_COLUMN_TEST_FIRST_BUFFER_INDEX], length, DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY, DapColumnTest::DAP_COLUMN_TEST_ZERO_BASED_RESPONSE) != length
+    return false if dap_column_test_find(bytes[DapColumnTest::DAP_COLUMN_TEST_FIRST_BUFFER_INDEX], length, DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY, DapColumnTest::DAP_COLUMN_TEST_DEFAULT_FIRST_RESPONSE) == length
+    return false if dap_column_test_find(bytes[DapColumnTest::DAP_COLUMN_TEST_FIRST_BUFFER_INDEX], length, DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY, DapColumnTest::DAP_COLUMN_TEST_DEFAULT_UNRESOLVED_RESPONSE) == length
+    return false if dap_column_test_find(bytes[DapColumnTest::DAP_COLUMN_TEST_FIRST_BUFFER_INDEX], length, DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY, DapColumnTest::DAP_COLUMN_TEST_DEFAULT_ZERO_COLUMN_RESPONSE) == length
+    return dap_column_test_find(bytes[DapColumnTest::DAP_COLUMN_TEST_FIRST_BUFFER_INDEX], length, DapColumnTest::DAP_COLUMN_TEST_OUTPUT_EMPTY, DapColumnTest::DAP_COLUMN_TEST_DEFAULT_LINE_ONLY_RESPONSE) != length
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    return DapColumnTest::DAP_COLUMN_TEST_BAD_ARGUMENTS if argc != DapColumnTest::DAP_COLUMN_TEST_CHILD_ARGUMENT_COUNT
+    arguments: mutable cstr&& = argv.cast[mutable cstr&&]
+    mode: cstr = arguments[DapColumnTest::DAP_COLUMN_TEST_MODE_ARGUMENT_INDEX].cast[cstr]
+    if dap_column_test_cstr_matches(mode, DapColumnTest::DAP_COLUMN_TEST_DEFAULT_MODE):
+        return DapColumnTest::DAP_COLUMN_TEST_SUCCESS if dap_column_test_write_input(false) can Blocking.IO, Unsafe.PointerCast
+    if dap_column_test_cstr_matches(mode, DapColumnTest::DAP_COLUMN_TEST_ZERO_BASED_MODE):
+        return DapColumnTest::DAP_COLUMN_TEST_SUCCESS if dap_column_test_write_input(true) can Blocking.IO, Unsafe.PointerCast
+    if dap_column_test_cstr_matches(mode, DapColumnTest::DAP_COLUMN_TEST_DEFAULT_CHECK_MODE):
+        return DapColumnTest::DAP_COLUMN_TEST_SUCCESS if dap_column_test_check_output(false) can Blocking.IO, Unsafe.PointerCast
+    if dap_column_test_cstr_matches(mode, DapColumnTest::DAP_COLUMN_TEST_ZERO_BASED_CHECK_MODE):
+        return DapColumnTest::DAP_COLUMN_TEST_SUCCESS if dap_column_test_check_output(true) can Blocking.IO, Unsafe.PointerCast
+    return DapColumnTest::DAP_COLUMN_TEST_BAD_ARGUMENTS

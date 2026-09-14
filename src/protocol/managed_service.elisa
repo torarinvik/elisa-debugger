@@ -42,6 +42,9 @@ module DebuggerManagedService:
             MAX_SEEK_EVENT: u64 = 64
             MAX_SOURCE_BREAKPOINTS: usize = 256
 
+        const module SourceBreakpoints:
+            PROTOCOL_MANAGED_SERVICE_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX: usize = 0
+
         const module RecordingState:
             ROOT_RECORDING_BRANCH: u64 = 0
 
@@ -122,6 +125,8 @@ module DebuggerManagedService:
         struct SourceBreakpointEntry:
             id: mutable DebuggerIdentity::DebugId
             line: mutable u32
+            column: mutable u32
+            has_column: mutable bool
             verified: mutable bool
 
         struct SourceBreakpointResult:
@@ -344,6 +349,11 @@ module DebuggerManagedService:
             return DebuggerManagedEngine::managed_set_source_breakpoint(service.controller, location)
 
         def service_replace_source_breakpoints(service: mutable Service&, source: DebuggerIdentity::DebugId, lines: u32&, requested_count: usize) -> SourceBreakpointResult:
+            columns: mutable u32[HistoryLimits::MAX_SOURCE_BREAKPOINTS] = zeroed
+            has_columns: mutable bool[HistoryLimits::MAX_SOURCE_BREAKPOINTS] = zeroed
+            return service_replace_source_breakpoints_with_columns(service, source, lines, columns[SourceBreakpoints::PROTOCOL_MANAGED_SERVICE_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX], has_columns[SourceBreakpoints::PROTOCOL_MANAGED_SERVICE_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX], requested_count)
+
+        def service_replace_source_breakpoints_with_columns(service: mutable Service&, source: DebuggerIdentity::DebugId, lines: u32&, columns: u32&, has_columns: bool&, requested_count: usize) -> SourceBreakpointResult:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if source.value == 0 or requested_count > HistoryLimits::MAX_SOURCE_BREAKPOINTS:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_UNSUPPORTED)
@@ -364,7 +374,7 @@ module DebuggerManagedService:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
             service.last_error <- failure
             return source_breakpoint_result_error(failure) if not DebuggerErrors::error_is_ok(failure)
-            replacement: DebuggerBreakpointManager::BreakpointReplacement = DebuggerManagedEngine::managed_replace_source_breakpoints(service.controller, source, lines, requested_count)
+            replacement: DebuggerBreakpointManager::BreakpointReplacement = DebuggerManagedEngine::managed_replace_source_breakpoints_with_columns(service.controller, source, lines, columns, has_columns, requested_count)
             if not replacement.accepted:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_UNSUPPORTED) if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints)
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure)
@@ -375,7 +385,7 @@ module DebuggerManagedService:
             result.accepted <- true
             result.count <- replacement.count
             for index in 0..<replacement.count:
-                result.points[index] <- SourceBreakpointEntry{id: replacement.results[index].id, line: replacement.results[index].line, verified: replacement.results[index].verified}
+                result.points[index] <- SourceBreakpointEntry{id: replacement.results[index].id, line: replacement.results[index].line, column: replacement.results[index].column, has_column: replacement.results[index].has_column, verified: replacement.results[index].verified}
             result.failure <- DebuggerErrors::no_error()
             return result
 

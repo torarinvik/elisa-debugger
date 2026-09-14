@@ -48,6 +48,19 @@ Re-request scopes after execution advances. The adapter supports both
 `source.path` and a known positive `sourceReference` for source breakpoints;
 when both are supplied they must identify the same EDIR source entry.
 
+DAP source breakpoints may include an optional `column`. The adapter converts
+one-based DAP columns to zero-based coordinates when `columnsStartAt1` is true,
+matches that position against executable EDIR source spans, and returns the
+normalized line and column with each breakpoint response. A breakpoint without
+a column keeps the existing line-only resolution and response shape. Column
+matching is correct when EDIR source spans already use the session
+protocol's zero-based UTF-16 columns. Current compiler-emitted EDIR artifacts
+use one-based UTF-8-byte columns, so they are incompatible even for ASCII until
+the producer normalizes them. The DAP adapter does not infer or transcode those
+producer-specific units; `columnsStartAt1` only selects the zero-based versus
+one-based DAP coordinate basis. Non-ASCII UTF-16 matching is not verified for
+current compiler artifacts.
+
 ## Headless JSON process
 
 Run `build/elisa-debugger-server` with one process per client session. The

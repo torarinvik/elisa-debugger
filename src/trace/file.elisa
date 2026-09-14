@@ -21,7 +21,7 @@ module DebuggerTraceFile:
         const module Path:
             EMPTY_LENGTH: usize = 0
             TERMINATOR_BYTES: usize = 1
-            FIRST_BYTE_INDEX: usize = 0
+            PATH_FIRST_BYTE_INDEX: usize = 0
             SEPARATOR_BYTES: usize = 1
             SLASH: u8 = 47
             NUL: u8 = 0
@@ -51,7 +51,7 @@ module DebuggerTraceFile:
 
         const module Loop:
             EOF: isize = 0
-            FIRST_BYTE_INDEX: usize = 0
+            LOOP_FIRST_BYTE_INDEX: usize = 0
 
         const module Detail:
             INVALID_PATH: u32 = 1
@@ -84,15 +84,15 @@ module DebuggerTraceFile:
 
         def temporary_path_prepare(path: u8&, path_length: usize, output: mutable u8&) -> void:
             directory_length: mutable usize = Path::EMPTY_LENGTH
-            for index in Path::FIRST_BYTE_INDEX..<path_length:
+            for index in Path::PATH_FIRST_BYTE_INDEX..<path_length:
                 directory_length <- index + Path::SEPARATOR_BYTES if path[index] == Path::SLASH
-            for index in Path::FIRST_BYTE_INDEX..<directory_length:
+            for index in Path::PATH_FIRST_BYTE_INDEX..<directory_length:
                 output[index] <- path[index]
-            for template_index in Path::FIRST_BYTE_INDEX..<TemporaryPath::TEMPLATE_LENGTH_BYTES:
+            for template_index in Path::PATH_FIRST_BYTE_INDEX..<TemporaryPath::TEMPLATE_LENGTH_BYTES:
                 output[directory_length + template_index] <- TemporaryPath::TEMPLATE[template_index].u8()
 
         def temporary_file_discard(path: mutable u8&) -> void can[Blocking.IO, Unsafe.PointerCast]:
-            _ = unlink((&path[Path::FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
+            _ = unlink((&path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
 
         def trace_file_write_transaction(path: u8&, path_length: usize, bytes: u8&, length: usize, failure_point: FailureInjection) -> WriteResult can[Blocking.IO, Unsafe.PointerCast]:
             empty_scan: DebuggerTraceStorage::StorageScan = zeroed
@@ -107,8 +107,8 @@ module DebuggerTraceFile:
             return invalid_write(FileStatus.InvalidTrace, Detail::INVALID_TRACE, DebuggerErrors::ErrorCode.Corrupt, ErrorPolicy::NON_RETRYABLE, scan) if scan_status != FileStatus.Ready
 
             temporary_path: mutable u8[TemporaryPath::PATH_CAPACITY_BYTES] = zeroed
-            temporary_path_prepare(path, path_length, temporary_path[Path::FIRST_BYTE_INDEX])
-            descriptor: int = mkstemp((&temporary_path[Path::FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
+            temporary_path_prepare(path, path_length, temporary_path[Path::PATH_FIRST_BYTE_INDEX])
+            descriptor: int = mkstemp((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
             return invalid_write(FileStatus.OpenFailure, Detail::OPEN, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO, scan) if descriptor == FileSystem::SYSCALL_FAILURE_RESULT
 
             if failure_point == FailureInjection.AfterPartialWrite:
@@ -116,45 +116,45 @@ module DebuggerTraceFile:
                 partial_length <- WriteProgress::MINIMUM_PARTIAL_BYTES if partial_length == Buffer::EMPTY_CAPACITY
                 _ = DebuggerTraceStorage::storage_write_all(descriptor, bytes, partial_length) can Blocking.IO
                 _ = close(descriptor) can Blocking.IO
-                temporary_file_discard(temporary_path[Path::FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.WriteFailure, Detail::WRITE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
 
             write_status: DebuggerTraceStorage::StorageStatus = DebuggerTraceStorage::storage_write_all(descriptor, bytes, length) can Blocking.IO
             if write_status != DebuggerTraceStorage::StorageStatus.Ready:
                 _ = close(descriptor) can Blocking.IO
-                temporary_file_discard(temporary_path[Path::FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.WriteFailure, Detail::WRITE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
 
             sync_status: int = fsync(descriptor) can Blocking.IO
             close_status: int = close(descriptor) can Blocking.IO
             if sync_status == FileSystem::SYSCALL_FAILURE_RESULT:
-                temporary_file_discard(temporary_path[Path::FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.SyncFailure, Detail::SYNC, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
             if close_status == FileSystem::SYSCALL_FAILURE_RESULT:
-                temporary_file_discard(temporary_path[Path::FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.CloseFailure, Detail::CLOSE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
 
             # Fault injection stops immediately before the atomic rename.
             if failure_point == FailureInjection.BeforeCommit:
-                temporary_file_discard(temporary_path[Path::FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.CommitFailure, Detail::COMMIT, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
 
             terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
-            path_terminate(path, path_length, terminated_path[Path::FIRST_BYTE_INDEX])
-            commit_status: int = rename((&temporary_path[Path::FIRST_BYTE_INDEX]).cast[cstr], (&terminated_path[Path::FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
+            path_terminate(path, path_length, terminated_path[Path::PATH_FIRST_BYTE_INDEX])
+            commit_status: int = rename((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr], (&terminated_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
             if commit_status == FileSystem::SYSCALL_FAILURE_RESULT:
-                temporary_file_discard(temporary_path[Path::FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.CommitFailure, Detail::COMMIT, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
             return WriteResult{accepted: true, status: FileStatus.Ready, scan: scan, failure: DebuggerErrors::no_error()}
 
         def path_is_valid(path: u8&, path_length: usize) -> bool:
             return false if path_length == Path::EMPTY_LENGTH or path_length > DebuggerTraceFileLimits::PATH_CAPACITY_BYTES
-            for index in Path::FIRST_BYTE_INDEX..<path_length:
+            for index in Path::PATH_FIRST_BYTE_INDEX..<path_length:
                 return false if path[index] == Path::NUL
             return true
 
         def path_terminate(path: u8&, path_length: usize, output: mutable u8&) -> void:
-            for index in Path::FIRST_BYTE_INDEX..<path_length:
+            for index in Path::PATH_FIRST_BYTE_INDEX..<path_length:
                 output[index] <- path[index]
             output[path_length] <- Path::NUL
 
@@ -219,8 +219,8 @@ module DebuggerTraceFile:
             return invalid_read(FileStatus.InvalidCapacity, Detail::INVALID_CAPACITY, DebuggerErrors::ErrorCode.InvalidArgument, ErrorPolicy::NON_RETRYABLE) if output_capacity == Buffer::EMPTY_CAPACITY or output_capacity > DebuggerTraceFileLimits::MAX_FILE_BYTES
 
             terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
-            path_terminate(path, path_length, terminated_path[Loop::FIRST_BYTE_INDEX])
-            descriptor: int = open((&terminated_path[Loop::FIRST_BYTE_INDEX]).cast[cstr], FileSystem::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
+            path_terminate(path, path_length, terminated_path[Loop::LOOP_FIRST_BYTE_INDEX])
+            descriptor: int = open((&terminated_path[Loop::LOOP_FIRST_BYTE_INDEX]).cast[cstr], FileSystem::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
             return invalid_read(FileStatus.OpenFailure, Detail::OPEN, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO) if descriptor == FileSystem::SYSCALL_FAILURE_RESULT
 
             bytes_read: mutable usize = Buffer::EMPTY_CAPACITY
@@ -250,7 +250,7 @@ module DebuggerTraceFile:
             return invalid_read_with_count(FileStatus.CloseFailure, Detail::CLOSE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, bytes_read) if close_result == FileSystem::SYSCALL_FAILURE_RESULT
             return invalid_read_with_count(FileStatus.TooLarge, Detail::TOO_LARGE, DebuggerErrors::ErrorCode.ResourceLimit, ErrorPolicy::NON_RETRYABLE, bytes_read) if too_large
 
-            scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(output[Loop::FIRST_BYTE_INDEX], bytes_read)
+            scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(output[Loop::LOOP_FIRST_BYTE_INDEX], bytes_read)
             status: FileStatus = trace_file_scan_status(scan)
             return ReadResult{accepted: status == FileStatus.Ready, bytes_read: bytes_read, status: status, scan: scan, failure: DebuggerErrors::no_error()} if status == FileStatus.Ready
             return ReadResult{accepted: false, bytes_read: bytes_read, status: status, scan: scan, failure: trace_file_scan_failure(status)}

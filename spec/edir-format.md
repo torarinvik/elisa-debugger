@@ -55,6 +55,16 @@ than the referenced row's line count. A zero file ID remains valid for
 instructions without source locations. The codec accepts at most 128
 instructions.
 
+The current compiler's schema-2 producer serializes parser spans verbatim:
+lines are one-based, columns are one-based UTF-8 byte counts, and byte offsets
+are zero-based with an exclusive end. The wire format has no coordinate-unit
+tag. These producer columns do not satisfy the session protocol's zero-based
+UTF-16 column contract; the DAP adapter currently changes the column base but
+does not convert UTF-8 bytes to UTF-16 code units. Line breakpoints remain
+usable, while compiler-artifact column breakpoints are unsupported until the
+producer emits normalized coordinates or the artifact carries enough source
+content for a consumer to convert them safely.
+
 Schema 3 appends a function count and its descriptors after all instructions:
 
 | Field | Width | Meaning |

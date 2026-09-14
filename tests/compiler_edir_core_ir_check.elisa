@@ -1,0 +1,57 @@
+include "../src/vm/edir_file.elisa"
+
+const module CoreIRCheck:
+    ARTIFACT_PATH_LENGTH: usize = 32
+    ARTIFACT_PATH: cstr = "build/compiler_edir_core_ir.edir"
+    EXPECTED_SOURCE_FILE_COUNT: usize = 1
+    EXPECTED_RESULT: i64 = 42
+    EXPECTED_SOURCE_FILE_ID: u64 = 1
+    EXPECTED_SOURCE_LINE_COUNT: u64 = 4
+    EXPECTED_DECLARATION_LINE: u32 = 2
+    EXPECTED_EXPRESSION_LINE: u32 = 3
+    NO_SOURCE_VALUE: u64 = 0
+    NO_SOURCE_COLUMN: u32 = 0
+    EXPECTED_INITIALIZER_VALUE: i64 = 40
+    EXPECTED_RIGHT_OPERAND: i64 = 2
+    EXPECTED_LOCAL_COUNT: u64 = 1
+    EXPECTED_LOCAL_INDEX: i64 = 0
+    EXPECTED_INSTRUCTION_COUNT: u64 = 5
+    CONSTANT_INSTRUCTION_INDEX: usize = 0
+    STORE_LOCAL_INSTRUCTION_INDEX: usize = 1
+    LOAD_LOCAL_INSTRUCTION_INDEX: usize = 2
+    ARITHMETIC_INSTRUCTION_INDEX: usize = 3
+    RETURN_INSTRUCTION_INDEX: usize = 4
+    RUN_STEP_BUDGET: u64 = CoreIRCheck::EXPECTED_INSTRUCTION_COUNT
+    RESULT_ARTIFACT_LOAD: i64 = 1
+    RESULT_IMAGE_VERIFICATION: i64 = 2
+    RESULT_INSTRUCTION_SHAPE: i64 = 3
+    RESULT_SOURCE_SPAN: i64 = 4
+    RESULT_EXECUTION: i64 = 5
+    SUCCESS_RESULT: i64 = 0
+
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(CoreIRCheck::ARTIFACT_PATH.cast[u8&], CoreIRCheck::ARTIFACT_PATH_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return CoreIRCheck::RESULT_ARTIFACT_LOAD if not loaded.valid or loaded.status != DebuggerEDIRFile::LoadStatus.Ready
+    return CoreIRCheck::RESULT_IMAGE_VERIFICATION if not DebuggerEDIR::verify_image(loaded.image).valid
+    return CoreIRCheck::RESULT_SOURCE_SPAN if loaded.image.source_file_count != CoreIRCheck::EXPECTED_SOURCE_FILE_COUNT
+    return CoreIRCheck::RESULT_SOURCE_SPAN if loaded.image.source_files[0].id.value != CoreIRCheck::EXPECTED_SOURCE_FILE_ID or loaded.image.source_files[0].logical_path.value == CoreIRCheck::NO_SOURCE_VALUE or loaded.image.source_files[0].content.value == CoreIRCheck::NO_SOURCE_VALUE or loaded.image.source_files[0].line_count != CoreIRCheck::EXPECTED_SOURCE_LINE_COUNT
+    return CoreIRCheck::RESULT_INSTRUCTION_SHAPE if loaded.image.program.instruction_count != CoreIRCheck::EXPECTED_INSTRUCTION_COUNT or loaded.image.program.local_count != CoreIRCheck::EXPECTED_LOCAL_COUNT or not loaded.image.program.has_return
+    return CoreIRCheck::RESULT_INSTRUCTION_SHAPE if loaded.image.instructions[CoreIRCheck::CONSTANT_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.Constant or loaded.image.instructions[CoreIRCheck::CONSTANT_INSTRUCTION_INDEX].a != CoreIRCheck::EXPECTED_INITIALIZER_VALUE
+    return CoreIRCheck::RESULT_INSTRUCTION_SHAPE if loaded.image.instructions[CoreIRCheck::STORE_LOCAL_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.StoreLocal or loaded.image.instructions[CoreIRCheck::STORE_LOCAL_INSTRUCTION_INDEX].a != CoreIRCheck::EXPECTED_LOCAL_INDEX
+    return CoreIRCheck::RESULT_INSTRUCTION_SHAPE if loaded.image.instructions[CoreIRCheck::LOAD_LOCAL_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.LoadLocal or loaded.image.instructions[CoreIRCheck::LOAD_LOCAL_INSTRUCTION_INDEX].a != CoreIRCheck::EXPECTED_LOCAL_INDEX
+    return CoreIRCheck::RESULT_INSTRUCTION_SHAPE if loaded.image.instructions[CoreIRCheck::ARITHMETIC_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.Add or loaded.image.instructions[CoreIRCheck::ARITHMETIC_INSTRUCTION_INDEX].a != CoreIRCheck::EXPECTED_RIGHT_OPERAND
+    return CoreIRCheck::RESULT_INSTRUCTION_SHAPE if loaded.image.instructions[CoreIRCheck::RETURN_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.Return
+    initializer_source: DebuggerIdentity::SourceSpan = loaded.image.instructions[CoreIRCheck::CONSTANT_INSTRUCTION_INDEX].source
+    declaration_source: DebuggerIdentity::SourceSpan = loaded.image.instructions[CoreIRCheck::STORE_LOCAL_INSTRUCTION_INDEX].source
+    local_source: DebuggerIdentity::SourceSpan = loaded.image.instructions[CoreIRCheck::LOAD_LOCAL_INSTRUCTION_INDEX].source
+    arithmetic_source: DebuggerIdentity::SourceSpan = loaded.image.instructions[CoreIRCheck::ARITHMETIC_INSTRUCTION_INDEX].source
+    return CoreIRCheck::RESULT_SOURCE_SPAN if initializer_source.file.value != CoreIRCheck::EXPECTED_SOURCE_FILE_ID or initializer_source.start_line != CoreIRCheck::EXPECTED_DECLARATION_LINE or initializer_source.start_byte >= initializer_source.end_byte or initializer_source.start_column == CoreIRCheck::NO_SOURCE_COLUMN
+    return CoreIRCheck::RESULT_SOURCE_SPAN if declaration_source.file.value != CoreIRCheck::EXPECTED_SOURCE_FILE_ID or declaration_source.start_line != CoreIRCheck::EXPECTED_DECLARATION_LINE or declaration_source.start_byte >= declaration_source.end_byte
+    return CoreIRCheck::RESULT_SOURCE_SPAN if local_source.file.value != CoreIRCheck::EXPECTED_SOURCE_FILE_ID or local_source.start_line != CoreIRCheck::EXPECTED_EXPRESSION_LINE or local_source.start_byte >= local_source.end_byte
+    return CoreIRCheck::RESULT_SOURCE_SPAN if arithmetic_source.file.value != CoreIRCheck::EXPECTED_SOURCE_FILE_ID or arithmetic_source.start_line != CoreIRCheck::EXPECTED_EXPRESSION_LINE or arithmetic_source.start_byte != local_source.start_byte or arithmetic_source.end_byte <= local_source.end_byte
+    returned_source: DebuggerIdentity::SourceSpan = loaded.image.instructions[CoreIRCheck::RETURN_INSTRUCTION_INDEX].source
+    return CoreIRCheck::RESULT_SOURCE_SPAN if returned_source.file.value != CoreIRCheck::EXPECTED_SOURCE_FILE_ID or returned_source.start_line != CoreIRCheck::EXPECTED_EXPRESSION_LINE or returned_source.start_byte >= returned_source.end_byte
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(loaded.image, DebuggerEDIR::machine_new(), CoreIRCheck::RUN_STEP_BUDGET)
+    return CoreIRCheck::RESULT_EXECUTION if machine.faulted or not machine.halted or machine.result != CoreIRCheck::EXPECTED_RESULT or not machine.locals_initialized[CoreIRCheck::EXPECTED_LOCAL_INDEX.usize()] or machine.locals[CoreIRCheck::EXPECTED_LOCAL_INDEX.usize()] != CoreIRCheck::EXPECTED_INITIALIZER_VALUE
+    return CoreIRCheck::SUCCESS_RESULT

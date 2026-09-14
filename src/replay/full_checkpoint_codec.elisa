@@ -25,7 +25,9 @@ const module DebuggerFullCheckpointCodecCapacity:
     SCHEDULE_DECISION_BYTES: usize = U64_BYTES * 2 + TASK_INFO_BYTES + U16_BYTES
     EFFECT_RECORD_BYTES: usize = U64_BYTES * 4 + U16_BYTES + BOOL_BYTES
     RESOURCE_FILE_HEADER_BYTES: usize = U64_BYTES * 5 + BOOL_BYTES
-    OUTER_FIXED_BYTES: usize = U32_BYTES * 3 + U64_BYTES * 4
+    # Header/schema fields, recording coordinates, stable build identity,
+    # complete-image fingerprint, and its validity bit.
+    OUTER_FIXED_BYTES: usize = U32_BYTES * 4 + U64_BYTES * 9 + BOOL_BYTES
     TASK_FIXED_BYTES: usize = U64_BYTES * 6 + U16_BYTES + BOOL_BYTES * 3
     EFFECT_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES * 4 + BOOL_BYTES * 2 + U32_BYTES
     RESOURCE_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES
@@ -47,7 +49,7 @@ module DebuggerFullCheckpointCodec:
     private:
         const module Codec:
             REPLAY_FULL_CHECKPOINT_CODEC_MAGIC: u32 = 1263022918
-            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 2
+            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 3
             REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS: u64 = 8
             REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK: u64 = 255
             FIRST_INDEX: usize = 0
@@ -164,6 +166,13 @@ module DebuggerFullCheckpointCodec:
         def writer_put_u64(writer: mutable CheckpointWriter&, value: u64) -> void:
             for shift in Codec::FIRST_INDEX..<Codec::REPLAY_FULL_CHECKPOINT_CODEC_U64_BYTES:
                 writer_put_byte(writer, ((value >> (Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS * shift.u64())) & Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK).u8())
+
+        def writer_put_build_identity(writer: mutable CheckpointWriter&, build: DebuggerIdentity::BuildIdentity) -> void:
+            writer_put_u64(writer, build.compiler.value)
+            writer_put_u64(writer, build.runtime.value)
+            writer_put_u64(writer, build.source.value)
+            writer_put_u64(writer, build.target.value)
+            writer_put_u32(writer, build.metadata_version)
 
         def writer_put_bool(writer: mutable CheckpointWriter&, value: bool) -> void:
             writer_put_byte(writer, Codec::REPLAY_FULL_CHECKPOINT_CODEC_TRUE if value else Codec::REPLAY_FULL_CHECKPOINT_CODEC_FALSE)
@@ -331,6 +340,15 @@ module DebuggerFullCheckpointCodec:
             for shift in Codec::FIRST_INDEX..<Codec::REPLAY_FULL_CHECKPOINT_CODEC_U64_BYTES:
                 value <- value | (reader_take_byte(reader).u64() << (Codec::REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS * shift.u64()))
             return value
+
+        def reader_take_build_identity(reader: mutable CheckpointReader&) -> DebuggerIdentity::BuildIdentity:
+            return DebuggerIdentity::BuildIdentity{
+                compiler: DebuggerIdentity::debug_id(reader_take_u64(reader)),
+                runtime: DebuggerIdentity::debug_id(reader_take_u64(reader)),
+                source: DebuggerIdentity::debug_id(reader_take_u64(reader)),
+                target: DebuggerIdentity::debug_id(reader_take_u64(reader)),
+                metadata_version: reader_take_u32(reader)
+            }
 
         def reader_take_bool(reader: mutable CheckpointReader&) -> bool:
             value: u8 = reader_take_byte(reader)
@@ -679,6 +697,9 @@ module DebuggerFullCheckpointCodec:
             writer_put_u64(writer, checkpoint.branch.value)
             writer_put_u64(writer, checkpoint.event)
             writer_put_u64(writer, checkpoint.state_hash)
+            writer_put_build_identity(writer, checkpoint.build)
+            writer_put_u64(writer, checkpoint.image_fingerprint)
+            writer_put_bool(writer, checkpoint.image_fingerprint_valid)
             machine_bytes: DebuggerTraceBinary::ByteWriter = DebuggerCheckpointCodec::checkpoint_encode(checkpoint.machine)
             if not DebuggerTraceBinary::writer_is_valid(machine_bytes) or machine_bytes.length != DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES:
                 encoded.failed <- true
@@ -716,6 +737,9 @@ module DebuggerFullCheckpointCodec:
             checkpoint.branch <- DebuggerIdentity::debug_id(reader_take_u64(reader))
             checkpoint.event <- reader_take_u64(reader)
             checkpoint.state_hash <- reader_take_u64(reader)
+            checkpoint.build <- reader_take_build_identity(reader)
+            checkpoint.image_fingerprint <- reader_take_u64(reader)
+            checkpoint.image_fingerprint_valid <- reader_take_bool(reader)
             if reader.failed or magic != Codec::REPLAY_FULL_CHECKPOINT_CODEC_MAGIC or codec_schema != Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA:
                 return decode_failure(DecodeStatus.Invalid)
             machine_bytes: mutable u8[DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES] = zeroed

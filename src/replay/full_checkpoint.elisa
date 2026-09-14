@@ -23,9 +23,11 @@ module DebuggerFullCheckpoint:
             RESOURCES: u32 = 7
             INTEGRITY: u32 = 8
             ADAPTERS: u32 = 9
+            BUILD_IDENTITY: u32 = 10
+            IMAGE_FINGERPRINT: u32 = 11
 
         const module Full:
-            CHECKPOINT_SCHEMA: u32 = 2
+            CHECKPOINT_SCHEMA: u32 = 3
             CHECKPOINT_NO_ID: u64 = 0
             CHECKPOINT_MAX_EVENT: u64 = 18446744073709551615
             CHECKPOINT_MAX_BRANCH: u64 = 18446744073709551615
@@ -40,6 +42,7 @@ module DebuggerFullCheckpoint:
             CHECKPOINT_HASH_FALSE: u8 = 0
             CHECKPOINT_HASH_TRUE: u8 = 1
             CHECKPOINT_INVALID_HASH: u64 = 0
+            CHECKPOINT_INVALID_METADATA_VERSION: u32 = 0
             CHECKPOINT_MAX_ERROR_CODE: u16 = 12
             CHECKPOINT_MAX_ERROR_SEVERITY: u16 = 2
 
@@ -67,6 +70,9 @@ module DebuggerFullCheckpoint:
 
         def checkpoint_hash_bool(hash: u64, value: bool) -> u64:
             return checkpoint_hash_byte(hash, Full::CHECKPOINT_HASH_TRUE if value else Full::CHECKPOINT_HASH_FALSE)
+
+        def checkpoint_build_identity_is_valid(build: DebuggerIdentity::BuildIdentity) -> bool:
+            return build.compiler.value != Full::CHECKPOINT_NO_ID and build.runtime.value != Full::CHECKPOINT_NO_ID and build.source.value != Full::CHECKPOINT_NO_ID and build.target.value != Full::CHECKPOINT_NO_ID and build.metadata_version != Full::CHECKPOINT_INVALID_METADATA_VERSION
 
         def checkpoint_hash_task(hash: u64, task: DebuggerConcurrency::TaskInfo) -> u64:
             updated: mutable u64 = checkpoint_hash_u64(hash, task.id.value)
@@ -131,6 +137,13 @@ module DebuggerFullCheckpoint:
             hash <- checkpoint_hash_u64(hash, checkpoint.recording.value)
             hash <- checkpoint_hash_u64(hash, checkpoint.branch.value)
             hash <- checkpoint_hash_u64(hash, checkpoint.event)
+            hash <- checkpoint_hash_u64(hash, checkpoint.build.compiler.value)
+            hash <- checkpoint_hash_u64(hash, checkpoint.build.runtime.value)
+            hash <- checkpoint_hash_u64(hash, checkpoint.build.source.value)
+            hash <- checkpoint_hash_u64(hash, checkpoint.build.target.value)
+            hash <- checkpoint_hash_u32(hash, checkpoint.build.metadata_version)
+            hash <- checkpoint_hash_u64(hash, checkpoint.image_fingerprint)
+            hash <- checkpoint_hash_bool(hash, checkpoint.image_fingerprint_valid)
 
             tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot = checkpoint.tasks
             hash <- checkpoint_hash_u64(hash, tasks.task_count.u64())
@@ -200,6 +213,9 @@ module DebuggerFullCheckpoint:
             branch: mutable DebuggerIdentity::DebugId
             event: mutable u64
             state_hash: mutable u64
+            build: mutable DebuggerIdentity::BuildIdentity
+            image_fingerprint: mutable u64
+            image_fingerprint_valid: mutable bool
             # Derived fingerprint catches edits to mutable side state after capture.
             side_state_hash: mutable u64
             machine: mutable DebuggerCheckpoint::MachineSnapshot
@@ -215,6 +231,8 @@ module DebuggerFullCheckpoint:
             # checkpoint taken before the first fork therefore legitimately
             # carries branch 0; only the reserved terminal id is invalid here.
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_BRANCH) if checkpoint.branch.value == Full::CHECKPOINT_MAX_BRANCH
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::BUILD_IDENTITY) if not checkpoint_build_identity_is_valid(checkpoint.build)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::IMAGE_FINGERPRINT) if not checkpoint.image_fingerprint_valid
             expected_machine_id: u64 = Full::CHECKPOINT_MAX_EVENT if checkpoint.event == Full::CHECKPOINT_MAX_EVENT else checkpoint.event + Full::REPLAY_FULL_CHECKPOINT_CHECKPOINT_ID_OFFSET
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_MACHINE) if checkpoint.machine.id.value == Full::CHECKPOINT_NO_ID or checkpoint.machine.id.value != expected_machine_id or checkpoint.machine.event != checkpoint.event or checkpoint.machine.state_hash != checkpoint.state_hash or not DebuggerCheckpoint::snapshot_shape_is_valid(checkpoint.machine) or checkpoint.machine.state_hash != DebuggerCheckpoint::snapshot_state_hash(checkpoint.machine)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
@@ -225,13 +243,16 @@ module DebuggerFullCheckpoint:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INTEGRITY) if checkpoint.side_state_hash != checkpoint_hash_side_state(checkpoint)
             return DebuggerErrors::no_error()
 
-        def full_checkpoint_capture_with_adapters(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, adapters: DebuggerReplayAdapters::AdapterSnapshot, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64) -> ManagedCheckpoint:
+        def full_checkpoint_capture_with_adapters(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, adapters: DebuggerReplayAdapters::AdapterSnapshot, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64, build: DebuggerIdentity::BuildIdentity, image_fingerprint: u64, image_fingerprint_valid: bool) -> ManagedCheckpoint:
             checkpoint: mutable ManagedCheckpoint = ManagedCheckpoint{
                 schema: Full::CHECKPOINT_SCHEMA,
                 recording: recording,
                 branch: branch,
                 event: event,
                 state_hash: state_hash,
+                build: build,
+                image_fingerprint: image_fingerprint,
+                image_fingerprint_valid: image_fingerprint_valid,
                 side_state_hash: Full::CHECKPOINT_INVALID_HASH,
                 machine: DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(Full::CHECKPOINT_MAX_EVENT if event == Full::CHECKPOINT_MAX_EVENT else event + Full::REPLAY_FULL_CHECKPOINT_CHECKPOINT_ID_OFFSET), event, state_hash),
                 tasks: tasks,

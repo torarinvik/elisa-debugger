@@ -6,61 +6,70 @@ Elisa programs can be compiled to EDIR.
 
 ## Compiler revision
 
-The adjacent `../Elisa-compiler` checkout was clean at
-`9791a8e1cd924bb03e43cb46da2d3530b4c9fbb0` on `main` (also referenced by
-`codex/wasm-sdk`). Its checked-in source lists `edir` in
-`cli_emit_mode_supported`, and includes the bounded EDIR emitter. The emitter's
-initial implementation was introduced by `91d63d51e91e382bdfbfc3ed1e73455dcf9d29a5`,
-which is an ancestor of the current revision.
-
-The adjacent stage1 product is stale relative to the current compiler source.
-On 2026-09-14 the strict EDIR emit command below exited with status 2 and named
-`src/driver/elisac.elisa` as newer than `bin/elisac-stage1`. Do not set
-`ELISA_ALLOW_STALE_STAGE1=1` for integration qualification: it only bypasses
-the freshness check and does not prove the product matches this revision. Seed
-or rebuild stage1 from the pinned clean source revision before claiming a fresh
-artifact build. Keep that build and any compiler changes in an isolated
-compiler worktree.
+On 2026-09-14 the adjacent `../Elisa-compiler` checkout was clean on `main` at
+`fd2cb3cff470319500db362e5fce2833cbe300de` (`fd2cb3cf`), exactly matching
+`origin/main`. This is the compiler revision for the checks below. The checked-in
+source includes the bounded EDIR emitter and lists `edir` in
+`cli_emit_mode_supported`.
 
 The wrapper `scripts/elisac_stage1.sh` rejects a product binary older than any
 compiler `.elisa` or `.elisai` source. The guard is timestamp based, not a Git
 revision check. Keep `ELISA_ALLOW_STALE_STAGE1=0` for integration checks; setting
 it to `1` only bypasses freshness validation and does not establish that the
-product matches the source revision.
+product matches the source revision. To reproduce the revision assertion as
+well as the wrapper's freshness guard, check that the compiler checkout is clean
+at the revision above, then use the commands below. Rebuild its stage1 product
+from that checkout with the compiler's documented seed flow if the wrapper
+reports stale; do not bypass the guard to qualify an artifact.
 
-## Verified emit command
+## Strict-freshness build and test path
 
-From this debugger repository, with `COMPILER_ROOT` set to a clean checkout at
-the pinned revision above, this command emitted a 419-byte schema-2 artifact
-with stale-product rejection enabled:
+From this debugger repository, set `COMPILER_ROOT` to the clean compiler
+checkout at the revision above. This direct command checks the stage1 product's
+timestamp freshness and emits the arithmetic fixture as EDIR:
 
 ```sh
-COMPILER_ROOT=/path/to/clean/Elisa-compiler
+COMPILER_ROOT="$(cd ../Elisa-compiler && pwd)"
+test "$(git -C "$COMPILER_ROOT" rev-parse HEAD)" = \
+  fd2cb3cff470319500db362e5fce2833cbe300de
+test -z "$(git -C "$COMPILER_ROOT" status --porcelain)"
+mkdir -p build
 ELISA_EDIR_SOURCE_ROOT="$PWD" ELISA_ALLOW_STALE_STAGE1=0 \
   "$COMPILER_ROOT/scripts/elisac_stage1.sh" \
   -emit edir -O0 -o build/compiler_edir_arithmetic.edir \
   tests/compiler_edir_arithmetic_fixture.elisa
 ```
 
-Historical evidence from 2026-09-13: the exact compiler invocation was exercised
-against revision `91d63d51e91e382bdfbfc3ed1e73455dcf9d29a5`; the artifact
-header reported codec schema 2, program version 1, five instructions, and one
-local. That revision is an ancestor of the current compiler source, but this
-does not replace rebuilding and rerunning the command against the current
-stage1 product. To run the repository's broader arithmetic/native parity
-check after rebuilding, use:
+For the reproducible debugger/compiler integration gate, run the focused Make
+targets with stale-product rejection explicitly kept on:
 
 ```sh
-make compiler-edir-check \
+make compiler-edir-check compiler-edir-loop-check compiler-edir-calls-check \
   ELISA_EDIR_COMPILER="$COMPILER_ROOT/scripts/elisac_stage1.sh" \
   ELISA_EDIR_ALLOW_STALE_STAGE1=0
 ```
 
-`make compiler-edir-loop-check` exercises the counted-loop EDIR artifact,
-source breakpoints, and reverse stepping. Those Make targets are separate from
-the ordinary smoke suite because they require this compiler branch. The direct
-emit command was verified for this record; the full Make targets are not thereby
-claimed as passing.
+These targets compile EDIR and native fixtures, check debugger execution and DAP
+inspection, and cover counted-loop breakpoints/reverse stepping and function
+calls. They are separate from the ordinary smoke suite because they require
+the compiler's `-emit edir` mode. The command is a reproducible test path, not a
+claim that all three targets have passed on every checkout.
+
+## Compiler optimization distinction
+
+Current stage1 documents default-on, conservative source-level memory lowering
+for proven local `darray[i64]` patterns: helper scratch reuse, capacity-based
+reserve inference, and bounded stack placement. Its separate LLVM optimization
+pipeline runs `default<O1>`, `default<O2>`, or `default<O3>` when those levels are
+requested; `-O0` skips that LLVM pipeline. The memory lowering and LLVM pass
+pipeline are distinct mechanisms. The EDIR integration targets intentionally
+use `-O0`; their success does not qualify LLVM optimization or the native memory
+optimizations. For work that changes native LLVM lowering, run the compiler's
+`test/parity/opt_pipeline_smoke.sh` and `test/parity/memory_speed_smoke.sh` in
+the compiler checkout as appropriate; use its memory benchmark only when making
+a performance claim. See the compiler's
+[memory optimization notes](../../Elisa-compiler/docs/memory-speed-automation.md)
+and [optimization-level notes](../../Elisa-compiler/docs/stage1_scope.md).
 
 ## Supported boundary and current limits
 

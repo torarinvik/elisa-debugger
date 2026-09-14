@@ -15,6 +15,7 @@ const module TraceServiceTestIdentity:
     INTERIOR_SESSION_ID: u64 = 82
     FRESH_RESTORE_SESSION_ID: u64 = 87
     FRESH_RESTORE_NO_CHECKPOINTS_SESSION_ID: u64 = 88
+    FRESH_RESTORE_FUTURE_IMAGE_SESSION_ID: u64 = 89
 
 const module TraceServiceTestRequest:
     ID: u64 = 1
@@ -76,6 +77,7 @@ const module TraceServiceTestFailure:
     FRESH_CHECKPOINT_CONFIGURATION_LOST: i64 = 28
     FRESH_CHECKPOINT_REVERSE_FAILED: i64 = 29
     FRESH_CHECKPOINT_CAPABILITY_IGNORED: i64 = 30
+    FRESH_CHECKPOINT_FUTURE_IMAGE_MISMATCH_ACCEPTED: i64 = 31
 
 const module TraceServiceTestRestore:
     BUILD_SOURCE_OFFSET: u64 = 1
@@ -95,6 +97,7 @@ const module TraceServiceTestConfiguration:
     SOURCE_LINE: u32 = 1
     SOURCE_COLUMN: u32 = 0
     SOURCE_DISCRIMINATOR: u32 = 0
+    FUTURE_SOURCE_DISCRIMINATOR: u32 = 1
     SOURCE_ROOT_LENGTH: usize = 4
     SOURCE_ROOT_SLASH: u8 = 47
     SOURCE_ROOT_T: u8 = 116
@@ -373,6 +376,37 @@ def image_mismatch_is_atomic(build: DebuggerIdentity::BuildIdentity, image: Debu
     restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, TraceServiceTestTrace::EVENT_COUNT.u64())
     return not restored.accepted and service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, initial_hash)
 
+def restore_rejects_future_image_mismatch(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, reader: DebuggerTraceReader::TraceReader&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> bool:
+    changed_image: mutable DebuggerEDIR::ProgramImage = image
+    future_instruction: mutable DebuggerEDIR::Instruction = changed_image.instructions[TraceServiceTestProgram::RETURN_INSTRUCTION_INDEX]
+    future_instruction.source.discriminator <- TraceServiceTestConfiguration::FUTURE_SOURCE_DISCRIMINATOR
+    changed_image.instructions[TraceServiceTestProgram::RETURN_INSTRUCTION_INDEX] <- future_instruction
+    return false if not DebuggerEDIR::verify_image_with_source_table(changed_image).valid
+
+    prefix_service: mutable DebuggerManagedService::Service = new_trace_service(TraceServiceTestIdentity::FRESH_RESTORE_FUTURE_IMAGE_SESSION_ID, build, changed_image, TraceServiceTestIdentity::RECORDING_ID)
+    return false if not run_service_to_event(prefix_service, checkpoint.event)
+    return false if not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, prefix_service.controller.engine.machine)
+    return false if prefix_service.controller.state.adapters.clock.count == checkpoint.adapters.clock.count
+    prefix_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(prefix_service.controller.engine)
+    prefix_event: usize = prefix_service.controller.engine.event_count
+    prefix_clock_count: usize = prefix_service.controller.state.adapters.clock.count
+    prefix_random_count: usize = prefix_service.controller.state.adapters.random.count
+    prefix_console_count: usize = prefix_service.controller.state.adapters.console.count
+    direct_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_restore_full_checkpoint(prefix_service.controller, checkpoint)
+    return false if DebuggerErrors::error_is_ok(direct_failure) or direct_failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    return false if prefix_service.controller.session.state != DebuggerSession::SessionState.Stopped or prefix_service.controller.engine.event_count != prefix_event
+    return false if DebuggerReplayEngine::replay_engine_state_hash(prefix_service.controller.engine) != prefix_hash
+    return false if prefix_service.controller.state.adapters.clock.count != prefix_clock_count or prefix_service.controller.state.adapters.random.count != prefix_random_count or prefix_service.controller.state.adapters.console.count != prefix_console_count
+
+    service: mutable DebuggerManagedService::Service = new_trace_service(TraceServiceTestIdentity::FRESH_RESTORE_FUTURE_IMAGE_SESSION_ID, build, changed_image, TraceServiceTestIdentity::RECORDING_ID)
+    initial_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine)
+    restored: mutable DebuggerManagedService::Result = DebuggerManagedTraceService::service_restore_fresh_checkpoint(service, checkpoint)
+    return false if restored.accepted or restored.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    return false if not service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, initial_hash)
+    restored <- DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, TraceServiceTestTrace::EVENT_COUNT.u64())
+    return false if restored.accepted or restored.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    return service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, initial_hash)
+
 def interior_checkpoint_restore_is_exact(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64:
     bundle: mutable DebuggerTraceBundle::TraceBundle = zeroed
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not build_interior_checkpoint_bundle(build, image, bundle)
@@ -426,6 +460,7 @@ def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image
     return TraceServiceTestFailure::BUILD_MISMATCH_ATOMIC if not build_mismatch_is_atomic(build, image, reopened)
     return TraceServiceTestFailure::RECORDING_MISMATCH_ATOMIC if not recording_mismatch_is_atomic(build, image, reopened)
     return TraceServiceTestFailure::IMAGE_MISMATCH_ATOMIC if not image_mismatch_is_atomic(build, image, reopened)
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_FUTURE_IMAGE_MISMATCH_ACCEPTED if not restore_rejects_future_image_mismatch(build, image, reopened, checkpoint.checkpoint)
 
     trace_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
     return TraceServiceTestFailure::VERIFY if trace_report.state != DebuggerTraceVerify::VerificationState.Exact or not trace_report.replayable or trace_report.verified_event != TraceServiceTestTrace::LAST_EVENT

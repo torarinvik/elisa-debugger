@@ -70,6 +70,22 @@ const module Test:
     RUNTIME_ID: u64 = 102
     SOURCE_ID: u64 = 103
     TARGET_ID: u64 = 104
+    IMAGE_FINGERPRINT: u64 = 105
+    BUILD_ID_TAMPER_DELTA: u64 = 1
+    NO_BUILD_COMPONENT_ID: u64 = 0
+    CHECKPOINT_BUILD_TAMPER_ACCEPTED: i64 = 38
+    CHECKPOINT_IMAGE_TAMPER_ACCEPTED: i64 = 39
+    CHECKPOINT_INVALID_FINGERPRINT_ACCEPTED: i64 = 40
+    CHECKPOINT_INVALID_BUILD_ACCEPTED: i64 = 41
+    ARTIFACT_FINGERPRINT_RESULT_FAILURE: i64 = 42
+    INVALID_ARTIFACT_FINGERPRINT_ACCEPTED: i64 = 43
+    EDIR_PROGRAM_VERSION: u32 = 1
+    EDIR_INSTRUCTION_COUNT: u64 = 2
+    EDIR_FIRST_INSTRUCTION_INDEX: usize = 0
+    EDIR_RETURN_INDEX: usize = 1
+    EDIR_ZERO_OPERAND: i64 = 0
+    EDIR_NO_LOCALS: u64 = 0
+    TEST_SUCCESS: i64 = 0
     TRACE_SCHEMA: u32 = 1
     TRACE_EVENT_HASH: u64 = 9901
     TRACE_EVENT_SEQUENCE: u64 = 2
@@ -140,6 +156,15 @@ def test_get_u64(bytes: u8&, offset: usize) -> u64:
 def test_rewrite_frame_checksum_legacy(bytes: mutable u8&, frame_offset: usize, payload_length: usize) -> void:
     checksum: u64 = test_legacy_checksum(bytes[frame_offset + Test::TRACE_HEADER_BYTES], payload_length)
     test_put_u64(bytes, frame_offset + Test::TRACE_CHECKSUM_OFFSET, checksum)
+
+def test_build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(Test::COMPILER_ID),
+        runtime: DebuggerIdentity::debug_id(Test::RUNTIME_ID),
+        source: DebuggerIdentity::debug_id(Test::SOURCE_ID),
+        target: DebuggerIdentity::debug_id(Test::TARGET_ID),
+        metadata_version: Test::METADATA_VERSION
+    }
 
 def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -213,7 +238,7 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
 
     machine_probe: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(Test::CHECKPOINT_EVENT + 1), Test::CHECKPOINT_EVENT, 0)
     state_hash: u64 = DebuggerCheckpoint::snapshot_state_hash(machine_probe)
-    return DebuggerFullCheckpoint::full_checkpoint_capture_with_adapters(machine, tasks, effects, resources, adapters, DebuggerIdentity::debug_id(Test::RECORDING_ID), DebuggerIdentity::debug_id(Test::BRANCH_ID), Test::CHECKPOINT_EVENT, state_hash)
+    return DebuggerFullCheckpoint::full_checkpoint_capture_with_adapters(machine, tasks, effects, resources, adapters, DebuggerIdentity::debug_id(Test::RECORDING_ID), DebuggerIdentity::debug_id(Test::BRANCH_ID), Test::CHECKPOINT_EVENT, state_hash, test_build_identity(), Test::IMAGE_FINGERPRINT, true)
 
 def checkpoint_manifest_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerTraceStorage::StoredChunk:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -236,6 +261,20 @@ def checkpoint_manifest_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpo
     for index in 0..<payload.length:
         chunk.payload[index] <- payload.bytes[index]
     return chunk
+
+def check_artifact_fingerprint() -> i64:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: Test::EDIR_PROGRAM_VERSION, instruction_count: Test::EDIR_INSTRUCTION_COUNT, local_count: Test::EDIR_NO_LOCALS, has_return: true}
+    image.instructions[Test::EDIR_FIRST_INSTRUCTION_INDEX] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: Test::EDIR_ZERO_OPERAND, b: Test::EDIR_ZERO_OPERAND, source: zeroed}
+    image.instructions[Test::EDIR_RETURN_INDEX] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::EDIR_ZERO_OPERAND, b: Test::EDIR_ZERO_OPERAND, source: zeroed}
+    encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(image)
+    fingerprint: DebuggerEDIRCodec::ArtifactFingerprint = DebuggerEDIRCodec::artifact_fingerprint(image)
+    return Test::ARTIFACT_FINGERPRINT_RESULT_FAILURE if not DebuggerTraceBinary::writer_is_valid(encoded) or not fingerprint.valid or fingerprint.value != DebuggerTraceBinary::writer_checksum(encoded)
+    invalid_image: mutable DebuggerEDIR::ProgramImage = image
+    invalid_image.program.has_return <- false
+    invalid_fingerprint: DebuggerEDIRCodec::ArtifactFingerprint = DebuggerEDIRCodec::artifact_fingerprint(invalid_image)
+    return Test::INVALID_ARTIFACT_FINGERPRINT_ACCEPTED if invalid_fingerprint.valid
+    return Test::TEST_SUCCESS
 
 def checkpoint_trace_event_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerTraceStorage::StoredChunk:
     position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(checkpoint.recording)
@@ -377,7 +416,7 @@ def adapter_snapshot_is_equal(left: DebuggerReplayAdapters::AdapterSnapshot, rig
     return true
 
 def checkpoints_are_equal(left: DebuggerFullCheckpoint::ManagedCheckpoint, right: DebuggerFullCheckpoint::ManagedCheckpoint) -> bool:
-    return false if left.schema != right.schema or left.recording.value != right.recording.value or left.branch.value != right.branch.value or left.event != right.event or left.state_hash != right.state_hash or left.side_state_hash != right.side_state_hash
+    return false if left.schema != right.schema or left.recording.value != right.recording.value or left.branch.value != right.branch.value or left.event != right.event or left.state_hash != right.state_hash or left.side_state_hash != right.side_state_hash or left.build.compiler.value != right.build.compiler.value or left.build.runtime.value != right.build.runtime.value or left.build.source.value != right.build.source.value or left.build.target.value != right.build.target.value or left.build.metadata_version != right.build.metadata_version or left.image_fingerprint != right.image_fingerprint or left.image_fingerprint_valid != right.image_fingerprint_valid
     return false if not machine_snapshot_is_equal(left.machine, right.machine)
     return false if left.tasks.task_count != right.tasks.task_count or left.tasks.next_id != right.tasks.next_id or left.tasks.status != right.tasks.status or left.tasks.current.value != right.tasks.current.value or left.tasks.wait_count != right.tasks.wait_count or left.tasks.scheduler_cursor != right.tasks.scheduler_cursor or left.tasks.scheduler_count != right.tasks.scheduler_count or left.tasks.scheduler_replaying != right.tasks.scheduler_replaying or left.tasks.scheduler_diverged != right.tasks.scheduler_diverged or left.tasks.scheduler_overflowed != right.tasks.scheduler_overflowed
     return false if left.tasks.task_count > Test::TASK_CAPACITY or left.tasks.wait_count > Test::WAIT_CAPACITY or left.tasks.scheduler_count > Test::SCHEDULE_CAPACITY
@@ -434,7 +473,7 @@ def check_round_trip() -> i64:
     managed_state: mutable DebuggerManagedState::State = DebuggerManagedState::state_new()
     return Test::ADAPTER_RESTORE_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedState::state_restore(managed_state, decoded.checkpoint)) or not adapter_snapshot_is_equal(managed_state.adapters, checkpoint.adapters)
     restored_machine: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(decoded.checkpoint)
-    recaptured: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedState::state_capture(managed_state, restored_machine, decoded.checkpoint.recording, decoded.checkpoint.branch, decoded.checkpoint.event, decoded.checkpoint.state_hash)
+    recaptured: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedState::state_capture(managed_state, restored_machine, decoded.checkpoint.build, DebuggerEDIRCodec::ArtifactFingerprint{value: decoded.checkpoint.image_fingerprint, valid: decoded.checkpoint.image_fingerprint_valid}, decoded.checkpoint.recording, decoded.checkpoint.branch, decoded.checkpoint.event, decoded.checkpoint.state_hash)
     return Test::ADAPTER_RESTORE_FAILURE if not checkpoints_are_equal(checkpoint, recaptured)
     legacy_checkpoint: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = encoded
     legacy_inner_checksum: u64 = test_legacy_checksum(legacy_checkpoint.bytes[0], legacy_checkpoint.length - Test::CODEC_CHECKSUM_BYTES)
@@ -502,11 +541,27 @@ def check_rejects_malformed_inputs() -> i64:
     tampered_replay_suppression: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
     tampered_replay_suppression.adapters.console.output_suppressed <- false
     return Test::REPLAY_WRITE_UNSUPPRESSED_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(tampered_replay_suppression)
+    tampered_build: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    tampered_build.build.compiler <- DebuggerIdentity::debug_id(Test::COMPILER_ID + Test::BUILD_ID_TAMPER_DELTA)
+    return Test::CHECKPOINT_BUILD_TAMPER_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(tampered_build)
+    tampered_image: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    tampered_image.image_fingerprint <- Test::IMAGE_FINGERPRINT + Test::BUILD_ID_TAMPER_DELTA
+    return Test::CHECKPOINT_IMAGE_TAMPER_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(tampered_image)
+    invalid_fingerprint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    invalid_fingerprint.image_fingerprint_valid <- false
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(invalid_fingerprint)
+    return Test::CHECKPOINT_INVALID_FINGERPRINT_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(invalid_fingerprint)
+    invalid_build: mutable DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
+    invalid_build.build.compiler <- DebuggerIdentity::debug_id(Test::NO_BUILD_COMPONENT_ID)
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(invalid_build)
+    return Test::CHECKPOINT_INVALID_BUILD_ACCEPTED if DebuggerFullCheckpoint::full_checkpoint_is_valid(invalid_build)
     rejected_trace_chunk: DebuggerTraceStorage::CheckpointChunkEncoding = DebuggerTraceStorage::storage_checkpoint_chunk_new(malformed, Test::TRACE_SEQUENCE)
     return Test::TRACE_INVALID_CHECKPOINT_ACCEPTED if rejected_trace_chunk.status != DebuggerTraceStorage::StorageStatus.Invalid
     return 0
 
 def main() -> i64:
+    fingerprint: i64 = check_artifact_fingerprint()
+    return fingerprint if fingerprint != 0
     round_trip: i64 = check_round_trip()
     return round_trip if round_trip != 0
     large_capacity: i64 = check_large_trace_capacity()

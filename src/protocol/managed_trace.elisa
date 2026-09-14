@@ -7,6 +7,7 @@ include "../trace/pipeline.elisa"
 include "../trace/export.elisa"
 include "../trace/verify.elisa"
 include "../trace/reader.elisa"
+include "../vm/edir_codec.elisa"
 
 module DebuggerManagedTraceService:
     private:
@@ -43,6 +44,7 @@ module DebuggerManagedTraceService:
             EVENT_MISMATCH: u32 = 7
             CHECKPOINT_CAPACITY: u32 = 8
             CAPABILITY: u32 = 9
+            IMAGE_MISMATCH: u32 = 10
 
         const module FreshRestoreDetail:
             CAPABILITY: u32 = 11
@@ -51,6 +53,8 @@ module DebuggerManagedTraceService:
             CAPACITY: u32 = 14
             REPLAY: u32 = 15
             DESTINATION: u32 = 16
+            BUILD: u32 = 17
+            IMAGE: u32 = 18
 
         def trace_build_error(failure: DebuggerErrors::DebuggerError) -> DebuggerTracePipeline::BundleBuildResult:
             return DebuggerTracePipeline::BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
@@ -61,6 +65,13 @@ module DebuggerManagedTraceService:
 
         def trace_restore_build_matches(build: DebuggerIdentity::BuildIdentity, manifest: DebuggerTraceManifest::BundleManifest) -> bool:
             return build.compiler.value == manifest.compiler.value and build.runtime.value == manifest.runtime.value and build.source.value == manifest.source.value and build.target.value == manifest.target.value and build.metadata_version == manifest.metadata_version
+
+        def trace_restore_builds_equal(left: DebuggerIdentity::BuildIdentity, right: DebuggerIdentity::BuildIdentity) -> bool:
+            return left.compiler.value == right.compiler.value and left.runtime.value == right.runtime.value and left.source.value == right.source.value and left.target.value == right.target.value and left.metadata_version == right.metadata_version
+
+        def trace_restore_image_matches(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint, image: mutable DebuggerEDIR::ProgramImage&) -> bool:
+            fingerprint: DebuggerEDIRCodec::ArtifactFingerprint = DebuggerEDIRCodec::artifact_fingerprint(image)
+            return fingerprint.valid and checkpoint.image_fingerprint_valid and checkpoint.image_fingerprint == fingerprint.value
 
         def trace_restore_events_match(expected: DebuggerEvents::EventEnvelope, actual: DebuggerEvents::EventEnvelope) -> bool:
             return false if expected.schema != actual.schema or expected.ordinal != actual.ordinal or expected.task.value != actual.task.value or expected.kind != actual.kind or expected.quality != actual.quality or expected.payload_hash != actual.payload_hash
@@ -104,6 +115,8 @@ module DebuggerManagedTraceService:
             checkpoint_lookup: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, target_event)
             return trace_restore_error(DebuggerErrors::ErrorCode.Unavailable, true, RestoreDetail::CHECKPOINT_MISMATCH) if not checkpoint_lookup.found
             checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint_lookup.checkpoint
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::BUILD_MISMATCH) if not trace_restore_builds_equal(checkpoint.build, service.controller.session.build)
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::IMAGE_MISMATCH) if not trace_restore_image_matches(checkpoint, service.controller.engine.image)
             return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::RECORDING_MISMATCH) if checkpoint.recording.value != service.controller.engine.recording.value or checkpoint.branch.value != RestoreIdentity::ROOT_BRANCH
             return trace_restore_error(DebuggerErrors::ErrorCode.ResourceLimit, false, RestoreDetail::CHECKPOINT_CAPACITY) if target_event > DebuggerManagedService::service_recording_capacity().u64()
             return trace_restore_error(DebuggerErrors::ErrorCode.Corrupt, false, RestoreDetail::INVALID_READER) if checkpoint.event > reader.event_count.u64()
@@ -141,6 +154,8 @@ module DebuggerManagedTraceService:
             return DebuggerManagedService::result_error(failure) if not DebuggerErrors::error_is_ok(failure)
             capabilities: DebuggerCapabilities::CapabilitySet = service.controller.session.capabilities
             return trace_restore_error(DebuggerErrors::ErrorCode.Unsupported, false, FreshRestoreDetail::CAPABILITY) if capabilities.engine != DebuggerCapabilities::EngineKind.Managed or capabilities.history != DebuggerCapabilities::HistoryKind.Exact or not capabilities.checkpoints
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FreshRestoreDetail::BUILD) if not trace_restore_builds_equal(checkpoint.build, service.controller.session.build)
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FreshRestoreDetail::IMAGE) if not trace_restore_image_matches(checkpoint, service.controller.engine.image)
             return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FreshRestoreDetail::DESTINATION) if service.controller.session.state != DebuggerSession::SessionState.Created or service.controller.engine.event_count != RestoreRequest::INITIAL_EVENT.usize() or service.recorded_event_count != Boundary::NO_RECORDED_EVENTS or service.trace_partial or service.controller.state.branches.count != Boundary::NO_RECORDED_EVENTS
             return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FreshRestoreDetail::RECORDING) if checkpoint.recording.value != service.controller.engine.recording.value
             return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FreshRestoreDetail::BRANCH) if checkpoint.branch.value != RestoreIdentity::ROOT_BRANCH
@@ -217,14 +232,12 @@ module DebuggerManagedTraceService:
         def service_trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, target_event: u64) -> DebuggerManagedService::Result:
             return trace_restore_checkpoint(service, reader, target_event)
 
-        # Restore a decoded checkpoint into a fresh service after replaying its
-        # machine prefix against the caller-supplied build and image. The
-        # checkpoint format carries recording and branch IDs, but no build or
-        # program identity; callers must bind it to the intended build, image,
-        # and recording. Validation and replay detect inconsistency, but this
-        # API does not authenticate checkpoints from untrusted sources. The
-        # destination must be Created, have no recorded events or branch
-        # records, and negotiate checkpoint support; debug configuration may
-        # be seeded beforehand and is preserved.
+        # Restore a decoded checkpoint into a fresh service after verifying its
+        # build and complete canonical EDIR image fingerprint, then replaying
+        # its machine prefix. The identity fields and hashes detect accidental
+        # mismatches but do not authenticate checkpoints from untrusted
+        # sources. The destination must be Created, have no recorded events or
+        # branch records, and negotiate checkpoint support; debug configuration
+        # may be seeded beforehand and is preserved.
         def service_restore_fresh_checkpoint(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerManagedService::Result:
             return trace_restore_fresh_checkpoint(service, checkpoint)

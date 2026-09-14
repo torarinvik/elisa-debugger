@@ -53,6 +53,24 @@ chunks, a verified footer, and all required source/build artifacts. Removing a
 replay-required blob produces a partial/non-replayable export rather than an
 exact claim.
 
+## Managed full checkpoint payload
+
+The managed full-checkpoint codec schema is `3`; its envelope fields are
+encoded explicitly in little-endian order. The envelope contains the checkpoint
+schema, recording and branch IDs, event ordinal, state hash, complete
+`BuildIdentity` (compiler, runtime, source, target, and metadata version), and
+a validity-tagged fingerprint of the complete canonical EDIR artifact before
+the machine, task, effect, virtual-resource, and adapter snapshots. A checksum
+covers the encoded envelope. The image fingerprint is the 64-bit FNV-1a checksum
+of `DebuggerEDIRCodec::artifact_encode` bytes, including instructions, source
+files, and function descriptors. Restore compares both identities with the
+destination before replaying the checkpoint prefix.
+
+The checksum and image fingerprint detect accidental corruption or identity
+mismatch; they are not cryptographic authentication. Schema-2 checkpoint
+payloads are rejected by the schema-3 decoder and must be regenerated from a
+source execution with the intended build and image.
+
 Trace format v1 has no branch-lineage manifest. Exact v1 recordings therefore
 accept only root-branch events and root-branch full checkpoints. Structurally
 valid non-root or mixed-branch records can still be decoded, but verification

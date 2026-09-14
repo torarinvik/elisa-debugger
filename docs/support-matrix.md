@@ -15,7 +15,7 @@ carry their operands and results.
 | Expression arithmetic | Bounded side-effect-free evaluator | Provider dependent | Provider dependent |
 | Record/replay effects | Generic oracle exactly replays scalar clock samples; other effect kinds mark the oracle incomplete | Not exact | Unsupported |
 | Reverse step and seek | Supported within retained EDIR history | Disabled | Unsupported |
-| Durable checkpoint codec and restore | Supported for bounded managed EDIR: fresh-service restore replays the prefix against the caller-bound build, image, and recording; checkpoints are not independently build-bound or authenticated | Not resumable | Core artifacts are inspect-only |
+| Durable checkpoint codec and restore | Supported for bounded managed EDIR: checkpoints persist the full build identity and canonical whole-image fingerprint; restore rejects mismatched build/image/recording before replay. Integrity checks detect corruption and identity mismatch but do not authenticate untrusted checkpoints. | Not resumable | Core artifacts are inspect-only |
 | Deterministic task model | Bounded scheduler and wait graph | Not exact | Unsupported |
 | Branch lineage | Bounded immutable branch records and verified branch comparison | Unsupported | Unsupported |
 | Historical queries | Cancellable last-write/first-change queries over captured provenance | Capability contract | Unsupported |

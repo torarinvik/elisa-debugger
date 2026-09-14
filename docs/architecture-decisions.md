@@ -77,15 +77,16 @@ require request payloads are validated through typed service contracts; the
 service never falls back to parsing interactive CLI output.
 
 The typed `service_restore_fresh_checkpoint` API restores a decoded managed
-checkpoint by replaying its event prefix into a temporary exact managed
-service, checking the resulting event position, state hash, and machine
-snapshot, then applying the checkpoint's side state. It requires negotiated
-checkpoint support and a `Created` destination with no recorded events or
-branch records; caller-seeded debug configuration is retained. The caller
-must bind the checkpoint to the intended build, image, and recording: the
-checkpoint schema carries no build or program identity, and validation does
-not authenticate an untrusted checkpoint. This API is an in-process surface;
-the compact headless wire protocol does not transfer checkpoint payloads.
+checkpoint by first comparing its full build identity and canonical fingerprint
+of the complete EDIR image with the destination, then replaying its event prefix
+into a temporary exact managed service. It checks the resulting event position,
+state hash, and machine snapshot before applying the checkpoint's side state.
+It requires negotiated checkpoint support and a `Created` destination with no
+recorded events or branch records; caller-seeded debug configuration is
+retained. Checkpoint integrity and identity checks detect accidental
+mismatches, but the hashes do not authenticate an untrusted checkpoint. This
+API is an in-process surface; the compact headless wire protocol does not
+transfer checkpoint payloads.
 
 Historical values use an explicit `Absent` state in addition to unavailable,
 optimized-away, uninitialized, invalid, and redacted states. Query results

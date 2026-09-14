@@ -1,0 +1,106 @@
+include "../src/vm/edir_file.elisa"
+
+const module TestArtifact:
+    PATH_LENGTH: usize = 30
+    PATH: cstr = "build/compiler_edir_calls.edir"
+    EXPECTED_SOURCE_FILE_COUNT: usize = 1
+    EXPECTED_SOURCE_FILE_ID: u64 = 1
+    EXPECTED_SOURCE_LINE_COUNT: u64 = 11
+
+
+const module TestFunction:
+    EXPECTED_COUNT: usize = 3
+    MAIN_NAME_LENGTH: usize = 4
+    MAIN_NAME: cstr = "main"
+    DESCEND_NAME_LENGTH: usize = 7
+    DESCEND_NAME: cstr = "descend"
+    ADD_TEN_NAME_LENGTH: usize = 7
+    ADD_TEN_NAME: cstr = "add_ten"
+
+
+const module TestCall:
+    EXPECTED_COUNT: usize = 3
+    INCREMENT: usize = 1
+
+
+const module TestIndex:
+    FIRST: usize = 0
+
+
+const module TestSource:
+    NO_LINE: u32 = 0
+
+
+const module TestTarget:
+    MINIMUM_VALID_TARGET: i64 = 0
+
+
+const module TestExecution:
+    STEP_BUDGET: u64 = 1024
+    EXPECTED_RESULT: i64 = 52
+
+
+const module TestResult:
+    SUCCESS: i64 = 0
+    ARTIFACT_LOAD: i64 = 1
+    IMAGE_VERIFICATION: i64 = 2
+    FUNCTION_TABLE: i64 = 3
+    FUNCTION_NAME: i64 = 4
+    SOURCE_SPAN: i64 = 5
+    CALL_GRAPH: i64 = 6
+    EXECUTION: i64 = 7
+
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(TestArtifact::PATH.cast[u8&], TestArtifact::PATH_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::ARTIFACT_LOAD if not loaded.valid or loaded.status != DebuggerEDIRFile::LoadStatus.Ready
+    image: mutable DebuggerEDIR::ProgramImage = loaded.image
+    return TestResult::IMAGE_VERIFICATION if not DebuggerEDIR::verify_image(image).valid
+    return TestResult::FUNCTION_TABLE if image.source_file_count != TestArtifact::EXPECTED_SOURCE_FILE_COUNT
+    source_file: DebuggerMetadata::SourceFile = image.source_files[TestIndex::FIRST]
+    return TestResult::FUNCTION_TABLE if source_file.id.value != TestArtifact::EXPECTED_SOURCE_FILE_ID or source_file.line_count != TestArtifact::EXPECTED_SOURCE_LINE_COUNT
+    return TestResult::FUNCTION_TABLE if image.function_count != TestFunction::EXPECTED_COUNT
+
+    found_main: mutable bool = false
+    found_descend: mutable bool = false
+    found_add_ten: mutable bool = false
+    for function_index_value in TestIndex::FIRST..<image.function_count:
+        function: DebuggerEDIR::FunctionDescriptor = image.functions[function_index_value]
+        return TestResult::SOURCE_SPAN if function.source.file.value != TestArtifact::EXPECTED_SOURCE_FILE_ID or function.source.start_byte >= function.source.end_byte or function.source.start_line == TestSource::NO_LINE or function.source.end_line > TestArtifact::EXPECTED_SOURCE_LINE_COUNT
+        return TestResult::FUNCTION_TABLE if function.entry_instruction >= function.end_instruction_exclusive
+        if function.name_length == TestFunction::MAIN_NAME_LENGTH:
+            matches_main: mutable bool = true
+            for name_index in TestIndex::FIRST..<TestFunction::MAIN_NAME_LENGTH:
+                matches_main <- false if function.name_bytes[name_index] != TestFunction::MAIN_NAME[name_index].u8()
+            if matches_main:
+                found_main <- true
+                return TestResult::FUNCTION_TABLE if function.entry_instruction != TestIndex::FIRST.u64()
+        if function.name_length == TestFunction::DESCEND_NAME_LENGTH:
+            matches_descend: mutable bool = true
+            for name_index in TestIndex::FIRST..<TestFunction::DESCEND_NAME_LENGTH:
+                matches_descend <- false if function.name_bytes[name_index] != TestFunction::DESCEND_NAME[name_index].u8()
+            found_descend <- true if matches_descend
+        if function.name_length == TestFunction::ADD_TEN_NAME_LENGTH:
+            matches_add_ten: mutable bool = true
+            for name_index in TestIndex::FIRST..<TestFunction::ADD_TEN_NAME_LENGTH:
+                matches_add_ten <- false if function.name_bytes[name_index] != TestFunction::ADD_TEN_NAME[name_index].u8()
+            found_add_ten <- true if matches_add_ten
+    return TestResult::FUNCTION_NAME if not found_main or not found_descend or not found_add_ten
+
+    call_count: mutable usize = TestIndex::FIRST
+    for instruction_index in TestIndex::FIRST..<image.program.instruction_count.usize():
+        instruction: DebuggerEDIR::Instruction = image.instructions[instruction_index]
+        continue if instruction.opcode != DebuggerEDIR::Opcode.Call
+        call_count <- call_count + TestCall::INCREMENT
+        target_has_function: mutable bool = false
+        return TestResult::CALL_GRAPH if instruction.a < TestTarget::MINIMUM_VALID_TARGET
+        for function_index_value in TestIndex::FIRST..<image.function_count:
+            target_function: DebuggerEDIR::FunctionDescriptor = image.functions[function_index_value]
+            target_has_function <- true if target_function.entry_instruction == instruction.a.u64()
+        return TestResult::CALL_GRAPH if not target_has_function
+        return TestResult::CALL_GRAPH if instruction.source.file.value != TestArtifact::EXPECTED_SOURCE_FILE_ID or instruction.source.start_byte >= instruction.source.end_byte
+    return TestResult::CALL_GRAPH if call_count != TestCall::EXPECTED_COUNT
+
+    machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(image, DebuggerEDIR::machine_new(), TestExecution::STEP_BUDGET)
+    return TestResult::EXECUTION if machine.faulted or not machine.halted or machine.result != TestExecution::EXPECTED_RESULT or machine.return_stack_pointer != TestIndex::FIRST
+    return TestResult::SUCCESS

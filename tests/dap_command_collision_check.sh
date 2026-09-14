@@ -4,6 +4,11 @@ set -eu
 DAP_SERVER=$1
 PROGRAM_PATH=$2
 EXPECTED_SUCCESSFUL_CONFIGURATION_DONE_RESPONSES=2
+DAP_FRAME_ID_STRIDE=18
+DAP_FRAME_ID_FIRST_OFFSET=1
+DAP_FIRST_STOP_GENERATION=1
+DAP_FIRST_STOP_FRAME_ID=$((DAP_FIRST_STOP_GENERATION * DAP_FRAME_ID_STRIDE + DAP_FRAME_ID_FIRST_OFFSET))
+DAP_INVALID_NEXT_FRAME_ID=$((DAP_FIRST_STOP_FRAME_ID + 1))
 
 input=$(for payload in \
     '{"seq":1,"type":"request","command":"configurationDone"}' \
@@ -15,8 +20,8 @@ input=$(for payload in \
     '{"seq":7,"type":"request","command":"dPntinue"}' \
     '{"seq":8,"type":"request","command":"stackTrace","arguments":{"threadId":1}}' \
     '{"seq":9,"type":"request","command":"stackTrace","arguments":{"threadId":2}}' \
-    '{"seq":10,"type":"request","command":"scopes","arguments":{"frameId":1}}' \
-    '{"seq":11,"type":"request","command":"scopes","arguments":{"frameId":2}}' \
+    "{\"seq\":10,\"type\":\"request\",\"command\":\"scopes\",\"arguments\":{\"frameId\":$DAP_FIRST_STOP_FRAME_ID}}" \
+    "{\"seq\":11,\"type\":\"request\",\"command\":\"scopes\",\"arguments\":{\"frameId\":$DAP_INVALID_NEXT_FRAME_ID}}" \
     '{"seq":12,"type":"request","command":"scopes"}'; do
     frame_length=$(printf %s "$payload" | wc -c | tr -d ' ')
     printf 'Content-Length: %s\r\n\r\n%s' "$frame_length" "$payload"

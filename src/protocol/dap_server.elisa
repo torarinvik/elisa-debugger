@@ -19,6 +19,7 @@ include "./managed_service.elisa"
 include "./dap_payload.elisa"
 include "./dap.elisa"
 include "../vm/edir_file.elisa"
+include "./dap_frames.elisa"
 
 module DebuggerDAPServer:
     private:
@@ -211,8 +212,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsConditionalBreakpoints\":false,\"supportsHitConditionalBreakpoints\":false,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":false,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 432
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsConditionalBreakpoints\":false,\"supportsHitConditionalBreakpoints\":false,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":false,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 472
 
         const module JsonWire:
             JSON_ASCII_MAX: u8 = 127
@@ -341,7 +342,6 @@ module DebuggerDAPServer:
             DAP_NO_SOURCE_REFERENCE: u64 = 0
             DAP_FALLBACK_REQUEST_ID: u64 = 1
             DAP_SUPPORTED_THREAD_ID: u64 = 1
-            DAP_SUPPORTED_FRAME_ID: u64 = 1
             DAP_NO_VARIABLE_REFERENCE: u64 = 0
             DAP_NO_VARIABLES_REQUESTED: usize = 0
             DAP_MAIN_THREAD_ID: u64 = 1
@@ -383,30 +383,58 @@ module DebuggerDAPServer:
             DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"source breakpoint capacity is exhausted\"}"
             DAP_SOURCE_BREAKPOINT_RESOURCE_SUFFIX_LENGTH: usize = 70
 
-        const module StackTrace:
+        const module StackTraceCommand:
             DAP_STACK_TRACE_COMMAND: cstr = "stackTrace"
             DAP_STACK_TRACE_COMMAND_LENGTH: usize = 10
-            DAP_STACK_TRACE_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"main\",\"line\":1,\"column\":1}]}}"
-            DAP_STACK_TRACE_SUFFIX_LENGTH: usize = 85
-            DAP_STACK_DYNAMIC_BEFORE_LINE: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"main\",\"line\":"
-            DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH: usize = 69
-            DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":[{\"id\":1,\"name\":\"frame\",\"line\":"
-            DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE_LENGTH: usize = 70
-            DAP_STACK_DYNAMIC_BEFORE_COLUMN: cstr = ",\"column\":"
-            DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH: usize = 10
-            DAP_STACK_DYNAMIC_AFTER_COLUMN: cstr = "}]}}"
-            DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH: usize = 4
-            DAP_STACK_SOURCE_BEFORE_NAME: cstr = ",\"source\":{\"name\":"
-            DAP_STACK_SOURCE_BEFORE_NAME_LENGTH: usize = 18
-            DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH: cstr = ",\"path\":"
-            DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH_LENGTH: usize = 8
-            DAP_STACK_SOURCE_AFTER_PATH: cstr = "}"
-            DAP_STACK_SOURCE_AFTER_PATH_LENGTH: usize = 1
+
+        const module StackTraceFrameWire:
+            RESPONSE_PREFIX: cstr = "\",\"success\":true,\"body\":{\"stackFrames\":["
+            RESPONSE_PREFIX_LENGTH: usize = 40
+            RESPONSE_MIDDLE: cstr = "],\"totalFrames\":"
+            RESPONSE_MIDDLE_LENGTH: usize = 16
+            RESPONSE_SUFFIX: cstr = "}}"
+            RESPONSE_SUFFIX_LENGTH: usize = 2
+            FRAME_ID_PREFIX: cstr = "{\"id\":"
+            FRAME_ID_PREFIX_LENGTH: usize = 6
+            FIRST_NAME_BYTE_INDEX: usize = 0
+            FRAME_NAME_PREFIX: cstr = ",\"name\":"
+            FRAME_NAME_PREFIX_LENGTH: usize = 8
+            FRAME_LINE_PREFIX: cstr = ",\"line\":"
+            FRAME_LINE_PREFIX_LENGTH: usize = 8
+            FRAME_COLUMN_PREFIX: cstr = ",\"column\":"
+            FRAME_COLUMN_PREFIX_LENGTH: usize = 10
+            FRAME_SOURCE_BEFORE_NAME: cstr = ",\"source\":{\"name\":"
+            FRAME_SOURCE_BEFORE_NAME_LENGTH: usize = 18
+            FRAME_SOURCE_BETWEEN_NAME_AND_PATH: cstr = ",\"path\":"
+            FRAME_SOURCE_BETWEEN_NAME_AND_PATH_LENGTH: usize = 8
+            FRAME_SOURCE_AFTER_PATH: cstr = "}"
+            FRAME_SOURCE_AFTER_PATH_LENGTH: usize = 1
+            FRAME_SUFFIX: cstr = "}"
+            FRAME_SUFFIX_LENGTH: usize = 1
+            FRAME_SEPARATOR: cstr = ","
+            FRAME_SEPARATOR_LENGTH: usize = 1
+
+        const module StackTraceSourcePath:
             DAP_STACK_SOURCE_PATH_CAPACITY: usize = DebuggerMetadataSourcePath::MAPPED_SOURCE_PATH_CAPACITY
-            DAP_STACK_SOURCE_NO_NAME_LENGTH: usize = 0
-            DAP_STACK_SOURCE_NO_NAME_START: usize = 0
-            DAP_STACK_SOURCE_ROOT_DISABLED_LENGTH: usize = 0
-            DAP_STACK_SOURCE_PATH_SEPARATOR: u8 = 47
+            EMPTY_PATH_LENGTH: usize = 0
+            EMPTY_NAME_START: usize = 0
+            DISABLED_ROOT_LENGTH: usize = 0
+            PATH_SEPARATOR: u8 = 47
+            PATH_SEPARATOR_COUNT: usize = 1
+            FIRST_SOURCE_FILE_INDEX: usize = 0
+            FIRST_PATH_BYTE_INDEX: usize = 0
+            PATH_INDEX_INCREMENT: usize = 1
+            FIRST_FRAME_PAGE_INDEX: usize = 0
+
+        const module StackTraceFrameHandle:
+            INVALID_FRAME_ID: u64 = 0
+            FRAME_ID_RESERVED_SLOT_COUNT: usize = 1
+            MAX_REFERENCE: u64 = 18446744073709551615
+            REFERENCE_STRIDE: usize = DebuggerEDIRCapacity::EDIR_CALL_FRAME_CAPACITY + StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT
+
+        const module StackTraceLocalsReference:
+            MAX_REFERENCE: u64 = 18446744073709551615
+            REFERENCE_STRIDE: usize = DebuggerEDIRCapacity::EDIR_CALL_FRAME_CAPACITY
 
         const module Threads:
             DAP_THREADS_COMMAND: cstr = "threads"
@@ -705,7 +733,7 @@ module DebuggerDAPServer:
             return CommandDispatch::COMMAND_HASH_STEP_BACK if candidate_hash == CommandDispatch::COMMAND_HASH_STEP_BACK and dap_json_string_matches_ascii(payload, start, end, ExecutionControl::DAP_STEP_BACK_COMMAND, ExecutionControl::DAP_STEP_BACK_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_PAUSE if candidate_hash == CommandDispatch::COMMAND_HASH_PAUSE and dap_json_string_matches_ascii(payload, start, end, ExecutionControl::DAP_PAUSE_COMMAND, ExecutionControl::DAP_PAUSE_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_THREADS if candidate_hash == CommandDispatch::COMMAND_HASH_THREADS and dap_json_string_matches_ascii(payload, start, end, Threads::DAP_THREADS_COMMAND, Threads::DAP_THREADS_COMMAND_LENGTH)
-            return CommandDispatch::COMMAND_HASH_STACK_TRACE if candidate_hash == CommandDispatch::COMMAND_HASH_STACK_TRACE and dap_json_string_matches_ascii(payload, start, end, StackTrace::DAP_STACK_TRACE_COMMAND, StackTrace::DAP_STACK_TRACE_COMMAND_LENGTH)
+            return CommandDispatch::COMMAND_HASH_STACK_TRACE if candidate_hash == CommandDispatch::COMMAND_HASH_STACK_TRACE and dap_json_string_matches_ascii(payload, start, end, StackTraceCommand::DAP_STACK_TRACE_COMMAND, StackTraceCommand::DAP_STACK_TRACE_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_SCOPES if candidate_hash == CommandDispatch::COMMAND_HASH_SCOPES and dap_json_string_matches_ascii(payload, start, end, Scopes::DAP_SCOPES_COMMAND, Scopes::DAP_SCOPES_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_VARIABLES if candidate_hash == CommandDispatch::COMMAND_HASH_VARIABLES and dap_json_string_matches_ascii(payload, start, end, Variables::DAP_VARIABLES_COMMAND, Variables::DAP_VARIABLES_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_EVALUATE if candidate_hash == CommandDispatch::COMMAND_HASH_EVALUATE and dap_json_string_matches_ascii(payload, start, end, Evaluate::DAP_EVALUATE_COMMAND, Evaluate::DAP_EVALUATE_COMMAND_LENGTH)
@@ -1384,47 +1412,54 @@ module DebuggerDAPServer:
         struct DAPSourceLocation:
             line: mutable u64
             column: mutable u64
-            source_path_bytes: mutable u8[StackTrace::DAP_STACK_SOURCE_PATH_CAPACITY]
+            source_path_bytes: mutable u8[StackTraceSourcePath::DAP_STACK_SOURCE_PATH_CAPACITY]
             source_path_length: mutable usize
             source_name_start: mutable usize
             source_name_length: mutable usize
             has_source: mutable bool
 
-        def stack_source_location(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, coordinates: DebuggerDAPPayload::ClientCoordinates) -> DAPSourceLocation:
+        struct DAPRequestContext:
+            stack_start_frame: mutable usize
+            stack_levels: mutable usize
+            stack_has_levels: mutable bool
+            scope_frame_index: mutable usize
+
+        def stack_source_location(service: DebuggerManagedService::Service, source: DebuggerIdentity::SourceSpan, has_source: bool, coordinates: DebuggerDAPPayload::ClientCoordinates) -> DAPSourceLocation:
             location: mutable DAPSourceLocation = zeroed
             location.line <- ResponseMetadata::DAP_UNKNOWN_SOURCE_LINE
             location.column <- ResponseMetadata::DAP_UNKNOWN_SOURCE_LINE
-            instruction_index: u64 = result.session.position.statement.value
-            if instruction_index < service.controller.engine.image.program.instruction_count:
-                source: DebuggerIdentity::SourceSpan = service.controller.engine.image.instructions[instruction_index.usize()].source
-                if source.file.value != RuntimeIdentifiers::DAP_NO_SOURCE_FILE_ID and source.start_line != ResponseMetadata::DAP_UNKNOWN_SOURCE_LINE:
-                    line: mutable u64 = source.start_line.u64()
-                    column: mutable u64 = source.start_column.u64()
-                    line <- line - 1 if not coordinates.lines_start_at_one
-                    column <- column + 1 if coordinates.columns_start_at_one
-                    location.line <- line
-                    location.column <- column
-                    if service.controller.engine.image.source_file_count <= DebuggerEDIR::source_file_capacity():
-                        for file_index in 0..<service.controller.engine.image.source_file_count:
-                            file: DebuggerMetadata::SourceFile = service.controller.engine.image.source_files[file_index]
-                            continue if file.id.value != source.file.value or file.path_length == StackTrace::DAP_STACK_SOURCE_NO_NAME_LENGTH or file.path_length > DebuggerMetadata::source_path_capacity()
-                            root_length: usize = service.controller.source_path_root_length
-                            if root_length > StackTrace::DAP_STACK_SOURCE_ROOT_DISABLED_LENGTH and root_length <= DebuggerMetadata::source_path_capacity():
-                                for path_index in 0..<root_length:
-                                    location.source_path_bytes[path_index] <- service.controller.source_path_root[path_index]
-                                location.source_path_length <- root_length
-                                if service.controller.source_path_root[root_length - 1] != StackTrace::DAP_STACK_SOURCE_PATH_SEPARATOR:
-                                    location.source_path_bytes[location.source_path_length] <- StackTrace::DAP_STACK_SOURCE_PATH_SEPARATOR
-                                    location.source_path_length <- location.source_path_length + 1
-                            for path_index in 0..<file.path_length:
-                                location.source_path_bytes[location.source_path_length + path_index] <- file.path_bytes[path_index]
-                            location.source_path_length <- location.source_path_length + file.path_length
-                            location.source_name_start <- StackTrace::DAP_STACK_SOURCE_NO_NAME_START
-                            for path_index in 0..<location.source_path_length:
-                                location.source_name_start <- path_index + 1 if location.source_path_bytes[path_index] == StackTrace::DAP_STACK_SOURCE_PATH_SEPARATOR
-                            location.source_name_length <- location.source_path_length - location.source_name_start
-                            location.has_source <- true
-                            return location
+            return location if not has_source or DebuggerIdentity::debug_id_is_zero(source.file) or source.start_line == ResponseMetadata::DAP_UNKNOWN_SOURCE_LINE
+            line: mutable u64 = source.start_line.u64()
+            column: mutable u64 = source.start_column.u64()
+            line <- line - SourceBreakpoints::DAP_SOURCE_BREAKPOINT_LINE_INCREMENT if not coordinates.lines_start_at_one
+            column <- column + SourceBreakpoints::DAP_SOURCE_BREAKPOINT_COLUMN_INCREMENT if coordinates.columns_start_at_one
+            location.line <- line
+            location.column <- column
+            if service.controller.engine.image.source_file_count <= DebuggerEDIR::source_file_capacity():
+                for file_index in StackTraceSourcePath::FIRST_SOURCE_FILE_INDEX..<service.controller.engine.image.source_file_count:
+                    file: DebuggerMetadata::SourceFile = service.controller.engine.image.source_files[file_index]
+                    continue if file.id.value != source.file.value or file.path_length == StackTraceSourcePath::EMPTY_PATH_LENGTH or file.path_length > DebuggerMetadata::source_path_capacity()
+                    root_length: usize = service.controller.source_path_root_length
+                    return location if root_length > StackTraceSourcePath::DAP_STACK_SOURCE_PATH_CAPACITY
+                    separator_count: usize = StackTraceSourcePath::PATH_SEPARATOR_COUNT if root_length > StackTraceSourcePath::DISABLED_ROOT_LENGTH and service.controller.source_path_root[root_length - StackTraceSourcePath::PATH_INDEX_INCREMENT] != StackTraceSourcePath::PATH_SEPARATOR else StackTraceSourcePath::EMPTY_PATH_LENGTH
+                    prefix_length: usize = root_length + separator_count
+                    return location if prefix_length > StackTraceSourcePath::DAP_STACK_SOURCE_PATH_CAPACITY or file.path_length > StackTraceSourcePath::DAP_STACK_SOURCE_PATH_CAPACITY - prefix_length
+                    if root_length > StackTraceSourcePath::DISABLED_ROOT_LENGTH:
+                        for path_index in StackTraceSourcePath::FIRST_PATH_BYTE_INDEX..<root_length:
+                            location.source_path_bytes[path_index] <- service.controller.source_path_root[path_index]
+                        location.source_path_length <- root_length
+                        if separator_count > StackTraceSourcePath::EMPTY_PATH_LENGTH:
+                            location.source_path_bytes[location.source_path_length] <- StackTraceSourcePath::PATH_SEPARATOR
+                            location.source_path_length <- location.source_path_length + separator_count
+                    for path_index in StackTraceSourcePath::FIRST_PATH_BYTE_INDEX..<file.path_length:
+                        location.source_path_bytes[location.source_path_length + path_index] <- file.path_bytes[path_index]
+                    location.source_path_length <- location.source_path_length + file.path_length
+                    location.source_name_start <- StackTraceSourcePath::EMPTY_NAME_START
+                    for path_index in StackTraceSourcePath::FIRST_PATH_BYTE_INDEX..<location.source_path_length:
+                        location.source_name_start <- path_index + StackTraceSourcePath::PATH_INDEX_INCREMENT if location.source_path_bytes[path_index] == StackTraceSourcePath::PATH_SEPARATOR
+                    location.source_name_length <- location.source_path_length - location.source_name_start
+                    location.has_source <- true
+                    return location
             return location
 
         def json_string_encoded_length(bytes: u8&, start: usize, length: usize) -> usize:
@@ -1441,44 +1476,102 @@ module DebuggerDAPServer:
                 _ = printf("%c", bytes[index].i32()) can Console
             _ = printf("%c", Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_QUOTE.i32()) can Console
 
-        def write_stack_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, request_sequence: u64, response_sequence: u64, coordinates: DebuggerDAPPayload::ClientCoordinates) -> void can[Console, Unsafe.PointerCast]:
-            location: DAPSourceLocation = stack_source_location(service, result, coordinates)
-            frame_prefix: mutable cstr = StackTrace::DAP_STACK_DYNAMIC_BEFORE_LINE
-            frame_prefix_length: mutable usize = StackTrace::DAP_STACK_DYNAMIC_BEFORE_LINE_LENGTH
-            if service.controller.engine.machine.return_stack_pointer > ResponseMetadata::DAP_MAIN_CALL_DEPTH:
-                frame_prefix <- StackTrace::DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE
-                frame_prefix_length <- StackTrace::DAP_STACK_DYNAMIC_NESTED_BEFORE_LINE_LENGTH
-            body_length: mutable u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + StackTrace::DAP_STACK_TRACE_COMMAND_LENGTH + frame_prefix_length + decimal_digits(location.line) + StackTrace::DAP_STACK_DYNAMIC_BEFORE_COLUMN_LENGTH + decimal_digits(location.column) + StackTrace::DAP_STACK_DYNAMIC_AFTER_COLUMN_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
-            if location.has_source:
-                source_name_length: usize = json_string_encoded_length(location.source_path_bytes[0], location.source_name_start, location.source_name_length)
-                source_path_length: usize = json_string_encoded_length(location.source_path_bytes[0], 0, location.source_path_length)
-                body_length <- body_length + (StackTrace::DAP_STACK_SOURCE_BEFORE_NAME_LENGTH + source_name_length + StackTrace::DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH_LENGTH + source_path_length + StackTrace::DAP_STACK_SOURCE_AFTER_PATH_LENGTH).u64()
+        def write_stack_response(service: DebuggerManagedService::Service, request_sequence: u64, response_sequence: u64, coordinates: DebuggerDAPPayload::ClientCoordinates, start_frame: usize, levels: usize, has_levels: bool) -> void can[Console, Unsafe.PointerCast]:
+            page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(service.controller.engine.image, service.controller.engine.machine, start_frame, levels, has_levels)
+            body_length: mutable u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + StackTraceCommand::DAP_STACK_TRACE_COMMAND_LENGTH + StackTraceFrameWire::RESPONSE_PREFIX_LENGTH + StackTraceFrameWire::RESPONSE_MIDDLE_LENGTH + decimal_digits(page.total_frames.u64()) + StackTraceFrameWire::RESPONSE_SUFFIX_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
+            for frame_index in StackTraceSourcePath::FIRST_FRAME_PAGE_INDEX..<page.count:
+                frame: DebuggerDAPFrames::FrameView = page.frames[frame_index]
+                location: DAPSourceLocation = stack_source_location(service, frame.source, frame.has_source, coordinates)
+                frame_id: u64 = dap_frame_id_for_generation(service.controller.session.stop_generation, frame.stack_index)
+                name_length: usize = json_string_encoded_length(frame.name_bytes[StackTraceFrameWire::FIRST_NAME_BYTE_INDEX], StackTraceFrameWire::FIRST_NAME_BYTE_INDEX, frame.name_length)
+                body_length <- body_length + (StackTraceFrameWire::FRAME_ID_PREFIX_LENGTH + decimal_digits(frame_id) + StackTraceFrameWire::FRAME_NAME_PREFIX_LENGTH + name_length + StackTraceFrameWire::FRAME_LINE_PREFIX_LENGTH + decimal_digits(location.line) + StackTraceFrameWire::FRAME_COLUMN_PREFIX_LENGTH + decimal_digits(location.column) + StackTraceFrameWire::FRAME_SUFFIX_LENGTH).u64()
+                body_length <- body_length + StackTraceFrameWire::FRAME_SEPARATOR_LENGTH.u64() if frame_index > StackTraceSourcePath::FIRST_FRAME_PAGE_INDEX
+                if location.has_source:
+                    source_name_length: usize = json_string_encoded_length(location.source_path_bytes[StackTraceSourcePath::FIRST_PATH_BYTE_INDEX], location.source_name_start, location.source_name_length)
+                    source_path_length: usize = json_string_encoded_length(location.source_path_bytes[StackTraceSourcePath::FIRST_PATH_BYTE_INDEX], StackTraceSourcePath::FIRST_PATH_BYTE_INDEX, location.source_path_length)
+                    body_length <- body_length + (StackTraceFrameWire::FRAME_SOURCE_BEFORE_NAME_LENGTH + source_name_length + StackTraceFrameWire::FRAME_SOURCE_BETWEEN_NAME_AND_PATH_LENGTH + source_path_length + StackTraceFrameWire::FRAME_SOURCE_AFTER_PATH_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(ResponseEnvelope::DAP_BODY_PREFIX) can Console
             _ = printf("%llu", response_sequence) can Console
             _ = printf(ResponseEnvelope::DAP_BODY_MIDDLE) can Console
             _ = printf("%llu", request_sequence) can Console
             _ = printf(ResponseEnvelope::DAP_COMMAND_PREFIX) can Console
-            _ = printf(StackTrace::DAP_STACK_TRACE_COMMAND) can Console
-            _ = printf(frame_prefix) can Console
-            _ = printf("%llu", location.line) can Console
-            _ = printf(StackTrace::DAP_STACK_DYNAMIC_BEFORE_COLUMN) can Console
-            _ = printf("%llu", location.column) can Console
-            if location.has_source:
-                _ = printf(StackTrace::DAP_STACK_SOURCE_BEFORE_NAME) can Console, Unsafe.PointerCast
-                write_json_string(location.source_path_bytes[0], location.source_name_start, location.source_name_length) can Console, Unsafe.PointerCast
-                _ = printf(StackTrace::DAP_STACK_SOURCE_BETWEEN_NAME_AND_PATH) can Console, Unsafe.PointerCast
-                write_json_string(location.source_path_bytes[0], 0, location.source_path_length) can Console, Unsafe.PointerCast
-                _ = printf(StackTrace::DAP_STACK_SOURCE_AFTER_PATH) can Console, Unsafe.PointerCast
-            _ = printf(StackTrace::DAP_STACK_DYNAMIC_AFTER_COLUMN) can Console
+            _ = printf(StackTraceCommand::DAP_STACK_TRACE_COMMAND) can Console
+            _ = printf(StackTraceFrameWire::RESPONSE_PREFIX) can Console
+            for frame_index in StackTraceSourcePath::FIRST_FRAME_PAGE_INDEX..<page.count:
+                frame: DebuggerDAPFrames::FrameView = page.frames[frame_index]
+                location: DAPSourceLocation = stack_source_location(service, frame.source, frame.has_source, coordinates)
+                frame_id: u64 = dap_frame_id_for_generation(service.controller.session.stop_generation, frame.stack_index)
+                if frame_index > StackTraceSourcePath::FIRST_FRAME_PAGE_INDEX:
+                    _ = printf(StackTraceFrameWire::FRAME_SEPARATOR) can Console
+                _ = printf(StackTraceFrameWire::FRAME_ID_PREFIX) can Console
+                _ = printf("%llu", frame_id) can Console
+                _ = printf(StackTraceFrameWire::FRAME_NAME_PREFIX) can Console
+                write_json_string(frame.name_bytes[StackTraceFrameWire::FIRST_NAME_BYTE_INDEX], StackTraceFrameWire::FIRST_NAME_BYTE_INDEX, frame.name_length) can Console, Unsafe.PointerCast
+                _ = printf(StackTraceFrameWire::FRAME_LINE_PREFIX) can Console
+                _ = printf("%llu", location.line) can Console
+                _ = printf(StackTraceFrameWire::FRAME_COLUMN_PREFIX) can Console
+                _ = printf("%llu", location.column) can Console
+                if location.has_source:
+                    _ = printf(StackTraceFrameWire::FRAME_SOURCE_BEFORE_NAME) can Console, Unsafe.PointerCast
+                    write_json_string(location.source_path_bytes[StackTraceSourcePath::FIRST_PATH_BYTE_INDEX], location.source_name_start, location.source_name_length) can Console, Unsafe.PointerCast
+                    _ = printf(StackTraceFrameWire::FRAME_SOURCE_BETWEEN_NAME_AND_PATH) can Console, Unsafe.PointerCast
+                    write_json_string(location.source_path_bytes[StackTraceSourcePath::FIRST_PATH_BYTE_INDEX], StackTraceSourcePath::FIRST_PATH_BYTE_INDEX, location.source_path_length) can Console, Unsafe.PointerCast
+                    _ = printf(StackTraceFrameWire::FRAME_SOURCE_AFTER_PATH) can Console, Unsafe.PointerCast
+                _ = printf(StackTraceFrameWire::FRAME_SUFFIX) can Console
+            _ = printf(StackTraceFrameWire::RESPONSE_MIDDLE) can Console
+            _ = printf("%llu", page.total_frames.u64()) can Console
+            _ = printf(StackTraceFrameWire::RESPONSE_SUFFIX) can Console
 
         def locals_reference_for_generation(generation: u64) -> u64:
             return ResponseMetadata::DAP_LOCALS_REFERENCE_FALLBACK if generation == RuntimeIdentifiers::DAP_NO_EXPECTED_GENERATION
             return generation
 
-        def write_scopes_response(service: DebuggerManagedService::Service, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
-            generation: u64 = locals_reference_for_generation(service.controller.session.stop_generation)
-            body_length: u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + Scopes::DAP_SCOPES_COMMAND_LENGTH + Scopes::DAP_SCOPES_BEFORE_REFERENCE_LENGTH + decimal_digits(generation) + Scopes::DAP_SCOPES_AFTER_REFERENCE_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
+        def locals_reference_for_frame(generation: u64, frame_index: usize) -> u64:
+            normalized_generation: u64 = locals_reference_for_generation(generation)
+            frame_offset: u64 = frame_index.u64()
+            stride: u64 = StackTraceLocalsReference::REFERENCE_STRIDE.u64()
+            return RuntimeIdentifiers::DAP_NO_VARIABLE_REFERENCE if normalized_generation > (StackTraceLocalsReference::MAX_REFERENCE - frame_offset) / stride
+            return normalized_generation * stride + frame_offset
+
+        def locals_frame_index_for_reference(generation: u64, return_stack_depth: usize, reference: u64) -> usize:
+            frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
+            normalized_generation: u64 = locals_reference_for_generation(generation)
+            stride: u64 = StackTraceLocalsReference::REFERENCE_STRIDE.u64()
+            return frame_capacity if return_stack_depth > DebuggerEDIR::call_depth_capacity()
+            return frame_capacity if normalized_generation > StackTraceLocalsReference::MAX_REFERENCE / stride
+            generation_base: u64 = normalized_generation * stride
+            return frame_capacity if reference < generation_base
+            frame_offset: u64 = reference - generation_base
+            return frame_capacity if frame_offset >= frame_capacity.u64()
+            frame_index: usize = frame_offset.usize()
+            return frame_capacity if frame_index > return_stack_depth
+            return frame_index
+
+        def dap_frame_id_for_generation(generation: u64, frame_index: usize) -> u64:
+            frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
+            return StackTraceFrameHandle::INVALID_FRAME_ID if frame_index >= frame_capacity
+            frame_offset: u64 = frame_index.u64() + StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT.u64()
+            stride: u64 = StackTraceFrameHandle::REFERENCE_STRIDE.u64()
+            return StackTraceFrameHandle::INVALID_FRAME_ID if generation > (StackTraceFrameHandle::MAX_REFERENCE - frame_offset) / stride
+            return generation * stride + frame_offset
+
+        def dap_frame_index_for_id(generation: u64, return_stack_depth: usize, reference: u64) -> usize:
+            frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
+            stride: u64 = StackTraceFrameHandle::REFERENCE_STRIDE.u64()
+            return frame_capacity if return_stack_depth > DebuggerEDIR::call_depth_capacity()
+            return frame_capacity if generation > StackTraceFrameHandle::MAX_REFERENCE / stride
+            generation_base: u64 = generation * stride
+            return frame_capacity if reference <= generation_base
+            frame_offset: u64 = reference - generation_base
+            return frame_capacity if frame_offset < StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT.u64() or frame_offset > frame_capacity.u64()
+            frame_index: usize = (frame_offset - StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT.u64()).usize()
+            return frame_capacity if frame_index > return_stack_depth
+            return frame_index
+
+        def write_scopes_response(service: DebuggerManagedService::Service, frame_index: usize, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            reference: u64 = locals_reference_for_frame(service.controller.session.stop_generation, frame_index)
+            body_length: u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + Scopes::DAP_SCOPES_COMMAND_LENGTH + Scopes::DAP_SCOPES_BEFORE_REFERENCE_LENGTH + decimal_digits(reference) + Scopes::DAP_SCOPES_AFTER_REFERENCE_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(ResponseEnvelope::DAP_BODY_PREFIX) can Console
             _ = printf("%llu", response_sequence) can Console
@@ -1487,7 +1580,7 @@ module DebuggerDAPServer:
             _ = printf(ResponseEnvelope::DAP_COMMAND_PREFIX) can Console
             _ = printf(Scopes::DAP_SCOPES_COMMAND) can Console
             _ = printf(Scopes::DAP_SCOPES_BEFORE_REFERENCE) can Console
-            _ = printf("%llu", generation) can Console
+            _ = printf("%llu", reference) can Console
             _ = printf(Scopes::DAP_SCOPES_AFTER_REFERENCE) can Console
 
         def signed_decimal_digits(value: i64) -> usize:
@@ -1627,13 +1720,15 @@ module DebuggerDAPServer:
             if request.reference == RuntimeIdentifiers::DAP_NO_VARIABLE_REFERENCE:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_VARIABLES_DETAIL_ZERO_REFERENCE)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Variables, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
-            current_reference: u64 = locals_reference_for_generation(service.controller.session.stop_generation)
-            if request.reference != current_reference:
+            generation: u64 = service.controller.session.stop_generation
+            return_stack_depth: usize = service.controller.engine.machine.return_stack_pointer
+            frame_index: usize = locals_frame_index_for_reference(generation, return_stack_depth, request.reference)
+            if frame_index >= DebuggerDAPFrames::frame_capacity():
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DAP_VARIABLES_DETAIL_STALE_REFERENCE)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Variables, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             result: DebuggerProtocolDispatcher::DispatchResult = dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Variables, request_id)
             return result if not result.accepted
-            page <- DebuggerManagedService::service_locals(service, request.start, request.count if request.has_count else RuntimeIdentifiers::DAP_NO_VARIABLES_REQUESTED)
+            page <- DebuggerManagedService::service_frame_locals(service, frame_index, request.start, request.count if request.has_count else RuntimeIdentifiers::DAP_NO_VARIABLES_REQUESTED)
             page.count <- RuntimeIdentifiers::DAP_NO_VARIABLES_REQUESTED if request.has_count and request.count == RuntimeIdentifiers::DAP_NO_VARIABLES_REQUESTED
             return result
 
@@ -1700,7 +1795,7 @@ module DebuggerDAPServer:
             service <- candidate
             return result
 
-        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&, context: mutable DAPRequestContext&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if command_hash == CommandDispatch::COMMAND_HASH_INITIALIZE:
                 coordinates: DebuggerDAPPayload::ClientCoordinates = DebuggerDAPPayload::client_coordinates_parse(payload, payload_length)
                 if not coordinates.valid:
@@ -1723,16 +1818,27 @@ module DebuggerDAPServer:
             if command_hash == CommandDispatch::COMMAND_HASH_TERMINATE:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Terminate, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_STACK_TRACE:
-                thread_request: DebuggerDAPPayload::ReferenceRequest = DebuggerDAPPayload::thread_id_request_parse(payload, payload_length)
-                if not thread_request.valid or thread_request.reference != RuntimeIdentifiers::DAP_SUPPORTED_THREAD_ID:
+                stack_request: DebuggerDAPPayload::StackTraceRequest = DebuggerDAPPayload::stack_trace_request_parse(payload, payload_length)
+                if not stack_request.valid or stack_request.thread_id != RuntimeIdentifiers::DAP_SUPPORTED_THREAD_ID:
                     failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_STACK_TRACE_DETAIL_ARGUMENT)
                     return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Stack, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(service.controller.engine.image, service.controller.engine.machine, stack_request.start_frame, stack_request.levels, stack_request.has_levels)
+                if not page.valid:
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_STACK_TRACE_DETAIL_ARGUMENT)
+                    return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Stack, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                context.stack_start_frame <- stack_request.start_frame
+                context.stack_levels <- stack_request.levels
+                context.stack_has_levels <- stack_request.has_levels
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Stack, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_SCOPES:
                 frame_request: DebuggerDAPPayload::ReferenceRequest = DebuggerDAPPayload::frame_id_request_parse(payload, payload_length)
-                if not frame_request.valid or frame_request.reference != RuntimeIdentifiers::DAP_SUPPORTED_FRAME_ID:
+                generation: u64 = service.controller.session.stop_generation
+                return_stack_depth: usize = service.controller.engine.machine.return_stack_pointer
+                frame_index: usize = dap_frame_index_for_id(generation, return_stack_depth, frame_request.reference) if frame_request.valid else DebuggerDAPFrames::frame_capacity()
+                if not frame_request.valid or frame_index >= DebuggerDAPFrames::frame_capacity():
                     failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_SCOPES_DETAIL_ARGUMENT)
                     return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Scopes, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+                context.scope_frame_index <- frame_index
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Scopes, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_VARIABLES:
                 return dispatch_variables(service, request_id, payload, payload_length, variables)
@@ -1789,7 +1895,7 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, Threads::DAP_THREADS_COMMAND, Threads::DAP_THREADS_COMMAND_LENGTH, ResponseStatus::DAP_UNAVAILABLE_SUFFIX, ResponseStatus::DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_STACK_TRACE:
-                write_dynamic_response(response_sequence, request_sequence, StackTrace::DAP_STACK_TRACE_COMMAND, StackTrace::DAP_STACK_TRACE_COMMAND_LENGTH, ResponseStatus::DAP_UNAVAILABLE_SUFFIX, ResponseStatus::DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                write_dynamic_response(response_sequence, request_sequence, StackTraceCommand::DAP_STACK_TRACE_COMMAND, StackTraceCommand::DAP_STACK_TRACE_COMMAND_LENGTH, ResponseStatus::DAP_UNAVAILABLE_SUFFIX, ResponseStatus::DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_SCOPES:
                 write_dynamic_response(response_sequence, request_sequence, Scopes::DAP_SCOPES_COMMAND, Scopes::DAP_SCOPES_COMMAND_LENGTH, ResponseStatus::DAP_UNAVAILABLE_SUFFIX, ResponseStatus::DAP_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
@@ -1862,7 +1968,7 @@ module DebuggerDAPServer:
                 _ = printf("%02llx", memory.bytes[index].u64()) can Console
             _ = printf(Memory::DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, state_committed: bool, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, client_coordinates: DebuggerDAPPayload::ClientCoordinates, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, state_committed: bool, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, client_coordinates: DebuggerDAPPayload::ClientCoordinates, context: DAPRequestContext, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
                 if command_hash == CommandDispatch::COMMAND_HASH_CONTINUE and state_committed:
                     # Continue may report a bounded-work failure after the VM
@@ -1935,10 +2041,10 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, Threads::DAP_THREADS_COMMAND, Threads::DAP_THREADS_COMMAND_LENGTH, Threads::DAP_THREADS_SUFFIX, Threads::DAP_THREADS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_STACK_TRACE:
-                write_stack_response(service, result, request_sequence, response_sequence, client_coordinates) can Console, Unsafe.PointerCast
+                write_stack_response(service, request_sequence, response_sequence, client_coordinates, context.stack_start_frame, context.stack_levels, context.stack_has_levels) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_SCOPES:
-                write_scopes_response(service, request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                write_scopes_response(service, context.scope_frame_index, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_VARIABLES:
                 write_variables_response(variables, request_sequence, response_sequence) can Console, Unsafe.PointerCast
@@ -1997,6 +2103,7 @@ module DebuggerDAPServer:
             memory: mutable DebuggerMemory::MemoryRead = zeroed
             variables: mutable DebuggerManagedInspection::LocalPage = zeroed
             source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult = zeroed
+            context: mutable DAPRequestContext = zeroed
             while true:
                 count: isize = read(TransportLimits::PROTOCOL_DAP_SERVER_TRANSPORT_LIMITS_STDIN_FD, (&chunk[0]).cast[void&], TransportLimits::DAP_READ_CHUNK_SIZE) can Console
                 break if count <= 0
@@ -2005,11 +2112,12 @@ module DebuggerDAPServer:
                     if completed:
                         memory <- zeroed
                         source_breakpoints <- zeroed
+                        context <- zeroed
                         generation_before_request: u64 = service.controller.session.stop_generation
-                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, variables, source_breakpoints, client_coordinates)
+                        result: DebuggerProtocolDispatcher::DispatchResult = dispatch_command(service, decoder.command_hash, decoder.request_sequence, decoder.payload[0], decoder.last_payload_length, memory, variables, source_breakpoints, client_coordinates, context)
                         service.controller.session <- result.session
                         state_committed: bool = service.controller.session.stop_generation != generation_before_request
-                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, state_committed, memory, variables, source_breakpoints, client_coordinates, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
+                        write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, state_committed, memory, variables, source_breakpoints, client_coordinates, context, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
                         return TransportLimits::DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == TransportLimits::MAX_DAP_OUTBOUND_SEQUENCE
                         outbound_sequence <- outbound_sequence + NumberFormat::DAP_DECIMAL_INCREMENT
                         event_batch: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(event_request_kind(decoder.command_hash), result.accepted, state_committed, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)

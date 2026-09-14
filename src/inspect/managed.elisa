@@ -15,12 +15,16 @@ module DebuggerManagedInspection:
 
         const module Frame:
             INSPECT_MANAGED_FRAME_ID_OFFSET: u64 = 1
+            INSPECT_MANAGED_FIRST_FRAME_INDEX: usize = 0
 
         const module Global:
             INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY: usize = 16
+            FIRST_GLOBAL_INDEX: usize = 0
+            UNBOUNDED_REQUEST: usize = 0
 
         const module Local:
             INSPECT_MANAGED_LOCAL_PAGE_CAPACITY: usize = 32
+            UNBOUNDED_REQUEST: usize = 0
 
         const module Sentinel:
             NEXT_LOCAL: usize = 0
@@ -57,10 +61,13 @@ module DebuggerManagedInspection:
         def current_frame(engine: mutable DebuggerReplayEngine::ReplayEngine&) -> FrameSnapshot:
             return FrameSnapshot{id: frame_id_for_instruction(engine.machine.program_counter), instruction: DebuggerIdentity::debug_id(engine.machine.program_counter), event: engine.event_count.u64(), accumulator: engine.machine.accumulator, result: engine.machine.result, return_depth: engine.machine.return_stack_pointer}
 
-        def locals_page(engine: mutable DebuggerReplayEngine::ReplayEngine&, offset: usize, requested: usize) -> LocalPage:
+        def locals_page_for_frame(engine: mutable DebuggerReplayEngine::ReplayEngine&, frame_index: usize, offset: usize, requested: usize) -> LocalPage:
             page: mutable LocalPage = zeroed
+            if engine.machine.return_stack_pointer > DebuggerEDIR::call_depth_capacity() or frame_index > engine.machine.return_stack_pointer:
+                page.complete <- true
+                return page
             limit: mutable usize = requested
-            limit <- Local::INSPECT_MANAGED_LOCAL_PAGE_CAPACITY if requested == 0 or requested > Local::INSPECT_MANAGED_LOCAL_PAGE_CAPACITY
+            limit <- Local::INSPECT_MANAGED_LOCAL_PAGE_CAPACITY if requested == Local::UNBOUNDED_REQUEST or requested > Local::INSPECT_MANAGED_LOCAL_PAGE_CAPACITY
             available: usize = engine.image.program.local_count.usize() if engine.image.program.local_count <= Local::INSPECT_MANAGED_LOCAL_PAGE_CAPACITY.u64() else Local::INSPECT_MANAGED_LOCAL_PAGE_CAPACITY
             if offset >= available:
                 page.next <- Sentinel::NEXT_LOCAL
@@ -68,25 +75,33 @@ module DebuggerManagedInspection:
                 return page
             remaining: usize = available - offset
             count: usize = limit if limit < remaining else remaining
-            for index in 0..<count:
+            for index in First::INSPECT_MANAGED_FIRST_LOCAL_INDEX..<count:
                 local_index: usize = offset + index
-                page.entries[index] <- LocalSnapshot{index: local_index, value: engine.machine.locals[local_index], available: engine.machine.locals_initialized[local_index]}
+                if frame_index == Frame::INSPECT_MANAGED_FIRST_FRAME_INDEX:
+                    page.entries[index] <- LocalSnapshot{index: local_index, value: engine.machine.locals[local_index], available: engine.machine.locals_initialized[local_index]}
+                else:
+                    frame_depth: usize = engine.machine.return_stack_pointer - frame_index
+                    slot: usize = DebuggerEDIR::frame_local_slot(frame_depth, local_index)
+                    page.entries[index] <- LocalSnapshot{index: local_index, value: engine.machine.frame_locals[slot], available: engine.machine.frame_locals_initialized[slot]}
             page.count <- count
             page.next <- offset + count if offset + count < available else Sentinel::NEXT_LOCAL
             page.complete <- page.next == Sentinel::NEXT_LOCAL
             return page
 
+        def locals_page(engine: mutable DebuggerReplayEngine::ReplayEngine&, offset: usize, requested: usize) -> LocalPage:
+            return locals_page_for_frame(engine, Frame::INSPECT_MANAGED_FIRST_FRAME_INDEX, offset, requested)
+
         def globals_page(engine: mutable DebuggerReplayEngine::ReplayEngine&, offset: usize, requested: usize) -> LocalPage:
             page: mutable LocalPage = zeroed
             limit: mutable usize = requested
-            limit <- Global::INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY if requested == 0 or requested > Global::INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY
+            limit <- Global::INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY if requested == Global::UNBOUNDED_REQUEST or requested > Global::INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY
             if offset >= Global::INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY:
                 page.next <- Sentinel::NEXT_LOCAL
                 page.complete <- true
                 return page
             remaining: usize = Global::INSPECT_MANAGED_GLOBAL_PAGE_CAPACITY - offset
             count: usize = limit if limit < remaining else remaining
-            for index in 0..<count:
+            for index in Global::FIRST_GLOBAL_INDEX..<count:
                 global_index: usize = offset + index
                 page.entries[index] <- LocalSnapshot{index: global_index, value: engine.machine.globals[global_index], available: engine.machine.globals_initialized[global_index]}
             page.count <- count

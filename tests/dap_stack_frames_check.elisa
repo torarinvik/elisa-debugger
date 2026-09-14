@@ -1,0 +1,256 @@
+include "../src/protocol/dap_frames.elisa"
+include "../src/protocol/dap_payload.elisa"
+include "../src/inspect/managed.elisa"
+
+const module DAPStackProgram:
+    VERSION: u32 = 1
+    INSTRUCTION_COUNT: u64 = 6
+    LOCAL_COUNT: u64 = 1
+    FUNCTION_COUNT: usize = 3
+    RECORDING_ID: u64 = 1
+
+const module DAPStackInstruction:
+    FIRST_INDEX: usize = 0
+    SECOND_INDEX: usize = 1
+    CALLER_FIRST_INDEX: usize = 2
+    CALLER_CALL_INDEX: usize = 3
+    CALLEE_FIRST_INDEX: usize = 4
+    LAST_INDEX: usize = 5
+    CURRENT_PC: u64 = DAPStackInstruction::CALLEE_FIRST_INDEX.u64()
+
+const module DAPStackFunction:
+    ROOT_INDEX: usize = 0
+    CALLER_INDEX: usize = 1
+    CALLEE_INDEX: usize = 2
+    ROOT_ID: u64 = 101
+    CALLER_ID: u64 = 102
+    CALLEE_ID: u64 = 103
+    ROOT_ENTRY: u64 = 0
+    ROOT_END: u64 = 2
+    CALLER_ENTRY: u64 = 2
+    CALLER_END: u64 = 4
+    CALLEE_ENTRY: u64 = 4
+    CALLEE_END: u64 = 6
+
+const module DAPStackSource:
+    TEST_FILE_ID: u64 = 200
+    FIRST_BYTE: u64 = 10
+    BYTE_WIDTH: u64 = 1
+    FIRST_COLUMN: u32 = 1
+    END_COLUMN: u32 = 2
+    ROOT_LINE: u32 = 11
+    CALLER_LINE: u32 = 13
+    CALLEE_LINE: u32 = 15
+    CALLEE_INSTRUCTION_LINE: u32 = 14
+    SPAN_DISCRIMINATOR: u32 = 0
+
+const module DAPStackMachine:
+    CURRENT_FRAME_INDEX: usize = 0
+    CALLER_FRAME_INDEX: usize = 1
+    ROOT_FRAME_INDEX: usize = 2
+    FRAME_COUNT: usize = 3
+    ROOT_RETURN_ADDRESS: u64 = 2
+    CALLER_RETURN_ADDRESS: u64 = 4
+    RETURN_STACK_DEPTH: usize = 2
+    CURRENT_LOCAL_VALUE: i64 = 30
+    CALLER_LOCAL_VALUE: i64 = 20
+    ROOT_LOCAL_VALUE: i64 = 10
+    CALL_STACK_ZERO_ADDRESS: u64 = 0
+
+const module DAPStackPage:
+    FIRST_START_FRAME: usize = 0
+    OMITTED_LEVELS: usize = 0
+    ONE_FRAME: usize = 1
+    CALLER_START_FRAME: usize = 1
+    AFTER_LAST_FRAME: usize = DAPStackMachine::FRAME_COUNT
+
+const module DAPStackName:
+    ROOT: cstr = "main"
+    ROOT_LENGTH: usize = 4
+    CALLER: cstr = "caller"
+    CALLER_LENGTH: usize = 6
+    CALLEE: cstr = "callee"
+    CALLEE_LENGTH: usize = 6
+    LEGACY_NESTED: cstr = "frame"
+    LEGACY_NESTED_LENGTH: usize = 5
+    FIRST_BYTE_INDEX: usize = 0
+
+const module DAPStackPayload:
+    OMITTED_LEVELS: cstr = "{\"arguments\":{\"threadId\":1}}"
+    PAGED_LEVELS: cstr = "{\"arguments\":{\"threadId\":7,\"startFrame\":2,\"levels\":3}}"
+    EXPLICIT_ZERO_LEVELS: cstr = "{\"arguments\":{\"threadId\":1,\"levels\":0}}"
+    DUPLICATE_LEVELS: cstr = "{\"arguments\":{\"threadId\":1,\"levels\":1,\"levels\":2}}"
+    NEGATIVE_START_FRAME: cstr = "{\"arguments\":{\"threadId\":1,\"startFrame\":-1}}"
+    FIRST_BYTE_INDEX: usize = 0
+    STRING_TERMINATOR: u8 = 0
+    BYTE_INCREMENT: usize = 1
+    PAGED_THREAD_ID: u64 = 7
+    PAGED_LEVEL_LIMIT: usize = 3
+
+const module DAPStackFailure:
+    INVALID_SCHEMA3_PAGE: i64 = 1
+    WRONG_SCHEMA3_ORDER: i64 = 2
+    WRONG_SCHEMA3_NAMES: i64 = 3
+    WRONG_SOURCE_MAPPING: i64 = 4
+    FUNCTION_SOURCE_FALLBACK_WRONG: i64 = 20
+    WRONG_PAGINATION: i64 = 5
+    EXPLICIT_ZERO_NOT_EMPTY: i64 = 6
+    OUT_OF_RANGE_PAGE_NOT_EMPTY: i64 = 7
+    INVALID_RETURN_STACK_ACCEPTED: i64 = 8
+    INVALID_DESCRIPTOR_ACCEPTED: i64 = 9
+    LEGACY_PAGE_INVALID: i64 = 10
+    LEGACY_NAMES_WRONG: i64 = 11
+    CURRENT_LOCALS_WRONG: i64 = 12
+    CALLER_LOCALS_WRONG: i64 = 13
+    ROOT_LOCALS_WRONG: i64 = 14
+    OMITTED_LEVELS_PARSE_WRONG: i64 = 15
+    PAGED_LEVELS_PARSE_WRONG: i64 = 16
+    EXPLICIT_ZERO_PARSE_WRONG: i64 = 17
+    DUPLICATE_LEVELS_ACCEPTED: i64 = 18
+    NEGATIVE_START_ACCEPTED: i64 = 19
+
+const module DAPStackExpected:
+    SUCCESS: i64 = 0
+    FIRST_PAGE_ID: u64 = 1
+    PAGED_CALLER_ID: u64 = 2
+    NO_PAGE_ENTRIES: usize = 0
+    NO_FRAME_LIMIT: bool = false
+    HAS_FRAME_LIMIT: bool = true
+    LOCAL_OFFSET: usize = 0
+    LOCAL_REQUEST_COUNT: usize = 1
+
+
+def test_cstr_length(value: cstr) -> usize:
+    length: mutable usize = DAPStackPayload::FIRST_BYTE_INDEX
+    while value[length].u8() != DAPStackPayload::STRING_TERMINATOR:
+        length <- length + DAPStackPayload::BYTE_INCREMENT
+    return length
+
+
+def test_source_span(file_id: u64, line: u32) -> DebuggerIdentity::SourceSpan:
+    return DebuggerIdentity::SourceSpan{
+        file: DebuggerIdentity::debug_id(file_id),
+        start_byte: DAPStackSource::FIRST_BYTE,
+        end_byte: DAPStackSource::FIRST_BYTE + DAPStackSource::BYTE_WIDTH,
+        start_line: line,
+        start_column: DAPStackSource::FIRST_COLUMN,
+        end_line: line,
+        end_column: DAPStackSource::END_COLUMN,
+        discriminator: DAPStackSource::SPAN_DISCRIMINATOR
+    }
+
+
+def test_function(name: cstr, name_length: usize, id: u64, entry: u64, end: u64, source: DebuggerIdentity::SourceSpan) -> DebuggerEDIR::FunctionDescriptor:
+    function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+    function.id <- DebuggerIdentity::debug_id(id)
+    function.name_length <- name_length
+    function.entry_instruction <- entry
+    function.end_instruction_exclusive <- end
+    function.source <- source
+    for index in DAPStackName::FIRST_BYTE_INDEX..<name_length:
+        function.name_bytes[index] <- name.cast[u8&][index]
+    return function
+
+
+def test_image() -> DebuggerEDIR::ProgramImage:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: DAPStackProgram::VERSION, instruction_count: DAPStackProgram::INSTRUCTION_COUNT, local_count: DAPStackProgram::LOCAL_COUNT, has_return: true}
+    image.instructions[DAPStackInstruction::FIRST_INDEX].source <- test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::ROOT_LINE)
+    image.instructions[DAPStackInstruction::SECOND_INDEX].source <- test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::ROOT_LINE)
+    image.instructions[DAPStackInstruction::CALLER_FIRST_INDEX].source <- test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::CALLER_LINE)
+    image.instructions[DAPStackInstruction::CALLER_CALL_INDEX].source <- test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::CALLER_LINE)
+    image.instructions[DAPStackInstruction::CALLEE_FIRST_INDEX].source <- test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::CALLEE_INSTRUCTION_LINE)
+    image.instructions[DAPStackInstruction::LAST_INDEX].source <- test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::CALLEE_LINE)
+    image.function_count <- DAPStackProgram::FUNCTION_COUNT
+    image.functions[DAPStackFunction::ROOT_INDEX] <- test_function(DAPStackName::ROOT, DAPStackName::ROOT_LENGTH, DAPStackFunction::ROOT_ID, DAPStackFunction::ROOT_ENTRY, DAPStackFunction::ROOT_END, test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::ROOT_LINE))
+    image.functions[DAPStackFunction::CALLER_INDEX] <- test_function(DAPStackName::CALLER, DAPStackName::CALLER_LENGTH, DAPStackFunction::CALLER_ID, DAPStackFunction::CALLER_ENTRY, DAPStackFunction::CALLER_END, test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::CALLER_LINE))
+    image.functions[DAPStackFunction::CALLEE_INDEX] <- test_function(DAPStackName::CALLEE, DAPStackName::CALLEE_LENGTH, DAPStackFunction::CALLEE_ID, DAPStackFunction::CALLEE_ENTRY, DAPStackFunction::CALLEE_END, test_source_span(DAPStackSource::TEST_FILE_ID, DAPStackSource::CALLEE_LINE))
+    return image
+
+
+def test_machine() -> DebuggerEDIR::Machine:
+    machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    machine.program_counter <- DAPStackInstruction::CURRENT_PC
+    machine.return_stack_pointer <- DAPStackMachine::RETURN_STACK_DEPTH
+    machine.return_stack[DAPStackMachine::CURRENT_FRAME_INDEX] <- DAPStackMachine::ROOT_RETURN_ADDRESS
+    machine.return_stack[DAPStackMachine::CALLER_FRAME_INDEX] <- DAPStackMachine::CALLER_RETURN_ADDRESS
+    return machine
+
+
+def test_frame_page() -> i64:
+    image: DebuggerEDIR::ProgramImage = test_image()
+    machine: DebuggerEDIR::Machine = test_machine()
+    page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(image, machine, DAPStackPage::FIRST_START_FRAME, DAPStackPage::OMITTED_LEVELS, DAPStackExpected::NO_FRAME_LIMIT)
+    return DAPStackFailure::INVALID_SCHEMA3_PAGE if not page.valid or page.count != DAPStackMachine::FRAME_COUNT or page.total_frames != DAPStackMachine::FRAME_COUNT
+    return DAPStackFailure::WRONG_SCHEMA3_ORDER if page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].id != DAPStackExpected::FIRST_PAGE_ID or page.frames[DAPStackMachine::CALLER_FRAME_INDEX].id != DAPStackExpected::PAGED_CALLER_ID or page.frames[DAPStackMachine::ROOT_FRAME_INDEX].id != DAPStackMachine::FRAME_COUNT.u64()
+    return DAPStackFailure::WRONG_SCHEMA3_NAMES if page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].name_length != DAPStackName::CALLEE_LENGTH or page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::CALLEE.cast[u8&][DAPStackName::FIRST_BYTE_INDEX] or page.frames[DAPStackMachine::CALLER_FRAME_INDEX].name_length != DAPStackName::CALLER_LENGTH or page.frames[DAPStackMachine::CALLER_FRAME_INDEX].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::CALLER.cast[u8&][DAPStackName::FIRST_BYTE_INDEX] or page.frames[DAPStackMachine::ROOT_FRAME_INDEX].name_length != DAPStackName::ROOT_LENGTH or page.frames[DAPStackMachine::ROOT_FRAME_INDEX].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::ROOT.cast[u8&][DAPStackName::FIRST_BYTE_INDEX]
+    return DAPStackFailure::WRONG_SOURCE_MAPPING if not page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].has_source or page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].source.start_line != DAPStackSource::CALLEE_INSTRUCTION_LINE or page.frames[DAPStackMachine::CALLER_FRAME_INDEX].source.start_line != DAPStackSource::CALLER_LINE or page.frames[DAPStackMachine::ROOT_FRAME_INDEX].source.start_line != DAPStackSource::ROOT_LINE
+    function_source_image: mutable DebuggerEDIR::ProgramImage = image
+    function_source_image.instructions[DAPStackInstruction::CALLEE_FIRST_INDEX].source <- zeroed
+    function_source_page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(function_source_image, machine, DAPStackPage::FIRST_START_FRAME, DAPStackPage::ONE_FRAME, DAPStackExpected::HAS_FRAME_LIMIT)
+    return DAPStackFailure::FUNCTION_SOURCE_FALLBACK_WRONG if not function_source_page.valid or not function_source_page.frames[DAPStackPage::FIRST_START_FRAME].has_source or function_source_page.frames[DAPStackPage::FIRST_START_FRAME].source.start_line != DAPStackSource::CALLEE_LINE
+    paged: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(image, machine, DAPStackPage::CALLER_START_FRAME, DAPStackPage::ONE_FRAME, DAPStackExpected::HAS_FRAME_LIMIT)
+    return DAPStackFailure::WRONG_PAGINATION if not paged.valid or paged.count != DAPStackPage::ONE_FRAME or paged.total_frames != DAPStackMachine::FRAME_COUNT or paged.frames[DAPStackPage::FIRST_START_FRAME].id != DAPStackExpected::PAGED_CALLER_ID or paged.frames[DAPStackPage::FIRST_START_FRAME].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::CALLER.cast[u8&][DAPStackName::FIRST_BYTE_INDEX]
+    explicit_empty: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(image, machine, DAPStackPage::FIRST_START_FRAME, DAPStackExpected::NO_PAGE_ENTRIES, DAPStackExpected::HAS_FRAME_LIMIT)
+    return DAPStackFailure::EXPLICIT_ZERO_NOT_EMPTY if not explicit_empty.valid or explicit_empty.count != DAPStackExpected::NO_PAGE_ENTRIES or explicit_empty.total_frames != DAPStackMachine::FRAME_COUNT
+    out_of_range: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(image, machine, DAPStackPage::AFTER_LAST_FRAME, DAPStackPage::ONE_FRAME, DAPStackExpected::HAS_FRAME_LIMIT)
+    return DAPStackFailure::OUT_OF_RANGE_PAGE_NOT_EMPTY if not out_of_range.valid or out_of_range.count != DAPStackExpected::NO_PAGE_ENTRIES or out_of_range.total_frames != DAPStackMachine::FRAME_COUNT
+    invalid_machine: mutable DebuggerEDIR::Machine = machine
+    invalid_machine.return_stack[DAPStackMachine::CALLER_FRAME_INDEX] <- DAPStackMachine::CALL_STACK_ZERO_ADDRESS
+    invalid_page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(image, invalid_machine, DAPStackPage::FIRST_START_FRAME, DAPStackPage::OMITTED_LEVELS, DAPStackExpected::NO_FRAME_LIMIT)
+    return DAPStackFailure::INVALID_RETURN_STACK_ACCEPTED if invalid_page.valid
+    invalid_descriptor_image: mutable DebuggerEDIR::ProgramImage = image
+    invalid_descriptor_image.functions[DAPStackFunction::CALLEE_INDEX].name_length <- DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY + DAPStackPage::ONE_FRAME
+    invalid_descriptor_page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(invalid_descriptor_image, machine, DAPStackPage::FIRST_START_FRAME, DAPStackPage::OMITTED_LEVELS, DAPStackExpected::NO_FRAME_LIMIT)
+    return DAPStackFailure::INVALID_DESCRIPTOR_ACCEPTED if invalid_descriptor_page.valid
+    legacy_image: mutable DebuggerEDIR::ProgramImage = image
+    legacy_image.function_count <- DAPStackPage::FIRST_START_FRAME
+    legacy_page: DebuggerDAPFrames::StackPage = DebuggerDAPFrames::stack_trace_page(legacy_image, machine, DAPStackPage::FIRST_START_FRAME, DAPStackPage::OMITTED_LEVELS, DAPStackExpected::NO_FRAME_LIMIT)
+    return DAPStackFailure::LEGACY_PAGE_INVALID if not legacy_page.valid or legacy_page.count != DAPStackMachine::FRAME_COUNT
+    return DAPStackFailure::LEGACY_NAMES_WRONG if legacy_page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].name_length != DAPStackName::LEGACY_NESTED_LENGTH or legacy_page.frames[DAPStackMachine::CURRENT_FRAME_INDEX].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::LEGACY_NESTED.cast[u8&][DAPStackName::FIRST_BYTE_INDEX] or legacy_page.frames[DAPStackMachine::CALLER_FRAME_INDEX].name_length != DAPStackName::LEGACY_NESTED_LENGTH or legacy_page.frames[DAPStackMachine::CALLER_FRAME_INDEX].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::LEGACY_NESTED.cast[u8&][DAPStackName::FIRST_BYTE_INDEX] or legacy_page.frames[DAPStackMachine::ROOT_FRAME_INDEX].name_length != DAPStackName::ROOT_LENGTH or legacy_page.frames[DAPStackMachine::ROOT_FRAME_INDEX].name_bytes[DAPStackName::FIRST_BYTE_INDEX] != DAPStackName::ROOT.cast[u8&][DAPStackName::FIRST_BYTE_INDEX]
+    return DAPStackExpected::SUCCESS
+
+
+def test_frame_locals() -> i64:
+    image: DebuggerEDIR::ProgramImage = test_image()
+    engine: mutable DebuggerReplayEngine::ReplayEngine = zeroed
+    engine.image <- image
+    engine.machine <- DebuggerEDIR::machine_new()
+    engine.machine.return_stack_pointer <- DAPStackMachine::RETURN_STACK_DEPTH
+    engine.machine.locals[DAPStackName::FIRST_BYTE_INDEX] <- DAPStackMachine::CURRENT_LOCAL_VALUE
+    engine.machine.locals_initialized[DAPStackName::FIRST_BYTE_INDEX] <- true
+    caller_slot: usize = DebuggerEDIR::frame_local_slot(DAPStackMachine::CALLER_FRAME_INDEX, DAPStackName::FIRST_BYTE_INDEX)
+    root_slot: usize = DebuggerEDIR::frame_local_slot(DAPStackMachine::CURRENT_FRAME_INDEX, DAPStackName::FIRST_BYTE_INDEX)
+    engine.machine.frame_locals[caller_slot] <- DAPStackMachine::CALLER_LOCAL_VALUE
+    engine.machine.frame_locals_initialized[caller_slot] <- true
+    engine.machine.frame_locals[root_slot] <- DAPStackMachine::ROOT_LOCAL_VALUE
+    engine.machine.frame_locals_initialized[root_slot] <- true
+    current: DebuggerManagedInspection::LocalPage = DebuggerManagedInspection::locals_page_for_frame(engine, DAPStackMachine::CURRENT_FRAME_INDEX, DAPStackExpected::LOCAL_OFFSET, DAPStackExpected::LOCAL_REQUEST_COUNT)
+    return DAPStackFailure::CURRENT_LOCALS_WRONG if current.count != DAPStackExpected::LOCAL_REQUEST_COUNT or not current.entries[DAPStackExpected::LOCAL_OFFSET].available or current.entries[DAPStackExpected::LOCAL_OFFSET].value != DAPStackMachine::CURRENT_LOCAL_VALUE
+    caller: DebuggerManagedInspection::LocalPage = DebuggerManagedInspection::locals_page_for_frame(engine, DAPStackMachine::CALLER_FRAME_INDEX, DAPStackExpected::LOCAL_OFFSET, DAPStackExpected::LOCAL_REQUEST_COUNT)
+    return DAPStackFailure::CALLER_LOCALS_WRONG if caller.count != DAPStackExpected::LOCAL_REQUEST_COUNT or not caller.entries[DAPStackExpected::LOCAL_OFFSET].available or caller.entries[DAPStackExpected::LOCAL_OFFSET].value != DAPStackMachine::CALLER_LOCAL_VALUE
+    root: DebuggerManagedInspection::LocalPage = DebuggerManagedInspection::locals_page_for_frame(engine, DAPStackMachine::ROOT_FRAME_INDEX, DAPStackExpected::LOCAL_OFFSET, DAPStackExpected::LOCAL_REQUEST_COUNT)
+    return DAPStackFailure::ROOT_LOCALS_WRONG if root.count != DAPStackExpected::LOCAL_REQUEST_COUNT or not root.entries[DAPStackExpected::LOCAL_OFFSET].available or root.entries[DAPStackExpected::LOCAL_OFFSET].value != DAPStackMachine::ROOT_LOCAL_VALUE
+    return DAPStackExpected::SUCCESS
+
+
+def test_stack_trace_payload() -> i64:
+    omitted: DebuggerDAPPayload::StackTraceRequest = DebuggerDAPPayload::stack_trace_request_parse(DAPStackPayload::OMITTED_LEVELS.cast[u8&], test_cstr_length(DAPStackPayload::OMITTED_LEVELS))
+    return DAPStackFailure::OMITTED_LEVELS_PARSE_WRONG if not omitted.valid or omitted.thread_id != DAPStackProgram::RECORDING_ID or omitted.start_frame != DAPStackPage::FIRST_START_FRAME or omitted.has_levels
+    paged: DebuggerDAPPayload::StackTraceRequest = DebuggerDAPPayload::stack_trace_request_parse(DAPStackPayload::PAGED_LEVELS.cast[u8&], test_cstr_length(DAPStackPayload::PAGED_LEVELS))
+    return DAPStackFailure::PAGED_LEVELS_PARSE_WRONG if not paged.valid or paged.thread_id != DAPStackPayload::PAGED_THREAD_ID or paged.start_frame != DAPStackMachine::ROOT_FRAME_INDEX or paged.levels != DAPStackPayload::PAGED_LEVEL_LIMIT or not paged.has_levels
+    explicit_zero: DebuggerDAPPayload::StackTraceRequest = DebuggerDAPPayload::stack_trace_request_parse(DAPStackPayload::EXPLICIT_ZERO_LEVELS.cast[u8&], test_cstr_length(DAPStackPayload::EXPLICIT_ZERO_LEVELS))
+    return DAPStackFailure::EXPLICIT_ZERO_PARSE_WRONG if not explicit_zero.valid or explicit_zero.levels != DAPStackExpected::NO_PAGE_ENTRIES or not explicit_zero.has_levels
+    duplicate: DebuggerDAPPayload::StackTraceRequest = DebuggerDAPPayload::stack_trace_request_parse(DAPStackPayload::DUPLICATE_LEVELS.cast[u8&], test_cstr_length(DAPStackPayload::DUPLICATE_LEVELS))
+    return DAPStackFailure::DUPLICATE_LEVELS_ACCEPTED if duplicate.valid
+    negative: DebuggerDAPPayload::StackTraceRequest = DebuggerDAPPayload::stack_trace_request_parse(DAPStackPayload::NEGATIVE_START_FRAME.cast[u8&], test_cstr_length(DAPStackPayload::NEGATIVE_START_FRAME))
+    return DAPStackFailure::NEGATIVE_START_ACCEPTED if negative.valid
+    return DAPStackExpected::SUCCESS
+
+
+def main() -> i64:
+    frames: i64 = test_frame_page()
+    return frames if frames != DAPStackExpected::SUCCESS
+    locals: i64 = test_frame_locals()
+    return locals if locals != DAPStackExpected::SUCCESS
+    return test_stack_trace_payload()

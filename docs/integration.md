@@ -42,11 +42,15 @@ breakpoints, expression evaluation, variable assignment, restart, and
 disassembly are unavailable. The initialize response advertises the relevant
 DAP capabilities; clients should honor that response.
 
-The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. A locals
-`variablesReference` is valid only for the stop generation that produced it.
-Re-request scopes after execution advances. The adapter supports both
-`source.path` and a known positive `sourceReference` for source breakpoints;
-when both are supplied they must identify the same EDIR source entry.
+The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. `stackTrace`
+supports the standard `startFrame` and `levels` paging arguments and reports
+`totalFrames`; initialization advertises
+`supportsDelayedStackTraceLoading`. Treat returned `frameId` and
+`variablesReference` values as opaque handles. Both are valid only for the stop
+generation that produced them, so request a fresh stack trace and scopes after
+execution advances. The adapter supports both `source.path` and a known
+positive `sourceReference` for source breakpoints; when both are supplied they
+must identify the same EDIR source entry.
 
 DAP source breakpoints may include an optional `column`. The adapter converts
 one-based DAP columns to zero-based coordinates when `columnsStartAt1` is true,

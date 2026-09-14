@@ -1,0 +1,139 @@
+# Bounded stack-frame projection for the managed EDIR machine. DAP formatting
+# stays in the transport module; this module resolves execution frames against
+# the verified function table and source spans.
+
+include "../vm/edir.elisa"
+
+module DebuggerDAPFrames:
+    private:
+        const module Bounds:
+            FRAME_CAPACITY: usize = DebuggerEDIRCapacity::EDIR_CALL_FRAME_CAPACITY
+            CALL_DEPTH_CAPACITY: usize = DebuggerEDIRCapacity::EDIR_CALL_DEPTH_CAPACITY
+
+        const module FallbackName:
+            MAIN_NAME: cstr = "main"
+            MAIN_NAME_LENGTH: usize = 4
+            NESTED_NAME: cstr = "frame"
+            NESTED_NAME_LENGTH: usize = 5
+
+        const module NameByte:
+            FIRST_NAME_BYTE_INDEX: usize = 0
+
+        const module FrameIndex:
+            CURRENT_FRAME: usize = 0
+            ROOT_FRAME_COUNT: usize = 1
+            FRAME_ID_INCREMENT: usize = 1
+            FIRST_FRAME_ARRAY_INDEX: usize = 0
+
+        const module PageCount:
+            EMPTY_PAGE: usize = 0
+
+        const module StackCount:
+            NO_FRAMES: usize = 0
+
+        const module MachineStack:
+            RETURN_ADDRESS_INCREMENT: u64 = 1
+
+        def frame_instruction_is_valid(machine: DebuggerEDIR::Machine, frame_index: usize) -> bool:
+            return false if frame_index > machine.return_stack_pointer or frame_index >= Bounds::FRAME_CAPACITY
+            return true if frame_index == FrameIndex::CURRENT_FRAME
+            caller_slot: usize = machine.return_stack_pointer - frame_index
+            return false if caller_slot >= Bounds::CALL_DEPTH_CAPACITY
+            return machine.return_stack[caller_slot] >= MachineStack::RETURN_ADDRESS_INCREMENT
+
+        def frame_instruction_index(machine: DebuggerEDIR::Machine, frame_index: usize) -> u64:
+            return machine.program_counter if frame_index == FrameIndex::CURRENT_FRAME
+            caller_slot: usize = machine.return_stack_pointer - frame_index
+            return machine.return_stack[caller_slot] - MachineStack::RETURN_ADDRESS_INCREMENT
+
+        def frame_name_fallback(frame: mutable FrameView&, is_root: bool) -> void:
+            if is_root:
+                frame.name_length <- FallbackName::MAIN_NAME_LENGTH
+                for index in NameByte::FIRST_NAME_BYTE_INDEX..<FallbackName::MAIN_NAME_LENGTH:
+                    frame.name_bytes[index] <- FallbackName::MAIN_NAME[index].u8()
+            else:
+                frame.name_length <- FallbackName::NESTED_NAME_LENGTH
+                for index in NameByte::FIRST_NAME_BYTE_INDEX..<FallbackName::NESTED_NAME_LENGTH:
+                    frame.name_bytes[index] <- FallbackName::NESTED_NAME[index].u8()
+
+    public:
+        struct FrameView:
+            id: mutable u64
+            stack_index: mutable usize
+            instruction_index: mutable u64
+            name_bytes: mutable u8[DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY]
+            name_length: mutable usize
+            source: mutable DebuggerIdentity::SourceSpan
+            has_source: mutable bool
+
+        struct StackPage:
+            valid: mutable bool
+            frames: mutable FrameView[Bounds::FRAME_CAPACITY]
+            count: mutable usize
+            total_frames: mutable usize
+
+        def frame_capacity() -> usize:
+            return Bounds::FRAME_CAPACITY
+
+        def frame_count(machine: DebuggerEDIR::Machine) -> usize:
+            return StackCount::NO_FRAMES if machine.return_stack_pointer > Bounds::CALL_DEPTH_CAPACITY
+            return machine.return_stack_pointer + FrameIndex::ROOT_FRAME_COUNT
+
+        def stack_trace_page(image: DebuggerEDIR::ProgramImage, machine: DebuggerEDIR::Machine, start_frame: usize, levels: usize, has_level_limit: bool) -> StackPage:
+            page: mutable StackPage = zeroed
+            return page if machine.return_stack_pointer > Bounds::CALL_DEPTH_CAPACITY or image.function_count > DebuggerEDIRCapacity::EDIR_FUNCTION_CAPACITY
+            return page if image.program.instruction_count == StackCount::NO_FRAMES.u64() or image.program.instruction_count > DebuggerEDIRCapacity::EDIR_INSTRUCTION_CAPACITY.u64()
+            return page if machine.program_counter >= image.program.instruction_count
+            page.valid <- true
+            total: usize = frame_count(machine)
+            page.total_frames <- total
+            return page if start_frame >= total
+            limit: mutable usize = levels
+            limit <- Bounds::FRAME_CAPACITY if not has_level_limit or levels > Bounds::FRAME_CAPACITY
+            remaining: usize = total - start_frame
+            page.count <- limit if limit < remaining else remaining
+            for page_index in FrameIndex::FIRST_FRAME_ARRAY_INDEX..<page.count:
+                frame_index: usize = start_frame + page_index
+                if not frame_instruction_is_valid(machine, frame_index):
+                    page.valid <- false
+                    page.count <- PageCount::EMPTY_PAGE
+                    return page
+                instruction_index: u64 = frame_instruction_index(machine, frame_index)
+                function_index: usize = DebuggerEDIR::function_index_for_instruction(image, instruction_index)
+                frame: mutable FrameView = zeroed
+                frame.id <- (frame_index + FrameIndex::FRAME_ID_INCREMENT).u64()
+                frame.stack_index <- frame_index
+                frame.instruction_index <- instruction_index
+                if function_index < image.function_count:
+                    function: DebuggerEDIR::FunctionDescriptor = image.functions[function_index]
+                    if function.name_length == NameByte::FIRST_NAME_BYTE_INDEX or function.name_length > DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY or function.entry_instruction >= function.end_instruction_exclusive or function.end_instruction_exclusive > image.program.instruction_count or instruction_index < function.entry_instruction or instruction_index >= function.end_instruction_exclusive:
+                        page.valid <- false
+                        page.count <- PageCount::EMPTY_PAGE
+                        return page
+                    frame.name_length <- function.name_length
+                    for name_index in NameByte::FIRST_NAME_BYTE_INDEX..<function.name_length:
+                        frame.name_bytes[name_index] <- function.name_bytes[name_index]
+                    # The source coordinates are preserved from the compiler's
+                    # EDIR spans. DAP only applies its existing line/column
+                    # base convention; it does not convert column units here.
+                    if instruction_index < image.program.instruction_count:
+                        instruction_source: DebuggerIdentity::SourceSpan = image.instructions[instruction_index.usize()].source
+                        if not DebuggerIdentity::debug_id_is_zero(instruction_source.file):
+                            frame.source <- instruction_source
+                            frame.has_source <- true
+                    if not frame.has_source and not DebuggerIdentity::debug_id_is_zero(function.source.file):
+                        frame.source <- function.source
+                        frame.has_source <- true
+                else:
+                    if image.function_count > StackCount::NO_FRAMES:
+                        page.valid <- false
+                        page.count <- PageCount::EMPTY_PAGE
+                        return page
+                    frame_name_fallback(frame, frame_index == total - FrameIndex::ROOT_FRAME_COUNT)
+                    if instruction_index < image.program.instruction_count:
+                        instruction_source: DebuggerIdentity::SourceSpan = image.instructions[instruction_index.usize()].source
+                        if not DebuggerIdentity::debug_id_is_zero(instruction_source.file):
+                            frame.source <- instruction_source
+                            frame.has_source <- true
+                page.frames[page_index] <- frame
+            return page

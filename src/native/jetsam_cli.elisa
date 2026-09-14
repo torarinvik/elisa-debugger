@@ -14,23 +14,39 @@ extern jetsam_cli_printf(format: cstr, ...) -> int can[Console]
 
 module DebuggerNativeJetsamCLI:
     private:
-        const module Limits:
-            CLI_READ_ONLY: int = 0
-            CLI_READ_CAPACITY: usize = 16777217
-            CLI_PID_MAX: u64 = 18446744073709551615
-            CLI_DECIMAL_BASE: u64 = 10
-            CLI_PID_MAX_LENGTH: usize = 20
-            CLI_SINGLE_ARGUMENTS: i64 = 2
-            CLI_SINGLE_PID_ARGUMENTS: i64 = 3
-            CLI_COMPARE_ARGUMENTS: i64 = 4
-            CLI_COMPARE_PID_ARGUMENTS: i64 = 5
-            CLI_PATH_INDEX: usize = 1
-            CLI_COMPARE_BASELINE_INDEX: usize = 2
-            CLI_COMPARE_LATEST_INDEX: usize = 3
-            CLI_SINGLE_PID_INDEX: usize = 2
-            CLI_COMPARE_PID_INDEX: usize = 4
-            CLI_GIB_BYTES: u64 = 1073741824
-            CLI_MICROS_PER_SECOND: u64 = 1000000
+        const module File:
+            READ_ONLY: int = 0
+            JETSAM_CLI_FILE_READ_CAPACITY: usize = 16777217
+
+        const module ProcessId:
+            JETSAM_CLI_PROCESSID_MAX: u64 = 18446744073709551615
+            JETSAM_CLI_PROCESSID_DECIMAL_BASE: u64 = 10
+            MAX_DIGITS: usize = 20
+
+        const module Arguments:
+            SINGLE_REPORT: i64 = 2
+            SINGLE_REPORT_WITH_PID: i64 = 3
+            COMPARISON: i64 = 4
+            COMPARISON_WITH_PID: i64 = 5
+            PATH_INDEX: usize = 1
+            COMPARISON_BASELINE_INDEX: usize = 2
+            COMPARISON_LATEST_INDEX: usize = 3
+            SINGLE_PID_INDEX: usize = 2
+            COMPARISON_PID_INDEX: usize = 4
+
+        const module Units:
+            BYTES_PER_GIB: u64 = 1073741824
+            JETSAM_CLI_UNITS_MICROSECONDS_PER_SECOND: u64 = 1000000
+
+        const module Ascii:
+            DIGIT_ZERO: u8 = 48
+            DIGIT_NINE: u8 = 57
+
+        const module Option:
+            JETSAM_CLI_OPTION_COMPARE: cstr = "--compare"
+
+        const module ExitCode:
+            USAGE: i64 = 2
 
         enum LoadStatus:
             Ready
@@ -55,28 +71,28 @@ module DebuggerNativeJetsamCLI:
         def parse_pid(value: cstr) -> u64:
             parsed: mutable u64 = 0
             digits: mutable usize = 0
-            while digits < Limits::CLI_PID_MAX_LENGTH and value[digits].u8() >= 48 and value[digits].u8() <= 57:
-                digit: u64 = (value[digits].u8() - 48).u64()
-                return 0 if parsed > (Limits::CLI_PID_MAX - digit) / Limits::CLI_DECIMAL_BASE
-                parsed <- parsed * Limits::CLI_DECIMAL_BASE + digit
+            while digits < ProcessId::MAX_DIGITS and value[digits].u8() >= Ascii::DIGIT_ZERO and value[digits].u8() <= Ascii::DIGIT_NINE:
+                digit: u64 = (value[digits].u8() - Ascii::DIGIT_ZERO).u64()
+                return 0 if parsed > (ProcessId::JETSAM_CLI_PROCESSID_MAX - digit) / ProcessId::JETSAM_CLI_PROCESSID_DECIMAL_BASE
+                parsed <- parsed * ProcessId::JETSAM_CLI_PROCESSID_DECIMAL_BASE + digit
                 digits <- digits + 1
             return 0 if digits == 0 or value[digits].u8() != 0 or parsed == 0
             return parsed
 
         def load_report(path: cstr, target_pid: u64, bytes: mutable u8&) -> LoadResult can[Blocking.IO, Unsafe.PointerCast]:
-            descriptor: int = jetsam_cli_open(path, Limits::CLI_READ_ONLY) can Blocking.IO
+            descriptor: int = jetsam_cli_open(path, File::READ_ONLY) can Blocking.IO
             if descriptor < 0:
                 return LoadResult{report: zeroed, bytes_read: 0, status: LoadStatus.OpenFailure}
             byte_count: mutable usize = 0
             read_failed: mutable bool = false
-            while byte_count < Limits::CLI_READ_CAPACITY:
-                received: isize = jetsam_cli_read(descriptor, (&bytes[byte_count]).cast[void&], Limits::CLI_READ_CAPACITY - byte_count) can Blocking.IO, Unsafe.PointerCast
+            while byte_count < File::JETSAM_CLI_FILE_READ_CAPACITY:
+                received: isize = jetsam_cli_read(descriptor, (&bytes[byte_count]).cast[void&], File::JETSAM_CLI_FILE_READ_CAPACITY - byte_count) can Blocking.IO, Unsafe.PointerCast
                 if received < 0:
                     read_failed <- true
                     break
                 break if received == 0
                 amount: usize = received.usize()
-                if amount > Limits::CLI_READ_CAPACITY - byte_count:
+                if amount > File::JETSAM_CLI_FILE_READ_CAPACITY - byte_count:
                     read_failed <- true
                     break
                 byte_count <- byte_count + amount
@@ -89,10 +105,10 @@ module DebuggerNativeJetsamCLI:
             return LoadResult{report: report, bytes_read: byte_count, status: LoadStatus.InvalidReport}
 
         def print_report(path: cstr, loaded: LoadResult) -> void can[Console]:
-            gib_whole: u64 = loaded.report.resident_bytes / Limits::CLI_GIB_BYTES
-            gib_tenths: u64 = (loaded.report.resident_bytes % Limits::CLI_GIB_BYTES) * 10 / Limits::CLI_GIB_BYTES
-            cpu_seconds: u64 = loaded.report.cpu_time_micros / Limits::CLI_MICROS_PER_SECOND
-            cpu_microseconds: u64 = loaded.report.cpu_time_micros % Limits::CLI_MICROS_PER_SECOND
+            gib_whole: u64 = loaded.report.resident_bytes / Units::BYTES_PER_GIB
+            gib_tenths: u64 = (loaded.report.resident_bytes % Units::BYTES_PER_GIB) * 10 / Units::BYTES_PER_GIB
+            cpu_seconds: u64 = loaded.report.cpu_time_micros / Units::JETSAM_CLI_UNITS_MICROSECONDS_PER_SECOND
+            cpu_microseconds: u64 = loaded.report.cpu_time_micros % Units::JETSAM_CLI_UNITS_MICROSECONDS_PER_SECOND
             _ = jetsam_cli_printf("report=%s pid=%llu residentPages=%llu residentBytes=%llu residentGiB=%llu.%llu lifetimeMaxBytes=%llu regions=%llu cpuSeconds=%llu.%06llu largestProcess=%d\n", path, loaded.report.process_id, loaded.report.resident_pages, loaded.report.resident_bytes, gib_whole, gib_tenths, loaded.report.lifetime_max_bytes, loaded.report.memory_regions, cpu_seconds, cpu_microseconds, loaded.report.is_largest_process) can Console
 
         def change_sign(increased: bool, magnitude: u64) -> cstr:
@@ -104,21 +120,21 @@ module DebuggerNativeJetsamCLI:
 
     public:
         def run(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Console, Unsafe.PointerCast]:
-            return 2 if argc < Limits::CLI_SINGLE_ARGUMENTS or argc > Limits::CLI_COMPARE_PID_ARGUMENTS
+            return ExitCode::USAGE if argc < Arguments::SINGLE_REPORT or argc > Arguments::COMPARISON_WITH_PID
             arguments: mutable cstr&& = argv.cast[mutable cstr&&]
-            compare_mode: bool = cstr_matches(arguments[Limits::CLI_PATH_INDEX].cast[cstr], "--compare")
-            return 2 if compare_mode and argc != Limits::CLI_COMPARE_ARGUMENTS and argc != Limits::CLI_COMPARE_PID_ARGUMENTS
-            return 2 if not compare_mode and argc != Limits::CLI_SINGLE_ARGUMENTS and argc != Limits::CLI_SINGLE_PID_ARGUMENTS
+            compare_mode: bool = cstr_matches(arguments[Arguments::PATH_INDEX].cast[cstr], Option::JETSAM_CLI_OPTION_COMPARE)
+            return ExitCode::USAGE if compare_mode and argc != Arguments::COMPARISON and argc != Arguments::COMPARISON_WITH_PID
+            return ExitCode::USAGE if not compare_mode and argc != Arguments::SINGLE_REPORT and argc != Arguments::SINGLE_REPORT_WITH_PID
             target_pid: mutable u64 = 0
-            has_pid: bool = argc == Limits::CLI_SINGLE_PID_ARGUMENTS and not compare_mode or argc == Limits::CLI_COMPARE_PID_ARGUMENTS and compare_mode
+            has_pid: bool = argc == Arguments::SINGLE_REPORT_WITH_PID and not compare_mode or argc == Arguments::COMPARISON_WITH_PID and compare_mode
             if has_pid:
-                pid_index: usize = Limits::CLI_SINGLE_PID_INDEX if not compare_mode else Limits::CLI_COMPARE_PID_INDEX
+                pid_index: usize = Arguments::SINGLE_PID_INDEX if not compare_mode else Arguments::COMPARISON_PID_INDEX
                 target_pid <- parse_pid(arguments[pid_index].cast[cstr])
-                return 2 if target_pid == 0
-            bytes: mutable u8[Limits::CLI_READ_CAPACITY] = zeroed
+                return ExitCode::USAGE if target_pid == 0
+            bytes: mutable u8[File::JETSAM_CLI_FILE_READ_CAPACITY] = zeroed
             if compare_mode:
-                baseline_path: cstr = arguments[Limits::CLI_COMPARE_BASELINE_INDEX].cast[cstr]
-                latest_path: cstr = arguments[Limits::CLI_COMPARE_LATEST_INDEX].cast[cstr]
+                baseline_path: cstr = arguments[Arguments::COMPARISON_BASELINE_INDEX].cast[cstr]
+                latest_path: cstr = arguments[Arguments::COMPARISON_LATEST_INDEX].cast[cstr]
                 baseline: LoadResult = load_report(baseline_path, target_pid, bytes[0]) can Blocking.IO, Unsafe.PointerCast
                 if baseline.status != LoadStatus.Ready:
                     print_load_error(baseline_path, baseline) can Console
@@ -133,7 +149,7 @@ module DebuggerNativeJetsamCLI:
                     return 5
                 _ = jetsam_cli_printf("pid=%llu residentBytes=%llu->%llu (%s%llu) regions=%llu->%llu (%s%llu) cpuMicros=%llu->%llu (%s%llu)\n", latest.report.process_id, baseline.report.resident_bytes, latest.report.resident_bytes, change_sign(delta.resident_bytes_grew, delta.resident_bytes_delta), delta.resident_bytes_delta, baseline.report.memory_regions, latest.report.memory_regions, change_sign(delta.memory_regions_grew, delta.memory_regions_delta), delta.memory_regions_delta, baseline.report.cpu_time_micros, latest.report.cpu_time_micros, change_sign(delta.cpu_time_grew, delta.cpu_time_delta_micros), delta.cpu_time_delta_micros) can Console
                 return 0
-            report_path: cstr = arguments[Limits::CLI_PATH_INDEX].cast[cstr]
+            report_path: cstr = arguments[Arguments::PATH_INDEX].cast[cstr]
             loaded: LoadResult = load_report(report_path, target_pid, bytes[0]) can Blocking.IO, Unsafe.PointerCast
             if loaded.status != LoadStatus.Ready:
                 print_load_error(report_path, loaded) can Console

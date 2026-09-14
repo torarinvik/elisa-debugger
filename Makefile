@@ -34,6 +34,14 @@ COMPILER_EDIR_LOOP_BREAKPOINT_LINE := 5
 COMPILER_EDIR_LOOP_DAP_INITIAL_LOCALS_REFERENCE := 1
 COMPILER_EDIR_LOOP_DAP_STEPPED_LOCALS_REFERENCE := 4
 COMPILER_EDIR_LOOP_DAP_REVERSED_LOCALS_REFERENCE := 5
+ELF_DWARF_LINE_CC ?= clang
+ELF_DWARF_LINE_FIXTURE_SOURCE := tests/native_elf_dwarf_line_fixture.c
+ELF_DWARF_LINE_FIXTURE := $(BUILD)/native-elf-dwarf-line-fixture
+ifeq ($(shell uname -s),Darwin)
+ELF_DWARF_LINE_TARGET_FLAGS := -target x86_64-unknown-linux-gnu -fuse-ld=lld
+else
+ELF_DWARF_LINE_TARGET_FLAGS :=
+endif
 PROCESS_SPAWN_CHECK_PARENT_MODE := --process-check-parent
 PROCESS_SPAWN_CHECK_RESERVED_FIRST := reserved-first
 PROCESS_SPAWN_CHECK_RESERVED_SECOND := reserved-second
@@ -72,7 +80,7 @@ ELISA_SOURCE_FILES := $(shell find src -type f -name '*.elisa')
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool
 .PHONY: native-macos-memory-check native-macos-memory-tool
-.PHONY: native-dwarf-line-check
+.PHONY: native-dwarf-line-check native-elf-dwarf-line-check
 .PHONY: native-macho-dwarf-line-check
 
 build: $(BUILD)/elisa-debugger
@@ -99,6 +107,7 @@ module-check: $(BUILD)/elisa-debugger-remote-artifacts-check
 module-check: $(BUILD)/elisa-debugger-native-elf-check
 module-check: $(BUILD)/elisa-debugger-native-macho-check
 module-check: $(BUILD)/elisa-debugger-native-dwarf-line-check
+module-check: $(BUILD)/elisa-debugger-native-elf-dwarf-line-check
 module-check: $(BUILD)/elisa-debugger-native-macho-dwarf-line-check
 module-check: $(BUILD)/elisa-debugger-native-artifact-check
 module-check: $(BUILD)/elisa-debugger-native-jetsam-check
@@ -144,6 +153,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-native-elf-check"
 	"$(BUILD)/elisa-debugger-native-macho-check"
 	"$(BUILD)/elisa-debugger-native-dwarf-line-check"
+	"$(BUILD)/elisa-debugger-native-elf-dwarf-line-check"
 	"$(BUILD)/elisa-debugger-native-macho-dwarf-line-check"
 	"$(BUILD)/elisa-debugger-native-artifact-check"
 	"$(BUILD)/elisa-debugger-native-jetsam-check"
@@ -576,6 +586,17 @@ $(BUILD)/elisa-debugger-native-dwarf-line-check: tests/native_dwarf_line_check.e
 
 native-dwarf-line-check: $(BUILD)/elisa-debugger-native-dwarf-line-check
 	"$(BUILD)/elisa-debugger-native-dwarf-line-check"
+
+$(ELF_DWARF_LINE_FIXTURE): $(ELF_DWARF_LINE_FIXTURE_SOURCE)
+	mkdir -p $(BUILD)
+	$(ELF_DWARF_LINE_CC) $(ELF_DWARF_LINE_TARGET_FLAGS) -gdwarf-4 -O0 -nostdlib -static -Wl,-e,main -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-native-elf-dwarf-line-check: tests/native_elf_dwarf_line_check.elisa $(ELF_DWARF_LINE_FIXTURE) $(ELISA_SOURCE_FILES)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-elf-dwarf-line-check: $(BUILD)/elisa-debugger-native-elf-dwarf-line-check
+	"$(BUILD)/elisa-debugger-native-elf-dwarf-line-check"
 
 $(BUILD)/elisa-debugger-native-macho-dwarf-line-check: tests/native_macho_dwarf_line_check.elisa $(ELISA_SOURCE_FILES)
 	mkdir -p $(BUILD)

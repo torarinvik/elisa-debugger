@@ -1,0 +1,99 @@
+# ELF adapter for the DWARF v2-v4 line-table reader. Callers provide an
+# unslid ELF virtual address; translating a live process address through its
+# load bias remains the responsibility of the process mapping boundary.
+
+include "./elf.elisa"
+include "./dwarf_line.elisa"
+
+module DebuggerNativeElfDwarfLine:
+    private:
+        const module SectionName:
+            NAME_LENGTH: usize = 11
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_0: u8 = 46
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_1: u8 = 100
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_2: u8 = 101
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_3: u8 = 98
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_4: u8 = 117
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_5: u8 = 103
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_6: u8 = 95
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_7: u8 = 108
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_8: u8 = 105
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_9: u8 = 110
+            ELF_DWARF_LINE_SECTIONNAME_BYTE_10: u8 = 101
+            ELF_DWARF_LINE_SECTIONNAME_NULL_BYTE: u8 = 0
+
+        const module DebugLineSection:
+            NULL: u32 = 0
+            STRING_TABLE: u32 = 3
+            NOBITS: u32 = 8
+
+        const module StringTable:
+            EMPTY_BYTES: u64 = 0
+            INITIAL_NULL_BYTE_OFFSET: usize = 0
+
+        const module Address:
+            WIDTH_64: usize = 8
+            EMPTY_SECTION_BYTES: u64 = 0
+            NO_SECTION_INDEX: usize = 0
+            FIRST_SECTION_INDEX: usize = 0
+            SECTION_INDEX_INCREMENT: usize = 1
+
+        enum SectionNameStatus:
+            Invalid
+            NoMatch
+            Match
+
+        def debug_line_name() -> u8[SectionName::NAME_LENGTH]:
+            return [SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_0, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_1, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_2, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_3, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_4, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_5, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_6, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_7, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_8, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_9, SectionName::ELF_DWARF_LINE_SECTIONNAME_BYTE_10]
+
+        def section_name_status(bytes: u8&, length: usize, string_table: DebuggerNativeElf::ElfSectionHeader, name_offset: u32) -> SectionNameStatus:
+            return SectionNameStatus.Invalid if not string_table.valid or string_table.kind != DebugLineSection::STRING_TABLE
+            return SectionNameStatus.Invalid if name_offset.u64() >= string_table.size
+            remaining: u64 = string_table.size - name_offset.u64()
+            start: u64 = string_table.offset + name_offset.u64()
+            return SectionNameStatus.Invalid if start < string_table.offset or start > length.u64()
+            return SectionNameStatus.Invalid if remaining > length.u64() - start
+            expected_name: u8[SectionName::NAME_LENGTH] = debug_line_name()
+            for index in 0..<SectionName::NAME_LENGTH:
+                return SectionNameStatus.Invalid if index.u64() >= remaining
+                value: u8 = bytes[start.usize() + index]
+                return SectionNameStatus.NoMatch if value == SectionName::ELF_DWARF_LINE_SECTIONNAME_NULL_BYTE or value != expected_name[index]
+            return SectionNameStatus.Invalid if SectionName::NAME_LENGTH.u64() >= remaining
+            terminator: u8 = bytes[start.usize() + SectionName::NAME_LENGTH]
+            return SectionNameStatus.Match if terminator == SectionName::ELF_DWARF_LINE_SECTIONNAME_NULL_BYTE
+            return SectionNameStatus.NoMatch
+
+    public:
+        def elf_dwarf_line_lookup_link_address(image_bytes: u8&, image_length: usize, link_address: u64) -> DebuggerNativeDwarfLine::Lookup:
+            result: mutable DebuggerNativeDwarfLine::Lookup = zeroed
+            result.status <- DebuggerNativeDwarfLine::Status.Invalid
+            header: DebuggerNativeElf::ElfHeader = DebuggerNativeElf::elf_parse(image_bytes, image_length)
+            return result if not DebuggerNativeElf::elf_machine_is_supported(header)
+            if header.section_header_count == Address::NO_SECTION_INDEX.u16():
+                result.status <- DebuggerNativeDwarfLine::Status.NotFound
+                return result
+            return result if header.section_name_string_table_index >= header.section_header_count
+
+            string_table: DebuggerNativeElf::ElfSectionHeader = DebuggerNativeElf::elf_section_header(image_bytes, image_length, header, header.section_name_string_table_index.usize())
+            return result if not string_table.valid or string_table.kind != DebugLineSection::STRING_TABLE
+            return result if string_table.size == StringTable::EMPTY_BYTES
+            return result if image_bytes[string_table.offset.usize() + StringTable::INITIAL_NULL_BYTE_OFFSET] != SectionName::ELF_DWARF_LINE_SECTIONNAME_NULL_BYTE
+            debug_line: mutable DebuggerNativeElf::ElfSectionHeader = zeroed
+            found_section: mutable bool = false
+            for section_index in Address::FIRST_SECTION_INDEX..<header.section_header_count.usize():
+                section: DebuggerNativeElf::ElfSectionHeader = DebuggerNativeElf::elf_section_header(image_bytes, image_length, header, section_index)
+                return result if not section.valid
+                name_status: SectionNameStatus = section_name_status(image_bytes, image_length, string_table, section.name)
+                return result if name_status == SectionNameStatus.Invalid
+                continue if name_status == SectionNameStatus.NoMatch
+                return result if found_section
+                debug_line <- section
+                found_section <- true
+
+            if not found_section:
+                result.status <- DebuggerNativeDwarfLine::Status.NotFound
+                return result
+            return result if debug_line.kind == DebugLineSection::NULL or debug_line.kind == DebugLineSection::NOBITS or debug_line.size == Address::EMPTY_SECTION_BYTES
+            section_offset: usize = debug_line.offset.usize()
+            return result if section_offset > image_length or debug_line.size > (image_length - section_offset).u64()
+            return DebuggerNativeDwarfLine::dwarf_line_lookup(image_bytes[section_offset], debug_line.size.usize(), Address::WIDTH_64, link_address)

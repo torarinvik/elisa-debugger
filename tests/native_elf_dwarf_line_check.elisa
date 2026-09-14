@@ -1,0 +1,83 @@
+include "../src/native/elf_dwarf_line.elisa"
+
+@link_name("open")
+extern elf_dwarf_line_test_open(path: cstr, flags: int) -> int can[Blocking.IO]
+@link_name("read")
+extern elf_dwarf_line_test_read(fd: int, buffer: void&, count: usize) -> isize can[Blocking.IO]
+@link_name("close")
+extern elf_dwarf_line_test_close(fd: int) -> int can[Blocking.IO]
+
+const module TestPath:
+    COMPILED_ELF_FIXTURE: cstr = "build/native-elf-dwarf-line-fixture"
+
+const module TestFile:
+    READ_ONLY: int = 0
+    MAXIMUM_IMAGE_BYTES: usize = 65536
+    OVERFLOW_DETECTION_BYTES: usize = 1
+    READ_BUFFER_BYTES: usize = MAXIMUM_IMAGE_BYTES + OVERFLOW_DETECTION_BYTES
+    EMPTY_BYTE_COUNT: usize = 0
+
+const module TestElfHeader:
+    SECTION_NAME_STRING_INDEX_OFFSET: usize = 62
+    SECTION_NAME_STRING_INDEX_SECOND_BYTE_OFFSET: usize = 1
+    UNSUPPORTED_SECTION_NAME_STRING_INDEX: u16 = 65535
+
+const module TestExpected:
+    DWARF_SOURCE_FILENAME_LENGTH: usize = 31
+    FIRST_FILENAME_BYTE: u8 = 110
+    LAST_FILENAME_BYTE: u8 = 99
+    FIRST_SOURCE_LINE: i64 = 1
+
+const module TestResult:
+    SUCCESS: i64 = 0
+    OPEN_FAILURE: i64 = 1
+    READ_FAILURE: i64 = 2
+    CLOSE_FAILURE: i64 = 3
+    IMAGE_TOO_LARGE: i64 = 4
+    INVALID_ELF: i64 = 5
+    DWARF_LINE_MAPPING_FAILURE: i64 = 6
+    INVALID_SECTION_NAME_TABLE: i64 = 7
+    DWARF_LINE_METADATA_FAILURE: i64 = 8
+    DWARF_FILENAME_FAILURE: i64 = 9
+    DWARF_LINE_NOT_FOUND: i64 = 10
+    DWARF_LINE_UNSUPPORTED: i64 = 11
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    descriptor: int = elf_dwarf_line_test_open(TestPath::COMPILED_ELF_FIXTURE, TestFile::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::OPEN_FAILURE if descriptor < 0
+
+    image: mutable u8[TestFile::READ_BUFFER_BYTES] = zeroed
+    byte_count: mutable usize = TestFile::EMPTY_BYTE_COUNT
+    read_failed: mutable bool = false
+    while byte_count < TestFile::READ_BUFFER_BYTES:
+        received: isize = elf_dwarf_line_test_read(descriptor, (&image[byte_count]).cast[void&], TestFile::READ_BUFFER_BYTES - byte_count) can Blocking.IO, Unsafe.PointerCast
+        if received < 0:
+            read_failed <- true
+            break
+        break if received == 0
+        received_bytes: usize = received.usize()
+        if received_bytes > TestFile::READ_BUFFER_BYTES - byte_count:
+            read_failed <- true
+            break
+        byte_count <- byte_count + received_bytes
+    close_status: int = elf_dwarf_line_test_close(descriptor) can Blocking.IO
+    return TestResult::READ_FAILURE if read_failed
+    return TestResult::CLOSE_FAILURE if close_status < 0
+    return TestResult::IMAGE_TOO_LARGE if byte_count > TestFile::MAXIMUM_IMAGE_BYTES
+
+    header: DebuggerNativeElf::ElfHeader = DebuggerNativeElf::elf_parse(image[0], byte_count)
+    return TestResult::INVALID_ELF if not header.valid or not header.executable or header.entry == 0
+    lookup: DebuggerNativeDwarfLine::Lookup = DebuggerNativeElfDwarfLine::elf_dwarf_line_lookup_link_address(image[0], byte_count, header.entry)
+    return TestResult::DWARF_LINE_MAPPING_FAILURE if lookup.status == DebuggerNativeDwarfLine::Status.Invalid
+    return TestResult::DWARF_LINE_NOT_FOUND if lookup.status == DebuggerNativeDwarfLine::Status.NotFound
+    return TestResult::DWARF_LINE_UNSUPPORTED if lookup.status != DebuggerNativeDwarfLine::Status.Found
+    return TestResult::DWARF_LINE_METADATA_FAILURE if lookup.line != TestExpected::FIRST_SOURCE_LINE or lookup.filename_length != TestExpected::DWARF_SOURCE_FILENAME_LENGTH
+    return TestResult::DWARF_FILENAME_FAILURE if lookup.filename[0] != TestExpected::FIRST_FILENAME_BYTE or lookup.filename[lookup.filename_length - 1] != TestExpected::LAST_FILENAME_BYTE
+
+    malformed_name_table: mutable u8[TestFile::READ_BUFFER_BYTES] = image
+    section_name_index_offset: usize = TestElfHeader::SECTION_NAME_STRING_INDEX_OFFSET
+    malformed_name_table[section_name_index_offset] <- TestElfHeader::UNSUPPORTED_SECTION_NAME_STRING_INDEX.u8()
+    malformed_name_table[section_name_index_offset + TestElfHeader::SECTION_NAME_STRING_INDEX_SECOND_BYTE_OFFSET] <- (TestElfHeader::UNSUPPORTED_SECTION_NAME_STRING_INDEX >> 8).u8()
+    invalid_lookup: DebuggerNativeDwarfLine::Lookup = DebuggerNativeElfDwarfLine::elf_dwarf_line_lookup_link_address(malformed_name_table[0], byte_count, header.entry)
+    return TestResult::INVALID_SECTION_NAME_TABLE if invalid_lookup.status != DebuggerNativeDwarfLine::Status.Invalid
+    return TestResult::SUCCESS

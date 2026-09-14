@@ -66,9 +66,10 @@ capacity.
 
 `discover.result.features` includes a boolean for every capability in the
 shared `CapabilitySet`. The process clears features whose request operands or
-result payloads are not wired to this compact transport, including source
-breakpoints, memory reads, checkpoints, branches, trace verification, trace
-export, and historical queries. Threads, frames, scopes, and locals are
+result payloads are not wired to this compact transport, including memory
+reads, checkpoints, branches, trace verification, trace export, and historical
+queries. Managed EDIR source breakpoints are supported through the bounded
+`setBreakpoints` payload below. Threads, frames, scopes, and locals are
 available through the managed inspection surface. Expression evaluation and
 trace artifact transfer are not wired to this process. Clients must honor the
 process's discovery result; method names in the typed in-process API or the
@@ -90,7 +91,25 @@ length, one space, and a newline):
 ```
 
 ```json
-{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":false,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":false,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":false,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+```
+
+After launching a verified artifact, a generic editor bridge can replace the
+breakpoints for one EDIR source file by its exact normalized logical path.
+Each requested line is a positive JSON integer; at most 32 lines may be sent
+per source. Absolute editor paths should be mapped to the relative logical
+path stored in the artifact before sending the request. The operation returns
+the manager-assigned breakpoint IDs and whether each line resolves to an
+executable instruction. Unknown source paths fail with `INVALID_ARGUMENT`.
+The complete request and success result are validated by the
+[`setBreakpoints` schema](../schemas/session-protocol-v1.set-breakpoints.schema.json).
+
+```json
+{"method":"setBreakpoints","id":8,"arguments":{"source":{"path":"main.elisa"},"breakpoints":[{"line":42},{"line":99}]}}
+```
+
+```json
+{"kind":"response","id":"8","ok":true,"result":{"accepted":true,"stopGeneration":"0","breakpoints":[{"id":"1","line":42,"verified":true},{"id":"2","line":99,"verified":false}]}}
 ```
 
 ## Target lifecycle

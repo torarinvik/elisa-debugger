@@ -61,7 +61,8 @@ and [wire specification](../spec/session-protocol.md) for exact framing,
 fields, and errors.
 
 The supported compact request flow is `launch` with
-`arguments.program`, `pause`, `continue`, `step`, `reverseStep`, and `seek`.
+`arguments.program`, `setBreakpoints`, `pause`, `continue`, `step`,
+`reverseStep`, and `seek`.
 After launch, `threads` returns one logical `main` thread, including while the
 session is running. Pause before requesting `stack`, `scopes`, or `variables`.
 `program` must name a complete verified EDIR artifact. `variablesReference` is
@@ -69,12 +70,22 @@ generation-bound; request a fresh scopes response after execution advances.
 Variable pages use top-level `pageSize` and decimal-string
 `pageStart`/`next` offsets. The current page-size limit is 256 entries.
 
-This endpoint does not implement attach, source-breakpoint payloads, expression
-evaluation, memory reads, trace artifact transfer, or multi-client session
-ownership. Checkpoint, branch, comparison, and trace operations that need
-structured operands or results are not available through this compact endpoint
-merely because corresponding typed Elisa APIs exist. `discover` reports the
-compact endpoint's capabilities, with process-inaccessible features disabled.
+For source breakpoints, send `setBreakpoints` with
+`arguments.source.path` equal to the artifact's normalized logical source path
+and a `breakpoints` array of positive line numbers. The endpoint replaces that
+source's complete breakpoint set and returns each breakpoint ID, line, and
+`verified` status. A path absent from the artifact metadata is rejected;
+absolute editor paths must be mapped to the EDIR logical path by the host.
+Requests are bounded to 32 lines per source. The
+[set-breakpoints schema](../schemas/session-protocol-v1.set-breakpoints.schema.json)
+defines the compact wire shape.
+
+This endpoint does not implement attach, expression evaluation, memory reads,
+trace artifact transfer, or multi-client session ownership. Checkpoint,
+branch, comparison, and trace operations that need structured operands or
+results are not available through this compact endpoint merely because
+corresponding typed Elisa APIs exist. `discover` reports the compact endpoint's
+capabilities, with process-inaccessible features disabled.
 
 The compact process does not emit progress or ordered session events, route
 cancellation, create a shareable session token, or let another process attach
@@ -95,10 +106,10 @@ For a DAP host, the mapping is direct: source-line breakpoints use
 `setBreakpoints`; call-stack and local panes use `threads`, `stackTrace`,
 `scopes`, and `variables`; controls use the supported execution requests; the
 host displays capability fields and protocol errors. For a compact JSON host,
-map lifecycle controls to the request names above, refresh inspection handles
-on every stop-generation change, and keep the headless process private to that
-client. There is no supported way to combine a DAP session with a second
-headless connection.
+map lifecycle controls and source breakpoints to the documented request
+names, refresh inspection handles on every stop-generation change, and keep
+the headless process private to that client. There is no supported way to
+combine a DAP session with a second headless connection.
 
 ## Integration rules
 

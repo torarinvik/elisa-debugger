@@ -23,6 +23,10 @@ module DebuggerProtocolServer:
             DETAIL_STALE_VARIABLE_REFERENCE: u32 = 5
             DETAIL_INVALID_LAUNCH_STATE: u32 = 6
             DETAIL_STALE_LAUNCH_GENERATION: u32 = 7
+            PROTOCOL_SERVER_ERROR_DETAIL_INVALID_SOURCE_BREAKPOINTS: u32 = 8
+            PROTOCOL_SERVER_ERROR_DETAIL_STALE_SOURCE_BREAKPOINT_GENERATION: u32 = 9
+            PROTOCOL_SERVER_ERROR_DETAIL_UNKNOWN_SOURCE_PATH: u32 = 10
+            PROTOCOL_SERVER_ERROR_DETAIL_CORRUPT_SOURCE_TABLE: u32 = 11
 
         const module InitializationState:
             INITIALIZE_NOT_REQUESTED: u8 = 0
@@ -39,6 +43,7 @@ module DebuggerProtocolServer:
             PROTOCOL_SERVER_REQUEST_DEFAULTS_NO_EXPECTED_GENERATION: u64 = 0
             PROTOCOL_SERVER_REQUEST_DEFAULTS_DEFAULT_PAGE_SIZE: u64 = 0
             DEFAULT_PAGE_START: u64 = 0
+            PROTOCOL_SERVER_NO_SOURCE_FILE_ID: u64 = 0
 
         const module ResponseEncoding:
             RESPONSE_BODY_PREFIX_LENGTH: usize = 25
@@ -83,6 +88,10 @@ module DebuggerProtocolServer:
             requested_major: mutable u64
             requested_minor: mutable u64
 
+        struct SourceBreakpointDispatch:
+            dispatch: mutable DebuggerProtocolDispatcher::DispatchResult
+            payload: mutable DebuggerManagedService::SourceBreakpointResult
+
         def decimal_digits(value: u64) -> usize:
             count: mutable usize = 1
             remaining: mutable u64 = value
@@ -109,11 +118,9 @@ module DebuggerProtocolServer:
 
         def server_capabilities(engine_capabilities: DebuggerCapabilities::CapabilitySet) -> DebuggerCapabilities::CapabilitySet:
             wire: mutable DebuggerCapabilities::CapabilitySet = engine_capabilities
-            # This compact endpoint does not carry source breakpoint operands
-            # or the result payloads for memory, checkpoint, branch, and trace
-            # operations. Hide those engine-level features while exposing the
-            # managed thread, stack, and local snapshots it can serialize.
-            wire.source_breakpoints <- false
+            # Source breakpoints now have a bounded path/line request and
+            # structured result on this wire. Keep other capabilities hidden
+            # when their operands or result payloads are not transported.
             wire.checkpoints <- false
             wire.branches <- false
             wire.trace_verification <- false
@@ -139,7 +146,7 @@ module DebuggerProtocolServer:
             return true if method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
             return false
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse, source_breakpoints: DebuggerManagedService::SourceBreakpointResult) -> void can[Console, Unsafe.PointerCast]:
             if initialization.status == InitializationState::INITIALIZE_COMPATIBLE:
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_response_encode(id, initialization.requested_minor)
                 write_json_buffer_response(encoded) can Console
@@ -176,6 +183,10 @@ module DebuggerProtocolServer:
                 safe_page_start: usize = local_count.usize() if page_start > local_count else page_start.usize()
                 locals: DebuggerManagedInspection::LocalPage = DebuggerManagedService::service_locals(service, safe_page_start, page_size.usize())
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_locals_response_encode(id, result.stop_generation, result.session.position.event, locals)
+                write_json_buffer_response(encoded) can Console
+                return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_source_breakpoints_response_encode(id, result.stop_generation, source_breakpoints)
                 write_json_buffer_response(encoded) can Console
                 return
             if result.accepted and response_requires_missing_payload(result.method):
@@ -255,6 +266,32 @@ module DebuggerProtocolServer:
             service <- candidate
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
 
+        def source_breakpoint_dispatch_error(service: DebuggerManagedService::Service, request: DebuggerProtocolRequest::Request, code: DebuggerErrors::ErrorCode, detail: u32) -> SourceBreakpointDispatch:
+            failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(code, code == DebuggerErrors::ErrorCode.Unavailable, detail)
+            dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
+            return SourceBreakpointDispatch{dispatch: dispatch, payload: zeroed}
+
+        def dispatch_source_breakpoints(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands) -> SourceBreakpointDispatch:
+            return source_breakpoint_dispatch_error(service, request, DebuggerErrors::ErrorCode.InvalidArgument, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_INVALID_SOURCE_BREAKPOINTS) if not operands.source_breakpoints.valid or not operands.source_breakpoints.has_source_path or not operands.source_breakpoints.has_breakpoints
+            if operands.has_expected_generation and request.expected_generation != service.controller.session.stop_generation:
+                return source_breakpoint_dispatch_error(service, request, DebuggerErrors::ErrorCode.StaleGeneration, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_STALE_SOURCE_BREAKPOINT_GENERATION)
+            image: DebuggerEDIR::ProgramImage = service.controller.engine.image
+            return source_breakpoint_dispatch_error(service, request, DebuggerErrors::ErrorCode.Corrupt, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_CORRUPT_SOURCE_TABLE) if image.source_file_count > DebuggerEDIR::source_file_capacity()
+            source: mutable DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(RequestDefaults::PROTOCOL_SERVER_NO_SOURCE_FILE_ID)
+            for file_index in 0..<image.source_file_count:
+                file: DebuggerMetadata::SourceFile = image.source_files[file_index]
+                continue if file.path_length != operands.source_breakpoints.source_path.length
+                path_matches: mutable bool = true
+                for path_index in 0..<file.path_length:
+                    path_matches <- false if file.path_bytes[path_index] != operands.source_breakpoints.source_path.bytes[path_index]
+                if path_matches:
+                    source <- file.id
+                    break
+            return source_breakpoint_dispatch_error(service, request, DebuggerErrors::ErrorCode.InvalidArgument, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_UNKNOWN_SOURCE_PATH) if source.value == RequestDefaults::PROTOCOL_SERVER_NO_SOURCE_FILE_ID
+            replacement: DebuggerManagedService::SourceBreakpointResult = DebuggerManagedService::service_replace_source_breakpoints(service, source, operands.source_breakpoints.lines[0], operands.source_breakpoints.count)
+            dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: replacement.accepted, stop_generation: service.controller.session.stop_generation, failure: replacement.failure}
+            return SourceBreakpointDispatch{dispatch: dispatch, payload: replacement}
+
     public:
         def run_protocol_server() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             decoder: mutable DebuggerProtocolFraming::FrameDecoder = DebuggerProtocolFraming::frame_decoder_new()
@@ -281,6 +318,7 @@ module DebuggerProtocolServer:
                         operands: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(decoder.payload[0], DebuggerProtocolFraming::frame_decoder_length(decoder))
                         result: mutable DebuggerProtocolDispatcher::DispatchResult = zeroed
                         initialization: mutable InitializationResponse = zeroed
+                        source_breakpoint_payload: mutable DebuggerManagedService::SourceBreakpointResult = zeroed
                         if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Initialize:
                             if not operands.valid or not operands.has_protocol_major or not operands.has_protocol_minor:
                                 initialization.status <- InitializationState::INITIALIZE_INVALID_REQUEST
@@ -311,16 +349,21 @@ module DebuggerProtocolServer:
                                     if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Launch:
                                         result <- dispatch_launch(service, request, operands) can Blocking.IO, Unsafe.PointerCast
                                     else:
-                                        if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
-                                            stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::DETAIL_STALE_VARIABLE_REFERENCE)
-                                            result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                        if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints:
+                                            replacement: SourceBreakpointDispatch = dispatch_source_breakpoints(service, request, operands)
+                                            result <- replacement.dispatch
+                                            source_breakpoint_payload <- replacement.payload
                                         else:
-                                            result <- dispatch_request(service, request)
+                                            if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
+                                                stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::DETAIL_STALE_VARIABLE_REFERENCE)
+                                                result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                            else:
+                                                result <- dispatch_request(service, request)
                         session <- result.session
                         response_id: u64 = request.id if request.has_id else RequestDefaults::FALLBACK_RESPONSE_ID
                         page_size: u64 = operands.page_size if operands.has_page_size else RequestDefaults::PROTOCOL_SERVER_REQUEST_DEFAULTS_DEFAULT_PAGE_SIZE
                         page_start: u64 = operands.page_start if operands.has_page_start else RequestDefaults::DEFAULT_PAGE_START
-                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization) can Console, Unsafe.PointerCast
+                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization, source_breakpoint_payload) can Console, Unsafe.PointerCast
                         _ = fflush(null) can Console
                         DebuggerProtocolFraming::frame_decoder_reset(decoder)
                     return ServerProcess::SERVER_INVALID_FRAME_EXIT_CODE if DebuggerProtocolFraming::frame_decoder_is_failed(decoder)

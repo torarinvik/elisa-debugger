@@ -132,6 +132,10 @@ module DebuggerProtocolRequest:
             PAGE_SIZE_MAX: u64 = 256
             PAGE_START_MAX: u64 = NumberFormat::REQUEST_NUMBERFORMAT_MAX_U64
             VERSION_MAX: u64 = 4294967295
+            REQUEST_LIMITS_SOURCE_BREAKPOINT_COUNT_MAX: usize = 32
+            REQUEST_LIMITS_SOURCE_BREAKPOINT_LINE_MAX: u64 = 4294967295
+            REQUEST_LIMITS_NO_SOURCE_LINE: u64 = 0
+            REQUEST_LIMITS_SINGLE_SOURCE_BREAKPOINT_MEMBER_COUNT: usize = 1
 
         const module Unicode:
             ESCAPE_DIGITS: usize = 4
@@ -229,8 +233,17 @@ module DebuggerProtocolRequest:
             length: mutable usize
             valid: mutable bool
 
+        struct SourceBreakpointRequest:
+            source_path: mutable ProgramPath
+            has_source_path: mutable bool
+            lines: mutable u32[RequestLimits::REQUEST_LIMITS_SOURCE_BREAKPOINT_COUNT_MAX]
+            count: mutable usize
+            has_breakpoints: mutable bool
+            valid: mutable bool
+
         struct RequestOperands:
             valid: mutable bool
+            has_expected_generation: mutable bool
             program: mutable ProgramPath
             has_program: mutable bool
             protocol_major: mutable u64
@@ -243,6 +256,7 @@ module DebuggerProtocolRequest:
             has_page_size: mutable bool
             page_start: mutable u64
             has_page_start: mutable bool
+            source_breakpoints: mutable SourceBreakpointRequest
 
         def invalid_request() -> Request:
             return zeroed
@@ -844,6 +858,91 @@ module DebuggerProtocolRequest:
                 index <- index + 1
             return invalid_program_path()
 
+        def request_source_breakpoint_object_has_only_field(payload: u8&, length: usize, object_start: usize, expected: cstr) -> bool:
+            return false if object_start >= length or payload[object_start] != Character::REQUEST_CHARACTER_ASCII_BRACE_OPEN
+            cursor: mutable usize = object_start + 1
+            field_count: mutable usize = 0
+            while cursor < length:
+                while cursor < length and is_json_whitespace(payload[cursor]):
+                    cursor <- cursor + 1
+                return field_count == RequestLimits::REQUEST_LIMITS_SINGLE_SOURCE_BREAKPOINT_MEMBER_COUNT if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BRACE_CLOSE
+                key_start: usize = cursor
+                key_end: usize = json_string_end(payload, length, key_start)
+                return false if key_end == JsonParser::REQUEST_JSONPARSER_NO_INDEX
+                return false if not request_json_key_matches(payload, key_start + 1, key_end - 1, expected)
+                cursor <- key_end
+                while cursor < length and is_json_whitespace(payload[cursor]):
+                    cursor <- cursor + 1
+                return false if cursor >= length or payload[cursor] != Character::REQUEST_CHARACTER_ASCII_COLON
+                cursor <- cursor + 1
+                while cursor < length and is_json_whitespace(payload[cursor]):
+                    cursor <- cursor + 1
+                value_end: usize = request_operand_json_value_end(payload, length, cursor)
+                return false if value_end == JsonParser::REQUEST_JSONPARSER_NO_INDEX
+                cursor <- value_end
+                field_count <- field_count + 1
+                while cursor < length and is_json_whitespace(payload[cursor]):
+                    cursor <- cursor + 1
+                return field_count == RequestLimits::REQUEST_LIMITS_SINGLE_SOURCE_BREAKPOINT_MEMBER_COUNT if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BRACE_CLOSE
+                return false if cursor >= length or payload[cursor] != Character::REQUEST_CHARACTER_ASCII_COMMA
+                cursor <- cursor + 1
+            return false
+
+        def request_source_breakpoint_line_parse(payload: u8&, length: usize, object_start: usize) -> ParsedOperandNumber:
+            return invalid_operand_number() if not request_source_breakpoint_object_has_only_field(payload, length, object_start, "line")
+            line_start: usize = request_object_field_value_start(payload, length, object_start, "line", 0)
+            return invalid_operand_number() if line_start == JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            return invalid_operand_number() if request_object_field_value_start(payload, length, object_start, "line", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            return request_parse_bounded_unsigned(payload, length, line_start, RequestLimits::REQUEST_LIMITS_SOURCE_BREAKPOINT_LINE_MAX, false)
+
+        def request_source_breakpoint_array_parse(payload: u8&, length: usize, array_start: usize, request: mutable SourceBreakpointRequest&) -> bool:
+            return false if array_start >= length or payload[array_start] != Character::REQUEST_CHARACTER_ASCII_BRACKET_OPEN
+            request.has_breakpoints <- true
+            cursor: mutable usize = array_start + 1
+            while cursor < length and is_json_whitespace(payload[cursor]):
+                cursor <- cursor + 1
+            return true if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BRACKET_CLOSE
+            while cursor < length:
+                return false if request.count >= RequestLimits::REQUEST_LIMITS_SOURCE_BREAKPOINT_COUNT_MAX
+                return false if payload[cursor] != Character::REQUEST_CHARACTER_ASCII_BRACE_OPEN
+                line: ParsedOperandNumber = request_source_breakpoint_line_parse(payload, length, cursor)
+                return false if not line.valid or line.value == RequestLimits::REQUEST_LIMITS_NO_SOURCE_LINE
+                request.lines[request.count] <- line.value.u32()
+                request.count <- request.count + 1
+                value_end: usize = request_operand_json_value_end(payload, length, cursor)
+                return false if value_end == JsonParser::REQUEST_JSONPARSER_NO_INDEX
+                cursor <- value_end
+                while cursor < length and is_json_whitespace(payload[cursor]):
+                    cursor <- cursor + 1
+                if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_COMMA:
+                    cursor <- cursor + 1
+                    while cursor < length and is_json_whitespace(payload[cursor]):
+                        cursor <- cursor + 1
+                    continue
+                if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BRACKET_CLOSE:
+                    return true
+                return false
+            return false
+
+        def request_source_breakpoints_parse(payload: u8&, length: usize, arguments: usize) -> SourceBreakpointRequest:
+            request: mutable SourceBreakpointRequest = zeroed
+            request.source_path <- invalid_program_path()
+            source: usize = request_object_field_value_start(payload, length, arguments, "source", 0)
+            return request if source == JsonParser::REQUEST_JSONPARSER_NO_INDEX or request_object_field_value_start(payload, length, arguments, "source", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            return request if source >= length or payload[source] != Character::REQUEST_CHARACTER_ASCII_BRACE_OPEN
+            return request if not request_source_breakpoint_object_has_only_field(payload, length, source, "path")
+            path_start: usize = request_object_field_value_start(payload, length, source, "path", 0)
+            return request if path_start == JsonParser::REQUEST_JSONPARSER_NO_INDEX or request_object_field_value_start(payload, length, source, "path", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            source_path: ProgramPath = request_program_path_string_parse(payload, length, path_start)
+            return request if not source_path.valid
+            request.source_path <- source_path
+            request.has_source_path <- true
+            breakpoints_start: usize = request_object_field_value_start(payload, length, arguments, "breakpoints", 0)
+            return request if breakpoints_start == JsonParser::REQUEST_JSONPARSER_NO_INDEX or request_object_field_value_start(payload, length, arguments, "breakpoints", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            return request if not request_source_breakpoint_array_parse(payload, length, breakpoints_start, request)
+            request.valid <- true
+            return request
+
         def request_arguments_operands_parse(payload: u8&, length: usize, arguments: usize, method: RequestMethod, operands: mutable RequestOperands&) -> bool:
             return false if arguments >= length or payload[arguments] != Character::REQUEST_CHARACTER_ASCII_BRACE_OPEN
             program: usize = request_object_field_value_start(payload, length, arguments, "program", 0)
@@ -860,6 +959,10 @@ module DebuggerProtocolRequest:
                 return false if not variables_reference.valid
                 operands.variables_reference <- variables_reference.value
                 operands.has_variables_reference <- true
+            if method == RequestMethod.SetBreakpoints:
+                source_breakpoints: SourceBreakpointRequest = request_source_breakpoints_parse(payload, length, arguments)
+                return false if not source_breakpoints.valid
+                operands.source_breakpoints <- source_breakpoints
             return false if method == RequestMethod.Variables and not operands.has_variables_reference
             return true
 
@@ -1212,6 +1315,8 @@ module DebuggerProtocolRequest:
             root_start: mutable usize = 0
             while root_start < length and is_json_whitespace(payload[root_start]):
                 root_start <- root_start + 1
+            expected_generation: usize = request_object_field_value_start(payload, length, root_start, "expectedStopGeneration", 0)
+            operands.has_expected_generation <- expected_generation != JsonParser::REQUEST_JSONPARSER_NO_INDEX
             arguments: usize = request_object_field_value_start(payload, length, root_start, "arguments", 0)
             return operands if request_object_field_value_start(payload, length, root_start, "arguments", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
             if arguments != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
@@ -1222,3 +1327,6 @@ module DebuggerProtocolRequest:
             return operands if not request_pagination_operands_parse(payload, length, root_start, operands)
             operands.valid <- true
             return operands
+
+        def source_breakpoint_request_capacity() -> usize:
+            return RequestLimits::REQUEST_LIMITS_SOURCE_BREAKPOINT_COUNT_MAX

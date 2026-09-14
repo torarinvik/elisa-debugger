@@ -166,11 +166,11 @@ argument-free operation vocabulary.
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use
 bounded `pageSize` and `pageStart` operands. It returns the managed session's
-single `main` thread. Expression evaluation, source breakpoint payloads, trace
-artifact transfer, memory reads, and provider selection are not wired on this
-endpoint; discovery reports the smaller process capability set. See [the
-integration guide](docs/integration.md) for the exact process boundaries and
-limitations.
+single `main` thread and accepts `setBreakpoints` for normalized logical paths
+in the launched EDIR artifact. Expression evaluation, trace artifact transfer,
+memory reads, and provider selection are not wired on this endpoint; discovery
+reports the smaller process capability set. See [the integration
+guide](docs/integration.md) for the exact process boundaries and limitations.
 
 ## Integration boundary
 

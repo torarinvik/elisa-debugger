@@ -23,7 +23,7 @@ carry their operands and results.
 | Trace storage | Checksummed chunks, manifests, recovery scan | Format contract | Read-only artifact mode |
 | Managed trace capture/export | Exact single-root EDIR boundary events through the typed service API; rewinds and child-branch execution make the capture partial | Unsupported | Unsupported |
 | DAP process | Managed EDIR only: verified-artifact launch; source-line breakpoints; one `main` thread; stack/scopes/locals; bounded local pages; memory reads; continue/pause/step-in/over/out and reverse step/continue. Attach, conditional/log/function/data breakpoints, evaluation, assignment, restart, and disassembly are unavailable. | No native operations are wired | No postmortem operations are wired |
-| Headless JSON process | Managed EDIR launch, pause/continue/step/reverse-step/seek, one `main` thread, stack/scopes, and paged locals. No attach, source breakpoints, evaluation, serialized memory result, trace artifact transfer, or shared-session ownership. | No native operations are wired | No postmortem operations are wired |
+| Headless JSON process | Managed EDIR launch, source-line breakpoint replacement by the artifact's normalized logical path, pause/continue/step/reverse-step/seek, one `main` thread, stack/scopes, and paged locals. Breakpoint requests are bounded to 32 lines per source and return IDs plus verified status. No attach, evaluation, serialized memory result, trace artifact transfer, or shared-session ownership. | No native operations are wired | No postmortem operations are wired |
 | macOS live resource snapshot CLI | Not applicable | One read-only `PROC_PIDTASKALLINFO` snapshot by PID: virtual/resident bytes, process/thread CPU time, thread counts, page faults, and process start identity. No suspension, memory reads, allocation tracing, or interactive-session integration. | Not applicable |
 | macOS Jetsam report CLI | Not applicable | Not applicable | Bounded read-only `.ips` parsing; PID/UUID identity checks; resident bytes from page count and page size; lifetime maximum, region count, and CPU time; ordered snapshot counter comparison. No live attach, core-dump inspection, or allocation-site attribution. |
 | Remote transport | Handshake, quotas, resumable artifact transfer, reconnect state | Not qualified | Not qualified |
@@ -54,8 +54,10 @@ from an agent transport failure, but no process monitor or target-agent transpor
 currently supplies those transitions.
 
 The headless process advertises its smaller wire surface through discovery.
-Memory reads, source breakpoints, checkpoints, branches, comparison, and trace
-operations are not enabled on that endpoint where the required operands or
-results are unavailable. A typed in-process API is not evidence that the
-compact process can carry those operands and results. See [editor
-integration](integration.md) for the process boundary and host mapping.
+Source breakpoints are enabled for managed EDIR artifacts and use the compact
+`setBreakpoints` request/result described in the session protocol. Memory
+reads, checkpoints, branches, comparison, and trace operations remain disabled
+where the required operands or results are unavailable. A typed in-process
+API is not evidence that the compact process can carry those operands and
+results. See [editor integration](integration.md) for the process boundary and
+host mapping.

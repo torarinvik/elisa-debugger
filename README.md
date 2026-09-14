@@ -90,9 +90,9 @@ make module-check
 make source-store-check protocol-events-check
 ```
 
-The Makefile allows a stale sibling compiler product by default because that
-checkout can contain unrelated work. Set `ELISA_ALLOW_STALE_STAGE1=0` for the
-strict compiler-freshness gate.
+The Makefile requires a fresh sibling compiler product by default. Keep
+`ELISA_ALLOW_STALE_STAGE1=0` for the strict compiler-freshness gate; setting it
+to `1` is an explicit escape hatch for investigating older build artifacts.
 The build output is ignored under `build/`.
 
 `build/elisa-debugger` runs the deterministic core self-test. The self-test

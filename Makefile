@@ -122,6 +122,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: trace-file-check
 .PHONY: remote-authorization-check server-version-check compiler-edir-loop-check compiler-edir-calls-check
 .PHONY: protocol-client-ordering-check
+.PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
 .PHONY: build-runner-check
@@ -173,6 +174,7 @@ module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: server-source-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check
 module-check: $(BUILD)/elisa-debugger-replay-provenance-check
+module-check: $(BUILD)/elisa-debugger-replay-seek-atomicity-check
 module-check: $(BUILD)/elisa-debugger-state-integrity-check
 module-check: $(BUILD)/elisa-debugger-trace-checkpoint-validation-check
 module-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
@@ -225,6 +227,7 @@ endif
 	"$(BUILD)/elisa-debugger-dap-events-check"
 	"$(BUILD)/elisa-debugger-dap-continue-partial-check"
 	"$(BUILD)/elisa-debugger-replay-provenance-check"
+	"$(BUILD)/elisa-debugger-replay-seek-atomicity-check"
 	"$(BUILD)/elisa-debugger-replay-branches-check"
 	"$(BUILD)/elisa-debugger-state-integrity-check"
 	"$(BUILD)/elisa-debugger-trace-manifest-status-check"
@@ -293,6 +296,13 @@ $(BUILD)/elisa-debugger-replay-provenance-check: tests/replay_provenance_check.e
 
 replay-provenance-check: $(BUILD)/elisa-debugger-replay-provenance-check
 	"$(BUILD)/elisa-debugger-replay-provenance-check"
+
+$(BUILD)/elisa-debugger-replay-seek-atomicity-check: tests/replay_seek_atomicity_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+replay-seek-atomicity-check: $(BUILD)/elisa-debugger-replay-seek-atomicity-check
+	"$(BUILD)/elisa-debugger-replay-seek-atomicity-check"
 
 $(BUILD)/elisa-debugger-state-integrity-check: tests/state_integrity_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

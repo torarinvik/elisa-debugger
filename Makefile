@@ -57,9 +57,13 @@ DAP_VARIABLES_AFTER_STEP_FRAME_ID := $(shell expr $(DAP_VARIABLES_AFTER_STEP_STO
 DAP_VARIABLES_AFTER_STEP_REFERENCE := $(shell expr $(DAP_VARIABLES_AFTER_STEP_STOP_GENERATION) \* $(DAP_LOCALS_REFERENCE_STRIDE))
 COMPILER_EDIR_CALLS_FIXTURE := tests/compiler_edir_calls_fixture.elisa
 COMPILER_EDIR_CALLS_ARTIFACT := $(BUILD)/compiler_edir_calls.edir
+COMPILER_EDIR_CALLS_REJECTION_LOG := $(BUILD)/compiler_edir_calls_rejection.log
 COMPILER_EDIR_CALLS_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_calls_native
-COMPILER_EDIR_CALLS_CHECK := $(BUILD)/elisa-debugger-compiler-edir-calls-check
 COMPILER_EDIR_CALLS_EXPECTED_EXIT := 52
+COMPILER_EDIR_CALLS_EXPECTED_DIAGNOSTIC := the file must contain exactly one top-level declaration
+COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL := 0
+COMPILER_EDIR_CALLS_NATIVE_OPTIMIZATION_LEVEL := 2
+COMPILER_EDIR_CALLS_NATIVE_SUCCESS_STATUS := 0
 DAP_STACK_FRAMES_CHECK := $(BUILD)/elisa-debugger-dap-stack-frames-check
 ELF_DWARF_LINE_CC ?= clang
 ELF_DWARF_LINE_FIXTURE_SOURCE := tests/native_elf_dwarf_line_fixture.c
@@ -120,7 +124,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
 .PHONY: trace-file-check
-.PHONY: remote-authorization-check server-version-check compiler-edir-loop-check compiler-edir-calls-check
+.PHONY: remote-authorization-check server-version-check compiler-edir-loop-check compiler-edir-calls-unsupported-check
 .PHONY: protocol-client-ordering-check
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
@@ -454,18 +458,21 @@ compiler-edir-loop-check: $(COMPILER_EDIR_LOOP_INTEGRATION_CHECK) $(BUILD)/elisa
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
 	loop_native_status=0; "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" || loop_native_status=$$?; test "$$loop_native_status" -eq "$(COMPILER_EDIR_LOOP_EXPECTED_EXIT)"
 
-$(COMPILER_EDIR_CALLS_CHECK): tests/compiler_edir_calls_check.elisa $(ELISA_BUILD_INPUTS)
+# Keep this boundary check explicit until the current compiler's EDIR emitter
+# supports multiple top-level functions and function descriptors. The producer
+# leaves an empty output after rejection to avoid preserving a stale artifact;
+# this check verifies it is not usable. Its native backend must still compile
+# the same recursive call fixture at the optimized level used by the latest
+# compiler pipeline.
+compiler-edir-calls-unsupported-check:
 	mkdir -p $(BUILD)
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
-
-# Exercise compiler-emitted schema-3 function descriptors, direct calls, and
-# recursion through the debugger's production codec and managed VM.
-compiler-edir-calls-check: $(COMPILER_EDIR_CALLS_CHECK)
-	mkdir -p $(BUILD)
-	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
-	"$(COMPILER_EDIR_CALLS_CHECK)"
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
-	calls_native_status=0; "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" || calls_native_status=$$?; test "$$calls_native_status" -eq "$(COMPILER_EDIR_CALLS_EXPECTED_EXIT)"
+	rm -f "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_REJECTION_LOG)" "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)"
+	if ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O$(COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)" >"$(COMPILER_EDIR_CALLS_REJECTION_LOG)" 2>&1; then cat "$(COMPILER_EDIR_CALLS_REJECTION_LOG)" >&2; echo "unexpectedly emitted EDIR for an unsupported multi-function fixture" >&2; exit 1; fi
+	grep -F "$(COMPILER_EDIR_CALLS_EXPECTED_DIAGNOSTIC)" "$(COMPILER_EDIR_CALLS_REJECTION_LOG)"
+	test ! -s "$(COMPILER_EDIR_CALLS_ARTIFACT)"
+	rm -f "$(COMPILER_EDIR_CALLS_ARTIFACT)"
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O$(COMPILER_EDIR_CALLS_NATIVE_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
+	calls_native_status=$(COMPILER_EDIR_CALLS_NATIVE_SUCCESS_STATUS); "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" || calls_native_status=$$?; test "$$calls_native_status" -eq "$(COMPILER_EDIR_CALLS_EXPECTED_EXIT)"
 
 $(BUILD)/elisa-debugger-timeline-capability-check: tests/timeline_capability_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

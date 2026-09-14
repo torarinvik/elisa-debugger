@@ -40,20 +40,37 @@ ELISA_EDIR_SOURCE_ROOT="$PWD" ELISA_ALLOW_STALE_STAGE1=0 \
   tests/compiler_edir_arithmetic_fixture.elisa
 ```
 
-For the reproducible debugger/compiler integration gate, run the focused Make
-targets with stale-product rejection explicitly kept on:
+For the reproducible supported debugger/compiler integration gates, run the
+focused Make targets with stale-product rejection explicitly kept on:
 
 ```sh
-make compiler-edir-check compiler-edir-loop-check compiler-edir-calls-check \
+make compiler-edir-check compiler-edir-loop-check \
   ELISA_EDIR_COMPILER="$COMPILER_ROOT/scripts/elisac_stage1.sh" \
   ELISA_EDIR_ALLOW_STALE_STAGE1=0
 ```
 
 These targets compile EDIR and native fixtures, check debugger execution and DAP
-inspection, and cover counted-loop breakpoints/reverse stepping and function
-calls. They are separate from the ordinary smoke suite because they require
-the compiler's `-emit edir` mode. The command is a reproducible test path, not a
-claim that all three targets have passed on every checkout.
+inspection, and cover counted-loop breakpoints and reverse stepping. They are
+separate from the ordinary smoke suite because they require the compiler's
+`-emit edir` mode. The command is a reproducible test path, not a claim that
+both targets have passed on every checkout.
+
+The current compiler does not yet emit EDIR function descriptors or direct
+calls. Run the explicit boundary check to verify that the latest compiler
+rejects the multi-function fixture and leaves no usable artifact, while its
+optimized native backend still executes the same recursive source with the
+expected result:
+
+```sh
+make compiler-edir-calls-unsupported-check \
+  ELISA_EDIR_COMPILER="$COMPILER_ROOT/scripts/elisac_stage1.sh" \
+  ELISA_EDIR_ALLOW_STALE_STAGE1=0
+```
+
+This does not qualify compiler-to-EDIR calls. The debugger's schema-3 codec
+and VM call behavior have separate Elisa-authored checks; promoting this
+boundary to a positive compiler integration test requires the producer to emit
+the schema-3 function table.
 
 ## Compiler optimization distinction
 
@@ -82,15 +99,17 @@ partial artifact. Includes, static-generated source maps, multiple source
 files, general functions and calls, general control flow, effects, and arbitrary
 native programs are outside this slice.
 
-The seam is the portable EDIR v2 byte format in [the EDIR specification](../spec/edir-format.md):
-the compiler emits a verified-format artifact with source identity and spans;
-the Elisa debugger decodes and verifies it before managed execution. A relative
-input source path becomes the artifact's logical path. For absolute source
-paths, `ELISA_EDIR_SOURCE_ROOT` must identify the root to strip; the editor then
-uses the corresponding `sourcePathRoot` launch mapping when sending absolute
-paths to DAP. EDIR input is not a native executable, so this slice does not
-provide reverse execution for compiler-produced native executables or ship and
-qualify IDE plugins.
+The current compiler producer emits codec schema 2 artifacts with EDIR program
+version 1 in [the EDIR format](../spec/edir-format.md). The debugger also
+accepts schema 3, which adds function descriptors, and verifies either schema
+before managed execution. The current compiler's schema-2 output includes
+source identity and spans but no function table. A relative input source path
+becomes the artifact's logical path. For absolute source paths,
+`ELISA_EDIR_SOURCE_ROOT` must identify the root to strip; the editor then uses
+the corresponding `sourcePathRoot` launch mapping when sending absolute paths to
+DAP. EDIR input is not a native executable, so this slice does not provide
+reverse execution for compiler-produced native executables or ship and qualify
+IDE plugins.
 
 Editor hosts connect through the debugger's documented DAP or headless process
 interfaces; they must not depend on compiler internals or duplicate execution

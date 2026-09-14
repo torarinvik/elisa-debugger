@@ -102,17 +102,17 @@ bytes and decodes JSON escapes, including Unicode surrogate pairs.
 
 This loader runs on the POSIX host boundary; file access is provided by
 `open`, `read`, and `close`, while bounds checks, decoding, and EDIR
-verification remain in Elisa. The isolated compiler integration branch emits
-legacy schema-2 artifacts for its explicitly supported single-file scalar
-subset, with source-table identities and original source spans. Those artifacts
-remain loadable, but the producer does not yet supply schema-3 function
-descriptors. The producer
-rejects includes and unsupported syntax instead of emitting a partial image;
-the Elisa-authored fixtures continue to cover VM instructions beyond that
-initial compiler subset. Relative compiler source paths become logical paths
-directly. For absolute source paths, set `ELISA_EDIR_SOURCE_ROOT` to the
-workspace root so the producer can strip that exact prefix and retain a safe
-relative path in the artifact.
+verification remain in Elisa. The current adjacent compiler checkout at the
+revision recorded in [`docs/compiler-integration.md`](../docs/compiler-integration.md)
+emits legacy codec schema-2 artifacts for its explicitly supported single-file
+scalar and counted-loop subset, with source-table identities and original
+source spans. Those artifacts remain loadable, but the producer does not yet
+supply schema-3 function descriptors. It rejects includes and unsupported
+syntax instead of emitting a partial image; the Elisa-authored fixtures
+continue to cover VM instructions beyond that initial compiler subset.
+Relative compiler source paths become logical paths directly. For absolute
+source paths, set `ELISA_EDIR_SOURCE_ROOT` to the workspace root so the producer
+can strip that exact prefix and retain a safe relative path in the artifact.
 The table stores relative logical paths. For standard DAP clients that send an
 absolute editor `source.path`, `launch.arguments.sourcePathRoot` supplies the
 explicit workspace root; the adapter strips only that exact prefix at a path

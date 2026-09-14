@@ -9,8 +9,8 @@ carry their operands and results.
 | --- | --- | --- | --- |
 | Launch | Supported for the bounded managed image | Capability boundary only | Unsupported |
 | Attach | Unsupported | Controller contract present | Process attach model present |
-| Source and function metadata | Bounded source/function tables; EDIR v2 binds source IDs to normalized paths and content digests | Symbol table and source spans; bounded DWARF32 v2-v4 lookup maps ELF `.debug_line` link addresses to source rows, but is not yet wired to live interactive source resolution | Symbol table plus bounds-checked ELF/Mach-O artifact headers |
-| Source breakpoints | DAP resolves logical paths against the EDIR v2 table; absolute editor paths use an explicit `sourcePathRoot` launch mapping, and explicit source references remain supported | Resolver contract | Metadata dependent |
+| Source and function metadata | Debugger codec supports bounded source/function tables in EDIR codec schema 3 and reads legacy schema 2; the current compiler emits schema 2 source rows without function descriptors | Symbol table and source spans; bounded DWARF32 v2-v4 lookup maps ELF `.debug_line` link addresses to source rows, but is not yet wired to live interactive source resolution | Symbol table plus bounds-checked ELF/Mach-O artifact headers |
+| Source breakpoints | DAP resolves logical paths against the EDIR source table; absolute editor paths use an explicit `sourcePathRoot` launch mapping, and explicit source references remain supported | Resolver contract | Metadata dependent |
 | Typed value states | Supported bounded store, including absent and historical states | Capability contract | Availability depends on metadata |
 | Expression arithmetic | Bounded side-effect-free evaluator | Provider dependent | Provider dependent |
 | Record/replay effects | Generic oracle exactly replays scalar clock samples; other effect kinds mark the oracle incomplete | Not exact | Unsupported |

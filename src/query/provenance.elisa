@@ -8,6 +8,9 @@ module DebuggerProvenance:
         const module MutationLimits:
             QUERY_PROVENANCE_MUTATION_LIMITS_KIND_MAX: u16 = 5
 
+        const module Identity:
+            NO_DECLARATION: u64 = 0
+
         const module Provenance:
             QUERY_PROVENANCE_CAPACITY: usize = 512
 
@@ -42,7 +45,7 @@ module DebuggerProvenance:
 
         def provenance_append(index: ProvenanceIndex, mutation: Mutation) -> ProvenanceIndex:
             updated: mutable ProvenanceIndex = index
-            if mutation.kind.u16() > MutationLimits::QUERY_PROVENANCE_MUTATION_LIMITS_KIND_MAX or mutation.binding.declaration.value == 0:
+            if not mutation_is_valid(mutation):
                 updated.overflowed <- true
                 return updated
             if index.count >= Provenance::QUERY_PROVENANCE_CAPACITY:
@@ -54,6 +57,20 @@ module DebuggerProvenance:
 
         def mutation_is_write(kind: MutationKind) -> bool:
             return kind == MutationKind.Assignment or kind == MutationKind.Input or kind == MutationKind.Foreign
+
+        # Storage lifetime records may have no lexical binding.  Assignment
+        # and input records must retain one so a malformed write cannot enter
+        # the historical index under an all-zero identity.
+        def mutation_requires_binding(kind: MutationKind) -> bool:
+            return kind == MutationKind.Assignment or kind == MutationKind.Input
+
+        def mutation_is_lifetime(kind: MutationKind) -> bool:
+            return kind == MutationKind.Allocation or kind == MutationKind.Deallocation or kind == MutationKind.RegionReset
+
+        def mutation_is_valid(mutation: Mutation) -> bool:
+            return false if mutation.kind.u16() > MutationLimits::QUERY_PROVENANCE_MUTATION_LIMITS_KIND_MAX
+            return false if mutation_requires_binding(mutation.kind) and mutation.binding.declaration.value == Identity::NO_DECLARATION
+            return true
 
         def provenance_last_write(index: ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, before_event: u64) -> Mutation:
             result: mutable Mutation = zeroed
@@ -87,7 +104,7 @@ module DebuggerProvenance:
             return false if index.overflowed or index.count > Provenance::QUERY_PROVENANCE_CAPACITY
             for position in 0..<index.count:
                 mutation: Mutation = index.mutations[position]
-                return false if mutation.kind.u16() > MutationLimits::QUERY_PROVENANCE_MUTATION_LIMITS_KIND_MAX or mutation.binding.declaration.value == 0
+                return false if not mutation_is_valid(mutation)
             return true
 
         def provenance_first_change(index: ProvenanceIndex, binding: DebuggerIdentity::BindingIdentity, first_event: u64, last_event: u64, previous_hash: u64) -> Mutation:
@@ -96,7 +113,7 @@ module DebuggerProvenance:
             return result if index.count > Provenance::QUERY_PROVENANCE_CAPACITY or index.overflowed
             for position in 0..<index.count:
                 candidate: Mutation = index.mutations[position]
-                if DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event >= first_event and candidate.event <= last_event and candidate.value_hash != previous_hash and (not found or candidate.event < result.event):
+                if mutation_is_write(candidate.kind) and DebuggerIdentity::binding_identity_equal(candidate.binding, binding) and candidate.event >= first_event and candidate.event <= last_event and candidate.value_hash != previous_hash and (not found or candidate.event < result.event):
                     result <- candidate
                     found <- true
             return result

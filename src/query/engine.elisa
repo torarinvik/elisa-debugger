@@ -17,12 +17,17 @@ module DebuggerQueryEngine:
             ENGINE_EVENT_NO_EVENT: u64 = 18446744073709551615
             ENGINE_EVENT_MAX: u64 = 18446744073709551615
 
+        const module Identity:
+            NO_ALLOCATION: u64 = 0
+            NO_GENERATION: u64 = 0
+
         const module FailureDetail:
             WINDOW: u32 = 1
             CANCELLED: u32 = 2
             ENGINE_FAILUREDETAIL_CAPACITY: u32 = 3
             ENGINE_FAILUREDETAIL_OVERFLOW: u32 = 4
             FIRST_CHANGE: u32 = 5
+            ALLOCATION: u32 = 6
 
         const module Cancellation:
             INITIAL_TICK: u64 = 1
@@ -118,6 +123,58 @@ module DebuggerQueryEngine:
             result.next_index <- index.count
             return result
 
+        # Query allocation, release, and region-reset records without
+        # requiring a lexical binding. Storage identity includes generation
+        # and byte offset so address reuse cannot merge unrelated lifetimes.
+        def query_find_allocation_lifetime(index: DebuggerProvenance::ProvenanceIndex, allocation: DebuggerIdentity::AllocationIdentity, window: DebuggerHistory::QueryWindow, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
+            result: mutable QueryExecution = query_execution_new(window)
+            if not DebuggerHistory::query_window_is_valid(window):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FailureDetail::WINDOW)
+                return result
+            if allocation.allocation.value == Identity::NO_ALLOCATION or allocation.generation == Identity::NO_GENERATION:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FailureDetail::ALLOCATION)
+                return result
+            if index.count > DebuggerProvenance::provenance_capacity() or index.overflowed:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
+                return result
+            if DebuggerCancellation::cancellation_is_requested(token, Cancellation::INITIAL_TICK):
+                result.cancelled <- true
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, FailureDetail::CANCELLED)
+                return result
+            for position in 0..<index.count:
+                candidate: DebuggerProvenance::Mutation = index.mutations[position]
+                result.scanned <- result.scanned + 1
+                result.next_index <- position + 1
+                result.next_event <- Event::ENGINE_EVENT_MAX if candidate.event == Event::ENGINE_EVENT_MAX and candidate.event >= result.next_event
+                result.next_event <- candidate.event + 1 if candidate.event != Event::ENGINE_EVENT_MAX and candidate.event >= result.next_event
+                if DebuggerCancellation::cancellation_is_requested(token, result.scanned):
+                    result.cancelled <- true
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Cancelled, true, FailureDetail::CANCELLED)
+                    return result
+                matches_allocation: bool = candidate.allocation.allocation.value == allocation.allocation.value and candidate.allocation.generation == allocation.generation and candidate.allocation.offset == allocation.offset
+                if candidate.event < window.first_event or candidate.event > window.last_event or not matches_allocation or not DebuggerProvenance::mutation_is_lifetime(candidate.kind):
+                    if result.scanned >= window.max_steps and position + 1 < index.count:
+                        result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
+                        return result
+                    continue
+                result <- query_record(result, candidate)
+                if result.count.u64() >= window.max_results:
+                    result.complete <- position + 1 >= index.count
+                    if not result.complete and result.scanned >= window.max_steps:
+                        result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
+                    return result
+                if result.count >= Capacity::MATCHES:
+                    result.complete <- position + 1 >= index.count
+                    return result if result.complete
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
+                    return result
+                if result.scanned >= window.max_steps and position + 1 < index.count:
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
+                    return result
+            result.complete <- true
+            result.next_index <- index.count
+            return result
+
         # Continue a paged write query from the exact index position at which
         # the previous page stopped.  Provenance is append-only but callers
         # may provide an unordered index, so an event number alone cannot be a
@@ -139,6 +196,26 @@ module DebuggerQueryEngine:
             remaining_window: mutable DebuggerHistory::QueryWindow = execution.window
             remaining_window.max_steps <- execution.window.max_steps - execution.scanned
             resumed: mutable QueryExecution = query_find_writes(suffix, binding, remaining_window, token)
+            resumed.scanned <- execution.scanned + resumed.scanned
+            resumed.next_index <- execution.next_index + resumed.next_index
+            return resumed
+
+        def query_resume_allocation_lifetime(execution: QueryExecution, index: DebuggerProvenance::ProvenanceIndex, allocation: DebuggerIdentity::AllocationIdentity, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
+            return execution if execution.complete or execution.cancelled
+            if execution.next_index > index.count or index.count > DebuggerProvenance::provenance_capacity() or index.overflowed:
+                failed: mutable QueryExecution = execution
+                failed.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, FailureDetail::ENGINE_FAILUREDETAIL_OVERFLOW)
+                return failed
+            if execution.scanned >= execution.window.max_steps:
+                limited: mutable QueryExecution = execution
+                limited.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
+                return limited
+            suffix: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+            for position in execution.next_index..<index.count:
+                suffix <- DebuggerProvenance::provenance_append(suffix, index.mutations[position])
+            remaining_window: mutable DebuggerHistory::QueryWindow = execution.window
+            remaining_window.max_steps <- execution.window.max_steps - execution.scanned
+            resumed: mutable QueryExecution = query_find_allocation_lifetime(suffix, allocation, remaining_window, token)
             resumed.scanned <- execution.scanned + resumed.scanned
             resumed.next_index <- execution.next_index + resumed.next_index
             return resumed

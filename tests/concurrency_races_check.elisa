@@ -1,0 +1,112 @@
+include "../src/concurrency/races.elisa"
+
+const module Test:
+    FILE_ID: u64 = 71
+    TASK_ONE: u64 = 1
+    TASK_TWO: u64 = 2
+    TASK_THREE: u64 = 3
+    ALLOCATION_ID: u64 = 9
+    ALLOCATION_GENERATION: u64 = 4
+    OTHER_GENERATION: u64 = 5
+    FIRST_OFFSET: u64 = 2
+    OTHER_OFFSET: u64 = 3
+    FIRST_EVENT: u64 = 1
+    SECOND_EVENT: u64 = 2
+    THIRD_EVENT: u64 = 3
+    FOURTH_EVENT: u64 = 4
+    FIFTH_EVENT: u64 = 5
+    FIRST_LINE: u32 = 10
+    SECOND_LINE: u32 = 20
+    THIRD_LINE: u32 = 30
+    FOURTH_LINE: u32 = 40
+    FIFTH_LINE: u32 = 50
+    SOURCE_START_COLUMN: u32 = 1
+    SOURCE_END_COLUMN: u32 = 2
+    SOURCE_DISCRIMINATOR: u32 = 1
+    SOURCE_BYTE_WIDTH: u64 = 1
+    ZERO_U64: u64 = 0
+    FIRST_INDEX: usize = 0
+    EXPECTED_FIRST_ACCESS_COUNT: usize = 1
+    EXPECTED_NO_FINDINGS: usize = 0
+    INVALID_DETAIL: u32 = 1
+    UNORDERED_EVENT: u64 = 0
+    SECOND_CLOCK_AFTER: u64 = 2
+    THIRD_CLOCK_AFTER: u64 = 3
+    FIRST_CLOCK_INDEX: usize = 0
+    SECOND_CLOCK_INDEX: usize = 1
+    FIRST_CLOCK_VALUE: u64 = 1
+    SECOND_CLOCK_VALUE: u64 = 1
+    SYNCHRONIZED_CLOCK_VALUE: u64 = 1
+    EXPECTED_ACCESS_COUNT: usize = 5
+    EXPECTED_FINDING_COUNT: usize = 1
+    COMPLETED_DETAIL: u32 = 3
+    RESULT_FIRST: i64 = 1
+    RESULT_SECOND: i64 = 2
+    RESULT_UNORDERED: i64 = 3
+    RESULT_FINDING: i64 = 4
+    RESULT_ACCESS_COUNT: i64 = 5
+    RESULT_INVALID: i64 = 6
+    RESULT_COMPLETED: i64 = 7
+    RESULT_SUCCESS: i64 = 0
+
+
+def test_source(line: u32) -> DebuggerIdentity::SourceSpan:
+    return DebuggerIdentity::SourceSpan{
+        file: DebuggerIdentity::debug_id(Test::FILE_ID),
+        start_byte: line.u64(),
+        end_byte: line.u64() + Test::SOURCE_BYTE_WIDTH,
+        start_line: line,
+        start_column: Test::SOURCE_START_COLUMN,
+        end_line: line,
+        end_column: Test::SOURCE_END_COLUMN,
+        discriminator: Test::SOURCE_DISCRIMINATOR
+    }
+
+def test_access(event: u64, task: u64, generation: u64, offset: u64, kind: DebuggerConcurrencyRaces::AccessKind, first_clock: u64, second_clock: u64, line: u32) -> DebuggerConcurrencyRaces::MemoryAccess:
+    clock: mutable DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_new()
+    clock.values[Test::FIRST_CLOCK_INDEX] <- first_clock
+    clock.values[Test::SECOND_CLOCK_INDEX] <- second_clock
+    return DebuggerConcurrencyRaces::MemoryAccess{
+        event: event,
+        task: DebuggerIdentity::debug_id(task),
+        allocation: DebuggerIdentity::AllocationIdentity{allocation: DebuggerIdentity::debug_id(Test::ALLOCATION_ID), generation: generation, offset: offset},
+        kind: kind,
+        clock: clock,
+        source: test_source(line)
+    }
+
+def main() -> i64:
+    report: mutable DebuggerConcurrencyRaces::RaceReport = DebuggerConcurrencyRaces::race_report_new()
+    first_write: DebuggerConcurrencyRaces::MemoryAccess = test_access(Test::FIRST_EVENT, Test::TASK_ONE, Test::ALLOCATION_GENERATION, Test::FIRST_OFFSET, DebuggerConcurrencyRaces::AccessKind.Write, Test::FIRST_CLOCK_VALUE, Test::ZERO_U64, Test::FIRST_LINE)
+    report <- DebuggerConcurrencyRaces::race_report_add_access(report, first_write)
+    return Test::RESULT_FIRST if not DebuggerConcurrencyRaces::race_report_is_valid(report) or report.access_count != Test::EXPECTED_FIRST_ACCESS_COUNT or report.finding_count != Test::EXPECTED_NO_FINDINGS
+
+    concurrent_read: DebuggerConcurrencyRaces::MemoryAccess = test_access(Test::SECOND_EVENT, Test::TASK_TWO, Test::ALLOCATION_GENERATION, Test::FIRST_OFFSET, DebuggerConcurrencyRaces::AccessKind.Read, Test::ZERO_U64, Test::SECOND_CLOCK_VALUE, Test::SECOND_LINE)
+    report <- DebuggerConcurrencyRaces::race_report_add_access(report, concurrent_read)
+    return Test::RESULT_SECOND if report.finding_count != Test::EXPECTED_FINDING_COUNT or not DebuggerConcurrencyRaces::race_report_has_races(report)
+
+    synchronized_write: DebuggerConcurrencyRaces::MemoryAccess = test_access(Test::THIRD_EVENT, Test::TASK_ONE, Test::ALLOCATION_GENERATION, Test::FIRST_OFFSET, DebuggerConcurrencyRaces::AccessKind.Write, Test::FIRST_CLOCK_VALUE, Test::SYNCHRONIZED_CLOCK_VALUE, Test::THIRD_LINE)
+    report <- DebuggerConcurrencyRaces::race_report_add_access(report, synchronized_write)
+    same_cell_read: DebuggerConcurrencyRaces::MemoryAccess = test_access(Test::FOURTH_EVENT, Test::TASK_TWO, Test::ALLOCATION_GENERATION, Test::OTHER_OFFSET, DebuggerConcurrencyRaces::AccessKind.Read, Test::ZERO_U64, Test::SECOND_CLOCK_AFTER, Test::FOURTH_LINE)
+    report <- DebuggerConcurrencyRaces::race_report_add_access(report, same_cell_read)
+    other_generation_read: DebuggerConcurrencyRaces::MemoryAccess = test_access(Test::FIFTH_EVENT, Test::TASK_THREE, Test::OTHER_GENERATION, Test::FIRST_OFFSET, DebuggerConcurrencyRaces::AccessKind.Read, Test::ZERO_U64, Test::THIRD_CLOCK_AFTER, Test::FIFTH_LINE)
+    report <- DebuggerConcurrencyRaces::race_report_add_access(report, other_generation_read)
+    return Test::RESULT_ACCESS_COUNT if report.access_count != Test::EXPECTED_ACCESS_COUNT or report.finding_count != Test::EXPECTED_FINDING_COUNT
+
+    report <- DebuggerConcurrencyRaces::race_report_finish(report)
+    return Test::RESULT_FINDING if not report.complete or not DebuggerConcurrencyRaces::race_report_is_valid(report) or not DebuggerConcurrencyRaces::race_report_is_observed_only(report)
+    finding: DebuggerConcurrencyRaces::RaceFinding = DebuggerConcurrencyRaces::race_report_finding_at(report, Test::FIRST_INDEX)
+    return Test::RESULT_FINDING if finding.first_event != Test::FIRST_EVENT or finding.second_event != Test::SECOND_EVENT or finding.first_task.value != Test::TASK_ONE or finding.second_task.value != Test::TASK_TWO or finding.allocation.generation != Test::ALLOCATION_GENERATION or finding.allocation.offset != Test::FIRST_OFFSET or finding.first_source.start_line != Test::FIRST_LINE or finding.second_source.start_line != Test::SECOND_LINE
+    report <- DebuggerConcurrencyRaces::race_report_add_access(report, synchronized_write)
+    return Test::RESULT_COMPLETED if report.failure.code != DebuggerErrors::ErrorCode.InvalidState or report.failure.detail != Test::COMPLETED_DETAIL or report.complete
+
+    invalid: mutable DebuggerConcurrencyRaces::RaceReport = DebuggerConcurrencyRaces::race_report_new()
+    invalid_access: DebuggerConcurrencyRaces::MemoryAccess = test_access(Test::FIRST_EVENT, Test::TASK_ONE, Test::ZERO_U64, Test::FIRST_OFFSET, DebuggerConcurrencyRaces::AccessKind.Write, Test::FIRST_CLOCK_VALUE, Test::ZERO_U64, Test::FIRST_LINE)
+    invalid <- DebuggerConcurrencyRaces::race_report_add_access(invalid, invalid_access)
+    return Test::RESULT_INVALID if invalid.failure.code != DebuggerErrors::ErrorCode.InvalidArgument or invalid.failure.detail != Test::INVALID_DETAIL or invalid.complete
+
+    unordered: mutable DebuggerConcurrencyRaces::RaceReport = DebuggerConcurrencyRaces::race_report_new()
+    unordered <- DebuggerConcurrencyRaces::race_report_add_access(unordered, first_write)
+    unordered <- DebuggerConcurrencyRaces::race_report_add_access(unordered, test_access(Test::UNORDERED_EVENT, Test::TASK_TWO, Test::ALLOCATION_GENERATION, Test::FIRST_OFFSET, DebuggerConcurrencyRaces::AccessKind.Read, Test::ZERO_U64, Test::SECOND_CLOCK_VALUE, Test::SECOND_LINE))
+    return Test::RESULT_UNORDERED if unordered.failure.code != DebuggerErrors::ErrorCode.InvalidArgument or unordered.complete
+    return Test::RESULT_SUCCESS

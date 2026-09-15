@@ -1,0 +1,175 @@
+# Bounded observed-access race analysis for managed execution.
+#
+# A finding requires two accesses to the same allocation generation and offset,
+# different logical tasks, at least one write, and concurrent vector clocks.
+# The report never infers race freedom: it describes only the accesses supplied
+# by the recorder and remains incomplete when the bounded input is truncated.
+
+include "./analysis.elisa"
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+
+module DebuggerConcurrencyRaces:
+    private:
+        const module Capacity:
+            RACE_ACCESS_CAPACITY: usize = 256
+            RACE_FINDING_CAPACITY: usize = 128
+
+        const module Event:
+            RACE_EVENT_MAX: u64 = 18446744073709551615
+
+        const module Identity:
+            RACE_NO_TASK: u64 = 0
+            RACE_NO_ALLOCATION: u64 = 0
+            RACE_NO_GENERATION: u64 = 0
+
+        const module Index:
+            RACE_FIRST_INDEX: usize = 0
+
+        const module Access:
+            RACE_ACCESS_KIND_MAX: u16 = 1
+
+        const module Detail:
+            RACE_DETAIL_INVALID_ACCESS: u32 = 1
+            RACE_DETAIL_CAPACITY: u32 = 2
+            RACE_DETAIL_COMPLETED: u32 = 3
+            RACE_DETAIL_FINDING_CAPACITY: u32 = 4
+
+
+        def race_failure(report: RaceReport, code: DebuggerErrors::ErrorCode, retryable: bool, detail: u32) -> RaceReport:
+            updated: mutable RaceReport = report
+            updated.complete <- false
+            updated.overflowed <- true if code == DebuggerErrors::ErrorCode.ResourceLimit
+            updated.failure <- DebuggerErrors::make_error(code, retryable, detail)
+            return updated
+
+        def race_access_targets_same_cell(left: MemoryAccess, right: MemoryAccess) -> bool:
+            return left.allocation.allocation.value == right.allocation.allocation.value and left.allocation.generation == right.allocation.generation and left.allocation.offset == right.allocation.offset
+
+        def race_access_conflicts(left: MemoryAccess, right: MemoryAccess) -> bool:
+            return false if left.task.value == Identity::RACE_NO_TASK or right.task.value == Identity::RACE_NO_TASK or left.task.value == right.task.value
+            return false if not race_access_targets_same_cell(left, right)
+            return false if left.kind == AccessKind.Read and right.kind == AccessKind.Read
+            return DebuggerConcurrencyAnalysis::vector_clock_concurrent(left.clock, right.clock)
+
+        def race_finding_matches_accesses(report: RaceReport, finding: RaceFinding) -> bool:
+            return false if finding.first_access_index >= report.access_count or finding.second_access_index >= report.access_count
+            left: MemoryAccess = report.accesses[finding.first_access_index]
+            right: MemoryAccess = report.accesses[finding.second_access_index]
+            return false if left.event != finding.first_event or right.event != finding.second_event
+            return false if left.source.start_line != finding.first_source.start_line or right.source.start_line != finding.second_source.start_line
+            return race_access_conflicts(left, right)
+
+
+    public:
+        enum AccessKind:
+            Read
+            Write
+
+        struct MemoryAccess:
+            event: mutable u64
+            task: mutable DebuggerIdentity::DebugId
+            allocation: mutable DebuggerIdentity::AllocationIdentity
+            kind: mutable AccessKind
+            clock: mutable DebuggerConcurrencyAnalysis::VectorClock
+            source: mutable DebuggerIdentity::SourceSpan
+
+        struct RaceFinding:
+            first_access_index: mutable usize
+            second_access_index: mutable usize
+            first_event: mutable u64
+            second_event: mutable u64
+            first_task: mutable DebuggerIdentity::DebugId
+            second_task: mutable DebuggerIdentity::DebugId
+            allocation: mutable DebuggerIdentity::AllocationIdentity
+            first_kind: mutable AccessKind
+            second_kind: mutable AccessKind
+            first_source: mutable DebuggerIdentity::SourceSpan
+            second_source: mutable DebuggerIdentity::SourceSpan
+
+        struct RaceReport:
+            accesses: mutable MemoryAccess[Capacity::RACE_ACCESS_CAPACITY]
+            access_count: mutable usize
+            findings: mutable RaceFinding[Capacity::RACE_FINDING_CAPACITY]
+            finding_count: mutable usize
+            last_event: mutable u64
+            has_last_event: mutable bool
+            observed_only: mutable bool
+            complete: mutable bool
+            overflowed: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def race_report_new() -> RaceReport:
+            return RaceReport{accesses: zeroed, access_count: Index::RACE_FIRST_INDEX, findings: zeroed, finding_count: Index::RACE_FIRST_INDEX, last_event: Index::RACE_FIRST_INDEX.u64(), has_last_event: false, observed_only: true, complete: false, overflowed: false, failure: DebuggerErrors::no_error()}
+
+        def race_access_is_valid(access: MemoryAccess) -> bool:
+            return false if access.event == Event::RACE_EVENT_MAX or access.task.value == Identity::RACE_NO_TASK
+            return false if access.allocation.allocation.value == Identity::RACE_NO_ALLOCATION or access.allocation.generation == Identity::RACE_NO_GENERATION
+            return false if access.kind.u16() > Access::RACE_ACCESS_KIND_MAX
+            return true
+
+        def race_report_access_capacity() -> usize:
+            return Capacity::RACE_ACCESS_CAPACITY
+
+        def race_report_finding_capacity() -> usize:
+            return Capacity::RACE_FINDING_CAPACITY
+
+        def race_report_add_access(report: RaceReport, access: MemoryAccess) -> RaceReport:
+            return report if report.overflowed or not DebuggerErrors::error_is_ok(report.failure)
+            return race_failure(report, DebuggerErrors::ErrorCode.InvalidState, false, Detail::RACE_DETAIL_COMPLETED) if report.complete
+            return race_failure(report, DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::RACE_DETAIL_INVALID_ACCESS) if not race_access_is_valid(access)
+            return race_failure(report, DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::RACE_DETAIL_INVALID_ACCESS) if report.has_last_event and access.event < report.last_event
+            return race_failure(report, DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::RACE_DETAIL_CAPACITY) if report.access_count >= Capacity::RACE_ACCESS_CAPACITY
+            updated: mutable RaceReport = report
+            for index in Index::RACE_FIRST_INDEX..<report.access_count:
+                prior: MemoryAccess = report.accesses[index]
+                if race_access_conflicts(prior, access):
+                    return race_failure(report, DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::RACE_DETAIL_FINDING_CAPACITY) if updated.finding_count >= Capacity::RACE_FINDING_CAPACITY
+                    updated.findings[updated.finding_count] <- RaceFinding{
+                        first_access_index: index,
+                        second_access_index: report.access_count,
+                        first_event: prior.event,
+                        second_event: access.event,
+                        first_task: prior.task,
+                        second_task: access.task,
+                        allocation: prior.allocation,
+                        first_kind: prior.kind,
+                        second_kind: access.kind,
+                        first_source: prior.source,
+                        second_source: access.source
+                    }
+                    updated.finding_count <- updated.finding_count + 1
+            updated.accesses[report.access_count] <- access
+            updated.access_count <- updated.access_count + 1
+            updated.last_event <- access.event
+            updated.has_last_event <- true
+            return updated
+
+        def race_report_finish(report: RaceReport) -> RaceReport:
+            updated: mutable RaceReport = report
+            return updated if report.overflowed or not DebuggerErrors::error_is_ok(report.failure)
+            updated.complete <- true
+            return updated
+
+        def race_report_is_observed_only(report: RaceReport) -> bool:
+            return report.observed_only
+
+        def race_report_has_races(report: RaceReport) -> bool:
+            return report.finding_count > Index::RACE_FIRST_INDEX
+
+        def race_report_finding_at(report: RaceReport, index: usize) -> RaceFinding:
+            result: mutable RaceFinding = zeroed
+            return result if index >= report.finding_count or report.finding_count > Capacity::RACE_FINDING_CAPACITY
+            return report.findings[index]
+
+        def race_report_is_valid(report: RaceReport) -> bool:
+            return false if report.access_count > Capacity::RACE_ACCESS_CAPACITY or report.finding_count > Capacity::RACE_FINDING_CAPACITY
+            return false if not report.observed_only or not DebuggerErrors::error_is_well_formed(report.failure)
+            return false if report.complete and (report.overflowed or not DebuggerErrors::error_is_ok(report.failure))
+            return false if report.overflowed and DebuggerErrors::error_is_ok(report.failure)
+            for index in Index::RACE_FIRST_INDEX..<report.access_count:
+                return false if not race_access_is_valid(report.accesses[index])
+                return false if index > Index::RACE_FIRST_INDEX and report.accesses[index].event < report.accesses[index - 1].event
+            for index in Index::RACE_FIRST_INDEX..<report.finding_count:
+                return false if not race_finding_matches_accesses(report, report.findings[index])
+            return true

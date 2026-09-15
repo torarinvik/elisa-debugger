@@ -251,6 +251,10 @@ module DebuggerProtocolRequest:
         struct RequestOperands:
             valid: mutable bool
             has_expected_generation: mutable bool
+            session_id: mutable u64
+            has_session_id: mutable bool
+            owner_token: mutable u64
+            has_owner_token: mutable bool
             program: mutable ProgramPath
             has_program: mutable bool
             protocol_major: mutable u64
@@ -992,6 +996,29 @@ module DebuggerProtocolRequest:
                 operands.has_page_start <- true
             return true
 
+        # Session ownership fields live on the root request object.  They are
+        # optional for the legacy compact flow, but once a client opts into
+        # createSession the server can require both fields on every state
+        # changing request.  Parse them here rather than treating them as
+        # untyped extension data so duplicate, malformed, and overflowing
+        # values fail before dispatch.
+        def request_session_operands_parse(payload: u8&, length: usize, root_start: usize, operands: mutable RequestOperands&) -> bool:
+            session_start: usize = request_object_field_value_start(payload, length, root_start, "sessionId", 0)
+            return false if request_object_field_value_start(payload, length, root_start, "sessionId", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            if session_start != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
+                session: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, session_start, NumberFormat::REQUEST_NUMBERFORMAT_MAX_U64, true)
+                return false if not session.valid
+                operands.session_id <- session.value
+                operands.has_session_id <- true
+            owner_start: usize = request_object_field_value_start(payload, length, root_start, "ownerToken", 0)
+            return false if request_object_field_value_start(payload, length, root_start, "ownerToken", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            if owner_start != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
+                owner: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, owner_start, NumberFormat::REQUEST_NUMBERFORMAT_MAX_U64, true)
+                return false if not owner.valid
+                operands.owner_token <- owner.value
+                operands.has_owner_token <- true
+            return true
+
         # The headless initialize request must negotiate the wire version
         # before clients issue session operations. Versions are JSON integers
         # bounded to the protocol's u32 representation.
@@ -1332,6 +1359,7 @@ module DebuggerProtocolRequest:
                 return operands if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
             return operands if request.method == RequestMethod.Launch and not operands.has_program
             return operands if request.method == RequestMethod.Variables and not operands.has_variables_reference
+            return operands if not request_session_operands_parse(payload, length, root_start, operands)
             return operands if not request_initialization_version_parse(payload, length, root_start, request.method, operands)
             return operands if not request_pagination_operands_parse(payload, length, root_start, operands)
             operands.valid <- true

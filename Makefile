@@ -99,6 +99,8 @@ SERVER_PROTOCOL_MAJOR := 1
 SERVER_PROTOCOL_MINOR := 0
 SERVER_NEWER_MINOR_REQUEST := 17
 SERVER_INCOMPATIBLE_MAJOR := 2
+SERVER_OWNER_SESSION_ID := 1
+SERVER_OWNER_TOKEN := 1
 SERVER_INITIALIZE_PAYLOAD := {"method":"initialize","id":99,"protocolMajor":$(SERVER_PROTOCOL_MAJOR),"protocolMinor":$(SERVER_PROTOCOL_MINOR)}
 EDIR_FILE_TOO_LARGE_BYTES := 37730
 EDIR_FILE_TRUNCATED_BYTES := 5
@@ -132,8 +134,8 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
 .PHONY: trace-file-check
-.PHONY: remote-authorization-check server-version-check compiler-edir-loop-check compiler-edir-calls-unsupported-check compiler-edir-core-ir-check
-.PHONY: protocol-client-ordering-check
+.PHONY: remote-authorization-check server-version-check server-ownership-check compiler-edir-loop-check compiler-edir-calls-unsupported-check compiler-edir-core-ir-check
+.PHONY: protocol-client-ordering-check session-ownership-check
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
@@ -150,6 +152,9 @@ server: $(BUILD)/elisa-debugger-server
 server-version-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
 	server_preinit_payload='{"method":"launch","id":40,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}'; server_preinit_length=$$(printf %s "$$server_preinit_payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$server_preinit_length" "$$server_preinit_payload" | "$(BUILD)/elisa-debugger-server" | grep -F '"id":"40","ok":false' | grep -F '"code":"INITIALIZE_REQUIRED"'
 	server_initialize_input=$$(for payload in '{"method":"initialize","id":41,"protocolMajor":$(SERVER_INCOMPATIBLE_MAJOR),"protocolMinor":$(SERVER_PROTOCOL_MINOR)}' '{"method":"launch","id":48,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"initialize","id":44,"protocolMajor":$(SERVER_PROTOCOL_MAJOR)}' '{"method":"launch","id":49,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"initialize","id":42,"protocolMajor":$(SERVER_PROTOCOL_MAJOR),"protocolMinor":$(SERVER_PROTOCOL_MINOR)}' '{"method":"initialize","id":43,"protocolMajor":$(SERVER_PROTOCOL_MAJOR),"protocolMinor":$(SERVER_NEWER_MINOR_REQUEST)}' '{"method":"launch","id":45,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"pause","id":46}' '{"method":"stack","id":47}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$frame_length" "$$payload"; done); server_initialize_output=$$(printf '%s\n' "$$server_initialize_input" | "$(BUILD)/elisa-debugger-server"); echo "$$server_initialize_output" | grep -F '"id":"41","ok":false' | grep -F '"code":"INCOMPATIBLE_VERSION"' | grep -F '"requestedProtocolMajor":$(SERVER_INCOMPATIBLE_MAJOR)' | grep -F '"serverProtocolMajor":$(SERVER_PROTOCOL_MAJOR)'; echo "$$server_initialize_output" | grep -F '"id":"48","ok":false' | grep -F '"code":"INITIALIZE_REQUIRED"'; echo "$$server_initialize_output" | grep -F '"id":"44","ok":false' | grep -F '"code":"INVALID_ARGUMENT"' | grep -F 'protocolMajor and protocolMinor'; echo "$$server_initialize_output" | grep -F '"id":"49","ok":false' | grep -F '"code":"INITIALIZE_REQUIRED"'; echo "$$server_initialize_output" | grep -F '"id":"42","ok":true' | grep -F '"protocolMajor":$(SERVER_PROTOCOL_MAJOR)' | grep -F '"protocolMinor":$(SERVER_PROTOCOL_MINOR)'; echo "$$server_initialize_output" | grep -F '"id":"43","ok":true' | grep -F '"protocolMinor":$(SERVER_PROTOCOL_MINOR)'; echo "$$server_initialize_output" | grep -F '"id":"45","ok":true'; echo "$$server_initialize_output" | grep -F '"id":"47","ok":true'
+
+server-ownership-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
+	set -e; server_ownership_input=$$(for payload in '{"method":"initialize","id":1,"protocolMajor":$(SERVER_PROTOCOL_MAJOR),"protocolMinor":$(SERVER_PROTOCOL_MINOR)}' '{"method":"createSession","id":2}' '{"method":"launch","id":3,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"launch","id":4,"sessionId":"$(SERVER_OWNER_SESSION_ID)","ownerToken":"$(SERVER_OWNER_TOKEN)","arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"pause","id":5,"sessionId":"$(SERVER_OWNER_SESSION_ID)","ownerToken":"2"}' '{"method":"pause","id":6,"sessionId":"$(SERVER_OWNER_SESSION_ID)","ownerToken":"$(SERVER_OWNER_TOKEN)"}' '{"method":"stack","id":7,"sessionId":"$(SERVER_OWNER_SESSION_ID)"}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$frame_length" "$$payload"; done); server_ownership_output=$$(printf '%s\n' "$$server_ownership_input" | "$(BUILD)/elisa-debugger-server"); echo "$$server_ownership_output" | grep -F '"id":"2","ok":true' | grep -F '"sessionId":"$(SERVER_OWNER_SESSION_ID)"' | grep -F '"ownerToken":"$(SERVER_OWNER_TOKEN)"'; echo "$$server_ownership_output" | grep -F '"id":"3","ok":false' | grep -F '"code":"PERMISSION_DENIED"'; echo "$$server_ownership_output" | grep -F '"id":"4","ok":true'; echo "$$server_ownership_output" | grep -F '"id":"5","ok":false' | grep -F '"code":"PERMISSION_DENIED"'; echo "$$server_ownership_output" | grep -F '"id":"6","ok":true'; echo "$$server_ownership_output" | grep -F '"id":"7","ok":true'
 
 .PHONY: server-source-breakpoints-check
 server-source-breakpoints-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
@@ -185,6 +190,7 @@ endif
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: server-source-breakpoints-check
+module-check: server-ownership-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check
 module-check: $(BUILD)/elisa-debugger-replay-provenance-check
 module-check: $(BUILD)/elisa-debugger-replay-seek-atomicity-check
@@ -196,6 +202,7 @@ module-check: $(BUILD)/elisa-debugger-dap-events-check $(BUILD)/elisa-debugger-d
 module-check: $(DAP_STACK_FRAMES_CHECK)
 module-check: dap-column-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-protocol-client-ordering-check
+module-check: $(BUILD)/elisa-debugger-session-ownership-check
 module-check: edir-file-loader-check
 
 	"$(BUILD)/elisa-debugger-module-core-check"
@@ -647,6 +654,13 @@ $(BUILD)/elisa-debugger-protocol-encoding-check: tests/protocol_encoding_check.e
 $(BUILD)/elisa-debugger-protocol-framing-check: tests/protocol_framing_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-session-ownership-check: tests/session_ownership_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+session-ownership-check: $(BUILD)/elisa-debugger-session-ownership-check
+	"$(BUILD)/elisa-debugger-session-ownership-check"
 
 protocol-framing-check: $(BUILD)/elisa-debugger-protocol-framing-check
 	"$(BUILD)/elisa-debugger-protocol-framing-check"

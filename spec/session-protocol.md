@@ -139,9 +139,18 @@ or extension requests. The request/response shapes are published in
 The Elisa source defines a typed discovery document containing product
 version, trace schema, installation health, resource limits, and capabilities.
 It also defines ownership-token validation for typed session requests. The
-standalone process implements protocol-major/minor negotiation but does not
-currently implement the `createSession` token exchange or enforce ownership
-tokens on its compact requests.
+standalone process supports an opt-in `createSession` ownership exchange. The
+successful response contains the process session ID and an owner token. Every
+later request must carry the matching `sessionId`; state-changing requests
+must also carry the matching `ownerToken`. An absent or mismatched token
+returns `PERMISSION_DENIED` before dispatch, so a second client cannot control
+a session accidentally. The token is scoped to the adapter process and is not
+a replacement for an authenticated remote tunnel. Older compact clients may
+continue to use the legacy one-client flow by launching without
+`createSession`.
+
+The request and result shape is published in
+[`schemas/session-protocol-v1.create-session.schema.json`](../schemas/session-protocol-v1.create-session.schema.json).
 
 The client then sends `createSession` or `openTrace`, followed by `launch`,
 `attach`, or `replay`. State-changing requests carry `session`, `requestId`,

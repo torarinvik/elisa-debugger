@@ -98,15 +98,18 @@ Requests are bounded to 32 lines per source. The
 defines the compact wire shape.
 
 This endpoint does not implement attach, expression evaluation, memory reads,
-trace artifact transfer, or multi-client session ownership. Checkpoint,
+or trace artifact transfer. `createSession` can establish process-scoped
+session ownership before launch; after that handshake, preserve the returned
+`sessionId` on every request and the returned `ownerToken` on every state
+changing request. Checkpoint,
 branch, comparison, and trace operations that need structured operands or
 results are not available through this compact endpoint merely because
 corresponding typed Elisa APIs exist. `discover` reports the compact endpoint's
 capabilities, with process-inaccessible features disabled.
 
 The compact process does not emit progress or ordered session events, route
-cancellation, create a shareable session token, or let another process attach
-to its session. Requests and responses are documented in
+cancellation, or let another process attach to its session. Requests and
+responses are documented in
 [the session protocol](../spec/session-protocol.md). That document labels the
 broader typed target contract separately from the methods currently wired to
 the compact process.

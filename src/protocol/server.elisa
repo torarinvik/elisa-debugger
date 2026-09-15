@@ -27,6 +27,7 @@ module DebuggerProtocolServer:
             PROTOCOL_SERVER_ERROR_DETAIL_STALE_SOURCE_BREAKPOINT_GENERATION: u32 = 9
             PROTOCOL_SERVER_ERROR_DETAIL_UNKNOWN_SOURCE_PATH: u32 = 10
             PROTOCOL_SERVER_ERROR_DETAIL_CORRUPT_SOURCE_TABLE: u32 = 11
+            PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN: u32 = 12
 
         const module InitializationState:
             INITIALIZE_NOT_REQUESTED: u8 = 0
@@ -82,6 +83,10 @@ module DebuggerProtocolServer:
             READ_CHUNK_SIZE: usize = 4096
             SERVER_SUCCESS_EXIT_CODE: i64 = 0
             SERVER_INVALID_FRAME_EXIT_CODE: i64 = 2
+
+        const module Ownership:
+            SESSION_ID: u64 = 1
+            OWNER_TOKEN: u64 = 1
 
         struct InitializationResponse:
             status: mutable u8
@@ -146,7 +151,21 @@ module DebuggerProtocolServer:
             return true if method == DebuggerProtocolRequest::RequestMethod.Evaluate or method == DebuggerProtocolRequest::RequestMethod.Memory
             return false
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse, source_breakpoints: DebuggerManagedService::SourceBreakpointResult) -> void can[Console, Unsafe.PointerCast]:
+        def request_requires_session(method: DebuggerProtocolRequest::RequestMethod) -> bool:
+            return false if method == DebuggerProtocolRequest::RequestMethod.Discover or method == DebuggerProtocolRequest::RequestMethod.Initialize or method == DebuggerProtocolRequest::RequestMethod.CreateSession
+            return true
+
+        def request_requires_owner(method: DebuggerProtocolRequest::RequestMethod) -> bool:
+            return true if method == DebuggerProtocolRequest::RequestMethod.Launch or method == DebuggerProtocolRequest::RequestMethod.OpenTrace or method == DebuggerProtocolRequest::RequestMethod.Replay or method == DebuggerProtocolRequest::RequestMethod.Attach or method == DebuggerProtocolRequest::RequestMethod.Pause or method == DebuggerProtocolRequest::RequestMethod.Continue or method == DebuggerProtocolRequest::RequestMethod.Step or method == DebuggerProtocolRequest::RequestMethod.ReverseStep or method == DebuggerProtocolRequest::RequestMethod.ReverseStepOver or method == DebuggerProtocolRequest::RequestMethod.ReverseStepOut or method == DebuggerProtocolRequest::RequestMethod.Seek or method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints or method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints or method == DebuggerProtocolRequest::RequestMethod.Checkpoint or method == DebuggerProtocolRequest::RequestMethod.Branch or method == DebuggerProtocolRequest::RequestMethod.Detach or method == DebuggerProtocolRequest::RequestMethod.Terminate or method == DebuggerProtocolRequest::RequestMethod.Close or method == DebuggerProtocolRequest::RequestMethod.Cancel
+            return false
+
+        def ownership_validation(request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands, session: DebuggerSession::Session, owner_active: bool, owner_token: u64) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::no_error() if not owner_active or not request_requires_session(request.method)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN) if not operands.has_session_id or operands.session_id != session.id.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN) if request_requires_owner(request.method) and (not operands.has_owner_token or operands.owner_token != owner_token)
+            return DebuggerErrors::no_error()
+
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, owner_token: u64) -> void can[Console, Unsafe.PointerCast]:
             if initialization.status == InitializationState::INITIALIZE_COMPATIBLE:
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_response_encode(id, initialization.requested_minor)
                 write_json_buffer_response(encoded) can Console
@@ -165,6 +184,10 @@ module DebuggerProtocolServer:
                 return
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Discover:
                 write_discovery_response(id, capabilities) can Console
+                return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.CreateSession:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::create_session_response_encode(id, service.controller.session.id.value, owner_token, result.stop_generation)
+                write_json_buffer_response(encoded) can Console
                 return
             if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.Threads:
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_threads_response_encode(id, result.stop_generation)
@@ -303,10 +326,12 @@ module DebuggerProtocolServer:
                 target: DebuggerIdentity::debug_id(4),
                 metadata_version: 1
             }
-            session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
+            session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Ownership::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
             session.capabilities <- server_capabilities(session.capabilities)
-            service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
+            service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Ownership::SESSION_ID))
             protocol_initialized: mutable bool = false
+            ownership_active: mutable bool = false
+            owner_token: mutable u64 = 0
             while true:
                 count: isize = read(ServerProcess::PROTOCOL_SERVER_PROCESS_STDIN_FD, (&chunk[0]).cast[void&], ServerProcess::READ_CHUNK_SIZE) can Console
                 break if count <= 0
@@ -346,24 +371,35 @@ module DebuggerProtocolServer:
                                     failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_LAUNCH_CONFIGURATION)
                                     result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
                                 else:
-                                    if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Launch:
-                                        result <- dispatch_launch(service, request, operands) can Blocking.IO, Unsafe.PointerCast
+                                    ownership_failure: DebuggerErrors::DebuggerError = ownership_validation(request, operands, service.controller.session, ownership_active, owner_token)
+                                    if not DebuggerErrors::error_is_ok(ownership_failure):
+                                        result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, ownership_failure)
                                     else:
-                                        if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints:
-                                            replacement: SourceBreakpointDispatch = dispatch_source_breakpoints(service, request, operands)
-                                            result <- replacement.dispatch
-                                            source_breakpoint_payload <- replacement.payload
+                                        if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Launch:
+                                            result <- dispatch_launch(service, request, operands) can Blocking.IO, Unsafe.PointerCast
                                         else:
-                                            if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
-                                                stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::DETAIL_STALE_VARIABLE_REFERENCE)
-                                                result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                            if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints:
+                                                replacement: SourceBreakpointDispatch = dispatch_source_breakpoints(service, request, operands)
+                                                result <- replacement.dispatch
+                                                source_breakpoint_payload <- replacement.payload
                                             else:
-                                                result <- dispatch_request(service, request)
+                                                if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Variables and operands.variables_reference != service.controller.session.stop_generation:
+                                                    stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::DETAIL_STALE_VARIABLE_REFERENCE)
+                                                    result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
+                                                else:
+                                                    result <- dispatch_request(service, request)
+                                    # createSession is intentionally opt-in for
+                                    # compatibility with older compact clients.
+                                    # Once accepted, subsequent requests carry a
+                                    # process-scoped owner token and session ID.
+                                    if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.CreateSession and result.accepted:
+                                        ownership_active <- true
+                                        owner_token <- Ownership::OWNER_TOKEN
                         session <- result.session
                         response_id: u64 = request.id if request.has_id else RequestDefaults::FALLBACK_RESPONSE_ID
                         page_size: u64 = operands.page_size if operands.has_page_size else RequestDefaults::PROTOCOL_SERVER_REQUEST_DEFAULTS_DEFAULT_PAGE_SIZE
                         page_start: u64 = operands.page_start if operands.has_page_start else RequestDefaults::DEFAULT_PAGE_START
-                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization, source_breakpoint_payload) can Console, Unsafe.PointerCast
+                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization, source_breakpoint_payload, owner_token) can Console, Unsafe.PointerCast
                         _ = fflush(null) can Console
                         DebuggerProtocolFraming::frame_decoder_reset(decoder)
                     return ServerProcess::SERVER_INVALID_FRAME_EXIT_CODE if DebuggerProtocolFraming::frame_decoder_is_failed(decoder)

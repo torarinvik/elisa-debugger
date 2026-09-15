@@ -1,0 +1,50 @@
+include "../src/protocol/request.elisa"
+include "../src/protocol/encoding.elisa"
+
+const module Test:
+    CREATE_REQUEST: cstr = "{\"method\":\"createSession\",\"id\":1}"
+    OWNED_LAUNCH_REQUEST: cstr = "{\"method\":\"launch\",\"id\":2,\"sessionId\":\"1\",\"ownerToken\":\"1\",\"arguments\":{\"program\":\"app.edir\"}}"
+    DUPLICATE_SESSION_REQUEST: cstr = "{\"method\":\"launch\",\"id\":2,\"sessionId\":1,\"sessionId\":1,\"ownerToken\":1,\"arguments\":{\"program\":\"app.edir\"}}"
+    ZERO_OWNER_REQUEST: cstr = "{\"method\":\"launch\",\"id\":2,\"sessionId\":1,\"ownerToken\":0,\"arguments\":{\"program\":\"app.edir\"}}"
+    MALFORMED_OWNER_REQUEST: cstr = "{\"method\":\"launch\",\"id\":2,\"sessionId\":1,\"ownerToken\":\"1x\",\"arguments\":{\"program\":\"app.edir\"}}"
+    RESPONSE_ID: u64 = 2
+    RESPONSE_SESSION: u64 = 1
+    RESPONSE_OWNER: u64 = 1
+    RESPONSE_GENERATION: u64 = 0
+    RESPONSE_SESSION_FRAGMENT: cstr = "\"sessionId\":\"1\""
+    RESPONSE_OWNER_FRAGMENT: cstr = "\"ownerToken\":\"1\""
+
+
+def cstr_length(value: cstr) -> usize:
+    length: mutable usize = 0
+    while value[length] != 0:
+        length <- length + 1
+    return length
+
+def contains(buffer: DebuggerProtocolEncoding::JsonBuffer, expected: cstr) -> bool:
+    expected_length: usize = cstr_length(expected)
+    return false if expected_length > buffer.length
+    for start in 0..<(buffer.length - expected_length + 1):
+        matches: mutable bool = true
+        for offset in 0..<expected_length:
+            matches <- false if buffer.bytes[start + offset] != expected[offset].u8()
+        return true if matches
+    return false
+
+def main() -> i64:
+    create: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(Test::CREATE_REQUEST.cast[u8&], cstr_length(Test::CREATE_REQUEST))
+    return 1 if not create.valid or create.has_session_id or create.has_owner_token
+
+    owned: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(Test::OWNED_LAUNCH_REQUEST.cast[u8&], cstr_length(Test::OWNED_LAUNCH_REQUEST))
+    return 2 if not owned.valid or not owned.has_session_id or owned.session_id != Test::RESPONSE_SESSION or not owned.has_owner_token or owned.owner_token != Test::RESPONSE_OWNER
+
+    duplicate: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(Test::DUPLICATE_SESSION_REQUEST.cast[u8&], cstr_length(Test::DUPLICATE_SESSION_REQUEST))
+    return 3 if duplicate.valid
+    zero_owner: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(Test::ZERO_OWNER_REQUEST.cast[u8&], cstr_length(Test::ZERO_OWNER_REQUEST))
+    return 4 if not zero_owner.valid or zero_owner.owner_token != 0
+    malformed_owner: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(Test::MALFORMED_OWNER_REQUEST.cast[u8&], cstr_length(Test::MALFORMED_OWNER_REQUEST))
+    return 5 if malformed_owner.valid
+
+    response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::create_session_response_encode(Test::RESPONSE_ID, Test::RESPONSE_SESSION, Test::RESPONSE_OWNER, Test::RESPONSE_GENERATION)
+    return 6 if not DebuggerProtocolEncoding::json_buffer_is_valid(response) or not contains(response, Test::RESPONSE_SESSION_FRAGMENT) or not contains(response, Test::RESPONSE_OWNER_FRAGMENT)
+    return 0

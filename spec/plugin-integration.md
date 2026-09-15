@@ -51,9 +51,9 @@ or treat DAP's `program` as an Elisa source file.
 The DAP process does not return a cross-connection session identity. A second
 process cannot attach to or share the running DAP session. Timeline and branch
 controls that need more than the DAP operations must use an integration that
-already owns the same in-process managed service; the standalone session
-process does not yet expose the typed ownership-token/session-creation
-transport.
+already owns the same in-process managed service. The standalone headless
+session process exposes the compact `createSession` ownership handshake; it
+does not turn the DAP process into a shareable session.
 
 ## JetBrains
 
@@ -70,9 +70,10 @@ does not claim a JetBrains version has been tested.
 The DAP adapter uses standard DAP `initialize` capabilities. The headless
 process has a separate `discover`/`initialize` version handshake; its current
 `initialize` request requires numeric `protocolMajor` and `protocolMinor`.
-Do not assume headless-session semantics such as `createSession`, session
-ownership tokens, progress notifications, or event acknowledgements: those
-belong to typed Elisa contracts and are not implemented on the current compact
+Clients may then send `createSession` and must preserve its returned
+`sessionId` and `ownerToken` according to the
+[`createSession` schema](../schemas/session-protocol-v1.create-session.schema.json).
+Progress notifications and event acknowledgements remain outside the compact
 process transport.
 
 ## Other clients

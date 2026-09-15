@@ -1,0 +1,162 @@
+# Bounded, side-effect-free arithmetic expressions for debugger adapters.
+#
+# The parser intentionally accepts only decimal integer literals, whitespace,
+# unary minus, the four arithmetic operators, and parentheses. It evaluates
+# each checked operation immediately through the pure AST evaluator, so this
+# module has no access to a machine, value store, process, or replay state.
+
+include "./evaluate.elisa"
+include "../core/errors.elisa"
+
+module DebuggerExpressionParser:
+    private:
+        const module Bounds:
+            MAX_SOURCE_BYTES: usize = 256
+            MAX_NESTING_DEPTH: usize = 32
+            MAX_OPERAND_COUNT: usize = 32
+            ROOT_DEPTH: usize = 0
+
+        const module Cursor:
+            INCREMENT: usize = 1
+
+        const module Character:
+            ASCII_SPACE: u8 = 32
+            ASCII_TAB: u8 = 9
+            ASCII_LINE_FEED: u8 = 10
+            ASCII_CARRIAGE_RETURN: u8 = 13
+            ASCII_ZERO: u8 = 48
+            ASCII_NINE: u8 = 57
+            ASCII_PLUS: u8 = 43
+            ASCII_MINUS: u8 = 45
+            ASCII_MULTIPLY: u8 = 42
+            ASCII_DIVIDE: u8 = 47
+            ASCII_OPEN_PARENTHESIS: u8 = 40
+            ASCII_CLOSE_PARENTHESIS: u8 = 41
+
+        const module Arithmetic:
+            DECIMAL_BASE: i64 = 10
+            I64_MAX: i64 = 9223372036854775807
+            EVALUATION_BUDGET: usize = 2
+            ZERO: i64 = 0
+
+        const module ExpressionParserDetail:
+            EMPTY_INPUT: u32 = 1
+            EXPECTED_VALUE: u32 = 2
+            EXPECTED_CLOSE_PARENTHESIS: u32 = 3
+            TRAILING_INPUT: u32 = 4
+            LITERAL_OVERFLOW: u32 = 5
+            SOURCE_TOO_LONG: u32 = 6
+            NESTING_LIMIT: u32 = 7
+            OPERAND_LIMIT: u32 = 8
+
+        struct Node:
+            value: mutable i64
+            valid: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def invalid_node(code: DebuggerErrors::ErrorCode, retryable: bool, detail: u32) -> Node:
+            return Node{value: Arithmetic::ZERO, valid: false, failure: DebuggerErrors::make_error(code, retryable, detail)}
+
+        def valid_node(value: i64) -> Node:
+            return Node{value: value, valid: true, failure: DebuggerErrors::no_error()}
+
+        def is_whitespace(byte: u8) -> bool:
+            return byte == Character::ASCII_SPACE or byte == Character::ASCII_TAB or byte == Character::ASCII_LINE_FEED or byte == Character::ASCII_CARRIAGE_RETURN
+
+        def skip_whitespace(bytes: u8&, length: usize, position: mutable usize&) -> void:
+            while position < length and is_whitespace(bytes[position]):
+                position <- position + Cursor::INCREMENT
+
+        def apply_binary(kind: DebuggerEvaluate::EvaluationKind, left: i64, right: i64) -> Node:
+            expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: kind, left: left, right: right, binding: zeroed}
+            evaluation: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, Arithmetic::EVALUATION_BUDGET)
+            return invalid_node(evaluation.failure.code, evaluation.failure.retryable, evaluation.failure.detail) if not DebuggerErrors::error_is_ok(evaluation.failure)
+            return valid_node(evaluation.value)
+
+        def parse_additive(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> Node:
+            left: mutable Node = parse_multiplicative(bytes, length, position, depth, operands)
+            return left if not left.valid
+            while true:
+                skip_whitespace(bytes, length, position)
+                return left if position >= length or (bytes[position] != Character::ASCII_PLUS and bytes[position] != Character::ASCII_MINUS)
+                operator: u8 = bytes[position]
+                position <- position + Cursor::INCREMENT
+                right: Node = parse_multiplicative(bytes, length, position, depth, operands)
+                return right if not right.valid
+                combined: mutable Node = valid_node(Arithmetic::ZERO)
+                combined <- apply_binary(DebuggerEvaluate::EvaluationKind.Add, left.value, right.value) if operator == Character::ASCII_PLUS
+                combined <- apply_binary(DebuggerEvaluate::EvaluationKind.Subtract, left.value, right.value) if operator == Character::ASCII_MINUS
+                return combined if not combined.valid
+                left <- combined
+            return left
+
+        def parse_multiplicative(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> Node:
+            left: mutable Node = parse_unary(bytes, length, position, depth, operands)
+            return left if not left.valid
+            while true:
+                skip_whitespace(bytes, length, position)
+                return left if position >= length or (bytes[position] != Character::ASCII_MULTIPLY and bytes[position] != Character::ASCII_DIVIDE)
+                operator: u8 = bytes[position]
+                position <- position + Cursor::INCREMENT
+                right: Node = parse_unary(bytes, length, position, depth, operands)
+                return right if not right.valid
+                combined: mutable Node = valid_node(Arithmetic::ZERO)
+                combined <- apply_binary(DebuggerEvaluate::EvaluationKind.Multiply, left.value, right.value) if operator == Character::ASCII_MULTIPLY
+                combined <- apply_binary(DebuggerEvaluate::EvaluationKind.Divide, left.value, right.value) if operator == Character::ASCII_DIVIDE
+                return combined if not combined.valid
+                left <- combined
+            return left
+
+        def parse_unary(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> Node:
+            skip_whitespace(bytes, length, position)
+            if position < length and bytes[position] == Character::ASCII_MINUS:
+                position <- position + Cursor::INCREMENT
+                operand: Node = parse_unary(bytes, length, position, depth, operands)
+                return operand if not operand.valid
+                return apply_binary(DebuggerEvaluate::EvaluationKind.Negate, operand.value, Arithmetic::ZERO)
+            return parse_primary(bytes, length, position, depth, operands)
+
+        def parse_primary(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> Node:
+            skip_whitespace(bytes, length, position)
+            return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_VALUE) if position >= length
+            if bytes[position] == Character::ASCII_OPEN_PARENTHESIS:
+                return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::NESTING_LIMIT) if depth >= Bounds::MAX_NESTING_DEPTH
+                position <- position + Cursor::INCREMENT
+                nested: Node = parse_additive(bytes, length, position, depth + Cursor::INCREMENT, operands)
+                return nested if not nested.valid
+                skip_whitespace(bytes, length, position)
+                return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_CLOSE_PARENTHESIS) if position >= length or bytes[position] != Character::ASCII_CLOSE_PARENTHESIS
+                position <- position + Cursor::INCREMENT
+                return nested
+            return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_VALUE) if bytes[position] < Character::ASCII_ZERO or bytes[position] > Character::ASCII_NINE
+            return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::OPERAND_LIMIT) if operands >= Bounds::MAX_OPERAND_COUNT
+            value: mutable i64 = Arithmetic::ZERO
+            while position < length and bytes[position] >= Character::ASCII_ZERO and bytes[position] <= Character::ASCII_NINE:
+                digit: i64 = (bytes[position] - Character::ASCII_ZERO).i64()
+                return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::LITERAL_OVERFLOW) if value > (Arithmetic::I64_MAX - digit) / Arithmetic::DECIMAL_BASE
+                value <- value * Arithmetic::DECIMAL_BASE + digit
+                position <- position + Cursor::INCREMENT
+            operands <- operands + Cursor::INCREMENT
+            return valid_node(value)
+
+        def parse_failure(value: DebuggerErrors::DebuggerError, consumed: usize) -> ExpressionParseResult:
+            return ExpressionParseResult{value: Arithmetic::ZERO, consumed: consumed, valid: false, failure: value}
+
+    public:
+        struct ExpressionParseResult:
+            value: mutable i64
+            consumed: mutable usize
+            valid: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def expression_parse(bytes: u8&, length: usize) -> ExpressionParseResult:
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::SOURCE_TOO_LONG), Bounds::MAX_SOURCE_BYTES) if length > Bounds::MAX_SOURCE_BYTES
+            position: mutable usize = 0
+            operands: mutable usize = 0
+            skip_whitespace(bytes, length, position)
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EMPTY_INPUT), position) if position >= length
+            expression: Node = parse_additive(bytes, length, position, Bounds::ROOT_DEPTH, operands)
+            return parse_failure(expression.failure, position) if not expression.valid
+            skip_whitespace(bytes, length, position)
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::TRAILING_INPUT), position) if position != length
+            return ExpressionParseResult{value: expression.value, consumed: position, valid: true, failure: DebuggerErrors::no_error()}

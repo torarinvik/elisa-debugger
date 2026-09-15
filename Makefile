@@ -57,6 +57,7 @@ DAP_VARIABLES_AFTER_STEP_FRAME_ID := $(shell expr $(DAP_VARIABLES_AFTER_STEP_STO
 DAP_VARIABLES_AFTER_STEP_REFERENCE := $(shell expr $(DAP_VARIABLES_AFTER_STEP_STOP_GENERATION) \* $(DAP_LOCALS_REFERENCE_STRIDE))
 MANAGED_ALLOCATIONS_CHECK := $(BUILD)/elisa-debugger-managed-allocations-check
 CONCURRENCY_RACES_CHECK := $(BUILD)/elisa-debugger-concurrency-races-check
+EXPRESSION_PARSER_CHECK := $(BUILD)/elisa-debugger-expression-parser-check
 COMPILER_EDIR_CALLS_FIXTURE := tests/compiler_edir_calls_fixture.elisa
 COMPILER_EDIR_CALLS_ARTIFACT := $(BUILD)/compiler_edir_calls.edir
 COMPILER_EDIR_CALLS_CHECK := $(BUILD)/elisa-debugger-compiler-edir-calls-check
@@ -140,7 +141,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
-.PHONY: managed-allocations-check concurrency-races-check timeline-capability-check
+.PHONY: managed-allocations-check concurrency-races-check expression-parser-check timeline-capability-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool
@@ -173,6 +174,7 @@ cli-flush-check: $(BUILD)/elisa-debugger-cli
 module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-edir-codec-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-managed-trace-service-check $(BUILD)/elisa-debugger-managed-memory-write-history-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-protocol-encoding-check $(BUILD)/elisa-debugger-protocol-framing-check $(BUILD)/elisa-debugger-remote-authentication-check $(BUILD)/elisa-debugger-remote-authorization-check $(BUILD)/elisa-debugger-trace-storage-decode-check $(BUILD)/elisa-debugger-trace-reader-encoded-check $(BUILD)/elisa-debugger-checkpoint-state-check $(BUILD)/elisa-debugger-trace-manifest-status-check $(BUILD)/elisa-debugger-adapter-recording-bounds-check $(BUILD)/elisa-debugger-runtime-status-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-request-operands-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-query-evaluator-check $(BUILD)/elisa-debugger-breakpoint-manager-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-integration-surface-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check $(BUILD)/elisa-debugger-dap-payload-check $(BUILD)/elisa-debugger-ffi-probe $(BUILD)/elisa-debugger-path-policy-check $(BUILD)/elisa-debugger-process-spawn-check $(BUILD)/elisa-debugger-build-runner-check
 module-check: concurrency-scheduler-check
 module-check: $(CONCURRENCY_RACES_CHECK)
+module-check: $(EXPRESSION_PARSER_CHECK)
 module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
@@ -223,6 +225,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-timeline-capability-check"
 	"$(MANAGED_ALLOCATIONS_CHECK)"
 	"$(CONCURRENCY_RACES_CHECK)"
+	"$(EXPRESSION_PARSER_CHECK)"
 	"$(DAP_STACK_FRAMES_CHECK)"
 	"$(BUILD)/elisa-debugger-managed-service-check"
 	"$(BUILD)/elisa-debugger-managed-trace-service-check"
@@ -911,6 +914,13 @@ $(CONCURRENCY_RACES_CHECK): tests/concurrency_races_check.elisa $(ELISA_BUILD_IN
 
 concurrency-races-check: $(CONCURRENCY_RACES_CHECK)
 	"$(CONCURRENCY_RACES_CHECK)"
+
+$(EXPRESSION_PARSER_CHECK): tests/expression_parser_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+expression-parser-check: $(EXPRESSION_PARSER_CHECK)
+	"$(EXPRESSION_PARSER_CHECK)"
 
 $(BUILD)/elisa-debugger-source-store-check: tests/source_store_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

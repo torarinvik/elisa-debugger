@@ -55,6 +55,7 @@ COMPILER_EDIR_LOOP_DAP_REVERSED_LOCALS_REFERENCE := $(shell expr $(COMPILER_EDIR
 DAP_VARIABLES_AFTER_STEP_STOP_GENERATION := 6
 DAP_VARIABLES_AFTER_STEP_FRAME_ID := $(shell expr $(DAP_VARIABLES_AFTER_STEP_STOP_GENERATION) \* $(DAP_STACK_FRAME_ID_STRIDE) + $(DAP_STACK_FRAME_ID_FIRST_OFFSET))
 DAP_VARIABLES_AFTER_STEP_REFERENCE := $(shell expr $(DAP_VARIABLES_AFTER_STEP_STOP_GENERATION) \* $(DAP_LOCALS_REFERENCE_STRIDE))
+MANAGED_ALLOCATIONS_CHECK := $(BUILD)/elisa-debugger-managed-allocations-check
 COMPILER_EDIR_CALLS_FIXTURE := tests/compiler_edir_calls_fixture.elisa
 COMPILER_EDIR_CALLS_ARTIFACT := $(BUILD)/compiler_edir_calls.edir
 COMPILER_EDIR_CALLS_REJECTION_LOG := $(BUILD)/compiler_edir_calls_rejection.log
@@ -139,6 +140,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
+.PHONY: managed-allocations-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool
@@ -172,6 +174,7 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 module-check: concurrency-scheduler-check
 module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
+module-check: $(MANAGED_ALLOCATIONS_CHECK)
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 
 # Keep the remote artifact transfer regression in the aggregate module gate.
@@ -216,6 +219,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-edir-codec-check"
 	"$(BUILD)/elisa-debugger-session-check"
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
+	"$(MANAGED_ALLOCATIONS_CHECK)"
 	"$(DAP_STACK_FRAMES_CHECK)"
 	"$(BUILD)/elisa-debugger-managed-service-check"
 	"$(BUILD)/elisa-debugger-managed-trace-service-check"
@@ -621,6 +625,13 @@ $(BUILD)/elisa-debugger-ffi-probe: tests/ffi_probe.elisa $(ELISA_COMPILER_BUILD_
 $(BUILD)/elisa-debugger-managed-inspection-check: tests/managed_inspection_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(MANAGED_ALLOCATIONS_CHECK): tests/managed_allocations_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+managed-allocations-check: $(MANAGED_ALLOCATIONS_CHECK)
+	"$(MANAGED_ALLOCATIONS_CHECK)"
 
 $(BUILD)/elisa-debugger-managed-service-check: tests/managed_service_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

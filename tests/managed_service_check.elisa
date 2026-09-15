@@ -173,6 +173,54 @@ const module ManagedReverseWire:
     REVERSE_STEP_OVER_JSON: cstr = "{\"method\":\"reverseStepOver\",\"id\":90}"
     REVERSE_STEP_OUT_JSON: cstr = "{\"method\":\"reverseStepOut\",\"id\":90}"
 
+const module ManagedAllocationService:
+    PROGRAM_VERSION: u32 = 1
+    INSTRUCTION_COUNT: u64 = 4
+    LOCAL_COUNT: u64 = 0
+    ALLOCATION_SIZE: i64 = 1
+    VALUE: i64 = 17
+    MEMORY_SLOT: i64 = 0
+    REQUEST_ID: u64 = 300
+    SESSION_ID: u64 = 301
+    RECORDING_ID: u64 = 302
+    COMPILER_ID: u64 = 303
+    RUNTIME_ID: u64 = 304
+    SOURCE_ID: u64 = 305
+    TARGET_ID: u64 = 306
+    METADATA_VERSION: u32 = 1
+    EXPECTED_COUNT: usize = 1
+    EXPECTED_START: u64 = 0
+    EXPECTED_LENGTH: u64 = 1
+    EXPECTED_INITIALIZED: u64 = 1
+    FAILURE: i64 = 76
+
+
+def managed_allocation_service_image() -> DebuggerEDIR::ProgramImage:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: ManagedAllocationService::PROGRAM_VERSION, instruction_count: ManagedAllocationService::INSTRUCTION_COUNT, local_count: ManagedAllocationService::LOCAL_COUNT, has_return: true}
+    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Allocate, a: ManagedAllocationService::ALLOCATION_SIZE, b: 0, source: zeroed}
+    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: ManagedAllocationService::VALUE, b: 0, source: zeroed}
+    image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreMemory, a: ManagedAllocationService::MEMORY_SLOT, b: 0, source: zeroed}
+    image.instructions[3] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
+    return image
+
+def managed_allocation_service_request(method: DebuggerProtocolRequest::RequestMethod) -> DebuggerProtocolRequest::Request:
+    return DebuggerProtocolRequest::Request{method: method, id: ManagedAllocationService::REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+
+def check_managed_allocations_service() -> i64:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(ManagedAllocationService::COMPILER_ID), runtime: DebuggerIdentity::debug_id(ManagedAllocationService::RUNTIME_ID), source: DebuggerIdentity::debug_id(ManagedAllocationService::SOURCE_ID), target: DebuggerIdentity::debug_id(ManagedAllocationService::TARGET_ID), metadata_version: ManagedAllocationService::METADATA_VERSION}
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(ManagedAllocationService::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, managed_allocation_service_image(), DebuggerIdentity::debug_id(ManagedAllocationService::RECORDING_ID))
+    launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, managed_allocation_service_request(DebuggerProtocolRequest::RequestMethod.Launch))
+    return ManagedAllocationService::FAILURE if not launched.accepted
+    continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, managed_allocation_service_request(DebuggerProtocolRequest::RequestMethod.Continue))
+    return ManagedAllocationService::FAILURE if not continued.accepted
+    page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedService::service_allocations(service, 0, 0)
+    return ManagedAllocationService::FAILURE if not DebuggerErrors::error_is_ok(page.failure) or page.count != ManagedAllocationService::EXPECTED_COUNT or page.next != 0 or not page.complete
+    allocation: DebuggerManagedAllocations::AllocationSnapshot = page.entries[0]
+    return ManagedAllocationService::FAILURE if allocation.start_slot != ManagedAllocationService::EXPECTED_START or allocation.length != ManagedAllocationService::EXPECTED_LENGTH or allocation.initialized_slots != ManagedAllocationService::EXPECTED_INITIALIZED or not DebuggerManagedAllocations::allocation_snapshot_is_fully_initialized(allocation)
+    return 0
+
 
 def managed_reverse_recursive_image() -> DebuggerEDIR::ProgramImage:
     image: mutable DebuggerEDIR::ProgramImage = zeroed
@@ -426,6 +474,8 @@ def main() -> i64:
     return Test::MANAGED_CHECKPOINT_SIDE_STATE_CHECK_RESULT if checkpoint_side_state_status != 0
     history_limit_status: i64 = check_continue_history_limit_error()
     return Test::MANAGED_HISTORY_LIMIT_CHECK_RESULT if history_limit_status != 0
+    allocation_service_status: i64 = check_managed_allocations_service()
+    return allocation_service_status if allocation_service_status != 0
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
     session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
     image: mutable DebuggerEDIR::ProgramImage = zeroed

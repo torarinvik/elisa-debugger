@@ -1,0 +1,101 @@
+include "../src/inspect/allocations.elisa"
+include "../src/replay/engine.elisa"
+include "../src/vm/edir.elisa"
+
+const module Test:
+    PROGRAM_VERSION: u32 = 1
+    PROGRAM_INSTRUCTION_COUNT: u64 = 7
+    PROGRAM_LOCAL_COUNT: u64 = 0
+    RUN_BUDGET: u64 = 16
+    ALLOCATION_ONE_SIZE: i64 = 2
+    ALLOCATION_TWO_SIZE: i64 = 1
+    FIRST_VALUE: i64 = 41
+    SECOND_VALUE: i64 = 42
+    FIRST_ALLOCATE_INDEX: usize = 0
+    FIRST_CONSTANT_INDEX: usize = 1
+    FIRST_STORE_INDEX: usize = 2
+    SECOND_ALLOCATE_INDEX: usize = 3
+    SECOND_CONSTANT_INDEX: usize = 4
+    SECOND_STORE_INDEX: usize = 5
+    RETURN_INDEX: usize = 6
+    FIRST_MEMORY_SLOT: i64 = 0
+    SECOND_MEMORY_SLOT: i64 = 2
+    RECORDING_ID: u64 = 99
+    FULL_EVENT_COUNT: usize = 7
+    PREFIX_EVENT_COUNT: usize = 3
+    EXPECTED_ALLOCATION_COUNT: usize = 2
+    EXPECTED_FIRST_ALLOCATION_ID: u64 = 1
+    EXPECTED_SECOND_ALLOCATION_ID: u64 = 4
+    EXPECTED_REGION_ID: u64 = 1
+    EXPECTED_GENERATION: u64 = 1
+    EXPECTED_FIRST_START: u64 = 0
+    EXPECTED_FIRST_LENGTH: u64 = 2
+    EXPECTED_FIRST_INITIALIZED: u64 = 1
+    EXPECTED_SECOND_START: u64 = 2
+    EXPECTED_SECOND_LENGTH: u64 = 1
+    EXPECTED_SECOND_INITIALIZED: u64 = 1
+    EXPECTED_FIRST_PAGE_NEXT: usize = 1
+    EXPECTED_OFFSET_PAGE: usize = 1
+    EXPECTED_EMPTY_OFFSET: usize = 2
+    EXPECTED_INVALID_OFFSET: usize = 65
+    UNUSED_OPERAND: i64 = 0
+    SUCCESS: i64 = 0
+    RESULT_RUN: i64 = 1
+    RESULT_PAGE: i64 = 2
+    RESULT_FIRST: i64 = 3
+    RESULT_SECOND: i64 = 4
+    RESULT_OFFSET: i64 = 5
+    RESULT_EMPTY: i64 = 6
+    RESULT_SEEK: i64 = 7
+    RESULT_PREFIX: i64 = 8
+    RESULT_INVALID: i64 = 9
+
+
+def instruction(opcode: DebuggerEDIR::Opcode, operand: i64) -> DebuggerEDIR::Instruction:
+    return DebuggerEDIR::Instruction{opcode: opcode, a: operand, b: Test::UNUSED_OPERAND, source: zeroed}
+
+def test_image() -> DebuggerEDIR::ProgramImage:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: Test::PROGRAM_VERSION, instruction_count: Test::PROGRAM_INSTRUCTION_COUNT, local_count: Test::PROGRAM_LOCAL_COUNT, has_return: true}
+    image.instructions[Test::FIRST_ALLOCATE_INDEX] <- instruction(DebuggerEDIR::Opcode.Allocate, Test::ALLOCATION_ONE_SIZE)
+    image.instructions[Test::FIRST_CONSTANT_INDEX] <- instruction(DebuggerEDIR::Opcode.Constant, Test::FIRST_VALUE)
+    image.instructions[Test::FIRST_STORE_INDEX] <- instruction(DebuggerEDIR::Opcode.StoreMemory, Test::FIRST_MEMORY_SLOT)
+    image.instructions[Test::SECOND_ALLOCATE_INDEX] <- instruction(DebuggerEDIR::Opcode.Allocate, Test::ALLOCATION_TWO_SIZE)
+    image.instructions[Test::SECOND_CONSTANT_INDEX] <- instruction(DebuggerEDIR::Opcode.Constant, Test::SECOND_VALUE)
+    image.instructions[Test::SECOND_STORE_INDEX] <- instruction(DebuggerEDIR::Opcode.StoreMemory, Test::SECOND_MEMORY_SLOT)
+    image.instructions[Test::RETURN_INDEX] <- instruction(DebuggerEDIR::Opcode.Return, Test::UNUSED_OPERAND)
+    return image
+
+def main() -> i64:
+    image: DebuggerEDIR::ProgramImage = test_image()
+    engine: mutable DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_new(image, DebuggerIdentity::debug_id(Test::RECORDING_ID))
+    DebuggerReplayEngine::replay_engine_run(engine, Test::RUN_BUDGET)
+    return Test::RESULT_RUN if engine.engine_error != DebuggerReplayEngine::EngineError.None or engine.event_count != Test::FULL_EVENT_COUNT or engine.machine.heap_next != 3
+
+    page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedAllocations::allocation_page(engine, 0, 0)
+    return Test::RESULT_PAGE if not DebuggerManagedAllocations::allocation_page_is_valid(page) or not DebuggerErrors::error_is_ok(page.failure) or page.count != Test::EXPECTED_ALLOCATION_COUNT or page.next != 0 or not page.complete
+    first: DebuggerManagedAllocations::AllocationSnapshot = page.entries[0]
+    return Test::RESULT_FIRST if first.identity.allocation.value != Test::EXPECTED_FIRST_ALLOCATION_ID or first.identity.generation != Test::EXPECTED_GENERATION or first.region.value != Test::EXPECTED_REGION_ID or first.branch.value != 0 or first.start_slot != Test::EXPECTED_FIRST_START or first.length != Test::EXPECTED_FIRST_LENGTH or first.allocated_event != 0 or first.released_event != 0 or first.initialized_slots != Test::EXPECTED_FIRST_INITIALIZED or first.state != DebuggerManagedAllocations::AllocationState.Live or first.complete or DebuggerManagedAllocations::allocation_snapshot_is_fully_initialized(first)
+    second: DebuggerManagedAllocations::AllocationSnapshot = page.entries[1]
+    return Test::RESULT_SECOND if second.identity.allocation.value != Test::EXPECTED_SECOND_ALLOCATION_ID or second.identity.generation != Test::EXPECTED_GENERATION or second.region.value != Test::EXPECTED_REGION_ID or second.branch.value != 0 or second.start_slot != Test::EXPECTED_SECOND_START or second.length != Test::EXPECTED_SECOND_LENGTH or second.allocated_event != Test::SECOND_ALLOCATE_INDEX.u64() or second.released_event != 0 or second.initialized_slots != Test::EXPECTED_SECOND_INITIALIZED or second.state != DebuggerManagedAllocations::AllocationState.Live or not second.complete or not DebuggerManagedAllocations::allocation_snapshot_is_fully_initialized(second)
+
+    offset_page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedAllocations::allocation_page(engine, Test::EXPECTED_OFFSET_PAGE, Test::EXPECTED_OFFSET_PAGE)
+    return Test::RESULT_OFFSET if offset_page.count != 1 or offset_page.entries[0].identity.allocation.value != Test::EXPECTED_SECOND_ALLOCATION_ID or offset_page.next != 0 or not offset_page.complete
+    empty_page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedAllocations::allocation_page(engine, Test::EXPECTED_EMPTY_OFFSET, Test::EXPECTED_OFFSET_PAGE)
+    return Test::RESULT_EMPTY if empty_page.count != 0 or empty_page.next != 0 or not empty_page.complete or not DebuggerErrors::error_is_ok(empty_page.failure)
+
+    current_machine: DebuggerEDIR::Machine = engine.machine
+    engine.machine.memory_initialized[1] <- true
+    historical_page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedAllocations::allocation_page_at(engine, Test::PREFIX_EVENT_COUNT, 0, 0)
+    return Test::RESULT_PREFIX if historical_page.count != 1 or historical_page.entries[0].initialized_slots != Test::EXPECTED_FIRST_INITIALIZED or not historical_page.complete
+    engine.machine <- current_machine
+
+    DebuggerReplayEngine::replay_engine_seek(engine, Test::PREFIX_EVENT_COUNT)
+    return Test::RESULT_SEEK if engine.engine_error != DebuggerReplayEngine::EngineError.None or engine.event_count != Test::PREFIX_EVENT_COUNT or engine.machine.heap_next != Test::ALLOCATION_ONE_SIZE.usize()
+    prefix_page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedAllocations::allocation_page(engine, 0, 0)
+    return Test::RESULT_PREFIX if prefix_page.count != 1 or prefix_page.entries[0].identity.allocation.value != Test::EXPECTED_FIRST_ALLOCATION_ID or prefix_page.entries[0].initialized_slots != Test::EXPECTED_FIRST_INITIALIZED or not prefix_page.complete
+
+    invalid_page: DebuggerManagedAllocations::AllocationPage = DebuggerManagedAllocations::allocation_page(engine, Test::EXPECTED_INVALID_OFFSET, 0)
+    return Test::RESULT_INVALID if invalid_page.failure.code != DebuggerErrors::ErrorCode.Corrupt or invalid_page.failure.detail != 4 or not invalid_page.complete
+
+    return Test::SUCCESS

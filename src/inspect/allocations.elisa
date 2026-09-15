@@ -1,0 +1,194 @@
+# Bounded managed allocation inspection.  The managed heap is currently
+# monotonic, so allocation records are reconstructed from immutable replay
+# checkpoints instead of maintaining a second mutable lifetime log.  The
+# result identifies the logical region, allocation event, generation, and
+# initialized cells at the selected stop position.
+
+include "../core/errors.elisa"
+include "../core/identity.elisa"
+include "../replay/engine.elisa"
+
+module DebuggerManagedAllocations:
+    private:
+        const module Capacity:
+            PAGE: usize = 16
+            MAX_MEMORY_SLOTS: usize = 64
+            MAX_HISTORY_EVENTS: usize = 64
+
+        const module Identity:
+            MANAGED_REGION_ID: u64 = 1
+            FIRST_ALLOCATION_ID: u64 = 1
+            FIRST_GENERATION: u64 = 1
+            MAX_BRANCH_ID: u64 = 18446744073709551615
+            NO_RELEASE_EVENT: u64 = 0
+
+        const module Request:
+            UNBOUNDED_PAGE: usize = 0
+            FIRST_ALLOCATION_INDEX: usize = 0
+
+        const module Detail:
+            ENGINE: u32 = 1
+            HISTORY: u32 = 2
+            ALLOCATION: u32 = 3
+            PAGE: u32 = 4
+
+        const module Sentinel:
+            NO_ALLOCATION_ID: u64 = 0
+
+
+        def allocation_page_failure(failure: DebuggerErrors::DebuggerError) -> AllocationPage:
+            page: mutable AllocationPage = zeroed
+            page.complete <- true
+            page.failure <- failure
+            return page
+
+        def allocation_failure(detail: u32) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, detail)
+
+        def allocation_range_is_valid(start: usize, length: usize) -> bool:
+            return false if length == 0 or start > Capacity::MAX_MEMORY_SLOTS
+            return false if length > Capacity::MAX_MEMORY_SLOTS - start
+            return true
+
+        def allocation_snapshot_from_event(engine: mutable DebuggerReplayEngine::ReplayEngine&, selected_machine: DebuggerEDIR::Machine&, event: usize, ordinal: usize) -> AllocationSnapshot:
+            result: mutable AllocationSnapshot = zeroed
+            snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[event]
+            instruction: DebuggerEDIR::Instruction = engine.image.instructions[snapshot.program_counter.usize()]
+            start: usize = snapshot.heap_next
+            length: usize = instruction.a.usize()
+            result.identity <- DebuggerIdentity::AllocationIdentity{
+                allocation: DebuggerIdentity::debug_id(event.u64() + Identity::FIRST_ALLOCATION_ID),
+                generation: Identity::FIRST_GENERATION,
+                offset: 0
+            }
+            result.region <- DebuggerIdentity::debug_id(Identity::MANAGED_REGION_ID)
+            result.branch <- engine.events[event].position.branch
+            result.start_slot <- start.u64()
+            result.length <- length.u64()
+            result.allocated_event <- event.u64()
+            result.released_event <- Identity::NO_RELEASE_EVENT
+            result.state <- AllocationState.Live
+            result.ordinal <- ordinal.u64()
+            for slot in 0..<length:
+                result.initialized_slots <- result.initialized_slots + 1 if selected_machine.memory_initialized[start + slot]
+            result.complete <- result.initialized_slots == result.length
+            return result
+
+    public:
+        enum AllocationState:
+            Live
+            Released
+            Unavailable
+
+        struct AllocationSnapshot:
+            identity: mutable DebuggerIdentity::AllocationIdentity
+            region: mutable DebuggerIdentity::DebugId
+            branch: mutable DebuggerIdentity::DebugId
+            start_slot: mutable u64
+            length: mutable u64
+            allocated_event: mutable u64
+            released_event: mutable u64
+            initialized_slots: mutable u64
+            ordinal: mutable u64
+            state: mutable AllocationState
+            complete: mutable bool
+
+        struct AllocationPage:
+            entries: mutable AllocationSnapshot[Capacity::PAGE]
+            first: mutable usize
+            count: mutable usize
+            next: mutable usize
+            complete: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def allocation_page_capacity() -> usize:
+            return Capacity::PAGE
+
+        def allocation_snapshot_is_live(value: AllocationSnapshot) -> bool:
+            return value.state == AllocationState.Live and value.released_event == Identity::NO_RELEASE_EVENT
+
+        def allocation_snapshot_is_fully_initialized(value: AllocationSnapshot) -> bool:
+            return allocation_snapshot_is_live(value) and value.complete and value.initialized_slots == value.length
+
+        def allocation_snapshot_is_valid(value: AllocationSnapshot) -> bool:
+            return false if value.identity.allocation.value == Sentinel::NO_ALLOCATION_ID or value.identity.generation == 0
+            return false if value.region.value == Sentinel::NO_ALLOCATION_ID or value.branch.value > Identity::MAX_BRANCH_ID
+            return false if value.length == 0 or value.initialized_slots > value.length
+            return false if value.start_slot > Capacity::MAX_MEMORY_SLOTS.u64() or value.length > Capacity::MAX_MEMORY_SLOTS.u64() - value.start_slot
+            return false if value.released_event != Identity::NO_RELEASE_EVENT and value.released_event <= value.allocated_event
+            return false if value.state == AllocationState.Live and value.released_event != Identity::NO_RELEASE_EVENT
+            return false if value.complete and value.initialized_slots != value.length
+            return true
+
+        def allocation_page_is_valid(page: mutable AllocationPage&) -> bool:
+            return false if not DebuggerErrors::error_is_well_formed(page.failure)
+            return false if page.count > Capacity::PAGE or page.first > Capacity::MAX_HISTORY_EVENTS
+            return false if page.complete and page.next != Request::UNBOUNDED_PAGE
+            return false if not page.complete and page.next <= page.first
+            for index in 0..<page.count:
+                return false if not allocation_snapshot_is_valid(page.entries[index])
+            return true
+
+        # Return a page of logical allocations visible at the current replay
+        # stop.  Event ordinals are stable within a recording; the branch is
+        # carried separately so clients never merge allocations from sibling
+        # speculative executions by address or ordinal alone.
+        def allocation_page_for_machine(engine: mutable DebuggerReplayEngine::ReplayEngine&, selected_machine: DebuggerEDIR::Machine&, selected_event: usize, offset: usize, requested: usize) -> AllocationPage:
+            limit: mutable usize = requested
+            limit <- Capacity::PAGE if requested == Request::UNBOUNDED_PAGE or requested > Capacity::PAGE
+            return allocation_page_failure(allocation_failure(Detail::PAGE)) if offset > Capacity::MAX_HISTORY_EVENTS
+            return allocation_page_failure(allocation_failure(Detail::ENGINE)) if not DebuggerEDIR::verify_image(engine.image).valid
+            return allocation_page_failure(allocation_failure(Detail::HISTORY)) if selected_event > engine.event_count or engine.event_count > Capacity::MAX_HISTORY_EVENTS or engine.event_count > DebuggerReplayEngine::replay_engine_history_capacity()
+            return allocation_page_failure(allocation_failure(Detail::ENGINE)) if selected_machine.heap_next > Capacity::MAX_MEMORY_SLOTS
+            page: mutable AllocationPage = zeroed
+            page.first <- offset
+            page.failure <- DebuggerErrors::no_error()
+            ordinal: mutable usize = Request::FIRST_ALLOCATION_INDEX
+            total: mutable usize = Request::FIRST_ALLOCATION_INDEX
+            for event in 0..<selected_event:
+                snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[event]
+                return allocation_page_failure(allocation_failure(Detail::HISTORY)) if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(engine, event, snapshot)
+                return allocation_page_failure(allocation_failure(Detail::HISTORY)) if engine.events[event].ordinal != event.u64()
+                continue if snapshot.program_counter >= engine.image.program.instruction_count
+                instruction: DebuggerEDIR::Instruction = engine.image.instructions[snapshot.program_counter.usize()]
+                continue if instruction.opcode != DebuggerEDIR::Opcode.Allocate
+                return allocation_page_failure(allocation_failure(Detail::ALLOCATION)) if instruction.a <= 0
+                start: usize = snapshot.heap_next
+                length: usize = instruction.a.usize()
+                return allocation_page_failure(allocation_failure(Detail::ALLOCATION)) if not allocation_range_is_valid(start, length)
+                return allocation_page_failure(allocation_failure(Detail::ALLOCATION)) if start + length > selected_machine.heap_next
+                if total >= offset and page.count < limit:
+                    value: AllocationSnapshot = allocation_snapshot_from_event(engine, selected_machine, event, ordinal)
+                    return allocation_page_failure(allocation_failure(Detail::ALLOCATION)) if not allocation_snapshot_is_valid(value)
+                    page.entries[page.count] <- value
+                    page.count <- page.count + 1
+                total <- total + 1
+                ordinal <- ordinal + 1
+            if offset >= total:
+                page.count <- 0
+                page.next <- Request::UNBOUNDED_PAGE
+                page.complete <- true
+                return page
+            if offset + page.count < total:
+                page.next <- offset + page.count
+                page.complete <- false
+            else:
+                page.next <- Request::UNBOUNDED_PAGE
+                page.complete <- true
+            return page
+
+        def allocation_page(engine: mutable DebuggerReplayEngine::ReplayEngine&, offset: usize, requested: usize) -> AllocationPage:
+            return allocation_page_for_machine(engine, engine.machine, engine.event_count, offset, requested)
+
+        # A stop at event N observes the machine state after events [0, N).
+        # Reading an earlier stop uses its immutable checkpoint, which keeps
+        # historical initialization and lifetime views independent of the
+        # live machine after the caller has moved forward.
+        def allocation_page_at(engine: mutable DebuggerReplayEngine::ReplayEngine&, event: usize, offset: usize, requested: usize) -> AllocationPage:
+            return allocation_page_failure(allocation_failure(Detail::HISTORY)) if event > engine.event_count
+            selected_machine: mutable DebuggerEDIR::Machine = engine.machine
+            if event < engine.event_count:
+                snapshot: DebuggerCheckpoint::MachineSnapshot = engine.history[event]
+                return allocation_page_failure(allocation_failure(Detail::HISTORY)) if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(engine, event, snapshot)
+                selected_machine <- DebuggerCheckpoint::snapshot_restore(snapshot)
+            return allocation_page_for_machine(engine, selected_machine, event, offset, requested)

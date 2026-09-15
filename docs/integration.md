@@ -79,7 +79,7 @@ fields, and errors.
 
 The supported compact request flow is `launch` with
 `arguments.program`, `setBreakpoints`, `pause`, `continue`, `step`,
-`reverseStep`, `seek`, the read-only `timeline` history extension, and bounded managed `memory` reads.
+`reverseStep`, `seek`, the read-only `timeline` history extension, bounded managed `memory` reads, and checkpoint/branch metadata.
 After launch, `threads` returns one logical `main` thread, including while the
 session is running. Pause before requesting `stack`, `scopes`, or `variables`.
 `program` must name a complete verified EDIR artifact. `variablesReference` is
@@ -105,13 +105,15 @@ request. Event and identity fields are decimal JSON strings. Providers without
 history return `UNSUPPORTED` or `UNAVAILABLE`. Validate the wire shape with the
 [timeline schema](../schemas/session-protocol-v1.timeline.schema.json).
 
-This endpoint does not implement attach, expression evaluation, or trace artifact transfer. `createSession` can establish process-scoped
-session ownership before launch; after that handshake, preserve the returned
-`sessionId` on every request and the returned `ownerToken` on every state
-changing request. Checkpoint,
-branch, comparison, and trace operations that need structured operands or
-results are not available through this compact endpoint merely because
-corresponding typed Elisa APIs exist. `discover` reports the compact endpoint's
+Checkpoint and branch requests return validated metadata (`event`/`stateHash`
+or a branch ID) and preserve the same stop-generation rules. This endpoint
+does not implement attach, expression evaluation, or trace artifact transfer.
+`createSession` can establish process-scoped session ownership before launch;
+after that handshake, preserve the returned `sessionId` on every request and
+the returned `ownerToken` on every state changing request. Comparison and
+trace operations that need structured operands or results are not available
+through this compact endpoint merely because corresponding typed Elisa APIs
+exist. `discover` reports the compact endpoint's
 capabilities, with process-inaccessible features disabled. Reverse execution
 uses the same managed service history that produces the timeline snapshot.
 

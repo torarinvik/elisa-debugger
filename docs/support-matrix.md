@@ -50,8 +50,10 @@ standalone macOS resource snapshot CLI is observational only and does not
 change those capability sets. The DAP adapter only advertises
 termination for the managed engine and does not advertise native disassembly.
 The native controller model retains a reported target-crash detail separately
-from an agent transport failure, but no process monitor or target-agent transport
-currently supplies those transitions.
+from an agent transport failure. Its Elisa agent buffer validates monotonic
+safe-point acknowledgements and refuses to resume after event loss; a platform
+process monitor and target-agent transport are still required before those
+transitions can be driven by a live native target.
 
 The headless process advertises its smaller wire surface through discovery.
 Source breakpoints are enabled for managed EDIR artifacts and use the compact

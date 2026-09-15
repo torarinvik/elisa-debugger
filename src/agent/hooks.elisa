@@ -7,6 +7,14 @@ module DebuggerAgent:
             AGENT_HOOKS_EVENT_CAPACITY: usize = 256
             AGENT_HOOKS_EVENT_KIND_MAX: u16 = 5
 
+        const module Generation:
+            FIRST_STOP_GENERATION: u64 = 1
+            STOP_GENERATION_INCREMENT: u64 = 1
+            MAX_STOP_GENERATION: u64 = 18446744073709551615
+
+        const module Sentinel:
+            NO_STOP_GENERATION: u64 = 0
+
 
     public:
         enum AgentEventKind:
@@ -28,6 +36,8 @@ module DebuggerAgent:
             stopped: mutable bool
             stop_acknowledged: mutable bool
             overflowed: mutable bool
+            stop_generation: mutable u64
+            acknowledged_generation: mutable u64
 
         def agent_buffer_new() -> AgentBuffer:
             buffer: mutable AgentBuffer = zeroed
@@ -35,6 +45,8 @@ module DebuggerAgent:
             buffer.stopped <- false
             buffer.stop_acknowledged <- false
             buffer.overflowed <- false
+            buffer.stop_generation <- Sentinel::NO_STOP_GENERATION
+            buffer.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
             return buffer
 
         def agent_publish(buffer: AgentBuffer, event: AgentEvent) -> AgentBuffer:
@@ -50,26 +62,50 @@ module DebuggerAgent:
             updated: mutable AgentBuffer = buffer
             updated.stopped <- true
             updated.stop_acknowledged <- false
+            if buffer.stop_generation == Generation::MAX_STOP_GENERATION:
+                updated.overflowed <- true
+                return updated
+            if buffer.stop_generation == Sentinel::NO_STOP_GENERATION:
+                updated.stop_generation <- Generation::FIRST_STOP_GENERATION
+            else:
+                updated.stop_generation <- buffer.stop_generation + Generation::STOP_GENERATION_INCREMENT
             return updated
 
         def agent_acknowledge_stop(buffer: AgentBuffer) -> AgentBuffer:
             updated: mutable AgentBuffer = buffer
-            updated.stop_acknowledged <- true if buffer.stopped
+            if buffer.stopped:
+                updated.stop_acknowledged <- true
+                updated.acknowledged_generation <- buffer.stop_generation
             return updated
 
         def agent_resume(buffer: AgentBuffer) -> AgentBuffer:
             updated: mutable AgentBuffer = buffer
             return updated if buffer.stopped and not buffer.stop_acknowledged
+            return updated if buffer.stop_acknowledged and not buffer.stopped
+            return updated if buffer.overflowed
             updated.stopped <- false
             updated.stop_acknowledged <- false
+            updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
             return updated
 
         def agent_is_exact(buffer: AgentBuffer) -> bool:
             return false if buffer.overflowed or buffer.count > Agent::AGENT_HOOKS_EVENT_CAPACITY
             return false if buffer.stop_acknowledged and not buffer.stopped
+            return false if buffer.stopped and buffer.stop_generation == Sentinel::NO_STOP_GENERATION
+            return false if buffer.acknowledged_generation > buffer.stop_generation
+            return false if buffer.stop_acknowledged and buffer.acknowledged_generation != buffer.stop_generation
+            return false if not buffer.stop_acknowledged and buffer.acknowledged_generation != Sentinel::NO_STOP_GENERATION and not buffer.stopped
             for index in 0..<buffer.count:
                 return false if buffer.events[index].ordinal != index.u64() or buffer.events[index].kind.u16() > Agent::AGENT_HOOKS_EVENT_KIND_MAX
             return true
 
         def agent_stop_is_acknowledged(buffer: AgentBuffer) -> bool:
-            return buffer.stopped and buffer.stop_acknowledged
+            return buffer.stopped and buffer.stop_generation != Sentinel::NO_STOP_GENERATION and buffer.stop_acknowledged and buffer.acknowledged_generation == buffer.stop_generation
+
+        def agent_can_resume(buffer: AgentBuffer) -> bool:
+            return false if buffer.overflowed
+            return false if buffer.stopped and not buffer.stop_acknowledged
+            return true
+
+        def agent_event_count(buffer: AgentBuffer) -> usize:
+            return buffer.count

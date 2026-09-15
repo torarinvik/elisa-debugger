@@ -3,6 +3,7 @@
 
 include "../engine/provider.elisa"
 include "../core/errors.elisa"
+include "../agent/hooks.elisa"
 
 module DebuggerNative:
     private:
@@ -14,6 +15,7 @@ module DebuggerNative:
             DETAIL_AGENT_IDENTITY: u32 = 2
             DETAIL_PROVIDER_KIND: u32 = 3
             NATIVE_CONTROLLER_DETAIL_DETAIL_STATE: u32 = 4
+            DETAIL_AGENT_BUFFER: u32 = 5
 
         const module Crash:
             CRASH_DETAIL_NONE: u32 = 0
@@ -36,13 +38,14 @@ module DebuggerNative:
 
         struct NativeController:
             agent: mutable AgentIdentity
+            agent_buffer: mutable DebuggerAgent::AgentBuffer
             status: mutable NativeStopStatus
             provider: mutable DebuggerEngine::Provider
             crash_detail: mutable u32
             last_error: mutable DebuggerErrors::DebuggerError
 
         def native_controller_new(provider: DebuggerEngine::Provider) -> NativeController:
-            return NativeController{agent: AgentIdentity{protocol_major: 0, build: 0, target: 0}, status: NativeStopStatus.Detached, provider: provider, crash_detail: Crash::CRASH_DETAIL_NONE, last_error: DebuggerErrors::no_error()}
+            return NativeController{agent: AgentIdentity{protocol_major: 0, build: 0, target: 0}, agent_buffer: DebuggerAgent::agent_buffer_new(), status: NativeStopStatus.Detached, provider: provider, crash_detail: Crash::CRASH_DETAIL_NONE, last_error: DebuggerErrors::no_error()}
 
         def native_attach(controller: NativeController, agent: AgentIdentity) -> NativeController:
             updated: mutable NativeController = controller
@@ -62,6 +65,7 @@ module DebuggerNative:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::DETAIL_AGENT_IDENTITY)
                 return updated
             updated.agent <- agent
+            updated.agent_buffer <- DebuggerAgent::agent_buffer_new()
             updated.status <- NativeStopStatus.Attached
             updated.crash_detail <- Crash::CRASH_DETAIL_NONE
             updated.last_error <- DebuggerErrors::no_error()
@@ -75,6 +79,7 @@ module DebuggerNative:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
             updated.status <- NativeStopStatus.Crashed
+            updated.agent_buffer <- DebuggerAgent::agent_acknowledge_stop(DebuggerAgent::agent_request_stop(controller.agent_buffer))
             updated.crash_detail <- detail
             updated.last_error <- DebuggerErrors::no_error()
             return updated
@@ -87,6 +92,7 @@ module DebuggerNative:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
             updated.status <- NativeStopStatus.AgentFailed
+            updated.agent_buffer <- DebuggerAgent::agent_request_stop(controller.agent_buffer)
             updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, false, detail)
             return updated
 
@@ -96,6 +102,7 @@ module DebuggerNative:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
             updated.status <- NativeStopStatus.Pausing
+            updated.agent_buffer <- DebuggerAgent::agent_request_stop(controller.agent_buffer)
             updated.last_error <- DebuggerErrors::no_error()
             return updated
 
@@ -106,6 +113,8 @@ module DebuggerNative:
             if controller.status != NativeStopStatus.Pausing:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
+            updated.agent_buffer <- DebuggerAgent::agent_acknowledge_stop(controller.agent_buffer)
+            return native_agent_failed(updated, Detail::DETAIL_AGENT_BUFFER) if not DebuggerAgent::agent_stop_is_acknowledged(updated.agent_buffer)
             updated.status <- NativeStopStatus.Stopped
             updated.last_error <- DebuggerErrors::no_error()
             return updated
@@ -115,6 +124,8 @@ module DebuggerNative:
             if controller.status != NativeStopStatus.Stopped:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
+            updated.agent_buffer <- DebuggerAgent::agent_resume(controller.agent_buffer)
+            return native_agent_failed(updated, Detail::DETAIL_AGENT_BUFFER) if not DebuggerAgent::agent_can_resume(updated.agent_buffer)
             updated.status <- NativeStopStatus.Attached
             updated.last_error <- DebuggerErrors::no_error()
             return updated
@@ -133,6 +144,7 @@ module DebuggerNative:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, false, controller.last_error.detail)
                 return updated
             updated.status <- NativeStopStatus.Detached
+            updated.agent_buffer <- DebuggerAgent::agent_resume(controller.agent_buffer)
             updated.agent.protocol_major <- 0
             updated.agent.build <- 0
             updated.agent.target <- 0
@@ -143,6 +155,28 @@ module DebuggerNative:
         def native_can_inspect(controller: NativeController) -> bool:
             return false if controller.status != NativeStopStatus.Stopped and controller.status != NativeStopStatus.Crashed
             return DebuggerErrors::error_is_ok(controller.last_error) or controller.last_error.code == DebuggerErrors::ErrorCode.InvalidState
+
+        # Agent events are accepted only while the target is live. A malformed
+        # ordinal, unknown kind, or full buffer makes the live state unsafe to
+        # inspect and is reported as an agent transport failure.
+        def native_publish_agent_event(controller: NativeController, event: DebuggerAgent::AgentEvent) -> NativeController:
+            updated: mutable NativeController = controller
+            if controller.status != NativeStopStatus.Attached and controller.status != NativeStopStatus.Pausing:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
+                return updated
+            updated.agent_buffer <- DebuggerAgent::agent_publish(controller.agent_buffer, event)
+            if not DebuggerAgent::agent_is_exact(updated.agent_buffer):
+                updated.status <- NativeStopStatus.AgentFailed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Transport, false, Detail::DETAIL_AGENT_BUFFER)
+                return updated
+            updated.last_error <- DebuggerErrors::no_error()
+            return updated
+
+        def native_agent_is_exact(controller: NativeController) -> bool:
+            return DebuggerAgent::agent_is_exact(controller.agent_buffer) and controller.status != NativeStopStatus.AgentFailed
+
+        def native_agent_event_count(controller: NativeController) -> usize:
+            return DebuggerAgent::agent_event_count(controller.agent_buffer)
 
         def native_exact_replay_error() -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::DETAIL_AGENT_PROTOCOL)

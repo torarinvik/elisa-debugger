@@ -26,6 +26,18 @@ advertise their narrower capability sets and reject unsupported lifecycle or
 replay claims. A provider must return a typed capability or state error before
 an adapter exposes an operation.
 
+The Elisa agent/controller boundary carries a bounded safe-point handshake.
+Each stop request receives a monotonic generation, and the controller exposes
+`Stopped` only after the agent acknowledges that same generation. Event
+ordinals are checked against the bounded buffer cursor; unknown event kinds,
+gaps, capacity exhaustion, and invalid acknowledgement state downgrade the
+live controller to `AgentFailed` with a transport error. An overflowed buffer
+cannot resume, so an exact capture cannot silently continue after losing an
+event. Target crashes retain captured agent state and remain inspectable as a
+crash, while agent transport failure remains a separate state. This is a
+controller and testable agent contract; it does not claim a platform process
+transport or make native history/replay capabilities available.
+
 ## State and concurrency
 
 Every mutating session request is checked against a stop generation. A stale

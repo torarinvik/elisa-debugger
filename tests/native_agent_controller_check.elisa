@@ -1,0 +1,64 @@
+include "../src/agent/hooks.elisa"
+include "../src/native/controller.elisa"
+
+
+const module TestIdentity:
+    PROTOCOL_MAJOR: u32 = 1
+    AGENT_BUILD: u64 = 11
+    AGENT_TARGET: u64 = 22
+
+const module TestEvent:
+    FIRST_ORDINAL: u64 = 0
+    SECOND_ORDINAL: u64 = 1
+    INVALID_ORDINAL: u64 = 9
+    PAYLOAD_HASH: u64 = 77
+    STOP_GENERATION_INCREMENT: u64 = 1
+    FIRST_EVENT_COUNT: usize = 1
+    SECOND_EVENT_COUNT: usize = 2
+
+const module TestResult:
+    REQUEST_GENERATION_FAILURE: i64 = 1
+    ACKNOWLEDGEMENT_FAILURE: i64 = 2
+    RESUME_FAILURE: i64 = 3
+    OVERFLOW_FAILURE: i64 = 4
+    CONTROLLER_ATTACH_FAILURE: i64 = 5
+    CONTROLLER_EVENT_FAILURE: i64 = 6
+    CONTROLLER_STOP_FAILURE: i64 = 7
+    CONTROLLER_RESUME_FAILURE: i64 = 8
+    CONTROLLER_OVERFLOW_FAILURE: i64 = 9
+
+
+def main() -> i64:
+    buffer: mutable DebuggerAgent::AgentBuffer = DebuggerAgent::agent_buffer_new()
+    buffer <- DebuggerAgent::agent_request_stop(buffer)
+    return TestResult::REQUEST_GENERATION_FAILURE if buffer.stop_generation == 0 or not buffer.stopped or buffer.stop_acknowledged
+    first_generation: u64 = buffer.stop_generation
+    buffer <- DebuggerAgent::agent_acknowledge_stop(buffer)
+    return TestResult::ACKNOWLEDGEMENT_FAILURE if not DebuggerAgent::agent_stop_is_acknowledged(buffer) or buffer.acknowledged_generation != first_generation or not DebuggerAgent::agent_is_exact(buffer)
+    buffer <- DebuggerAgent::agent_resume(buffer)
+    return TestResult::RESUME_FAILURE if buffer.stopped or buffer.stop_acknowledged or not DebuggerAgent::agent_can_resume(buffer)
+    buffer <- DebuggerAgent::agent_request_stop(buffer)
+    return TestResult::REQUEST_GENERATION_FAILURE if buffer.stop_generation != first_generation + TestEvent::STOP_GENERATION_INCREMENT
+    invalid: mutable DebuggerAgent::AgentBuffer = DebuggerAgent::agent_publish(buffer, DebuggerAgent::AgentEvent{kind: DebuggerAgent::AgentEventKind.SafePoint, ordinal: TestEvent::INVALID_ORDINAL, payload_hash: TestEvent::PAYLOAD_HASH})
+    return TestResult::OVERFLOW_FAILURE if not invalid.overflowed or invalid.count != 0 or DebuggerAgent::agent_is_exact(invalid)
+    invalid <- DebuggerAgent::agent_acknowledge_stop(invalid)
+    blocked: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_resume(invalid)
+    return TestResult::OVERFLOW_FAILURE if not blocked.stopped or not blocked.stop_acknowledged or DebuggerAgent::agent_can_resume(blocked)
+
+    provider: DebuggerEngine::Provider = DebuggerEngine::provider_new(DebuggerCapabilities::EngineKind.InstrumentedNative, DebuggerCapabilities::native_live_capabilities())
+    controller: mutable DebuggerNative::NativeController = DebuggerNative::native_controller_new(provider)
+    controller <- DebuggerNative::native_attach(controller, DebuggerNative::AgentIdentity{protocol_major: TestIdentity::PROTOCOL_MAJOR, build: TestIdentity::AGENT_BUILD, target: TestIdentity::AGENT_TARGET})
+    return TestResult::CONTROLLER_ATTACH_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Attached or not DebuggerNative::native_agent_is_exact(controller)
+    controller <- DebuggerNative::native_publish_agent_event(controller, DebuggerAgent::AgentEvent{kind: DebuggerAgent::AgentEventKind.SafePoint, ordinal: TestEvent::FIRST_ORDINAL, payload_hash: TestEvent::PAYLOAD_HASH})
+    return TestResult::CONTROLLER_EVENT_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Attached or DebuggerNative::native_agent_event_count(controller) != TestEvent::FIRST_EVENT_COUNT or not DebuggerNative::native_agent_is_exact(controller)
+    controller <- DebuggerNative::native_pause(controller)
+    return TestResult::CONTROLLER_STOP_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Pausing or not controller.agent_buffer.stopped
+    controller <- DebuggerNative::native_acknowledge_pause(controller)
+    return TestResult::CONTROLLER_STOP_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerAgent::agent_stop_is_acknowledged(controller.agent_buffer) or not DebuggerNative::native_can_inspect(controller)
+    controller <- DebuggerNative::native_resume(controller)
+    return TestResult::CONTROLLER_RESUME_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Attached or controller.agent_buffer.stopped
+    controller <- DebuggerNative::native_publish_agent_event(controller, DebuggerAgent::AgentEvent{kind: DebuggerAgent::AgentEventKind.ThreadStart, ordinal: TestEvent::SECOND_ORDINAL, payload_hash: TestEvent::PAYLOAD_HASH})
+    return TestResult::CONTROLLER_EVENT_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Attached or DebuggerNative::native_agent_event_count(controller) != TestEvent::SECOND_EVENT_COUNT
+    controller <- DebuggerNative::native_publish_agent_event(controller, DebuggerAgent::AgentEvent{kind: DebuggerAgent::AgentEventKind.SafePoint, ordinal: TestEvent::INVALID_ORDINAL, payload_hash: TestEvent::PAYLOAD_HASH})
+    return TestResult::CONTROLLER_OVERFLOW_FAILURE if controller.status != DebuggerNative::NativeStopStatus.AgentFailed or DebuggerNative::native_agent_is_exact(controller) or controller.last_error.code != DebuggerErrors::ErrorCode.Transport
+    return 0

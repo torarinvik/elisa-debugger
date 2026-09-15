@@ -138,7 +138,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
 .PHONY: build-runner-check
-.PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool
+.PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool
 .PHONY: native-dwarf-line-check native-elf-dwarf-line-check
 .PHONY: native-macho-dwarf-line-check
@@ -166,6 +166,7 @@ cli-flush-check: $(BUILD)/elisa-debugger-cli
 module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-module-data-check $(BUILD)/elisa-debugger-module-protocol-check $(BUILD)/elisa-debugger-module-trace-codec-check $(BUILD)/elisa-debugger-module-trace-recording-check $(BUILD)/elisa-debugger-module-trace-bundle-check $(BUILD)/elisa-debugger-edir-call-check $(BUILD)/elisa-debugger-edir-codec-check $(BUILD)/elisa-debugger-session-check $(BUILD)/elisa-debugger-managed-inspection-check $(BUILD)/elisa-debugger-managed-service-check $(BUILD)/elisa-debugger-managed-trace-service-check $(BUILD)/elisa-debugger-managed-memory-write-history-check $(BUILD)/elisa-debugger-protocol-events-check $(BUILD)/elisa-debugger-protocol-encoding-check $(BUILD)/elisa-debugger-protocol-framing-check $(BUILD)/elisa-debugger-remote-authentication-check $(BUILD)/elisa-debugger-remote-authorization-check $(BUILD)/elisa-debugger-trace-storage-decode-check $(BUILD)/elisa-debugger-trace-reader-encoded-check $(BUILD)/elisa-debugger-checkpoint-state-check $(BUILD)/elisa-debugger-trace-manifest-status-check $(BUILD)/elisa-debugger-adapter-recording-bounds-check $(BUILD)/elisa-debugger-runtime-status-check $(BUILD)/elisa-debugger-source-store-check $(BUILD)/elisa-debugger-request-whitespace-check $(BUILD)/elisa-debugger-request-operands-check $(BUILD)/elisa-debugger-cli-commands-check $(BUILD)/elisa-debugger-value-store-check $(BUILD)/elisa-debugger-historical-values-check $(BUILD)/elisa-debugger-query-engine-check $(BUILD)/elisa-debugger-query-evaluator-check $(BUILD)/elisa-debugger-breakpoint-manager-check $(BUILD)/elisa-debugger-advanced-analysis-check $(BUILD)/elisa-debugger-integration-contract-check $(BUILD)/elisa-debugger-integration-surface-check $(BUILD)/elisa-debugger-trace-retention-check $(BUILD)/elisa-debugger-coordinator-seek-check $(BUILD)/elisa-debugger-capabilities-check $(BUILD)/elisa-debugger-dap-payload-check $(BUILD)/elisa-debugger-ffi-probe $(BUILD)/elisa-debugger-path-policy-check $(BUILD)/elisa-debugger-process-spawn-check $(BUILD)/elisa-debugger-build-runner-check
 module-check: concurrency-scheduler-check
 module-check: native-breakpoint-lifecycle-check
+module-check: native-agent-controller-check
 
 # Keep the remote artifact transfer regression in the aggregate module gate.
 module-check: $(BUILD)/elisa-debugger-remote-artifacts-check
@@ -234,6 +235,7 @@ ifeq ($(shell uname -s),Darwin)
 endif
 	"$(BUILD)/elisa-debugger-native-symbols-identity-check"
 	"$(BUILD)/elisa-debugger-native-symbol-loader-check"
+	"$(BUILD)/elisa-debugger-native-agent-controller-check"
 	"$(BUILD)/elisa-debugger-checkpoint-state-check"
 	"$(BUILD)/elisa-debugger-full-checkpoint-codec-check"
 	"$(BUILD)/elisa-debugger-dap-events-check"
@@ -813,6 +815,13 @@ $(BUILD)/elisa-debugger-native-controller-check: tests/native_controller_check.e
 
 native-controller-check: $(BUILD)/elisa-debugger-native-controller-check
 	"$(BUILD)/elisa-debugger-native-controller-check"
+
+$(BUILD)/elisa-debugger-native-agent-controller-check: tests/native_agent_controller_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-agent-controller-check: $(BUILD)/elisa-debugger-native-agent-controller-check
+	"$(BUILD)/elisa-debugger-native-agent-controller-check"
 
 $(BUILD)/elisa-debugger-native-breakpoint-lifecycle-check: tests/native_breakpoint_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

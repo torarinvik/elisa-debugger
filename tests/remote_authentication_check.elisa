@@ -13,6 +13,7 @@ const module Test:
     NO_QUOTA_REMAINING: u64 = 0
     QUOTA_REMAINING_FAILURE: i64 = 19
     DISCONNECTED_QUOTA_REMAINING_FAILURE: i64 = 20
+    QUOTA_BEGIN_BYPASS_FAILURE: i64 = 21
 
 
 def main() -> i64:
@@ -82,4 +83,14 @@ def main() -> i64:
     quota_channel <- DebuggerRemote::remote_disconnect(quota_channel)
     return Test::DISCONNECTED_QUOTA_REMAINING_FAILURE if DebuggerRemote::remote_quota_remaining(quota_channel) != Test::NO_QUOTA_REMAINING
     return 8 if not quota_channel.quota_exceeded or quota_channel.last_error.code != DebuggerErrors::ErrorCode.ResourceLimit or DebuggerRemote::remote_reconnect(quota_channel).state != DebuggerRemote::RemoteState.Disconnected
+    quota_channel <- DebuggerRemote::remote_begin(quota_channel)
+    return Test::QUOTA_BEGIN_BYPASS_FAILURE if quota_channel.state != DebuggerRemote::RemoteState.Disconnected or not quota_channel.quota_exceeded or quota_channel.last_error.code != DebuggerErrors::ErrorCode.ResourceLimit
+    direct_quota_handshake: mutable DebuggerRemote::RemoteChannel = quota_channel
+    direct_quota_handshake.state <- DebuggerRemote::RemoteState.Authenticating
+    direct_quota_handshake.handshake.authenticated <- true
+    direct_quota_handshake <- DebuggerRemote::remote_accept_handshake(direct_quota_handshake, handshake)
+    return Test::QUOTA_BEGIN_BYPASS_FAILURE if direct_quota_handshake.state != DebuggerRemote::RemoteState.Failed or not direct_quota_handshake.quota_exceeded or direct_quota_handshake.last_error.code != DebuggerErrors::ErrorCode.ResourceLimit
+    quota_channel <- DebuggerRemote::remote_authenticate(quota_channel, Test::EXPECTED_CREDENTIAL, Test::EXPECTED_CREDENTIAL)
+    quota_channel <- DebuggerRemote::remote_accept_handshake(quota_channel, handshake)
+    return Test::QUOTA_BEGIN_BYPASS_FAILURE if DebuggerRemote::remote_is_connected(quota_channel) or not quota_channel.quota_exceeded or DebuggerRemote::remote_quota_remaining(quota_channel) != Test::NO_QUOTA_REMAINING
     return 0

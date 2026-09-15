@@ -88,6 +88,7 @@ module DebuggerRemote:
 
         def remote_begin(channel: RemoteChannel) -> RemoteChannel:
             updated: mutable RemoteChannel = channel
+            return updated if channel.quota_exceeded
             return updated if channel.state != RemoteState.Disconnected
             return updated if channel.auth_attempts >= RemoteLimits::REMOTE_MAX_AUTH_ATTEMPTS
             updated.state <- RemoteState.Authenticating
@@ -125,6 +126,10 @@ module DebuggerRemote:
             if channel.state != RemoteState.Authenticating:
                 updated.state <- RemoteState.Failed
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
+                return updated
+            if channel.quota_exceeded:
+                updated.state <- RemoteState.Failed
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_QUOTA)
                 return updated
             if handshake.protocol_major != RemoteMetadata::REMOTE_PROTOCOL_MAJOR or handshake.protocol_minor > RemoteMetadata::REMOTE_PROTOCOL_MINOR or handshake.engine != RemoteMetadata::REMOTE_ENGINE_MANAGED or handshake.trace_schema != RemoteMetadata::REMOTE_TRACE_SCHEMA:
                 updated.state <- RemoteState.Failed
@@ -199,6 +204,9 @@ module DebuggerRemote:
             authorization: DebuggerErrors::DebuggerError = remote_authorize(channel, RemoteOperation.ArtifactTransfer)
             if not DebuggerErrors::error_is_ok(authorization):
                 updated.last_error <- authorization
+                return updated
+            if channel.artifact.state == DebuggerRemoteArtifacts::TransferState.Empty:
+                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::PROTOCOL_REMOTE_ERROR_DETAIL_DETAIL_STATE)
                 return updated
             updated.artifact <- DebuggerRemoteArtifacts::transfer_finish(channel.artifact)
             updated.last_error <- updated.artifact.last_error

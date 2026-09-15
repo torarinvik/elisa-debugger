@@ -29,12 +29,14 @@ const module Test:
     FRAME_LOCAL_INDEX: usize = 0
     MEMORY_INDEX: usize = 0
     RESOURCE_BYTES: usize = 5
+    RESOURCE_FIRST_INDEX: usize = 0
     RESOURCE_CURSOR: usize = 2
     RESOURCE_BYTE_0: u8 = 11
     RESOURCE_BYTE_1: u8 = 22
     RESOURCE_BYTE_2: u8 = 33
     RESOURCE_BYTE_3: u8 = 44
     RESOURCE_BYTE_4: u8 = 55
+    RESOURCE_MUTATED_BYTE: u8 = 66
     TRUNCATION: usize = 1
     DECODE_ROUND_TRIP_FAILURE: i64 = 1
     TASK_ROUND_TRIP_FAILURE: i64 = 2
@@ -88,6 +90,7 @@ const module Test:
     TEST_SUCCESS: i64 = 0
     TRACE_SCHEMA: u32 = 1
     TRACE_EVENT_HASH: u64 = 9901
+    RESOURCE_SNAPSHOT_ISOLATION_FAILURE: i64 = 44
     TRACE_EVENT_SEQUENCE: u64 = 2
     TRACE_FOOTER_SEQUENCE: u64 = 3
     TRACE_CHUNK_COUNT: u64 = 3
@@ -239,6 +242,18 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     machine_probe: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(machine, DebuggerIdentity::debug_id(Test::CHECKPOINT_EVENT + 1), Test::CHECKPOINT_EVENT, 0)
     state_hash: u64 = DebuggerCheckpoint::snapshot_state_hash(machine_probe)
     return DebuggerFullCheckpoint::full_checkpoint_capture_with_adapters(machine, tasks, effects, resources, adapters, DebuggerIdentity::debug_id(Test::RECORDING_ID), DebuggerIdentity::debug_id(Test::BRANCH_ID), Test::CHECKPOINT_EVENT, state_hash, test_build_identity(), Test::IMAGE_FINGERPRINT, true)
+
+def check_resource_snapshot_isolation() -> i64:
+    resources: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_new(DebuggerVirtualResources::ResourceMode.Recording)
+    handle: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), true, Test::RESOURCE_GENERATION)
+    data: mutable u8[Test::RESOURCE_BYTES] = zeroed
+    data[Test::RESOURCE_FIRST_INDEX] <- Test::RESOURCE_BYTE_0
+    seeded: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(resources, handle, data[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_BYTES)
+    return Test::RESOURCE_SNAPSHOT_ISOLATION_FAILURE if not DebuggerErrors::error_is_ok(seeded)
+    snapshot: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_snapshot(resources)
+    snapshot.files[Test::RESOURCE_FIRST_INDEX].bytes[Test::RESOURCE_FIRST_INDEX] <- Test::RESOURCE_MUTATED_BYTE
+    return Test::RESOURCE_SNAPSHOT_ISOLATION_FAILURE if resources.files[Test::RESOURCE_FIRST_INDEX].bytes[Test::RESOURCE_FIRST_INDEX] != Test::RESOURCE_BYTE_0 or snapshot.files[Test::RESOURCE_FIRST_INDEX].bytes[Test::RESOURCE_FIRST_INDEX] != Test::RESOURCE_MUTATED_BYTE
+    return Test::TEST_SUCCESS
 
 def checkpoint_manifest_chunk(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerTraceStorage::StoredChunk:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -560,6 +575,8 @@ def check_rejects_malformed_inputs() -> i64:
     return 0
 
 def main() -> i64:
+    resource_snapshot_status: i64 = check_resource_snapshot_isolation()
+    return resource_snapshot_status if resource_snapshot_status != Test::TEST_SUCCESS
     fingerprint: i64 = check_artifact_fingerprint()
     return fingerprint if fingerprint != 0
     round_trip: i64 = check_round_trip()

@@ -119,6 +119,12 @@ last verified prefix and downgrades capabilities at that boundary. Retention
 marks only unpinned, unreferenced chunks for collection so checkpoint and
 branch dependency closures remain recoverable after interrupted cleanup.
 
+Durable trace file reads and writes reject any path containing a parent
+directory component before opening, staging, or renaming a file. This keeps
+the bounded trace API from turning a caller-controlled relative path into an
+escape from its selected trace directory while preserving ordinary absolute
+and nested paths for host integrations.
+
 ## Native artifact formats
 
 Native artifact discovery keeps format readers independent: `DebuggerNativeElf`

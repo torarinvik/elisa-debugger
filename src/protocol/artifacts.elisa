@@ -17,6 +17,9 @@ module DebuggerRemoteArtifacts:
             PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_SIZE: u32 = 3
             PROTOCOL_ARTIFACTS_ERROR_DETAIL_DETAIL_CHECKSUM: u32 = 4
 
+        const module Validation:
+            EMPTY_EXPECTED_CHECKSUM: u64 = 0
+
         const module TransferLimits:
             ARTIFACT_CHUNK_CAPACITY: usize = 16
             ARTIFACT_CHUNK_BYTES: usize = 512
@@ -117,10 +120,12 @@ module DebuggerRemoteArtifacts:
 
         def transfer_is_valid(transfer: ArtifactTransfer) -> bool:
             if transfer.state == TransferState.Empty:
-                return transfer.expected_size == 0 and transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == Checksum::ARTIFACT_HASH_OFFSET_BASIS
+                return transfer.expected_size == 0 and transfer.expected_checksum == Validation::EMPTY_EXPECTED_CHECKSUM and transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == Checksum::ARTIFACT_HASH_OFFSET_BASIS and DebuggerErrors::error_is_ok(transfer.last_error)
             if transfer.state == TransferState.Failed and transfer.expected_size == 0:
-                return transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == Checksum::ARTIFACT_HASH_OFFSET_BASIS
+                return transfer.expected_checksum == Validation::EMPTY_EXPECTED_CHECKSUM and transfer.received_size == 0 and transfer.next_sequence == 0 and transfer.checksum == Checksum::ARTIFACT_HASH_OFFSET_BASIS and DebuggerErrors::error_is_well_formed(transfer.last_error) and not DebuggerErrors::error_is_ok(transfer.last_error)
             return false if transfer.expected_size == 0 or transfer.expected_size > TransferLimits::ARTIFACT_MAX_BYTES or transfer.received_size > transfer.expected_size or transfer.next_sequence > TransferLimits::ARTIFACT_MAX_SEQUENCE
+            return false if not DebuggerErrors::error_is_well_formed(transfer.last_error)
+            return false if transfer.state == TransferState.Receiving and not DebuggerErrors::error_is_ok(transfer.last_error)
             return false if not transfer_checksum_matches(transfer)
             return false if transfer.state == TransferState.Failed and DebuggerErrors::error_is_ok(transfer.last_error)
             return false if transfer.state == TransferState.Complete and not transfer_is_complete(transfer)

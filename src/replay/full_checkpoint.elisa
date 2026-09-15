@@ -78,8 +78,10 @@ module DebuggerFullCheckpoint:
             updated: mutable u64 = checkpoint_hash_u64(hash, task.id.value)
             updated <- checkpoint_hash_u64(updated, task.parent.value)
             updated <- checkpoint_hash_u16(updated, task.state.u16())
-            updated <- checkpoint_hash_u64(updated, task.logical_time)
-            return checkpoint_hash_u64(updated, task.os_thread)
+            # OS thread numbers are host attributes. They can be reused or
+            # remapped when a checkpoint is restored on another machine, so
+            # canonical checkpoint identity must depend on logical task state.
+            return checkpoint_hash_u64(updated, task.logical_time)
 
         def checkpoint_hash_adapter_error(hash: u64, adapter_failure: DebuggerErrors::DebuggerError) -> u64:
             updated: mutable u64 = checkpoint_hash_u16(hash, adapter_failure.code.u16())
@@ -130,7 +132,7 @@ module DebuggerFullCheckpoint:
                     updated <- checkpoint_hash_byte(updated, record.bytes[byte_index])
             return updated
 
-        def checkpoint_hash_side_state(checkpoint: ManagedCheckpoint) -> u64:
+        def checkpoint_hash_side_state(checkpoint: ManagedCheckpoint&) -> u64:
             return Full::CHECKPOINT_INVALID_HASH if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks) or not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or not DebuggerVirtualResources::resources_is_valid(checkpoint.resources) or not DebuggerReplayAdapters::adapter_snapshot_is_valid(checkpoint.adapters)
             hash: mutable u64 = Full::CHECKPOINT_HASH_OFFSET_BASIS
             hash <- checkpoint_hash_u32(hash, checkpoint.schema)
@@ -224,7 +226,7 @@ module DebuggerFullCheckpoint:
             resources: mutable DebuggerVirtualResources::ResourceStore
             adapters: mutable DebuggerReplayAdapters::AdapterSnapshot
 
-        def full_checkpoint_validate(checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+        def full_checkpoint_validate(checkpoint: ManagedCheckpoint&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_SCHEMA) if checkpoint.schema != Full::CHECKPOINT_SCHEMA
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_RECORDING) if checkpoint.recording.value == Full::CHECKPOINT_NO_ID
             # Branch zero is the canonical root branch, not a missing value.  A
@@ -264,13 +266,12 @@ module DebuggerFullCheckpoint:
             return checkpoint
 
         def full_checkpoint_seal_side_state(checkpoint: mutable ManagedCheckpoint&) -> void:
-            snapshot: DebuggerFullCheckpoint::ManagedCheckpoint = checkpoint
-            checkpoint.side_state_hash <- checkpoint_hash_side_state(snapshot)
+            checkpoint.side_state_hash <- checkpoint_hash_side_state(checkpoint)
 
-        def full_checkpoint_is_valid(checkpoint: ManagedCheckpoint) -> bool:
+        def full_checkpoint_is_valid(checkpoint: ManagedCheckpoint&) -> bool:
             return DebuggerErrors::error_is_ok(full_checkpoint_validate(checkpoint))
 
-        def full_checkpoint_restore_machine(checkpoint: ManagedCheckpoint) -> DebuggerEDIR::Machine:
+        def full_checkpoint_restore_machine(checkpoint: ManagedCheckpoint&) -> DebuggerEDIR::Machine:
             restored: mutable DebuggerEDIR::Machine = zeroed
             if not full_checkpoint_is_valid(checkpoint):
                 restored.halted <- true
@@ -278,29 +279,29 @@ module DebuggerFullCheckpoint:
                 return restored
             return DebuggerCheckpoint::snapshot_restore(checkpoint.machine)
 
-        def full_checkpoint_restore_tasks(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+        def full_checkpoint_restore_tasks(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, checkpoint: ManagedCheckpoint&) -> DebuggerErrors::DebuggerError:
             failure: DebuggerErrors::DebuggerError = full_checkpoint_validate(checkpoint)
             return failure if not DebuggerErrors::error_is_ok(failure)
             DebuggerConcurrencyCheckpoint::task_snapshot_restore(runtime, checkpoint.tasks)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_matches(runtime, checkpoint.tasks)
             return DebuggerErrors::no_error()
 
-        def full_checkpoint_effects(checkpoint: ManagedCheckpoint) -> DebuggerEffects::EffectOracle:
+        def full_checkpoint_effects(checkpoint: ManagedCheckpoint&) -> DebuggerEffects::EffectOracle:
             result: mutable DebuggerEffects::EffectOracle = zeroed
             return result if not full_checkpoint_is_valid(checkpoint)
             return checkpoint.effects
 
-        def full_checkpoint_resources(checkpoint: ManagedCheckpoint) -> DebuggerVirtualResources::ResourceStore:
+        def full_checkpoint_resources(checkpoint: ManagedCheckpoint&) -> DebuggerVirtualResources::ResourceStore:
             result: mutable DebuggerVirtualResources::ResourceStore = zeroed
             return result if not full_checkpoint_is_valid(checkpoint)
             return DebuggerVirtualResources::resources_clone_snapshot(checkpoint.resources)
 
-        def full_checkpoint_adapters(checkpoint: ManagedCheckpoint) -> DebuggerReplayAdapters::AdapterSnapshot:
+        def full_checkpoint_adapters(checkpoint: ManagedCheckpoint&) -> DebuggerReplayAdapters::AdapterSnapshot:
             result: mutable DebuggerReplayAdapters::AdapterSnapshot = zeroed
             return result if not full_checkpoint_is_valid(checkpoint)
             return checkpoint.adapters
 
-        def full_checkpoint_restore_adapters(adapters: mutable DebuggerReplayAdapters::AdapterSnapshot&, checkpoint: ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
+        def full_checkpoint_restore_adapters(adapters: mutable DebuggerReplayAdapters::AdapterSnapshot&, checkpoint: ManagedCheckpoint&) -> DebuggerErrors::DebuggerError:
             failure: DebuggerErrors::DebuggerError = full_checkpoint_validate(checkpoint)
             return failure if not DebuggerErrors::error_is_ok(failure)
             adapters <- checkpoint.adapters

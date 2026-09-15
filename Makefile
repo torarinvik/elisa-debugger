@@ -58,10 +58,9 @@ DAP_VARIABLES_AFTER_STEP_REFERENCE := $(shell expr $(DAP_VARIABLES_AFTER_STEP_ST
 MANAGED_ALLOCATIONS_CHECK := $(BUILD)/elisa-debugger-managed-allocations-check
 COMPILER_EDIR_CALLS_FIXTURE := tests/compiler_edir_calls_fixture.elisa
 COMPILER_EDIR_CALLS_ARTIFACT := $(BUILD)/compiler_edir_calls.edir
-COMPILER_EDIR_CALLS_REJECTION_LOG := $(BUILD)/compiler_edir_calls_rejection.log
+COMPILER_EDIR_CALLS_CHECK := $(BUILD)/elisa-debugger-compiler-edir-calls-check
 COMPILER_EDIR_CALLS_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_calls_native
 COMPILER_EDIR_CALLS_EXPECTED_EXIT := 52
-COMPILER_EDIR_CALLS_EXPECTED_DIAGNOSTIC := the file must contain exactly one top-level declaration
 COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL := 0
 COMPILER_EDIR_CALLS_NATIVE_OPTIMIZATION_LEVEL := 2
 COMPILER_EDIR_CALLS_NATIVE_SUCCESS_STATUS := 0
@@ -135,12 +134,12 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 
 .PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check
 .PHONY: trace-file-check
-.PHONY: remote-authorization-check server-version-check server-ownership-check compiler-edir-loop-check compiler-edir-calls-unsupported-check compiler-edir-core-ir-check
+.PHONY: remote-authorization-check server-version-check server-ownership-check compiler-edir-loop-check compiler-edir-calls-check compiler-edir-calls-unsupported-check compiler-edir-core-ir-check
 .PHONY: protocol-client-ordering-check session-ownership-check
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
-.PHONY: managed-allocations-check
+.PHONY: managed-allocations-check timeline-capability-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool
@@ -174,8 +173,8 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 module-check: concurrency-scheduler-check
 module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
-module-check: $(MANAGED_ALLOCATIONS_CHECK)
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
+module-check: $(MANAGED_ALLOCATIONS_CHECK)
 
 # Keep the remote artifact transfer regression in the aggregate module gate.
 module-check: $(BUILD)/elisa-debugger-remote-artifacts-check
@@ -219,6 +218,7 @@ module-check: edir-file-loader-check
 	"$(BUILD)/elisa-debugger-edir-codec-check"
 	"$(BUILD)/elisa-debugger-session-check"
 	"$(BUILD)/elisa-debugger-managed-inspection-check"
+	"$(BUILD)/elisa-debugger-timeline-capability-check"
 	"$(MANAGED_ALLOCATIONS_CHECK)"
 	"$(DAP_STACK_FRAMES_CHECK)"
 	"$(BUILD)/elisa-debugger-managed-service-check"
@@ -500,21 +500,22 @@ compiler-edir-loop-check: $(COMPILER_EDIR_LOOP_INTEGRATION_CHECK) $(BUILD)/elisa
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
 	loop_native_status=0; "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" || loop_native_status=$$?; test "$$loop_native_status" -eq "$(COMPILER_EDIR_LOOP_EXPECTED_EXIT)"
 
-# Keep this boundary check explicit until the current compiler's EDIR emitter
-# supports multiple top-level functions and function descriptors. The producer
-# leaves an empty output after rejection to avoid preserving a stale artifact;
-# this check verifies it is not usable. Its native backend must still compile
-# the same recursive call fixture at the optimized level used by the latest
-# compiler pipeline.
-compiler-edir-calls-unsupported-check:
+$(COMPILER_EDIR_CALLS_CHECK): tests/compiler_edir_calls_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)
-	rm -f "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_REJECTION_LOG)" "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)"
-	if ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O$(COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)" >"$(COMPILER_EDIR_CALLS_REJECTION_LOG)" 2>&1; then cat "$(COMPILER_EDIR_CALLS_REJECTION_LOG)" >&2; echo "unexpectedly emitted EDIR for an unsupported multi-function fixture" >&2; exit 1; fi
-	grep -F "$(COMPILER_EDIR_CALLS_EXPECTED_DIAGNOSTIC)" "$(COMPILER_EDIR_CALLS_REJECTION_LOG)"
-	test ! -s "$(COMPILER_EDIR_CALLS_ARTIFACT)"
-	rm -f "$(COMPILER_EDIR_CALLS_ARTIFACT)"
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+# Compile the recursive call fixture through the latest compiler's schema-3
+# EDIR function-table path, execute it in the managed VM, and compare the
+# optimized native backend result. Keep the old target as an alias so existing
+# local scripts continue to run while they migrate to the positive gate.
+compiler-edir-calls-check: $(COMPILER_EDIR_CALLS_CHECK)
+	mkdir -p $(BUILD)
+	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O$(COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
+	"$(COMPILER_EDIR_CALLS_CHECK)"
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O$(COMPILER_EDIR_CALLS_NATIVE_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
 	calls_native_status=$(COMPILER_EDIR_CALLS_NATIVE_SUCCESS_STATUS); "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" || calls_native_status=$$?; test "$$calls_native_status" -eq "$(COMPILER_EDIR_CALLS_EXPECTED_EXIT)"
+
+compiler-edir-calls-unsupported-check: compiler-edir-calls-check
 
 $(BUILD)/elisa-debugger-timeline-capability-check: tests/timeline_capability_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

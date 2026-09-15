@@ -8,10 +8,11 @@ Elisa programs can be compiled to EDIR.
 
 On 2026-09-15, `origin/main` resolved to
 `fd2cb3cff470319500db362e5fce2833cbe300de` (`fd2cb3cf`). The isolated debugger
-integration branch is pinned at
-`ce9e0292f40a6618b7803a4b9b07961d08033a5e` (`ce9e0292`), with that upstream
-revision and the shared EDIR/CoreIR lowering commits as ancestors. It adds the
-bounded EDIR emitter, shared typed `ElisaCoreIR` scalar lowering consumed by
+integration worktree is pinned at
+`8d7db0561d0f72c1f548fa6a73d071c86b2fe57f` (`8d7db056`), based on the current
+shared typed-lowering and optimization head `0f08a3ca` and carrying the schema-3
+EDIR function-call emitter. It adds the bounded EDIR emitter, schema-3 function
+descriptors and calls, shared typed `ElisaCoreIR` scalar lowering consumed by
 EDIR and native LLVM, and maps native DWARF locations back to original source
 lines. The checks below use a clean worktree at the integration revision, a
 stage1 product rebuilt from that worktree, and its matching runtime object.
@@ -28,9 +29,9 @@ product from it:
 COMPILER_SOURCE_ROOT="$(cd ../Elisa-compiler && pwd)"
 COMPILER_ROOT="${COMPILER_SOURCE_ROOT}-debugger-integration"
 git -C "$COMPILER_SOURCE_ROOT" worktree add --detach \
-  "$COMPILER_ROOT" ce9e0292f40a6618b7803a4b9b07961d08033a5e
+  "$COMPILER_ROOT" 8d7db0561d0f72c1f548fa6a73d071c86b2fe57f
 test "$(git -C "$COMPILER_ROOT" rev-parse HEAD)" = \
-  ce9e0292f40a6618b7803a4b9b07961d08033a5e
+  8d7db0561d0f72c1f548fa6a73d071c86b2fe57f
 test -z "$(git -C "$COMPILER_ROOT" status --porcelain)"
 # Set ELISACORE_BIN to the installed stage0 compiler if the wrapper cannot find it.
 ELISA_ALLOW_STALE_STAGE1=0 \
@@ -49,7 +50,7 @@ freshness and emits the arithmetic fixture as EDIR:
 ```sh
 COMPILER_ROOT="$(cd ../Elisa-compiler-debugger-integration && pwd)"
 test "$(git -C "$COMPILER_ROOT" rev-parse HEAD)" = \
-  ce9e0292f40a6618b7803a4b9b07961d08033a5e
+  8d7db0561d0f72c1f548fa6a73d071c86b2fe57f
 test -z "$(git -C "$COMPILER_ROOT" status --porcelain)"
 mkdir -p build
 ELISA_EDIR_SOURCE_ROOT="$PWD" ELISA_ALLOW_STALE_STAGE1=0 \
@@ -85,22 +86,26 @@ ELISACORE_BIN="$COMPILER_ROOT/bin/elisac-stage1" \
   "$COMPILER_ROOT/test/parity/backend_obj_smoke.sh"
 ```
 
-The current compiler does not yet emit EDIR function descriptors or direct
-calls. Run the explicit boundary check to verify that the latest compiler
-rejects the multi-function fixture and leaves no usable artifact, while its
-optimized native backend still executes the same recursive source with the
+The current compiler emits schema-3 EDIR function descriptors and direct calls
+for the bounded recursive-call fixture. Run the positive integration check to
+verify that the managed VM loads, verifies, and executes the function table,
+while the optimized native backend executes the same recursive source with the
 expected result:
 
 ```sh
-make compiler-edir-calls-unsupported-check \
+make compiler-edir-calls-check \
+  ELISA_COMPILER="$COMPILER_ROOT/scripts/elisac_stage1.sh" \
   ELISA_EDIR_COMPILER="$COMPILER_ROOT/scripts/elisac_stage1.sh" \
+  ELISA_COMPILER_SOURCE_ROOT="$COMPILER_ROOT" \
+  ELISA_RUNTIME="$COMPILER_ROOT/build/runtime/elisacore_runtime.o" \
+  ELISA_ALLOW_STALE_STAGE1=0 \
   ELISA_EDIR_ALLOW_STALE_STAGE1=0
 ```
 
-This does not qualify compiler-to-EDIR calls. The debugger's schema-3 codec
-and VM call behavior have separate Elisa-authored checks; promoting this
-boundary to a positive compiler integration test requires the producer to emit
-the schema-3 function table.
+The compiler's schema-3 producer and the debugger's schema-3 codec/VM call
+behavior are both covered by Elisa-authored checks. The fixture is deliberately
+bounded; arbitrary source-level calls, closures, generics, and foreign calls
+remain outside this integration contract.
 
 ## Compiler optimization distinction
 
@@ -126,20 +131,18 @@ general optimized-program replay claim.
 
 ## Supported boundary and current limits
 
-The compiler's `-emit edir` mode accepts only one top-level, undecorated,
-effect-free `def main() -> i64` with no parameters. Its body may return an
-integer literal, supported literal arithmetic, one explicitly typed `i64`
-local followed by a supported return, or the emitter's bounded counted-loop
-shape. It rejects other syntax and semantics instead of silently producing a
-partial artifact. Includes, static-generated source maps, multiple source
-files, general functions and calls, general control flow, effects, and arbitrary
-native programs are outside this slice.
+The compiler's `-emit edir` mode accepts the scalar and counted-loop fixtures
+plus a bounded three-function recursive-call shape with undecorated,
+effect-free `i64` signatures. It rejects other syntax and semantics instead of
+silently producing a partial artifact. Includes, static-generated source maps,
+multiple source files, closures, generics, effects, and arbitrary native
+programs are outside this slice.
 
-The current compiler producer emits codec schema 2 artifacts with EDIR program
-version 1 in [the EDIR format](../spec/edir-format.md). The debugger also
-accepts schema 3, which adds function descriptors, and verifies either schema
-before managed execution. The current compiler's schema-2 output includes
-source identity and spans but no function table. A relative input source path
+The current compiler producer emits codec schema 3 artifacts with EDIR program
+version 1 in [the EDIR format](../spec/edir-format.md). Schema 3 adds function
+descriptors and is required for the bounded recursive-call fixture. The
+debugger also accepts legacy schema 2 artifacts and verifies either schema
+before managed execution. A relative input source path
 becomes the artifact's logical path. For absolute source paths,
 `ELISA_EDIR_SOURCE_ROOT` must identify the root to strip; the editor then uses
 the corresponding `sourcePathRoot` launch mapping when sending absolute paths to

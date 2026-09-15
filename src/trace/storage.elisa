@@ -229,10 +229,13 @@ module DebuggerTraceStorage:
             return false if not storage_payload_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum)
             return storage_checkpoint_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.first_event, chunk.header.last_event)
 
-        def storage_checkpoint_chunk_new(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint, sequence: u64) -> CheckpointChunkEncoding:
-            return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Invalid} if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+        def storage_checkpoint_chunk_new(result: mutable CheckpointChunkEncoding&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, sequence: u64) -> void:
+            result <- CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Invalid}
+            return if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
             encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
-            return CheckpointChunkEncoding{chunk: zeroed, status: StorageStatus.Oversized} if encoded.failed or encoded.length == 0 or encoded.length > Capacity::PAYLOAD_CAPACITY_BYTES
+            if encoded.failed or encoded.length == 0 or encoded.length > Capacity::PAYLOAD_CAPACITY_BYTES:
+                result.status <- StorageStatus.Oversized
+                return
             checksum: u64 = storage_payload_checksum(encoded.bytes[0], encoded.length)
             chunk: mutable StoredChunk = zeroed
             chunk.header <- DebuggerTrace::ChunkHeader{schema: Layout::FORMAT_VERSION.u32(), kind: DebuggerTrace::ChunkKind.Checkpoint, sequence: sequence, first_event: checkpoint.event, last_event: checkpoint.event, payload_length: encoded.length.u64(), checksum: checksum}
@@ -240,7 +243,7 @@ module DebuggerTraceStorage:
             chunk.checksum <- checksum
             for index in 0..<encoded.length:
                 chunk.payload[index] <- encoded.bytes[index]
-            return CheckpointChunkEncoding{chunk: chunk, status: StorageStatus.Ready}
+            result <- CheckpointChunkEncoding{chunk: chunk, status: StorageStatus.Ready}
 
         def storage_checkpoint_chunk_decode(chunk: StoredChunk) -> DebuggerFullCheckpointCodec::DecodedCheckpoint:
             invalid: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::DecodedCheckpoint{checkpoint: zeroed, status: DebuggerFullCheckpointCodec::DecodeStatus.Invalid}

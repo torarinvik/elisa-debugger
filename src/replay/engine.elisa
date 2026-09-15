@@ -183,6 +183,39 @@ module DebuggerReplayEngine:
                     machine.accumulator <- engine.intervention_accumulators[index]
             return true
 
+        # Simulate a forward seek without touching the retained history or
+        # event arrays. A failed seek must leave those arrays byte-for-byte
+        # unchanged, while copying the complete ReplayEngine to achieve that
+        # would duplicate several large fixed-capacity buffers.
+        def replay_engine_speculative_step(engine: ReplayEngine&, machine: mutable DebuggerEDIR::Machine&, event: mutable usize&) -> EngineError:
+            return EngineError.None if machine.halted or machine.faulted
+            return EngineError.HistoryFull if event >= Capacity::HISTORY_CAPACITY
+            verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image(engine.image)
+            return EngineError.ExecutionFault if not verification.valid
+            return EngineError.ExecutionFault if machine.program_counter >= engine.image.program.instruction_count
+            return EngineError.HistoryUnavailable if not replay_engine_apply_interventions_to_machine(engine, machine, event.u64())
+            instruction: DebuggerEDIR::Instruction = engine.image.instructions[machine.program_counter.usize()]
+            DebuggerEDIR::machine_step_in_place(machine, instruction)
+            event <- event + 1
+            return EngineError.ExecutionFault if machine.faulted
+            return EngineError.None
+
+        # Commit one step after replay_engine_speculative_step has proved that
+        # the complete forward seek is executable. Keeping this routine free of
+        # fallible validation means the retained arrays are only touched during
+        # the commit phase, after every ordinary failure has already returned.
+        def replay_engine_commit_forward_step(engine: mutable ReplayEngine&) -> void:
+            for intervention_index in 0..<engine.intervention_count:
+                engine.machine.accumulator <- engine.intervention_accumulators[intervention_index] if replay_engine_intervention_applies(engine, intervention_index, engine.event_count.u64())
+            snapshot: DebuggerCheckpoint::MachineSnapshot = DebuggerCheckpoint::snapshot_capture(engine.machine, DebuggerIdentity::debug_id(engine.event_count.u64() + Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET), engine.event_count.u64(), replay_engine_state_hash(engine))
+            engine.history[engine.event_count] <- snapshot
+            instruction: DebuggerEDIR::Instruction = engine.image.instructions[engine.machine.program_counter.usize()]
+            DebuggerEDIR::machine_step_in_place(engine.machine, instruction)
+            position: DebuggerIdentity::Position = replay_engine_position(engine)
+            engine.events[engine.event_count] <- DebuggerEvents::event_envelope(Event::REPLAY_ENGINE_SCHEMA_VERSION, engine.event_count.u64(), position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, replay_engine_state_hash(engine))
+            engine.event_count <- engine.event_count + 1
+            engine.engine_error <- EngineError.ExecutionFault if engine.machine.faulted
+
         def replay_engine_snapshot_state_hash(snapshot: DebuggerCheckpoint::MachineSnapshot) -> u64:
             return DebuggerCheckpoint::snapshot_state_hash(snapshot)
 
@@ -291,24 +324,36 @@ module DebuggerReplayEngine:
                     engine.engine_error <- EngineError.HistoryUnavailable
                     return
                 return
-            original_forward_engine: ReplayEngine = engine
-            while engine.event_count < target and not engine.machine.halted and not engine.machine.faulted:
-                previous: usize = engine.event_count
-                replay_engine_step(engine)
-                break if engine.event_count == previous
-            if engine.event_count != target:
-                failed_error: EngineError = engine.engine_error
-                engine <- original_forward_engine
-                engine.engine_error <- EngineError.HistoryUnavailable if failed_error == EngineError.None
-                engine.engine_error <- failed_error if failed_error != EngineError.None
+            speculative_machine: mutable DebuggerEDIR::Machine = original_machine
+            speculative_event_count: mutable usize = original_count
+            speculative_error: mutable EngineError = EngineError.None
+            while speculative_event_count < target and not speculative_machine.halted and not speculative_machine.faulted:
+                previous: usize = speculative_event_count
+                speculative_error <- replay_engine_speculative_step(engine, speculative_machine, speculative_event_count)
+                break if speculative_event_count == previous or speculative_error != EngineError.None
+            if speculative_event_count != target or speculative_error != EngineError.None:
+                engine.machine <- original_machine
+                engine.event_count <- original_count
+                engine.engine_error <- EngineError.HistoryUnavailable if speculative_error == EngineError.None
+                engine.engine_error <- speculative_error if speculative_error != EngineError.None
                 return
-            if engine.engine_error != EngineError.None:
-                failed_error: EngineError = engine.engine_error
-                engine <- original_forward_engine
-                engine.engine_error <- failed_error
+            # The target boundary can carry an intervention even though no
+            # instruction executes there. Validate it against the speculative
+            # state before committing retained snapshots and events.
+            if not replay_engine_apply_interventions_to_machine(engine, speculative_machine, target.u64()):
+                engine.machine <- original_machine
+                engine.event_count <- original_count
+                engine.engine_error <- EngineError.HistoryUnavailable
                 return
+            # The speculative pass proved that every actual step can commit.
+            # Re-run those bounded steps once to populate retained history and
+            # event envelopes only after failure is no longer possible.
+            engine.engine_error <- EngineError.None
+            while engine.event_count < target:
+                replay_engine_commit_forward_step(engine)
             if not replay_engine_apply_seek_boundary(engine):
-                engine <- original_forward_engine
+                engine.machine <- original_machine
+                engine.event_count <- original_count
                 engine.engine_error <- EngineError.HistoryUnavailable
                 return
 
@@ -381,9 +426,15 @@ module DebuggerReplayEngine:
                 return false if event.payload_hash != replay_engine_machine_state_hash(replay_machine, index.u64())
             if engine.event_count > 0:
                 final_machine: mutable DebuggerEDIR::Machine = DebuggerCheckpoint::snapshot_restore(engine.history[engine.event_count - Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET.usize()])
+                for intervention_index in 0..<engine.intervention_count:
+                    final_machine.accumulator <- engine.intervention_accumulators[intervention_index] if replay_engine_intervention_applies(engine, intervention_index, engine.event_count.u64() - Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET)
                 DebuggerEDIR::machine_step_in_place(final_machine, engine.image.instructions[final_machine.program_counter.usize()])
                 final_event_hash: u64 = replay_engine_machine_state_hash(final_machine, engine.event_count.u64() - Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET)
                 return false if engine.events[engine.event_count - 1].payload_hash != final_event_hash
+                # A seek or a live intervention may also have changed the
+                # current boundary after the last instruction. Apply that
+                # boundary only for the final state comparison; the event
+                # payload hash above must describe the instruction itself.
                 for intervention_index in 0..<engine.intervention_count:
                     final_machine.accumulator <- engine.intervention_accumulators[intervention_index] if replay_engine_intervention_applies(engine, intervention_index, engine.event_count.u64())
                 return false if replay_engine_machine_state_hash(final_machine, engine.event_count.u64() - Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET) != replay_engine_machine_state_hash(engine.machine, engine.event_count.u64() - Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET)

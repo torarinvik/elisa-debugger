@@ -55,7 +55,7 @@ than the referenced row's line count. A zero file ID remains valid for
 instructions without source locations. The codec accepts at most 128
 instructions.
 
-The current compiler's schema-2 producer serializes parser spans verbatim:
+The current compiler's schema-3 producer serializes parser spans verbatim:
 lines are one-based, columns are one-based UTF-8 byte counts, and byte offsets
 are zero-based with an exclusive end. The wire format has no coordinate-unit
 tag. These producer columns do not satisfy the session protocol's zero-based
@@ -65,7 +65,11 @@ usable, while compiler-artifact column breakpoints are unsupported until the
 producer emits normalized coordinates or the artifact carries enough source
 content for a consumer to convert them safely.
 
-Schema 3 appends a function count and its descriptors after all instructions:
+Schema 3 appends a function count and its descriptors after all instructions.
+The bounded compiler call fixture emits three descriptors (`main`, `descend`,
+and `add_ten`) and call targets that point at their entry instructions. Other
+source-level calls remain outside the producer contract. The function table
+layout is:
 
 | Field | Width | Meaning |
 | --- | ---: | --- |
@@ -114,12 +118,13 @@ This loader runs on the POSIX host boundary; file access is provided by
 `open`, `read`, and `close`, while bounds checks, decoding, and EDIR
 verification remain in Elisa. The current adjacent compiler checkout at the
 revision recorded in [`docs/compiler-integration.md`](../docs/compiler-integration.md)
-emits legacy codec schema-2 artifacts for its explicitly supported single-file
-scalar and counted-loop subset, with source-table identities and original
-source spans. Those artifacts remain loadable, but the producer does not yet
-supply schema-3 function descriptors. It rejects includes and unsupported
-syntax instead of emitting a partial image; the Elisa-authored fixtures
-continue to cover VM instructions beyond that initial compiler subset.
+emits schema-3 artifacts for its explicitly supported single-file scalar,
+counted-loop, and bounded recursive-call fixtures, with source-table identities,
+original source spans, and function descriptors for the call fixture. Legacy
+schema-2 artifacts remain loadable for compatibility. The producer rejects
+includes and unsupported syntax instead of emitting a partial image; the
+Elisa-authored fixtures continue to cover VM instructions beyond that initial
+compiler subset.
 Relative compiler source paths become logical paths directly. For absolute
 source paths, set `ELISA_EDIR_SOURCE_ROOT` to the workspace root so the producer
 can strip that exact prefix and retain a safe relative path in the artifact.

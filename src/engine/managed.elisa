@@ -205,19 +205,25 @@ module DebuggerManagedEngine:
 
         def managed_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
-            original_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
-            original_session: DebuggerSession::Session = controller.session
+            original_machine: DebuggerEDIR::Machine = controller.engine.machine
+            original_engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
             before_event: usize = controller.engine.event_count
+            next_session: DebuggerSession::Session = DebuggerSession::session_step(controller.session)
+            if next_session.last_error != DebuggerSession::SessionError.None:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
             DebuggerReplayEngine::replay_engine_step(controller.engine)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
                 # A faulting EDIR instruction is still recorded as an event.
                 # Keep the session coordinate and generation-scoped handles in
                 # sync with that committed state change.
                 if controller.engine.event_count > before_event:
-                    controller.session <- DebuggerSession::session_step(controller.session)
+                    controller.session <- next_session
                     if controller.session.last_error != DebuggerSession::SessionError.None:
-                        controller.engine <- original_engine
-                        controller.session <- original_session
+                        controller.engine.machine <- original_machine
+                        controller.engine.event_count <- before_event
+                        controller.engine.engine_error <- original_engine_error
                         return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
                     managed_sync_position(controller)
                     managed_refresh_values(controller)
@@ -226,13 +232,7 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.event_count == before_event
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
-            controller.session <- DebuggerSession::session_step(controller.session)
-            if controller.session.last_error != DebuggerSession::SessionError.None:
-                session_failure: DebuggerSession::SessionError = controller.session.last_error
-                controller.engine <- original_engine
-                controller.session <- original_session
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if session_failure == DebuggerSession::SessionError.HistoryUnavailable
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            controller.session <- next_session
             managed_sync_position(controller)
             managed_refresh_values(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull
@@ -392,17 +392,16 @@ module DebuggerManagedEngine:
         def managed_reverse_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.event_count == Event::INITIAL_INDEX
-            original_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
-            original_session: DebuggerSession::Session = controller.session
+            original_machine: DebuggerEDIR::Machine = controller.engine.machine
+            original_event_count: usize = controller.engine.event_count
+            original_engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
+            next_session: DebuggerSession::Session = DebuggerSession::session_reverse_step(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if next_session.last_error != DebuggerSession::SessionError.None
             DebuggerReplayEngine::replay_engine_reverse_one(controller.engine)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
-            controller.session <- DebuggerSession::session_reverse_step(controller.session)
-            if controller.session.last_error != DebuggerSession::SessionError.None:
-                session_failure: DebuggerSession::SessionError = controller.session.last_error
-                controller.engine <- original_engine
-                controller.session <- original_session
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if session_failure == DebuggerSession::SessionError.HistoryUnavailable
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            controller.session <- next_session
             managed_sync_position(controller)
             managed_refresh_values(controller)
             return DebuggerErrors::no_error()
@@ -410,29 +409,27 @@ module DebuggerManagedEngine:
         def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if event.u64() != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
-            original_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
-            original_session: DebuggerSession::Session = controller.session
+            original_machine: DebuggerEDIR::Machine = controller.engine.machine
+            original_event_count: usize = controller.engine.event_count
+            original_engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
+            next_session: mutable DebuggerSession::Session = controller.session
+            next_session.retained_last <- event.u64() if event.u64() > next_session.retained_last
+            next_session <- DebuggerSession::session_seek(next_session, event.u64())
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if next_session.last_error != DebuggerSession::SessionError.None
             DebuggerReplayEngine::replay_engine_seek(controller.engine, event)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
                 # Restore the caller-visible engine state before surfacing the
                 # failed speculative seek as a divergence.
-                controller.engine <- original_engine
-                controller.session <- original_session
+                controller.engine.machine <- original_machine
+                controller.engine.event_count <- original_event_count
+                controller.engine.engine_error <- original_engine_error
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
-            # Validate the requested coordinate against the session's original
-            # position before copying the speculative engine position into it.
-            # Otherwise a Replayable session could turn an unsupported seek into
-            # an apparent no-op by observing the engine after it had already
-            # replayed to the requested event.
-            controller.session.retained_last <- event.u64() if event.u64() > controller.session.retained_last
-            controller.session <- DebuggerSession::session_seek(controller.session, event.u64())
-            if controller.session.last_error != DebuggerSession::SessionError.None:
-                session_failure: DebuggerSession::SessionError = controller.session.last_error
-                controller.engine <- original_engine
-                controller.session <- original_session
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if session_failure == DebuggerSession::SessionError.Unsupported
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            # Commit the preflighted session only after the engine reached the
+            # requested boundary. This keeps an unsuccessful seek atomic.
+            controller.session <- next_session
             managed_sync_position(controller)
             managed_refresh_values(controller)
             return DebuggerErrors::no_error()
@@ -612,7 +609,12 @@ module DebuggerManagedEngine:
 
         def managed_full_checkpoint(controller: mutable ManagedController&) -> DebuggerFullCheckpoint::ManagedCheckpoint:
             image_fingerprint: DebuggerEDIRCodec::ArtifactFingerprint = DebuggerEDIRCodec::artifact_fingerprint(controller.engine.image)
-            return DebuggerManagedState::state_capture(controller.state, controller.engine.machine, controller.session.build, image_fingerprint, controller.engine.recording, controller.engine.branch, controller.engine.event_count.u64(), DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+            checkpoint_event: u64 = controller.engine.event_count.u64()
+            # A child branch owns only the suffix after its fork. The timeline
+            # coordinate before that fork still belongs to the ancestor, even
+            # while the child remains the selected resumable branch.
+            checkpoint_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, checkpoint_event)
+            return DebuggerManagedState::state_capture(controller.state, controller.engine.machine, controller.session.build, image_fingerprint, controller.engine.recording, checkpoint_branch, checkpoint_event, DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
 
         def managed_restore_full_checkpoint(controller: mutable ManagedController&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> DebuggerErrors::DebuggerError:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
@@ -622,31 +624,38 @@ module DebuggerManagedEngine:
             image_fingerprint: DebuggerEDIRCodec::ArtifactFingerprint = DebuggerEDIRCodec::artifact_fingerprint(controller.engine.image)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreIdentityDetail::IMAGE_MISMATCH) if not image_fingerprint.valid or checkpoint.image_fingerprint != image_fingerprint.value
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ENGINE_FAULT) if checkpoint.recording.value != controller.engine.recording.value
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::HISTORY) if checkpoint.branch.value != controller.engine.branch.value
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::HISTORY) if checkpoint.branch.value != DebuggerReplayEngine::replay_engine_branch_at(controller.engine, checkpoint.event).value
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ENGINE_FAULT) if checkpoint.machine.program_counter > controller.engine.image.program.instruction_count
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ENGINE_FAULT) if checkpoint.machine.program_counter == controller.engine.image.program.instruction_count and not checkpoint.machine.halted
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if checkpoint.event > controller.engine.event_count.u64()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if checkpoint.event != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             expected_machine: mutable DebuggerEDIR::Machine = zeroed
+            # History entries are pre-instruction snapshots. When the target
+            # boundary has already been executed, its snapshot is authoritative
+            # and includes any intervention installed at that boundary. A
+            # checkpoint at the live boundary has no snapshot yet, so rebuild
+            # it from the preceding snapshot, execute that instruction, and
+            # then apply the live-boundary intervention before comparing state.
             if checkpoint.event < controller.engine.event_count.u64():
                 historical_index: usize = checkpoint.event.usize()
                 historical_snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[historical_index]
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(controller.engine, historical_index, historical_snapshot)
                 expected_machine <- DebuggerCheckpoint::snapshot_restore(historical_snapshot)
             else:
-                if controller.engine.event_count == Event::INITIAL_INDEX:
+                if checkpoint.event == Event::INITIAL_INDEX.u64():
                     expected_machine <- DebuggerEDIR::machine_new()
                     if not DebuggerEDIR::verify_image(controller.engine.image).valid:
                         expected_machine.faulted <- true
                         expected_machine.halted <- true
                 else:
-                    previous_index: usize = controller.engine.event_count - Event::PREVIOUS_OFFSET
+                    previous_index: usize = checkpoint.event.usize() - Event::PREVIOUS_OFFSET
                     previous_snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[previous_index]
                     return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_snapshot_is_valid(controller.engine, previous_index, previous_snapshot)
                     expected_machine <- DebuggerCheckpoint::snapshot_restore(previous_snapshot)
                     return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if expected_machine.program_counter >= controller.engine.image.program.instruction_count
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_apply_interventions_to_machine(controller.engine, expected_machine, previous_index.u64())
                     DebuggerEDIR::machine_step_in_place(expected_machine, controller.engine.image.instructions[expected_machine.program_counter.usize()])
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_apply_interventions_to_machine(controller.engine, expected_machine, controller.engine.event_count.u64())
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_apply_interventions_to_machine(controller.engine, expected_machine, checkpoint.event)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::HISTORY) if not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, expected_machine)
             restored_session: DebuggerSession::Session = DebuggerSession::session_seek(controller.session, checkpoint.event)
             if restored_session.last_error == DebuggerSession::SessionError.HistoryUnavailable:
@@ -659,7 +668,6 @@ module DebuggerManagedEngine:
             restored: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(checkpoint)
             controller.engine.machine <- restored
             controller.engine.event_count <- checkpoint.event.usize()
-            controller.engine.branch <- checkpoint.branch
             controller.engine.engine_error <- DebuggerReplayEngine::EngineError.None
             controller.session <- restored_session
             managed_sync_position(controller)

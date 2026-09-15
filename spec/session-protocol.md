@@ -66,9 +66,9 @@ capacity.
 
 `discover.result.features` includes a boolean for every capability in the
 shared `CapabilitySet`. The process clears features whose request operands or
-result payloads are not wired to this compact transport, including memory
-reads, checkpoints, branches, trace verification, trace export, and historical
-queries. Managed EDIR source breakpoints are supported through the bounded
+result payloads are not wired to this compact transport, including checkpoints,
+branches, trace verification, trace export, and historical queries. Managed memory
+reads and source breakpoints are supported through bounded payloads. Managed EDIR source breakpoints are supported through the bounded
 `setBreakpoints` payload below. Threads, frames, scopes, and locals are
 available through the managed inspection surface. Expression evaluation and
 trace artifact transfer are not wired to this process. Clients must honor the
@@ -91,7 +91,7 @@ length, one space, and a newline):
 ```
 
 ```json
-{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"timeline":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":false,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"timeline":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":true,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
 ```
 
 After launching a verified artifact, a generic editor bridge can replace the
@@ -210,6 +210,16 @@ For example, a successful request has this shape:
 
 Validate requests and responses against the
 [`timeline` JSON schema](../schemas/session-protocol-v1.timeline.schema.json).
+
+The `memory` method reads up to 64 bytes from the managed EDIR logical heap.
+Its `arguments` object requires an `address` from 0 through 512 and a numeric
+`length` from 0 through 64. Addresses may be decimal JSON strings so clients
+can use one lossless representation for all protocol identities. The server
+checks allocation and initialization state at the current stop before
+returning bytes as lowercase hexadecimal in the bounded result object. An
+unallocated or uninitialized range returns `UNAVAILABLE` without exposing
+runtime pointers. Validate requests and successful responses against the
+[`memory` JSON schema](../schemas/session-protocol-v1.memory.schema.json).
 
 The typed managed service exposes checkpoint creation and reverse navigation;
 the compact endpoint keeps checkpoint creation disabled because it has no

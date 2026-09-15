@@ -144,6 +144,8 @@ module DebuggerProtocolRequest:
             REQUEST_LIMITS_SOURCE_BREAKPOINT_LINE_MAX: u64 = 4294967295
             REQUEST_LIMITS_NO_SOURCE_LINE: u64 = 0
             REQUEST_LIMITS_SINGLE_SOURCE_BREAKPOINT_MEMBER_COUNT: usize = 1
+            MEMORY_ADDRESS_MAX: u64 = 512
+            MEMORY_LENGTH_MAX: u64 = 64
 
         const module Unicode:
             ESCAPE_DIGITS: usize = 4
@@ -269,6 +271,10 @@ module DebuggerProtocolRequest:
             has_page_size: mutable bool
             page_start: mutable u64
             has_page_start: mutable bool
+            memory_address: mutable u64
+            has_memory_address: mutable bool
+            memory_length: mutable u64
+            has_memory_length: mutable bool
             source_breakpoints: mutable SourceBreakpointRequest
 
         def invalid_request() -> Request:
@@ -977,11 +983,26 @@ module DebuggerProtocolRequest:
                 return false if not variables_reference.valid
                 operands.variables_reference <- variables_reference.value
                 operands.has_variables_reference <- true
+            memory_address_start: usize = request_object_field_value_start(payload, length, arguments, "address", 0)
+            return false if request_object_field_value_start(payload, length, arguments, "address", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            if memory_address_start != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
+                memory_address: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, memory_address_start, RequestLimits::MEMORY_ADDRESS_MAX, true)
+                return false if not memory_address.valid
+                operands.memory_address <- memory_address.value
+                operands.has_memory_address <- true
+            memory_length_start: usize = request_object_field_value_start(payload, length, arguments, "length", 0)
+            return false if request_object_field_value_start(payload, length, arguments, "length", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            if memory_length_start != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
+                memory_length: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, memory_length_start, RequestLimits::MEMORY_LENGTH_MAX, false)
+                return false if not memory_length.valid
+                operands.memory_length <- memory_length.value
+                operands.has_memory_length <- true
             if method == RequestMethod.SetBreakpoints:
                 source_breakpoints: SourceBreakpointRequest = request_source_breakpoints_parse(payload, length, arguments)
                 return false if not source_breakpoints.valid
                 operands.source_breakpoints <- source_breakpoints
             return false if method == RequestMethod.Variables and not operands.has_variables_reference
+            return false if method == RequestMethod.Memory and (not operands.has_memory_address or not operands.has_memory_length)
             return true
 
         def request_pagination_operands_parse(payload: u8&, length: usize, root_start: usize, operands: mutable RequestOperands&) -> bool:
@@ -1364,6 +1385,7 @@ module DebuggerProtocolRequest:
                 return operands if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
             return operands if request.method == RequestMethod.Launch and not operands.has_program
             return operands if request.method == RequestMethod.Variables and not operands.has_variables_reference
+            return operands if request.method == RequestMethod.Memory and (not operands.has_memory_address or not operands.has_memory_length)
             return operands if not request_session_operands_parse(payload, length, root_start, operands)
             return operands if not request_initialization_version_parse(payload, length, root_start, request.method, operands)
             return operands if not request_pagination_operands_parse(payload, length, root_start, operands)

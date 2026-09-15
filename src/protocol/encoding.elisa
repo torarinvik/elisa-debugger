@@ -9,6 +9,7 @@ include "./managed_service.elisa"
 include "../core/capabilities.elisa"
 include "../core/errors.elisa"
 include "../inspect/managed.elisa"
+include "../inspect/memory.elisa"
 
 module DebuggerProtocolEncoding:
     private:
@@ -110,6 +111,17 @@ module DebuggerProtocolEncoding:
             TIMELINE_AVAILABLE_LAST_EVENT_PREFIX: cstr = ",\"lastEvent\":"
             TIMELINE_OBJECT_SUFFIX: cstr = "}}}}"
 
+        const module MemoryEncoding:
+            MEMORY_FIELD_PREFIX: cstr = ",\"memory\":{\"address\":"
+            MEMORY_LENGTH_PREFIX: cstr = ",\"length\":"
+            MEMORY_STATE_PREFIX: cstr = ",\"state\":\""
+            MEMORY_BYTES_PREFIX: cstr = "\",\"bytes\":\""
+            MEMORY_OBJECT_SUFFIX: cstr = "\"}}}"
+            MEMORY_STATE_AVAILABLE: cstr = "available"
+            HEX_DIGITS: cstr = "0123456789abcdef"
+            HEX_SHIFT: u64 = 4
+            HEX_MASK: u8 = 15
+
         const module OwnershipEncoding:
             CREATE_SESSION_RESULT_PREFIX: cstr = ",\"ok\":true,\"result\":{\"accepted\":true,\"sessionId\":"
             CREATE_SESSION_OWNER_PREFIX: cstr = ",\"ownerToken\":"
@@ -190,6 +202,10 @@ module DebuggerProtocolEncoding:
         def buffer_put_named_id_string(buffer: mutable JsonBuffer&, name: cstr, value: u64) -> void:
             buffer_put_cstr(buffer, name)
             buffer_put_id_string(buffer, value)
+
+        def buffer_put_hex_byte(buffer: mutable JsonBuffer&, value: u8) -> void:
+            buffer_put_byte(buffer, MemoryEncoding::HEX_DIGITS[(value >> MemoryEncoding::HEX_SHIFT).usize()].u8())
+            buffer_put_byte(buffer, MemoryEncoding::HEX_DIGITS[(value & MemoryEncoding::HEX_MASK).usize()].u8())
 
         def request_id_is_valid(request: DebuggerProtocol::RequestEnvelope) -> bool:
             return request.request_id > Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID if request.method != DebuggerProtocol::Method.Discover
@@ -592,6 +608,24 @@ module DebuggerProtocolEncoding:
             buffer_put_id_string(buffer, page.next.u64()) if page.next > 0
             buffer_put_cstr(buffer, JsonValues::JSON_NULL) if page.next == 0
             buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        def managed_memory_response_encode(request_id: u64, generation: u64, read: DebuggerMemory::MemoryRead) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or not DebuggerMemory::memory_read_is_available(read):
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, MemoryEncoding::MEMORY_FIELD_PREFIX)
+            buffer_put_id_string(buffer, read.address)
+            buffer_put_cstr(buffer, MemoryEncoding::MEMORY_LENGTH_PREFIX)
+            buffer_put_u64(buffer, read.length.u64())
+            buffer_put_cstr(buffer, MemoryEncoding::MEMORY_STATE_PREFIX)
+            buffer_put_cstr(buffer, MemoryEncoding::MEMORY_STATE_AVAILABLE)
+            buffer_put_cstr(buffer, MemoryEncoding::MEMORY_BYTES_PREFIX)
+            for index in 0..<read.length:
+                buffer_put_hex_byte(buffer, read.bytes[index])
+            buffer_put_cstr(buffer, MemoryEncoding::MEMORY_OBJECT_SUFFIX)
             return buffer
 
         # Encode the bounded, editor-neutral timeline extension. Event and

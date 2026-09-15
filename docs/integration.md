@@ -79,7 +79,7 @@ fields, and errors.
 
 The supported compact request flow is `launch` with
 `arguments.program`, `setBreakpoints`, `pause`, `continue`, `step`,
-`reverseStep`, `seek`, and the read-only `timeline` history extension.
+`reverseStep`, `seek`, the read-only `timeline` history extension, and bounded managed `memory` reads.
 After launch, `threads` returns one logical `main` thread, including while the
 session is running. Pause before requesting `stack`, `scopes`, or `variables`.
 `program` must name a complete verified EDIR artifact. `variablesReference` is
@@ -105,8 +105,7 @@ request. Event and identity fields are decimal JSON strings. Providers without
 history return `UNSUPPORTED` or `UNAVAILABLE`. Validate the wire shape with the
 [timeline schema](../schemas/session-protocol-v1.timeline.schema.json).
 
-This endpoint does not implement attach, expression evaluation, memory reads,
-or trace artifact transfer. `createSession` can establish process-scoped
+This endpoint does not implement attach, expression evaluation, or trace artifact transfer. `createSession` can establish process-scoped
 session ownership before launch; after that handshake, preserve the returned
 `sessionId` on every request and the returned `ownerToken` on every state
 changing request. Checkpoint,
@@ -143,7 +142,7 @@ combine a DAP session with a second headless connection.
 ## Integration rules
 
 - Use the transport's capability and error responses to gate UI actions, while
-  respecting the documented compact-process limitation for `memoryRead`.
+  respecting the documented 64-byte managed `memoryRead` limit.
 - Preserve unknown optional fields and distinguish `UNSUPPORTED`,
   `UNAVAILABLE`, `STALE_GENERATION`, `CORRUPT`, `DIVERGED`, and
   `RESOURCE_LIMIT`; do not infer support from human-readable messages.

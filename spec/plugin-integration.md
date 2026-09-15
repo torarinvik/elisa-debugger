@@ -109,8 +109,9 @@ displaying a numeric zero.
 
 The `timeline`, `memory`, and `events` surfaces have public Elisa contracts
 backed by `DebuggerTimeline`, `DebuggerMemory`, and `DebuggerProtocolEvents`.
-The compact process serializes `timeline`; `memory` and `events` remain typed
-surfaces until a transport advertises and implements their result payloads.
+The compact process serializes `timeline` and bounded managed `memory` reads;
+`events` remains a typed surface until a transport advertises and implements
+its result payload.
 
 ## Remote artifact transfer
 

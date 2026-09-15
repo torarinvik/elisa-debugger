@@ -2,6 +2,7 @@ include "../src/protocol/encoding.elisa"
 include "../src/protocol/request.elisa"
 
 const module Test:
+    SUCCESS: i64 = 0
     SUCCESS_ID: u64 = 42
     SUCCESS_GENERATION: u64 = 9
     SESSION_ID: u64 = 7
@@ -26,6 +27,25 @@ const module Test:
     ASCII_TRUE_E: u8 = 101
     JSON_KEY_SOURCE_BREAKPOINTS: cstr = "\"sourceBreakpoints\""
     JSON_KEY_REVERSE_EXECUTION: cstr = "\"reverseExecution\""
+    JSON_KEY_TIMELINE: cstr = "\"timeline\""
+    TIMELINE_GENERATION: u64 = 4
+    TIMELINE_RECORDING_ID: u64 = 5
+    TIMELINE_BRANCH_ID: u64 = 6
+    TIMELINE_FIRST_EVENT: u64 = 0
+    TIMELINE_EVENT: u64 = 1
+    TIMELINE_LAST_EVENT: u64 = 2
+    TIMELINE_LABEL_ID: u64 = 700
+    TIMELINE_NOTE_ID: u64 = 701
+    TIMELINE_CHECKPOINT_EVENT: u64 = 1
+    TIMELINE_CHECKPOINT_HASH: u64 = 391
+    TIMELINE_NO_CHECKPOINT_EVENT: u64 = 0
+    TIMELINE_NO_CHECKPOINT_HASH: u64 = 0
+    ASCII_BRACE_CLOSE: u8 = 125
+    TIMELINE_FIELD: cstr = "\"timeline\":{"
+    TIMELINE_POSITION: cstr = "\"position\":{\"event\":\"1\",\"branch\":\"6\"}"
+    TIMELINE_RETAINED_BOUNDS: cstr = "\"retained\":{\"available\":true,\"firstEvent\":\"0\",\"lastEvent\":\"2\"}"
+    TIMELINE_BOOKMARK: cstr = "\"bookmarks\":[{\"id\":\"1\",\"event\":\"1\""
+    TIMELINE_CHECKPOINT: cstr = "\"checkpoint\":{\"available\":true,\"event\":\"1\",\"stateHash\":\"391\"}"
     JSON_KEY_TYPED_VALUES: cstr = "\"typedValues\""
     JSON_KEY_FUNCTION_BREAKPOINTS: cstr = "\"functionBreakpoints\""
     JSON_KEY_DATA_BREAKPOINTS: cstr = "\"dataBreakpoints\""
@@ -62,6 +82,7 @@ const module Test:
     INITIALIZE_MINOR_REQUEST: u64 = 17
     INCOMPATIBLE_PROTOCOL_MAJOR: u64 = 2
     FAILURE_INITIALIZE_ENCODING: i64 = 29
+    FAILURE_TIMELINE_ENCODING: i64 = 34
     INITIALIZE_PROTOCOL_MAJOR: cstr = "\"protocolMajor\":1"
     INITIALIZE_PROTOCOL_MINOR: cstr = "\"protocolMinor\":0"
     INITIALIZE_SERVER_NAME: cstr = "\"server\":\"elisa-debugger\""
@@ -146,6 +167,7 @@ def main() -> i64:
     return 17 if not DebuggerProtocolEncoding::json_buffer_is_valid(discovery_response)
     return 18 if discovery_flag_matches(discovery_response, Test::JSON_KEY_SOURCE_BREAKPOINTS, managed_capabilities.source_breakpoints) == false
     return 19 if discovery_flag_matches(discovery_response, Test::JSON_KEY_REVERSE_EXECUTION, managed_capabilities.reverse_execution) == false
+    return 33 if discovery_flag_matches(discovery_response, Test::JSON_KEY_TIMELINE, managed_capabilities.history != DebuggerCapabilities::HistoryKind.None) == false
     return 20 if discovery_flag_matches(discovery_response, Test::JSON_KEY_TYPED_VALUES, managed_capabilities.typed_values) == false
     return 21 if discovery_flag_matches(discovery_response, Test::JSON_KEY_HISTORICAL_QUERIES, managed_capabilities.historical_queries) == false
     return 22 if discovery_flag_matches(discovery_response, Test::JSON_KEY_TRACE_EXPORT, managed_capabilities.trace_export) == false
@@ -242,4 +264,22 @@ def main() -> i64:
     oversized_session_page: DebuggerProtocolIntegration::SessionResponse = integration_response
     oversized_session_page.next_page <- Test::MAX_TRACE_EVENTS + 1
     return 16 if DebuggerProtocolEncoding::json_buffer_is_valid(DebuggerProtocolEncoding::session_response_encode(oversized_session_page))
-    return 0
+
+    timeline_position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::TIMELINE_RECORDING_ID))
+    timeline_position.branch <- DebuggerIdentity::debug_id(Test::TIMELINE_BRANCH_ID)
+    timeline_position.event <- Test::TIMELINE_EVENT
+    timeline: mutable DebuggerTimeline::Timeline = DebuggerTimeline::timeline_new(timeline_position, managed_capabilities)
+    timeline.bounds.retained_first <- Test::TIMELINE_FIRST_EVENT
+    timeline.bounds.retained_last <- Test::TIMELINE_LAST_EVENT
+    timeline.bounds.exact_first <- Test::TIMELINE_FIRST_EVENT
+    timeline.bounds.exact_last <- Test::TIMELINE_LAST_EVENT
+    timeline.bounds.current <- Test::TIMELINE_EVENT
+    bookmark: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_add_bookmark(timeline, DebuggerIdentity::debug_id(Test::TIMELINE_LABEL_ID), DebuggerIdentity::debug_id(Test::TIMELINE_NOTE_ID), true)
+    return Test::FAILURE_TIMELINE_ENCODING if not bookmark.accepted
+    timeline_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_timeline_response_encode(Test::SUCCESS_ID, Test::TIMELINE_GENERATION, bookmark.timeline, true, Test::TIMELINE_CHECKPOINT_EVENT, Test::TIMELINE_CHECKPOINT_HASH)
+    return Test::FAILURE_TIMELINE_ENCODING if not DebuggerProtocolEncoding::json_buffer_is_valid(timeline_response) or not encoded_response_contains(timeline_response, Test::TIMELINE_FIELD) or not encoded_response_contains(timeline_response, Test::TIMELINE_POSITION) or not encoded_response_contains(timeline_response, Test::TIMELINE_RETAINED_BOUNDS) or not encoded_response_contains(timeline_response, Test::TIMELINE_BOOKMARK) or not encoded_response_contains(timeline_response, Test::TIMELINE_CHECKPOINT) or timeline_response.bytes[timeline_response.length - 1] != Test::ASCII_BRACE_CLOSE
+    malformed_timeline: mutable DebuggerTimeline::Timeline = bookmark.timeline
+    malformed_timeline.bounds.retained_first <- Test::TIMELINE_LAST_EVENT
+    malformed_timeline.bounds.retained_last <- Test::TIMELINE_FIRST_EVENT
+    return Test::FAILURE_TIMELINE_ENCODING if DebuggerProtocolEncoding::json_buffer_is_valid(DebuggerProtocolEncoding::managed_timeline_response_encode(Test::SUCCESS_ID, Test::TIMELINE_GENERATION, malformed_timeline, false, Test::TIMELINE_NO_CHECKPOINT_EVENT, Test::TIMELINE_NO_CHECKPOINT_HASH))
+    return Test::SUCCESS

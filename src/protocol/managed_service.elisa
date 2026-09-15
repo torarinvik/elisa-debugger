@@ -5,6 +5,7 @@
 include "../engine/managed.elisa"
 include "../inspect/managed.elisa"
 include "../inspect/memory.elisa"
+include "../inspect/allocations.elisa"
 include "../protocol/request.elisa"
 include "../core/errors.elisa"
 include "../replay/compare.elisa"
@@ -31,6 +32,7 @@ module DebuggerManagedService:
             DETAIL_MEMORY_HISTORY_SLOT: u32 = 8
             DETAIL_MEMORY_HISTORY_CORRUPT: u32 = 9
             DETAIL_RECORDING_DIVERGED: u32 = 10
+            DETAIL_ALLOCATION_UNAVAILABLE: u32 = 11
 
         const module EventCapture:
             SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
@@ -51,7 +53,7 @@ module DebuggerManagedService:
         const module RequestState:
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_EXPECTED_GENERATION: u64 = 0
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_REQUEST_ID: u64 = 0
-            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX: u16 = 31
+            PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX: u16 = 32
 
         def memory_history_error(window: DebuggerHistory::QueryWindow, failure: DebuggerErrors::DebuggerError) -> DebuggerQueryEngine::QueryExecution:
             result: mutable DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_execution_new(window)
@@ -233,6 +235,9 @@ module DebuggerManagedService:
             if request.method == DebuggerProtocolRequest::RequestMethod.Seek:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if request.target_event > HistoryLimits::MAX_SEEK_EVENT
                 failure <- DebuggerManagedEngine::managed_seek(service.controller, request.target_event.usize()) if DebuggerErrors::error_is_ok(failure)
+            if request.method == DebuggerProtocolRequest::RequestMethod.Timeline:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.capabilities.history == DebuggerCapabilities::HistoryKind.None
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
             if request.method == DebuggerProtocolRequest::RequestMethod.Memory:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if not service.controller.session.capabilities.memory_read
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED) if DebuggerErrors::error_is_ok(failure) and not DebuggerSession::session_can_inspect(service.controller.session)
@@ -293,7 +298,7 @@ module DebuggerManagedService:
             if request.method == DebuggerProtocolRequest::RequestMethod.Close:
                 service.controller.session <- DebuggerSession::session_close(service.controller.session)
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_UNSUPPORTED) if service.controller.session.last_error != DebuggerSession::SessionError.None
-            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOver and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOut and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Memory and request.method != DebuggerProtocolRequest::RequestMethod.Threads and request.method != DebuggerProtocolRequest::RequestMethod.Stack and request.method != DebuggerProtocolRequest::RequestMethod.Scopes and request.method != DebuggerProtocolRequest::RequestMethod.Variables and request.method != DebuggerProtocolRequest::RequestMethod.Evaluate and request.method != DebuggerProtocolRequest::RequestMethod.SetBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.Checkpoint and request.method != DebuggerProtocolRequest::RequestMethod.Branch and request.method != DebuggerProtocolRequest::RequestMethod.Compare and request.method != DebuggerProtocolRequest::RequestMethod.TraceVerify and request.method != DebuggerProtocolRequest::RequestMethod.TraceExport:
+            if request.method != DebuggerProtocolRequest::RequestMethod.Launch and request.method != DebuggerProtocolRequest::RequestMethod.Pause and request.method != DebuggerProtocolRequest::RequestMethod.Continue and request.method != DebuggerProtocolRequest::RequestMethod.Step and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStep and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOver and request.method != DebuggerProtocolRequest::RequestMethod.ReverseStepOut and request.method != DebuggerProtocolRequest::RequestMethod.Seek and request.method != DebuggerProtocolRequest::RequestMethod.Timeline and request.method != DebuggerProtocolRequest::RequestMethod.Memory and request.method != DebuggerProtocolRequest::RequestMethod.Threads and request.method != DebuggerProtocolRequest::RequestMethod.Stack and request.method != DebuggerProtocolRequest::RequestMethod.Scopes and request.method != DebuggerProtocolRequest::RequestMethod.Variables and request.method != DebuggerProtocolRequest::RequestMethod.Evaluate and request.method != DebuggerProtocolRequest::RequestMethod.SetBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints and request.method != DebuggerProtocolRequest::RequestMethod.Checkpoint and request.method != DebuggerProtocolRequest::RequestMethod.Branch and request.method != DebuggerProtocolRequest::RequestMethod.Compare and request.method != DebuggerProtocolRequest::RequestMethod.TraceVerify and request.method != DebuggerProtocolRequest::RequestMethod.TraceExport:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED) if request.method != DebuggerProtocolRequest::RequestMethod.Discover and request.method != DebuggerProtocolRequest::RequestMethod.Initialize and request.method != DebuggerProtocolRequest::RequestMethod.CreateSession and request.method != DebuggerProtocolRequest::RequestMethod.OpenTrace and request.method != DebuggerProtocolRequest::RequestMethod.Replay and request.method != DebuggerProtocolRequest::RequestMethod.Detach and request.method != DebuggerProtocolRequest::RequestMethod.Terminate and request.method != DebuggerProtocolRequest::RequestMethod.Close
             service.last_error <- failure
             service_sync_timeline(service)
@@ -312,6 +317,14 @@ module DebuggerManagedService:
 
         def service_globals(service: mutable Service&, offset: usize, requested: usize) -> DebuggerManagedInspection::LocalPage:
             return DebuggerManagedInspection::globals_page(service.controller.engine, offset, requested)
+
+        def service_allocations(service: mutable Service&, offset: usize, requested: usize) -> DebuggerManagedAllocations::AllocationPage:
+            unavailable: mutable DebuggerManagedAllocations::AllocationPage = zeroed
+            unavailable.complete <- true
+            unavailable.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_ALLOCATION_UNAVAILABLE)
+            return unavailable if not DebuggerSession::session_can_inspect(service.controller.session)
+            return unavailable if service.controller.session.capabilities.engine != DebuggerCapabilities::EngineKind.Managed or service.controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
+            return DebuggerManagedAllocations::allocation_page(service.controller.engine, offset, requested)
 
 
         def service_is_exact(service: mutable Service&) -> bool:

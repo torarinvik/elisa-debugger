@@ -172,6 +172,7 @@ module-check: $(BUILD)/elisa-debugger-module-core-check $(BUILD)/elisa-debugger-
 module-check: concurrency-scheduler-check
 module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
+module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 
 # Keep the remote artifact transfer regression in the aggregate module gate.
 module-check: $(BUILD)/elisa-debugger-remote-artifacts-check

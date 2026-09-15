@@ -91,6 +91,25 @@ module DebuggerProtocolEncoding:
             SESSION_RESPONSE_PREFIX: cstr = "{\"kind\":\"response\",\"id\":"
             SESSION_RESPONSE_SESSION_PREFIX: cstr = ",\"sessionId\":"
 
+        const module TimelineEncoding:
+            TIMELINE_DISCOVERY_FEATURE_PREFIX: cstr = ",\"timeline\":"
+            TIMELINE_FIELD_PREFIX: cstr = ",\"timeline\":{\"position\":{\"event\":"
+            TIMELINE_BRANCH_PREFIX: cstr = ",\"branch\":"
+            TIMELINE_HISTORY_PREFIX: cstr = "},\"history\":{\"retained\":{\"available\":"
+            TIMELINE_HISTORY_EXACT_PREFIX: cstr = "},\"exact\":{\"available\":"
+            TIMELINE_BOOKMARKS_PREFIX: cstr = "}},\"bookmarks\":["
+            TIMELINE_BOOKMARK_PREFIX: cstr = "{\"id\":"
+            TIMELINE_BOOKMARK_EVENT_PREFIX: cstr = ",\"event\":"
+            TIMELINE_BOOKMARK_LABEL_PREFIX: cstr = ",\"labelId\":"
+            TIMELINE_BOOKMARK_NOTE_PREFIX: cstr = ",\"noteId\":"
+            TIMELINE_BOOKMARK_PINNED_PREFIX: cstr = ",\"pinned\":"
+            TIMELINE_CHECKPOINT_PREFIX: cstr = "],\"checkpoint\":{\"available\":"
+            TIMELINE_CHECKPOINT_EVENT_PREFIX: cstr = ",\"event\":"
+            TIMELINE_CHECKPOINT_HASH_PREFIX: cstr = ",\"stateHash\":"
+            TIMELINE_AVAILABLE_EVENT_PREFIX: cstr = ",\"firstEvent\":"
+            TIMELINE_AVAILABLE_LAST_EVENT_PREFIX: cstr = ",\"lastEvent\":"
+            TIMELINE_OBJECT_SUFFIX: cstr = "}}}}"
+
         const module OwnershipEncoding:
             CREATE_SESSION_RESULT_PREFIX: cstr = ",\"ok\":true,\"result\":{\"accepted\":true,\"sessionId\":"
             CREATE_SESSION_OWNER_PREFIX: cstr = ",\"ownerToken\":"
@@ -250,6 +269,8 @@ module DebuggerProtocolEncoding:
             buffer_put_bool(buffer, capabilities.expression_evaluation)
             buffer_put_cstr(buffer, ",\"reverseExecution\":")
             buffer_put_bool(buffer, capabilities.reverse_execution)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_DISCOVERY_FEATURE_PREFIX)
+            buffer_put_bool(buffer, capabilities.history != DebuggerCapabilities::HistoryKind.None)
             buffer_put_cstr(buffer, ",\"checkpoints\":")
             buffer_put_bool(buffer, capabilities.checkpoints)
             buffer_put_cstr(buffer, ",\"branches\":")
@@ -571,4 +592,60 @@ module DebuggerProtocolEncoding:
             buffer_put_id_string(buffer, page.next.u64()) if page.next > 0
             buffer_put_cstr(buffer, JsonValues::JSON_NULL) if page.next == 0
             buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        # Encode the bounded, editor-neutral timeline extension. Event and
+        # identity values remain JSON strings so clients in JavaScript and
+        # other number-limited runtimes can round-trip them without loss.
+        # This response is deliberately a snapshot: clients must use the
+        # returned stop generation when issuing a subsequent seek or reverse
+        # request.
+        def managed_timeline_response_encode(request_id: u64, generation: u64, timeline: DebuggerTimeline::Timeline, has_checkpoint: bool, checkpoint_event: u64, checkpoint_hash: u64) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or timeline.bookmark_count > DebuggerTimeline::timeline_bookmark_capacity() or not DebuggerTimeline::history_bounds_is_valid(timeline.bounds):
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_FIELD_PREFIX)
+            buffer_put_id_string(buffer, timeline.position.event)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BRANCH_PREFIX)
+            buffer_put_id_string(buffer, timeline.position.branch.value)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_HISTORY_PREFIX)
+            buffer_put_bool(buffer, timeline.bounds.has_retained)
+            if timeline.bounds.has_retained:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_AVAILABLE_EVENT_PREFIX)
+                buffer_put_id_string(buffer, timeline.bounds.retained_first)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_AVAILABLE_LAST_EVENT_PREFIX)
+                buffer_put_id_string(buffer, timeline.bounds.retained_last)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_HISTORY_EXACT_PREFIX)
+            buffer_put_bool(buffer, timeline.bounds.has_exact)
+            if timeline.bounds.has_exact:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_AVAILABLE_EVENT_PREFIX)
+                buffer_put_id_string(buffer, timeline.bounds.exact_first)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_AVAILABLE_LAST_EVENT_PREFIX)
+                buffer_put_id_string(buffer, timeline.bounds.exact_last)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARKS_PREFIX)
+            for index in 0..<timeline.bookmark_count:
+                bookmark: DebuggerTimeline::Bookmark = timeline.bookmarks[index]
+                if index > 0:
+                    buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_COMMA)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARK_PREFIX)
+                buffer_put_id_string(buffer, bookmark.id.value)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARK_EVENT_PREFIX)
+                buffer_put_id_string(buffer, bookmark.position.event)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARK_LABEL_PREFIX)
+                buffer_put_id_string(buffer, bookmark.label.value)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARK_NOTE_PREFIX)
+                buffer_put_id_string(buffer, bookmark.note.value)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARK_PINNED_PREFIX)
+                buffer_put_bool(buffer, bookmark.pinned)
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_BRACE_CLOSE)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_CHECKPOINT_PREFIX)
+            buffer_put_bool(buffer, has_checkpoint)
+            if has_checkpoint:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_CHECKPOINT_EVENT_PREFIX)
+                buffer_put_id_string(buffer, checkpoint_event)
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_CHECKPOINT_HASH_PREFIX)
+                buffer_put_id_string(buffer, checkpoint_hash)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_OBJECT_SUFFIX)
             return buffer

@@ -92,25 +92,25 @@ clients in any language.
 
 Clients using the typed Elisa service must handle its cancellation, stale
 generation, capability, and bounded-history results. The current compact
-headless process does not emit progress/events or route cancellation. A client
-that only supports ordinary DAP debugging should use the advertised DAP
-capabilities and avoid assuming that a method name in the broader session
-protocol is wired to that process.
+headless process does not emit progress/events or route cancellation. It does
+expose the read-only `timeline` snapshot, while other advanced result payloads
+remain typed-only. A client that only supports ordinary DAP debugging should
+use the advertised DAP capabilities and avoid assuming that a method name in
+the broader session protocol is wired to that process.
 
 An Elisa component built in-process can call typed service APIs without
 opening the interactive CLI. Those APIs do not extend the compact JSON process
-transport, and the current DAP process does not expose advanced trace results.
-Where a transport actually supplies a session ownership token and stop
+transport, and the current DAP process does not expose the advanced timeline
+snapshot. Where a transport actually supplies a session ownership token and stop
 generation, clients must preserve them and reject stale handles. When a trace
 is partial, show the last verified event and disable reverse actions beyond
 it. When a value is unavailable, render its availability state instead of
 displaying a numeric zero.
 
-The optional `timeline`, `memory`, and `events` surfaces have public Elisa
-contracts backed by `DebuggerTimeline`, `DebuggerMemory`, and
-`DebuggerProtocolEvents`. Their presence in the source does not mean the
-headless process serializes them. Clients should use a transport only when it
-advertises and implements the required capability.
+The `timeline`, `memory`, and `events` surfaces have public Elisa contracts
+backed by `DebuggerTimeline`, `DebuggerMemory`, and `DebuggerProtocolEvents`.
+The compact process serializes `timeline`; `memory` and `events` remain typed
+surfaces until a transport advertises and implements their result payloads.
 
 ## Remote artifact transfer
 

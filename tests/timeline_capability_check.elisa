@@ -1,22 +1,83 @@
 include "../src/query/timeline.elisa"
+include "../src/protocol/integration.elisa"
+include "../src/protocol/discovery.elisa"
+include "../src/protocol/request.elisa"
 include "../src/core/identity.elisa"
 include "../src/core/capabilities.elisa"
 
-def main() -> i64:
-    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(1))
+const module TimelineTest:
+    SESSION_ID: u64 = 1
+    BUILD_COMPILER: u64 = 2
+    BUILD_RUNTIME: u64 = 3
+    BUILD_SOURCE: u64 = 4
+    BUILD_TARGET: u64 = 5
+    BUILD_METADATA_VERSION: u32 = 1
+    REQUEST_ID: u64 = 7
+    FIRST_INVALID_EVENT: u64 = 10
+    SECOND_INVALID_EVENT: u64 = 2
+    SUCCESS: i64 = 0
+    CAPABILITY_FAILURE: i64 = 1
+    INVALID_CAPABILITY_FAILURE: i64 = 2
+    MALFORMED_FAILURE: i64 = 3
+    REQUEST_FAILURE: i64 = 4
+    METHOD_NAME_FAILURE: i64 = 5
+    SUPPORT_FAILURE: i64 = 6
+
+const module TimelineWire:
+    REQUEST: cstr = "{\"method\":\"timeline\",\"id\":7}"
+    METHOD_NAME: cstr = "timeline"
+
+def cstr_equal(left: cstr, right: cstr) -> bool:
+    left_length: usize = DebuggerProtocolRequest::request_cstr_length(left)
+    right_length: usize = DebuggerProtocolRequest::request_cstr_length(right)
+    return false if left_length != right_length
+    for index in 0..<left_length:
+        return false if left[index] != right[index]
+    return true
+
+def check_capability_state() -> i64:
+    position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(TimelineTest::SESSION_ID))
     exact: DebuggerTimeline::Timeline = DebuggerTimeline::timeline_new(position, DebuggerCapabilities::managed_capabilities())
     observational: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_set_capabilities(exact, DebuggerCapabilities::native_live_capabilities())
-    return 1 if not observational.accepted or observational.timeline.bounds.has_exact
+    return TimelineTest::CAPABILITY_FAILURE if not observational.accepted or observational.timeline.bounds.has_exact
     upgraded: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_set_capabilities(observational.timeline, DebuggerCapabilities::managed_capabilities())
-    return 3 if not upgraded.accepted or not upgraded.timeline.bounds.has_exact or upgraded.timeline.bounds.exact_first != upgraded.timeline.bounds.current or upgraded.timeline.bounds.exact_last != upgraded.timeline.bounds.current
+    return TimelineTest::CAPABILITY_FAILURE if not upgraded.accepted or not upgraded.timeline.bounds.has_exact or upgraded.timeline.bounds.exact_first != upgraded.timeline.bounds.current or upgraded.timeline.bounds.exact_last != upgraded.timeline.bounds.current
     invalid: mutable DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::managed_capabilities()
     invalid.reverse_execution <- true
     invalid.history <- DebuggerCapabilities::HistoryKind.Observational
     rejected: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_set_capabilities(exact, invalid)
-    return 2 if rejected.accepted or rejected.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    return TimelineTest::INVALID_CAPABILITY_FAILURE if rejected.accepted or rejected.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
     malformed: mutable DebuggerTimeline::Timeline = exact
-    malformed.bounds.retained_first <- 10
-    malformed.bounds.retained_last <- 2
+    malformed.bounds.retained_first <- TimelineTest::FIRST_INVALID_EVENT
+    malformed.bounds.retained_last <- TimelineTest::SECOND_INVALID_EVENT
     rejected_malformed: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_set_capabilities(malformed, DebuggerCapabilities::native_live_capabilities())
-    return 4 if rejected_malformed.accepted or rejected_malformed.failure.code != DebuggerErrors::ErrorCode.Corrupt
-    return 0
+    return TimelineTest::MALFORMED_FAILURE if rejected_malformed.accepted or rejected_malformed.failure.code != DebuggerErrors::ErrorCode.Corrupt
+    return TimelineTest::SUCCESS
+
+def check_protocol_surface() -> i64:
+    parsed: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(TimelineWire::REQUEST.cast[u8&], DebuggerProtocolRequest::request_cstr_length(TimelineWire::REQUEST))
+    return TimelineTest::REQUEST_FAILURE if not parsed.valid or not parsed.has_id or parsed.id != TimelineTest::REQUEST_ID or parsed.method != DebuggerProtocolRequest::RequestMethod.Timeline
+    return TimelineTest::METHOD_NAME_FAILURE if not cstr_equal(DebuggerProtocolRequest::request_method_name(parsed.method), TimelineWire::METHOD_NAME)
+    managed: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::managed_capabilities()
+    return TimelineTest::SUPPORT_FAILURE if not DebuggerProtocol::method_is_valid(DebuggerProtocol::Method.Timeline) or not DebuggerProtocolIntegration::integration_method_supported(DebuggerProtocol::Method.Timeline, managed) or not DebuggerProtocolIntegration::retry_is_safe(DebuggerProtocol::Method.Timeline)
+    native_live: DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::native_live_capabilities()
+    return TimelineTest::SUPPORT_FAILURE if DebuggerProtocolIntegration::integration_method_supported(DebuggerProtocol::Method.Timeline, native_live)
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(TimelineTest::BUILD_COMPILER),
+        runtime: DebuggerIdentity::debug_id(TimelineTest::BUILD_RUNTIME),
+        source: DebuggerIdentity::debug_id(TimelineTest::BUILD_SOURCE),
+        target: DebuggerIdentity::debug_id(TimelineTest::BUILD_TARGET),
+        metadata_version: TimelineTest::BUILD_METADATA_VERSION
+    }
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(TimelineTest::SESSION_ID), build, managed)
+    discovery: DebuggerDiscovery::Discovery = DebuggerDiscovery::discovery_for(session)
+    return TimelineTest::SUPPORT_FAILURE if not DebuggerDiscovery::discovery_supports(discovery, DebuggerProtocol::Method.Timeline)
+    native_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(TimelineTest::SESSION_ID), build, DebuggerCapabilities::native_live_capabilities())
+    native_discovery: DebuggerDiscovery::Discovery = DebuggerDiscovery::discovery_for(native_session)
+    return TimelineTest::SUPPORT_FAILURE if DebuggerDiscovery::discovery_supports(native_discovery, DebuggerProtocol::Method.Timeline)
+    return TimelineTest::SUCCESS
+
+def main() -> i64:
+    failure: i64 = check_capability_state()
+    return failure if failure != TimelineTest::SUCCESS
+    return check_protocol_surface()

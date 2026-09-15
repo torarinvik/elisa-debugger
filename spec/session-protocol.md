@@ -91,7 +91,7 @@ length, one space, and a newline):
 ```
 
 ```json
-{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":false,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"timeline":true,"checkpoints":false,"branches":false,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":false,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
 ```
 
 After launching a verified artifact, a generic editor bridge can replace the
@@ -165,7 +165,7 @@ not observable as a ready stop until state validation succeeds.
 ## Target method families
 
 `discover`, `createSession`, `launch`, `attach`, `openTrace`, `pause`,
-`continue`, `step`, `reverseStep`, `seek`, `threads`, `stack`, `scopes`,
+`continue`, `step`, `reverseStep`, `seek`, `timeline`, `threads`, `stack`, `scopes`,
 `variables`, `evaluate`, `setBreakpoints`, `setDataBreakpoints`,
 `checkpoint`, `branch`, `compare`, `trace.verify`, `trace.export`, `detach`,
 `terminate`, and `close` are reserved method names. Unsupported operations
@@ -186,10 +186,38 @@ this contract are not yet enforced by the compact endpoint.
 ## Target timeline, history, and branch extensions
 
 These method shapes describe the intended advanced client contract. The
-standalone process does not currently serialize their result payloads or expose
-them as supported wire methods. Where in-process Elisa modules implement these
-operations, they remain subject to the capability set reported by the active
-provider. Requests carry structured fields only:
+standalone process serializes the bounded `timeline` snapshot below; the other
+advanced result payloads remain in-process typed APIs until their wire shapes
+are implemented. Where in-process Elisa modules implement these operations,
+they remain subject to the capability set reported by the active provider.
+Requests carry structured fields only:
+
+The `timeline` method is the first supported namespaced-free history extension
+on the compact headless endpoint. It is a read-only snapshot request and is
+available when the provider advertises retained history and the session is
+stopped or replaying. Its result contains the current event and branch,
+retained and exact history bounds, bounded bookmark metadata, and the most
+recent checkpoint event and state digest when one exists. Event, branch,
+bookmark, and checkpoint identities are decimal JSON strings. Clients use the
+returned `stopGeneration` with `seek`, `reverseStep`, `reverseStepOver`, or
+`reverseStepOut`; a stale generation is rejected before the engine moves.
+
+For example, a successful request has this shape:
+
+```json
+{"kind":"response","id":"7","ok":true,"result":{"accepted":true,"stopGeneration":"2","timeline":{"position":{"event":"1","branch":"0"},"history":{"retained":{"available":true,"firstEvent":"0","lastEvent":"1"},"exact":{"available":true,"firstEvent":"0","lastEvent":"1"}},"bookmarks":[],"checkpoint":{"available":true,"event":"1","stateHash":"0"}}}}
+```
+
+Validate requests and responses against the
+[`timeline` JSON schema](../schemas/session-protocol-v1.timeline.schema.json).
+
+The typed managed service exposes checkpoint creation and reverse navigation;
+the compact endpoint keeps checkpoint creation disabled because it has no
+checkpoint payload transport. Its timeline snapshot still reports checkpoint
+metadata when a typed caller has created one, and joins reverse navigation
+without transferring checkpoint payloads or unbounded event history. Unsupported
+providers return the normal `UNSUPPORTED` or `UNAVAILABLE` error and never
+manufacture bounds.
 
 - `seek` uses `targetEvent` and `expectedStopGeneration`.
 - `checkpoint` returns a checkpoint identity and its state digest.

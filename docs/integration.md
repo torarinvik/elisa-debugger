@@ -79,7 +79,7 @@ fields, and errors.
 
 The supported compact request flow is `launch` with
 `arguments.program`, `setBreakpoints`, `pause`, `continue`, `step`,
-`reverseStep`, and `seek`.
+`reverseStep`, `seek`, and the read-only `timeline` history extension.
 After launch, `threads` returns one logical `main` thread, including while the
 session is running. Pause before requesting `stack`, `scopes`, or `variables`.
 `program` must name a complete verified EDIR artifact. `variablesReference` is
@@ -97,6 +97,14 @@ Requests are bounded to 32 lines per source. The
 [set-breakpoints schema](../schemas/session-protocol-v1.set-breakpoints.schema.json)
 defines the compact wire shape.
 
+The `timeline` response reports the current event and branch, retained and
+exact bounds, bounded bookmarks, and the latest checkpoint event and state
+digest. It is valid only while the managed session is stopped or replaying;
+clients should pass its `stopGeneration` when issuing a seek or reverse
+request. Event and identity fields are decimal JSON strings. Providers without
+history return `UNSUPPORTED` or `UNAVAILABLE`. Validate the wire shape with the
+[timeline schema](../schemas/session-protocol-v1.timeline.schema.json).
+
 This endpoint does not implement attach, expression evaluation, memory reads,
 or trace artifact transfer. `createSession` can establish process-scoped
 session ownership before launch; after that handshake, preserve the returned
@@ -105,7 +113,8 @@ changing request. Checkpoint,
 branch, comparison, and trace operations that need structured operands or
 results are not available through this compact endpoint merely because
 corresponding typed Elisa APIs exist. `discover` reports the compact endpoint's
-capabilities, with process-inaccessible features disabled.
+capabilities, with process-inaccessible features disabled. Reverse execution
+uses the same managed service history that produces the timeline snapshot.
 
 The compact process does not emit progress or ordered session events, route
 cancellation, or let another process attach to its session. Requests and

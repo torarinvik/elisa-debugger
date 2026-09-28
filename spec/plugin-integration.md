@@ -37,11 +37,17 @@ as ignored because the current adapter does not apply them.
 Managed DAP source breakpoints support numeric `hitCondition` strings such as
 `"2"`: the breakpoint begins stopping when its second matching hit is
 observed. The current engine then stops on subsequent matching hits as well.
-Positive decimal integers are accepted; zero, comparison operators, and
-expression conditions are rejected. Expression `condition` and `logMessage`
-logpoints are also rejected because this adapter does not evaluate those
-breakpoint policies. The adapter advertises hit-conditional breakpoints and
-does not advertise expression-conditional breakpoints.
+Positive decimal integers are accepted; zero and comparison-operator hit
+conditions such as `">=2"` are rejected. Expression conditions use the bounded
+integer grammar in the [evaluation specification](expression-evaluation.md),
+and stop when their result is nonzero. Malformed expressions and unknown names
+produce a diagnostic and disable the breakpoint when evaluated. A known but
+unavailable value produces a diagnostic at that stop while leaving the
+breakpoint enabled, so it can match after execution reaches a state where that
+value is available.
+`logMessage` logpoints remain rejected because this adapter does not yet
+produce log output. The adapter advertises hit-conditional and
+expression-conditional breakpoints.
 
 The adapter does not implement DAP `attach`. The
 [attach-configuration schema](../schemas/dap-attach-configuration.schema.json)

@@ -119,6 +119,44 @@ const module Test:
     MANAGED_SOURCE_BREAKPOINT_EXPECTED_EVENT: usize = Test::NO_TARGET_EVENT.usize()
     FULL_CHECKPOINT_INTERVENTION_RESTORE_FAILURE: i64 = 61
     FULL_CHECKPOINT_INTERVENTION_VALUE: i64 = 99
+
+    const module BreakpointCondition:
+        SETUP_LINE: u32 = 20
+        TARGET_LINE: u32 = 21
+        SETUP_BYTE_OFFSET: u64 = 1
+        TARGET_BYTE_OFFSET: u64 = 3
+        SETUP_VALUE: i64 = 7
+        LOCAL_COUNT: u64 = 1
+        INSTRUCTION_COUNT: u64 = 4
+        FIRST_INSTRUCTION: usize = 0
+        STORE_LOCAL_INSTRUCTION: usize = 1
+        TARGET_INSTRUCTION: usize = 2
+        RETURN_INSTRUCTION: usize = 3
+        LOCAL_INDEX: i64 = 0
+        TRUE_EXPRESSION: cstr = "local0 == 7"
+        TRUE_EXPRESSION_LENGTH: usize = 11
+        FALSE_EXPRESSION: cstr = "local0 == 8"
+        FALSE_EXPRESSION_LENGTH: usize = 11
+        INVALID_EXPRESSION: cstr = "missing"
+        INVALID_EXPRESSION_LENGTH: usize = 7
+        TARGET_EVENT: usize = 2
+        BREAKPOINT_SLOT: usize = 0
+        NO_BREAKPOINT_ID: u64 = 0
+        HIT_COUNT: u64 = 1
+        SUCCESS_RESULT: i64 = 0
+        TRUE_CHECK_FAILURE: i64 = 62
+        FALSE_CHECK_FAILURE: i64 = 63
+        INVALID_CHECK_FAILURE: i64 = 64
+        UNAVAILABLE_CHECK_FAILURE: i64 = 67
+
+    const module ConditionService:
+        EXPRESSION: cstr = "local0 == 15"
+        EXPRESSION_LENGTH: usize = 12
+        EMPTY_EXPRESSION_LENGTH: usize = 0
+        FIRST_BYTE_INDEX: usize = 0
+        FIRST_EXPRESSION_BYTE: u8 = 108
+        RESULT_SET_CONDITION: i64 = 65
+        RESULT_CLEAR_CONDITION: i64 = 66
 const module ManagedReverseProgram:
     INSTRUCTION_COUNT: u64 = 13
     LOCAL_COUNT: u64 = 1
@@ -348,6 +386,17 @@ def managed_source_step_image() -> DebuggerEDIR::ProgramImage:
     image.instructions[3] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::MANAGED_REGRESSION_NO_OPERAND, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: later_source}
     return image
 
+def managed_conditional_breakpoint_image() -> DebuggerEDIR::ProgramImage:
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: Test::MANAGED_REGRESSION_PROGRAM_VERSION, instruction_count: Test::BreakpointCondition::INSTRUCTION_COUNT, local_count: Test::BreakpointCondition::LOCAL_COUNT, has_return: true}
+    setup_source: DebuggerIdentity::SourceSpan = managed_regression_source_span(Test::BreakpointCondition::SETUP_LINE, Test::BreakpointCondition::SETUP_BYTE_OFFSET)
+    target_source: DebuggerIdentity::SourceSpan = managed_regression_source_span(Test::BreakpointCondition::TARGET_LINE, Test::BreakpointCondition::TARGET_BYTE_OFFSET)
+    image.instructions[Test::BreakpointCondition::FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::BreakpointCondition::SETUP_VALUE, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: setup_source}
+    image.instructions[Test::BreakpointCondition::STORE_LOCAL_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.StoreLocal, a: Test::BreakpointCondition::LOCAL_INDEX, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: setup_source}
+    image.instructions[Test::BreakpointCondition::TARGET_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.LoadLocal, a: Test::BreakpointCondition::LOCAL_INDEX, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: target_source}
+    image.instructions[Test::BreakpointCondition::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::MANAGED_REGRESSION_NO_OPERAND, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: target_source}
+    return image
+
 def managed_call_breakpoint_image() -> DebuggerEDIR::ProgramImage:
     image: mutable DebuggerEDIR::ProgramImage = zeroed
     image.program <- DebuggerEDIR::Program{version: Test::MANAGED_REGRESSION_PROGRAM_VERSION, instruction_count: Test::MANAGED_REGRESSION_CALL_INSTRUCTION_COUNT, local_count: Test::MANAGED_REGRESSION_NO_LOCALS, has_return: true}
@@ -402,6 +451,59 @@ def check_managed_source_breakpoint_resume() -> i64:
     reverse_continue: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_continue(controller)
     return Test::MANAGED_SOURCE_BREAKPOINT_REVERSE_CONTINUE if not DebuggerErrors::error_is_ok(reverse_continue) or controller.engine.event_count != Test::MANAGED_SOURCE_BREAKPOINT_EXPECTED_EVENT or controller.state.breakpoints.points[0].hit_count != Test::MANAGED_SOURCE_BREAKPOINT_EXPECTED_HITS
     return 0
+
+def check_managed_conditional_breakpoint() -> i64:
+    image: DebuggerEDIR::ProgramImage = managed_conditional_breakpoint_image()
+    true_controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::BreakpointCondition::TRUE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(true_controller))
+    location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(Test::MANAGED_REGRESSION_SOURCE_FILE_ID), line: Test::BreakpointCondition::TARGET_LINE, column: Test::MANAGED_REGRESSION_SOURCE_COLUMN, discriminator: 0}
+    true_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(true_controller, location)
+    return Test::BreakpointCondition::TRUE_CHECK_FAILURE if true_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    for index in 0..<Test::BreakpointCondition::TRUE_EXPRESSION_LENGTH:
+        true_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_expression[index] <- Test::BreakpointCondition::TRUE_EXPRESSION.cast[u8&][index]
+    true_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_length <- Test::BreakpointCondition::TRUE_EXPRESSION_LENGTH
+    true_hit: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(true_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::BreakpointCondition::TRUE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(true_hit) or true_controller.engine.event_count != Test::BreakpointCondition::TARGET_EVENT or true_controller.engine.machine.locals[Test::BreakpointCondition::LOCAL_INDEX.usize()] != Test::BreakpointCondition::SETUP_VALUE or true_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].hit_count != Test::BreakpointCondition::HIT_COUNT
+    true_completion: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(true_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::BreakpointCondition::TRUE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(true_completion) or not true_controller.engine.machine.halted
+    true_reverse: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_continue(true_controller)
+    return Test::BreakpointCondition::TRUE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(true_reverse) or true_controller.engine.event_count != Test::BreakpointCondition::TARGET_EVENT
+
+    false_controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::BreakpointCondition::FALSE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(false_controller))
+    false_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(false_controller, location)
+    return Test::BreakpointCondition::FALSE_CHECK_FAILURE if false_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    for index in 0..<Test::BreakpointCondition::FALSE_EXPRESSION_LENGTH:
+        false_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_expression[index] <- Test::BreakpointCondition::FALSE_EXPRESSION.cast[u8&][index]
+    false_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_length <- Test::BreakpointCondition::FALSE_EXPRESSION_LENGTH
+    false_continue: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(false_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::BreakpointCondition::FALSE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(false_continue) or not false_controller.engine.machine.halted or false_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].hit_count != Test::BreakpointCondition::HIT_COUNT
+    false_reverse: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_continue(false_controller)
+    return Test::BreakpointCondition::FALSE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(false_reverse) or false_controller.engine.event_count != 0
+
+    unavailable_controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::BreakpointCondition::UNAVAILABLE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(unavailable_controller))
+    setup_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(Test::MANAGED_REGRESSION_SOURCE_FILE_ID), line: Test::BreakpointCondition::SETUP_LINE, column: Test::MANAGED_REGRESSION_SOURCE_COLUMN, discriminator: 0}
+    unavailable_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(unavailable_controller, setup_location)
+    return Test::BreakpointCondition::UNAVAILABLE_CHECK_FAILURE if unavailable_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    for index in 0..<Test::BreakpointCondition::TRUE_EXPRESSION_LENGTH:
+        unavailable_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_expression[index] <- Test::BreakpointCondition::TRUE_EXPRESSION.cast[u8&][index]
+    unavailable_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_length <- Test::BreakpointCondition::TRUE_EXPRESSION_LENGTH
+    unavailable_hit: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(unavailable_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::BreakpointCondition::UNAVAILABLE_CHECK_FAILURE if unavailable_hit.code != DebuggerErrors::ErrorCode.Unavailable or unavailable_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].status != DebuggerBreakpoints::BreakpointStatus.Verified or unavailable_controller.engine.event_count != Test::NO_TARGET_EVENT.usize() or not unavailable_controller.has_last_breakpoint_stop
+    unavailable_resume: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(unavailable_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::BreakpointCondition::UNAVAILABLE_CHECK_FAILURE if not DebuggerErrors::error_is_ok(unavailable_resume) or not unavailable_controller.engine.machine.halted
+
+    invalid_controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::BreakpointCondition::INVALID_CHECK_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(invalid_controller))
+    invalid_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(invalid_controller, location)
+    return Test::BreakpointCondition::INVALID_CHECK_FAILURE if invalid_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    for index in 0..<Test::BreakpointCondition::INVALID_EXPRESSION_LENGTH:
+        invalid_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_expression[index] <- Test::BreakpointCondition::INVALID_EXPRESSION.cast[u8&][index]
+    invalid_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].condition_length <- Test::BreakpointCondition::INVALID_EXPRESSION_LENGTH
+    invalid_hit: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(invalid_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::BreakpointCondition::INVALID_CHECK_FAILURE if invalid_hit.code != DebuggerErrors::ErrorCode.InvalidArgument or invalid_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].status != DebuggerBreakpoints::BreakpointStatus.Disabled or invalid_controller.engine.event_count != Test::BreakpointCondition::TARGET_EVENT
+    return Test::BreakpointCondition::SUCCESS_RESULT
 
 def check_managed_top_level_step_out() -> i64:
     controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(managed_source_step_image())
@@ -494,6 +596,8 @@ def main() -> i64:
     return Test::MANAGED_STEP_OUT_DESTINATION_BREAKPOINT_RESULT if step_out_destination_breakpoint_status != 0
     source_breakpoint_resume_status: i64 = check_managed_source_breakpoint_resume()
     return Test::MANAGED_SOURCE_BREAKPOINT_RESUME_RESULT if source_breakpoint_resume_status != 0
+    conditional_breakpoint_status: i64 = check_managed_conditional_breakpoint()
+    return conditional_breakpoint_status if conditional_breakpoint_status != 0
     reverse_compound_status: i64 = check_managed_reverse_compound_steps()
     return ManagedReverseResult::CHECK_FAILURE_BASE + reverse_compound_status if reverse_compound_status != ManagedReverseResult::SUCCESS
     reverse_route_status: i64 = check_managed_reverse_protocol_route()
@@ -575,6 +679,12 @@ def main() -> i64:
     evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count <- Test::EVALUATION_BREAKPOINT_HIT_TARGET
     evaluation_hit_reset: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_hit_target(evaluation_service, evaluation_breakpoint_id, Test::EVALUATION_BREAKPOINT_HIT_TARGET)
     return Test::RESULT_EVALUATION_HIT_RESET if not evaluation_hit_reset.accepted or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count != Test::EVALUATION_ZERO_HIT_COUNT
+    evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count <- Test::EVALUATION_BREAKPOINT_HIT_TARGET
+    condition_set: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_condition(evaluation_service, evaluation_breakpoint_id, Test::ConditionService::EXPRESSION.cast[u8&], Test::ConditionService::EXPRESSION_LENGTH)
+    return Test::ConditionService::RESULT_SET_CONDITION if not condition_set.accepted or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].condition_length != Test::ConditionService::EXPRESSION_LENGTH or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].condition_expression[Test::ConditionService::FIRST_BYTE_INDEX] != Test::ConditionService::FIRST_EXPRESSION_BYTE or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count != Test::EVALUATION_ZERO_HIT_COUNT
+    evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count <- Test::EVALUATION_BREAKPOINT_HIT_TARGET
+    condition_clear: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_condition(evaluation_service, evaluation_breakpoint_id, Test::ConditionService::EXPRESSION.cast[u8&], Test::ConditionService::EMPTY_EXPRESSION_LENGTH)
+    return Test::ConditionService::RESULT_CLEAR_CONDITION if not condition_clear.accepted or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].condition_length != Test::ConditionService::EMPTY_EXPRESSION_LENGTH or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count != Test::EVALUATION_ZERO_HIT_COUNT
     continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: Test::STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return 5 if not continued.accepted or not DebuggerManagedService::service_is_exact(service)

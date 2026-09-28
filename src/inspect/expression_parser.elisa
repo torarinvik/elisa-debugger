@@ -23,6 +23,10 @@ module DebuggerExpressionParser:
             FIRST_INDEX: usize = 0
             INCREMENT: usize = 1
 
+        const module ExpressionParserComparison:
+            NO_OPERATOR_WIDTH: usize = 0
+            TWO_CHARACTER_OPERATOR_WIDTH: usize = ExpressionParserCursor::INCREMENT + ExpressionParserCursor::INCREMENT
+
         const module ExpressionParserCharacter:
             ASCII_SPACE: u8 = 32
             ASCII_TAB: u8 = 9
@@ -34,6 +38,10 @@ module DebuggerExpressionParser:
             ASCII_MINUS: u8 = 45
             ASCII_MULTIPLY: u8 = 42
             ASCII_DIVIDE: u8 = 47
+            ASCII_LESS_THAN: u8 = 60
+            ASCII_EQUALS: u8 = 61
+            ASCII_GREATER_THAN: u8 = 62
+            ASCII_EXCLAMATION: u8 = 33
             ASCII_OPEN_PARENTHESIS: u8 = 40
             ASCII_CLOSE_PARENTHESIS: u8 = 41
             ASCII_UNDERSCORE: u8 = 95
@@ -164,6 +172,52 @@ module DebuggerExpressionParser:
                 left <- combined
             return left
 
+        def comparison_operator_at(bytes: u8&, length: usize, position: usize) -> DebuggerEvaluate::EvaluationKind:
+            return DebuggerEvaluate::EvaluationKind.CompareEqual if position + ExpressionParserCursor::INCREMENT < length and bytes[position] == ExpressionParserCharacter::ASCII_EQUALS and bytes[position + ExpressionParserCursor::INCREMENT] == ExpressionParserCharacter::ASCII_EQUALS
+            return DebuggerEvaluate::EvaluationKind.CompareNotEqual if position + ExpressionParserCursor::INCREMENT < length and bytes[position] == ExpressionParserCharacter::ASCII_EXCLAMATION and bytes[position + ExpressionParserCursor::INCREMENT] == ExpressionParserCharacter::ASCII_EQUALS
+            return DebuggerEvaluate::EvaluationKind.CompareLessOrEqual if position + ExpressionParserCursor::INCREMENT < length and bytes[position] == ExpressionParserCharacter::ASCII_LESS_THAN and bytes[position + ExpressionParserCursor::INCREMENT] == ExpressionParserCharacter::ASCII_EQUALS
+            return DebuggerEvaluate::EvaluationKind.CompareGreaterOrEqual if position + ExpressionParserCursor::INCREMENT < length and bytes[position] == ExpressionParserCharacter::ASCII_GREATER_THAN and bytes[position + ExpressionParserCursor::INCREMENT] == ExpressionParserCharacter::ASCII_EQUALS
+            return DebuggerEvaluate::EvaluationKind.CompareLess if bytes[position] == ExpressionParserCharacter::ASCII_LESS_THAN
+            return DebuggerEvaluate::EvaluationKind.CompareGreater if bytes[position] == ExpressionParserCharacter::ASCII_GREATER_THAN
+            return DebuggerEvaluate::EvaluationKind.Unsupported
+
+        def comparison_operator_width(kind: DebuggerEvaluate::EvaluationKind) -> usize:
+            return ExpressionParserCursor::INCREMENT if kind == DebuggerEvaluate::EvaluationKind.CompareLess or kind == DebuggerEvaluate::EvaluationKind.CompareGreater
+            return ExpressionParserComparison::TWO_CHARACTER_OPERATOR_WIDTH if kind != DebuggerEvaluate::EvaluationKind.Unsupported
+            return ExpressionParserComparison::NO_OPERATOR_WIDTH
+
+        def parse_comparison(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
+            left: mutable ExpressionParserNode = parse_additive(bytes, length, position, depth, operands, environment)
+            return left if not left.valid
+            while true:
+                skip_whitespace(bytes, length, position)
+                return left if position >= length
+                operator: DebuggerEvaluate::EvaluationKind = comparison_operator_at(bytes, length, position)
+                return left if operator == DebuggerEvaluate::EvaluationKind.Unsupported
+                position <- position + comparison_operator_width(operator)
+                right: ExpressionParserNode = parse_additive(bytes, length, position, depth, operands, environment)
+                return right if not right.valid
+                combined: ExpressionParserNode = apply_binary(operator, left.value, right.value)
+                return combined if not combined.valid
+                left <- combined
+            return left
+
+        def parse_equality(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
+            left: mutable ExpressionParserNode = parse_comparison(bytes, length, position, depth, operands, environment)
+            return left if not left.valid
+            while true:
+                skip_whitespace(bytes, length, position)
+                return left if position >= length
+                operator: DebuggerEvaluate::EvaluationKind = comparison_operator_at(bytes, length, position)
+                return left if operator != DebuggerEvaluate::EvaluationKind.CompareEqual and operator != DebuggerEvaluate::EvaluationKind.CompareNotEqual
+                position <- position + comparison_operator_width(operator)
+                right: ExpressionParserNode = parse_comparison(bytes, length, position, depth, operands, environment)
+                return right if not right.valid
+                combined: ExpressionParserNode = apply_binary(operator, left.value, right.value)
+                return combined if not combined.valid
+                left <- combined
+            return left
+
         def parse_multiplicative(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
             left: mutable ExpressionParserNode = parse_unary(bytes, length, position, depth, operands, environment)
             return left if not left.valid
@@ -199,7 +253,7 @@ module DebuggerExpressionParser:
             if bytes[position] == ExpressionParserCharacter::ASCII_OPEN_PARENTHESIS:
                 return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::NESTING_LIMIT) if depth >= ExpressionParserBounds::MAX_NESTING_DEPTH
                 position <- position + ExpressionParserCursor::INCREMENT
-                nested: ExpressionParserNode = parse_additive(bytes, length, position, depth + ExpressionParserCursor::INCREMENT, operands, environment)
+                nested: ExpressionParserNode = parse_equality(bytes, length, position, depth + ExpressionParserCursor::INCREMENT, operands, environment)
                 return nested if not nested.valid
                 skip_whitespace(bytes, length, position)
                 return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_CLOSE_PARENTHESIS) if position >= length or bytes[position] != ExpressionParserCharacter::ASCII_CLOSE_PARENTHESIS
@@ -219,7 +273,7 @@ module DebuggerExpressionParser:
             operands: mutable usize = 0
             skip_whitespace(bytes, length, position)
             return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EMPTY_INPUT), position) if position >= length
-            expression: ExpressionParserNode = parse_additive(bytes, length, position, ExpressionParserBounds::ROOT_DEPTH, operands, environment)
+            expression: ExpressionParserNode = parse_equality(bytes, length, position, ExpressionParserBounds::ROOT_DEPTH, operands, environment)
             return parse_failure(expression.failure, position) if not expression.valid
             skip_whitespace(bytes, length, position)
             return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::TRAILING_INPUT), position) if position != length

@@ -1,6 +1,6 @@
 # Bounded expression evaluation
 
-`src/inspect/expression_parser.elisa` implements a pure arithmetic expression
+`src/inspect/expression_parser.elisa` implements a pure integer expression
 parser. It evaluates against an explicit, bounded environment; the parser
 cannot read a machine, value store, process, filesystem, or replay engine.
 `DebuggerManagedService::service_evaluate_expression` builds that environment
@@ -10,7 +10,9 @@ bindings to the parser.
 The accepted grammar is:
 
 ```text
-expression  := additive
+expression  := equality
+equality    := comparison (('==' | '!=') comparison)*
+comparison  := additive (('<' | '<=' | '>' | '>=') additive)*
 additive    := multiplicative (('+' | '-') multiplicative)*
 multiplicative := unary (('*' | '/') unary)*
 unary       := '-' unary | primary
@@ -20,9 +22,10 @@ identifier  := (letter | '_') (letter | digit | '_')*
 ```
 
 Spaces, tabs, carriage returns, and line feeds may occur between grammar
-elements. Decimal literals and all checked arithmetic operations use signed
-64-bit values. Division by zero, overflow, malformed syntax, unknown names,
-and unavailable bindings return structured debugger errors.
+elements. Decimal literals and checked arithmetic use signed 64-bit values;
+comparisons return integer `1` for true and `0` for false. Division by zero,
+overflow, malformed syntax, unknown names, and unavailable bindings return
+structured debugger errors.
 
 The parser limits source text to 256 bytes, nesting to 32 levels, operands to
 32, bindings to 48, and each identifier to 32 bytes. The managed service

@@ -171,6 +171,12 @@ module DebuggerDAPPayload:
             PROGRAM_PATH_CAPACITY: usize = DebuggerMetadataSourcePath::MAPPED_SOURCE_PATH_CAPACITY
             SOURCE_BREAKPOINT_LIMIT: usize = 256
 
+        const module HitCondition:
+            NO_TARGET: u64 = 0
+            MAX_TARGET: u64 = NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64
+            QUOTE_WIDTH: usize = 1
+            DIGIT_INCREMENT: usize = 1
+
         const module Unicode:
             HEX_DIGITS: usize = 4
             DAP_PAYLOAD_UNICODE_SURROGATE_HIGH_START: u64 = 55296
@@ -930,6 +936,8 @@ module DebuggerDAPPayload:
             lines: mutable u32[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
             columns: mutable u32[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
             has_columns: mutable bool[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            hit_targets: mutable u64[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            has_hit_targets: mutable bool[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
             count: mutable usize
 
         struct SourcePathRootRequest:
@@ -1000,11 +1008,29 @@ module DebuggerDAPPayload:
             request.valid <- true
             return request
 
-        def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64, column: u64, has_column: bool) -> bool:
+        def hit_condition_string_parse(payload: u8&, length: usize, start: usize) -> ParsedValue:
+            return invalid_value() if start >= length or payload[start] != Character::DAP_PAYLOAD_CHARACTER_ASCII_QUOTE
+            cursor: mutable usize = start + HitCondition::QUOTE_WIDTH
+            value: mutable u64 = HitCondition::NO_TARGET
+            digit_count: mutable usize = 0
+            while cursor < length and payload[cursor] != Character::DAP_PAYLOAD_CHARACTER_ASCII_QUOTE:
+                byte: u8 = payload[cursor]
+                return invalid_value() if byte < Character::DAP_PAYLOAD_CHARACTER_ASCII_ZERO or byte > Character::DAP_PAYLOAD_CHARACTER_ASCII_NINE
+                digit: u64 = (byte - Character::DAP_PAYLOAD_CHARACTER_ASCII_ZERO).u64()
+                return invalid_value() if value > (HitCondition::MAX_TARGET - digit) / NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_DECIMAL_BASE
+                value <- value * NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_DECIMAL_BASE + digit
+                digit_count <- digit_count + HitCondition::DIGIT_INCREMENT
+                cursor <- cursor + HitCondition::DIGIT_INCREMENT
+            return invalid_value() if cursor >= length or digit_count == 0 or value == HitCondition::NO_TARGET
+            return ParsedValue{valid: true, value: value, end: cursor + HitCondition::QUOTE_WIDTH}
+
+        def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64, column: u64, has_column: bool, hit_target: u64, has_hit_target: bool) -> bool:
             return false if request.count >= SourcePaths::SOURCE_BREAKPOINT_LIMIT or line > NumberFormat::MAX_U32 or column > NumberFormat::MAX_U32
             request.lines[request.count] <- line.u32()
             request.columns[request.count] <- column.u32()
             request.has_columns[request.count] <- has_column
+            request.hit_targets[request.count] <- hit_target
+            request.has_hit_targets[request.count] <- has_hit_target
             request.count <- request.count + 1
             return true
 
@@ -1020,12 +1046,22 @@ module DebuggerDAPPayload:
                 line: mutable ParsedValue = invalid_value()
                 column: mutable u64 = SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN
                 has_column: mutable bool = false
+                hit_target: mutable u64 = HitCondition::NO_TARGET
+                has_hit_target: mutable bool = false
                 if object_items:
                     return false if payload[cursor] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
-                    # Reject semantics the engine cannot honor instead of
-                    # silently turning conditional or log breakpoints into
-                    # ordinary line breakpoints.
-                    return false if object_field_value_start(payload, length, cursor, DapFields::CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::HIT_CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                    # Reject expression conditions and logpoints, which the
+                    # engine cannot honor, instead of silently treating them
+                    # as ordinary line breakpoints. Numeric hit conditions
+                    # are parsed and applied below.
+                    return false if object_field_value_start(payload, length, cursor, DapFields::CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                    hit_condition_start: usize = object_field_value_start(payload, length, cursor, DapFields::HIT_CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+                    if hit_condition_start != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
+                        return false if object_field_value_start(payload, length, cursor, DapFields::HIT_CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                        hit_condition: ParsedValue = hit_condition_string_parse(payload, length, hit_condition_start)
+                        return false if not hit_condition.valid
+                        hit_target <- hit_condition.value
+                        has_hit_target <- true
                     line_start: usize = object_field_value_start(payload, length, cursor, DapFields::LINE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
                     return false if line_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, cursor, DapFields::LINE, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
                     line <- parse_unsigned_bounded(payload, length, line_start, NumberFormat::MAX_U32)
@@ -1036,13 +1072,13 @@ module DebuggerDAPPayload:
                         return false if not parsed_column.valid
                         column <- parsed_column.value
                         has_column <- true
-                    return false if not line.valid or not source_breakpoints_append(request, line.value, column, has_column)
+                    return false if not line.valid or not source_breakpoints_append(request, line.value, column, has_column, hit_target, has_hit_target)
                     item_end: usize = json_value_end(payload, length, cursor)
                     return false if item_end == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
                     cursor <- item_end
                 else:
                     line <- parse_unsigned_bounded(payload, length, cursor, NumberFormat::MAX_U32)
-                    return false if not line.valid or not source_breakpoints_append(request, line.value, SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN, false)
+                    return false if not line.valid or not source_breakpoints_append(request, line.value, SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN, false, HitCondition::NO_TARGET, false)
                     cursor <- line.end
                 while cursor < length and is_whitespace(payload[cursor]):
                     cursor <- cursor + 1

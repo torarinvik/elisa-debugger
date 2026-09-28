@@ -36,6 +36,7 @@ module DebuggerManagedService:
             DETAIL_ALLOCATION_UNAVAILABLE: u32 = 11
             DETAIL_EVALUATION_FRAME: u32 = 12
             DETAIL_EVALUATION_ENVIRONMENT: u32 = 13
+            DETAIL_BREAKPOINT_POLICY: u32 = 14
 
         const module EventCapture:
             SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
@@ -49,6 +50,10 @@ module DebuggerManagedService:
 
         const module SourceBreakpoints:
             PROTOCOL_MANAGED_SERVICE_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX: usize = 0
+
+        const module BreakpointPolicy:
+            NO_BREAKPOINT_ID: u64 = 0
+            FIRST_BREAKPOINT_INDEX: usize = 0
 
         const module RecordingState:
             ROOT_RECORDING_BRANCH: u64 = 0
@@ -467,6 +472,37 @@ module DebuggerManagedService:
                 result.points[index] <- SourceBreakpointEntry{id: replacement.results[index].id, line: replacement.results[index].line, column: replacement.results[index].column, has_column: replacement.results[index].has_column, verified: replacement.results[index].verified}
             result.failure <- DebuggerErrors::no_error()
             return result
+
+        def service_set_breakpoint_hit_target(service: mutable Service&, breakpoint_id: DebuggerIdentity::DebugId, hit_target: u64) -> Result:
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if breakpoint_id.value == BreakpointPolicy::NO_BREAKPOINT_ID:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY)
+            if not service.controller.session.capabilities.source_breakpoints:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.session.state == DebuggerSession::SessionState.Created or service.controller.session.state == DebuggerSession::SessionState.Configuring or service.controller.session.state == DebuggerSession::SessionState.Launching:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.session.state == DebuggerSession::SessionState.Exited or service.controller.session.state == DebuggerSession::SessionState.Detached or service.controller.session.state == DebuggerSession::SessionState.Failed or service.controller.session.state == DebuggerSession::SessionState.Closed:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or service.controller.engine.machine.faulted:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints):
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if not DebuggerErrors::error_is_ok(failure):
+                service.last_error <- failure
+                return result_error(failure)
+            found: mutable bool = false
+            for index in BreakpointPolicy::FIRST_BREAKPOINT_INDEX..<service.controller.state.breakpoints.count:
+                if service.controller.state.breakpoints.points[index].id.value == breakpoint_id.value and service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source:
+                    service.controller.state.breakpoints.points[index].hit_target <- hit_target
+                    service.controller.state.breakpoints.points[index].hit_count <- 0
+                    found <- true
+                    break
+            if not found:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY)
+                service.last_error <- failure
+                return result_error(failure)
+            service.last_error <- DebuggerErrors::no_error()
+            return result_ok()
 
         def service_values(service: mutable Service&) -> DebuggerValueStore::ValueStore:
             return DebuggerManagedEngine::managed_values(service.controller)

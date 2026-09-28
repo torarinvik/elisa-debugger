@@ -34,6 +34,15 @@ stored in the artifact. The [launch-configuration schema](../schemas/dap-launch-
 documents these fields. It also lists `args`, `cwd`, `env`, and `stopOnEntry`
 as ignored because the current adapter does not apply them.
 
+Managed DAP source breakpoints support numeric `hitCondition` strings such as
+`"2"`: the breakpoint begins stopping when its second matching hit is
+observed. The current engine then stops on subsequent matching hits as well.
+Positive decimal integers are accepted; zero, comparison operators, and
+expression conditions are rejected. Expression `condition` and `logMessage`
+logpoints are also rejected because this adapter does not evaluate those
+breakpoint policies. The adapter advertises hit-conditional breakpoints and
+does not advertise expression-conditional breakpoints.
+
 The adapter does not implement DAP `attach`. The
 [attach-configuration schema](../schemas/dap-attach-configuration.schema.json)
 intentionally rejects every attach configuration so a plugin can disable that

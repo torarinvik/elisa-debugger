@@ -1,9 +1,9 @@
 # Bounded, side-effect-free arithmetic expressions for debugger adapters.
 #
-# The parser intentionally accepts only decimal integer literals, whitespace,
-# unary minus, the four arithmetic operators, and parentheses. It evaluates
-# each checked operation immediately through the pure AST evaluator, so this
-# module has no access to a machine, value store, process, or replay state.
+# The parser accepts decimal integer literals, bounded identifiers, whitespace,
+# unary minus, the four arithmetic operators, and parentheses. Identifiers are
+# resolved only against an explicit immutable binding environment. The parser
+# has no access to a machine, value store, process, or replay state.
 
 include "./evaluate.elisa"
 include "../core/errors.elisa"
@@ -14,9 +14,13 @@ module DebuggerExpressionParser:
             MAX_SOURCE_BYTES: usize = 256
             MAX_NESTING_DEPTH: usize = 32
             MAX_OPERAND_COUNT: usize = 32
+            MAX_BINDINGS: usize = 48
+            MAX_IDENTIFIER_BYTES: usize = 32
+            EMPTY_IDENTIFIER_BYTES: usize = 0
             ROOT_DEPTH: usize = 0
 
         const module ExpressionParserCursor:
+            FIRST_INDEX: usize = 0
             INCREMENT: usize = 1
 
         const module ExpressionParserCharacter:
@@ -32,6 +36,11 @@ module DebuggerExpressionParser:
             ASCII_DIVIDE: u8 = 47
             ASCII_OPEN_PARENTHESIS: u8 = 40
             ASCII_CLOSE_PARENTHESIS: u8 = 41
+            ASCII_UNDERSCORE: u8 = 95
+            ASCII_UPPER_A: u8 = 65
+            ASCII_UPPER_Z: u8 = 90
+            ASCII_LOWER_A: u8 = 97
+            ASCII_LOWER_Z: u8 = 122
 
         const module ExpressionParserArithmetic:
             DECIMAL_BASE: u64 = 10
@@ -50,6 +59,53 @@ module DebuggerExpressionParser:
             SOURCE_TOO_LONG: u32 = 6
             NESTING_LIMIT: u32 = 7
             OPERAND_LIMIT: u32 = 8
+            UNKNOWN_BINDING: u32 = 9
+            UNAVAILABLE_BINDING: u32 = 10
+            INVALID_ENVIRONMENT: u32 = 11
+
+        def identifier_start_is_valid(byte: u8) -> bool:
+            return byte == ExpressionParserCharacter::ASCII_UNDERSCORE or (byte >= ExpressionParserCharacter::ASCII_UPPER_A and byte <= ExpressionParserCharacter::ASCII_UPPER_Z) or (byte >= ExpressionParserCharacter::ASCII_LOWER_A and byte <= ExpressionParserCharacter::ASCII_LOWER_Z)
+
+        def identifier_continue_is_valid(byte: u8) -> bool:
+            return identifier_start_is_valid(byte) or (byte >= ExpressionParserCharacter::ASCII_ZERO and byte <= ExpressionParserCharacter::ASCII_NINE)
+
+        def binding_name_matches(binding: ExpressionBinding, bytes: u8&, start: usize, length: usize) -> bool:
+            return false if binding.name_length != length
+            for index in ExpressionParserCursor::FIRST_INDEX..<length:
+                return false if binding.name[index] != bytes[start + index]
+            return true
+
+        def environment_is_valid(environment: ExpressionEnvironment) -> bool:
+            return false if environment.count > ExpressionParserBounds::MAX_BINDINGS
+            for index in ExpressionParserCursor::FIRST_INDEX..<environment.count:
+                binding: ExpressionBinding = environment.bindings[index]
+                return false if binding.name_length == ExpressionParserBounds::EMPTY_IDENTIFIER_BYTES or binding.name_length > ExpressionParserBounds::MAX_IDENTIFIER_BYTES or not identifier_start_is_valid(binding.name[ExpressionParserCursor::FIRST_INDEX])
+                for character_index in ExpressionParserCursor::INCREMENT..<binding.name_length:
+                    return false if not identifier_continue_is_valid(binding.name[character_index])
+                for previous in ExpressionParserCursor::FIRST_INDEX..<index:
+                    return false if environment.bindings[previous].name_length == binding.name_length and expression_binding_names_equal(environment.bindings[previous], binding)
+            return true
+
+        def expression_binding_names_equal(left: ExpressionBinding, right: ExpressionBinding) -> bool:
+            return false if left.name_length != right.name_length
+            for index in ExpressionParserCursor::FIRST_INDEX..<left.name_length:
+                return false if left.name[index] != right.name[index]
+            return true
+
+        def parse_identifier(bytes: u8&, length: usize, position: mutable usize&, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
+            start: usize = position
+            position <- position + ExpressionParserCursor::INCREMENT
+            while position < length and identifier_continue_is_valid(bytes[position]):
+                position <- position + ExpressionParserCursor::INCREMENT
+            name_length: usize = position - start
+            return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::OPERAND_LIMIT) if operands >= ExpressionParserBounds::MAX_OPERAND_COUNT
+            operands <- operands + ExpressionParserCursor::INCREMENT
+            for index in ExpressionParserCursor::FIRST_INDEX..<environment.count:
+                binding: ExpressionBinding = environment.bindings[index]
+                if binding_name_matches(binding, bytes, start, name_length):
+                    return invalid_node(DebuggerErrors::ErrorCode.Unavailable, true, ExpressionParserDetail::UNAVAILABLE_BINDING) if not binding.available
+                    return valid_node(binding.value)
+            return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::UNKNOWN_BINDING)
 
         struct ExpressionParserNode:
             value: mutable i64
@@ -91,15 +147,15 @@ module DebuggerExpressionParser:
             signed_value <- magnitude.i64() if not negative
             return valid_node(signed_value)
 
-        def parse_additive(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> ExpressionParserNode:
-            left: mutable ExpressionParserNode = parse_multiplicative(bytes, length, position, depth, operands)
+        def parse_additive(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
+            left: mutable ExpressionParserNode = parse_multiplicative(bytes, length, position, depth, operands, environment)
             return left if not left.valid
             while true:
                 skip_whitespace(bytes, length, position)
                 return left if position >= length or (bytes[position] != ExpressionParserCharacter::ASCII_PLUS and bytes[position] != ExpressionParserCharacter::ASCII_MINUS)
                 operator: u8 = bytes[position]
                 position <- position + ExpressionParserCursor::INCREMENT
-                right: ExpressionParserNode = parse_multiplicative(bytes, length, position, depth, operands)
+                right: ExpressionParserNode = parse_multiplicative(bytes, length, position, depth, operands, environment)
                 return right if not right.valid
                 combined: mutable ExpressionParserNode = valid_node(ExpressionParserArithmetic::ZERO)
                 combined <- apply_binary(DebuggerEvaluate::EvaluationKind.Add, left.value, right.value) if operator == ExpressionParserCharacter::ASCII_PLUS
@@ -108,15 +164,15 @@ module DebuggerExpressionParser:
                 left <- combined
             return left
 
-        def parse_multiplicative(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> ExpressionParserNode:
-            left: mutable ExpressionParserNode = parse_unary(bytes, length, position, depth, operands)
+        def parse_multiplicative(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
+            left: mutable ExpressionParserNode = parse_unary(bytes, length, position, depth, operands, environment)
             return left if not left.valid
             while true:
                 skip_whitespace(bytes, length, position)
                 return left if position >= length or (bytes[position] != ExpressionParserCharacter::ASCII_MULTIPLY and bytes[position] != ExpressionParserCharacter::ASCII_DIVIDE)
                 operator: u8 = bytes[position]
                 position <- position + ExpressionParserCursor::INCREMENT
-                right: ExpressionParserNode = parse_unary(bytes, length, position, depth, operands)
+                right: ExpressionParserNode = parse_unary(bytes, length, position, depth, operands, environment)
                 return right if not right.valid
                 combined: mutable ExpressionParserNode = valid_node(ExpressionParserArithmetic::ZERO)
                 combined <- apply_binary(DebuggerEvaluate::EvaluationKind.Multiply, left.value, right.value) if operator == ExpressionParserCharacter::ASCII_MULTIPLY
@@ -125,51 +181,89 @@ module DebuggerExpressionParser:
                 left <- combined
             return left
 
-        def parse_unary(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> ExpressionParserNode:
+        def parse_unary(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
             skip_whitespace(bytes, length, position)
             if position < length and bytes[position] == ExpressionParserCharacter::ASCII_MINUS:
                 position <- position + ExpressionParserCursor::INCREMENT
                 skip_whitespace(bytes, length, position)
                 if position < length and bytes[position] >= ExpressionParserCharacter::ASCII_ZERO and bytes[position] <= ExpressionParserCharacter::ASCII_NINE:
                     return parse_integer_literal(bytes, length, position, operands, true)
-                operand: ExpressionParserNode = parse_unary(bytes, length, position, depth, operands)
+                operand: ExpressionParserNode = parse_unary(bytes, length, position, depth, operands, environment)
                 return operand if not operand.valid
                 return apply_binary(DebuggerEvaluate::EvaluationKind.Negate, operand.value, ExpressionParserArithmetic::ZERO)
-            return parse_primary(bytes, length, position, depth, operands)
+            return parse_primary(bytes, length, position, depth, operands, environment)
 
-        def parse_primary(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> ExpressionParserNode:
+        def parse_primary(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&, environment: ExpressionEnvironment) -> ExpressionParserNode:
             skip_whitespace(bytes, length, position)
             return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_VALUE) if position >= length
             if bytes[position] == ExpressionParserCharacter::ASCII_OPEN_PARENTHESIS:
                 return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::NESTING_LIMIT) if depth >= ExpressionParserBounds::MAX_NESTING_DEPTH
                 position <- position + ExpressionParserCursor::INCREMENT
-                nested: ExpressionParserNode = parse_additive(bytes, length, position, depth + ExpressionParserCursor::INCREMENT, operands)
+                nested: ExpressionParserNode = parse_additive(bytes, length, position, depth + ExpressionParserCursor::INCREMENT, operands, environment)
                 return nested if not nested.valid
                 skip_whitespace(bytes, length, position)
                 return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_CLOSE_PARENTHESIS) if position >= length or bytes[position] != ExpressionParserCharacter::ASCII_CLOSE_PARENTHESIS
                 position <- position + ExpressionParserCursor::INCREMENT
                 return nested
-            return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_VALUE) if bytes[position] < ExpressionParserCharacter::ASCII_ZERO or bytes[position] > ExpressionParserCharacter::ASCII_NINE
-            return parse_integer_literal(bytes, length, position, operands, false)
+            return parse_integer_literal(bytes, length, position, operands, false) if bytes[position] >= ExpressionParserCharacter::ASCII_ZERO and bytes[position] <= ExpressionParserCharacter::ASCII_NINE
+            return parse_identifier(bytes, length, position, operands, environment) if identifier_start_is_valid(bytes[position])
+            return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_VALUE)
 
         def parse_failure(value: DebuggerErrors::DebuggerError, consumed: usize) -> ExpressionParseResult:
             return ExpressionParseResult{value: ExpressionParserArithmetic::ZERO, consumed: consumed, valid: false, failure: value}
 
+        def expression_parse_internal(bytes: u8&, length: usize, environment: ExpressionEnvironment) -> ExpressionParseResult:
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::INVALID_ENVIRONMENT), ExpressionParserBounds::ROOT_DEPTH) if not environment_is_valid(environment)
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::SOURCE_TOO_LONG), ExpressionParserBounds::MAX_SOURCE_BYTES) if length > ExpressionParserBounds::MAX_SOURCE_BYTES
+            position: mutable usize = 0
+            operands: mutable usize = 0
+            skip_whitespace(bytes, length, position)
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EMPTY_INPUT), position) if position >= length
+            expression: ExpressionParserNode = parse_additive(bytes, length, position, ExpressionParserBounds::ROOT_DEPTH, operands, environment)
+            return parse_failure(expression.failure, position) if not expression.valid
+            skip_whitespace(bytes, length, position)
+            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::TRAILING_INPUT), position) if position != length
+            return ExpressionParseResult{value: expression.value, consumed: position, valid: true, failure: DebuggerErrors::no_error()}
+
     public:
+        struct ExpressionBinding:
+            name: mutable u8[ExpressionParserBounds::MAX_IDENTIFIER_BYTES]
+            name_length: mutable usize
+            value: mutable i64
+            available: mutable bool
+
+        struct ExpressionEnvironment:
+            bindings: mutable ExpressionBinding[ExpressionParserBounds::MAX_BINDINGS]
+            count: mutable usize
+
         struct ExpressionParseResult:
             value: mutable i64
             consumed: mutable usize
             valid: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        def expression_environment_new() -> ExpressionEnvironment:
+            return zeroed
+
+        def expression_environment_add(environment: mutable ExpressionEnvironment&, name: u8&, name_length: usize, value: i64, available: bool) -> bool:
+            return false if environment.count >= ExpressionParserBounds::MAX_BINDINGS or name_length == ExpressionParserBounds::EMPTY_IDENTIFIER_BYTES or name_length > ExpressionParserBounds::MAX_IDENTIFIER_BYTES or not identifier_start_is_valid(name[ExpressionParserCursor::FIRST_INDEX])
+            for index in ExpressionParserCursor::INCREMENT..<name_length:
+                return false if not identifier_continue_is_valid(name[index])
+            for index in ExpressionParserCursor::FIRST_INDEX..<environment.count:
+                return false if binding_name_matches(environment.bindings[index], name, ExpressionParserCursor::FIRST_INDEX, name_length)
+            binding: mutable ExpressionBinding = zeroed
+            for index in ExpressionParserCursor::FIRST_INDEX..<name_length:
+                binding.name[index] <- name[index]
+            binding.name_length <- name_length
+            binding.value <- value
+            binding.available <- available
+            environment.bindings[environment.count] <- binding
+            environment.count <- environment.count + ExpressionParserCursor::INCREMENT
+            return true
+
         def expression_parse(bytes: u8&, length: usize) -> ExpressionParseResult:
-            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::SOURCE_TOO_LONG), ExpressionParserBounds::MAX_SOURCE_BYTES) if length > ExpressionParserBounds::MAX_SOURCE_BYTES
-            position: mutable usize = 0
-            operands: mutable usize = 0
-            skip_whitespace(bytes, length, position)
-            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EMPTY_INPUT), position) if position >= length
-            expression: ExpressionParserNode = parse_additive(bytes, length, position, ExpressionParserBounds::ROOT_DEPTH, operands)
-            return parse_failure(expression.failure, position) if not expression.valid
-            skip_whitespace(bytes, length, position)
-            return parse_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::TRAILING_INPUT), position) if position != length
-            return ExpressionParseResult{value: expression.value, consumed: position, valid: true, failure: DebuggerErrors::no_error()}
+            environment: ExpressionEnvironment = expression_environment_new()
+            return expression_parse_internal(bytes, length, environment)
+
+        def expression_parse_with_environment(bytes: u8&, length: usize, environment: ExpressionEnvironment) -> ExpressionParseResult:
+            return expression_parse_internal(bytes, length, environment)

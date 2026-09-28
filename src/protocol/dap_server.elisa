@@ -122,12 +122,17 @@ module DebuggerDAPServer:
             DAP_VARIABLES_DETAIL_METHOD: u32 = 5
             DAP_STACK_TRACE_DETAIL_ARGUMENT: u32 = 11
             DAP_SCOPES_DETAIL_ARGUMENT: u32 = 12
+            DAP_EVALUATE_DETAIL_ARGUMENT: u32 = 13
 
         const module Evaluate:
             DAP_EVALUATE_COMMAND: cstr = "evaluate"
             DAP_EVALUATE_COMMAND_LENGTH: usize = 8
-            DAP_EVALUATE_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"result\":\"unavailable\",\"variablesReference\":0}}"
-            DAP_EVALUATE_SUFFIX_LENGTH: usize = 72
+            DAP_EVALUATE_SUCCESS_BEFORE_VALUE: cstr = "\",\"success\":true,\"body\":{\"result\":\""
+            DAP_EVALUATE_SUCCESS_BEFORE_VALUE_LENGTH: usize = 35
+            DAP_EVALUATE_SUCCESS_AFTER_VALUE: cstr = "\",\"type\":\"integer\",\"variablesReference\":0}}"
+            DAP_EVALUATE_SUCCESS_AFTER_VALUE_LENGTH: usize = 43
+            DAP_EVALUATE_FAILURE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"expression could not be evaluated\"}"
+            DAP_EVALUATE_FAILURE_SUFFIX_LENGTH: usize = 64
 
         const module Events:
             DAP_EVENT_PREFIX: cstr = "{\"seq\":"
@@ -214,8 +219,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsConditionalBreakpoints\":false,\"supportsHitConditionalBreakpoints\":false,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":false,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 472
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsConditionalBreakpoints\":false,\"supportsHitConditionalBreakpoints\":false,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 471
 
         const module JsonWire:
             JSON_ASCII_MAX: u8 = 127
@@ -351,6 +356,7 @@ module DebuggerDAPServer:
             DAP_NO_VARIABLE_REFERENCE: u64 = 0
             DAP_NO_VARIABLES_REQUESTED: usize = 0
             DAP_MAIN_THREAD_ID: u64 = 1
+            DAP_CURRENT_FRAME_INDEX: usize = 0
 
         const module Scopes:
             DAP_SCOPES_COMMAND: cstr = "scopes"
@@ -1408,6 +1414,7 @@ module DebuggerDAPServer:
             stack_levels: mutable usize
             stack_has_levels: mutable bool
             scope_frame_index: mutable usize
+            evaluate_value: mutable i64
 
         def stack_source_location(service: DebuggerManagedService::Service, source: DebuggerIdentity::SourceSpan, has_source: bool, coordinates: DebuggerDAPPayload::ClientCoordinates) -> DAPSourceLocation:
             location: mutable DAPSourceLocation = zeroed
@@ -1717,6 +1724,23 @@ module DebuggerDAPServer:
             page.count <- RuntimeIdentifiers::DAP_NO_VARIABLES_REQUESTED if request.has_count and request.count == RuntimeIdentifiers::DAP_NO_VARIABLES_REQUESTED
             return result
 
+        def dispatch_evaluate(service: mutable DebuggerManagedService::Service&, payload: u8&, payload_length: usize, context: mutable DAPRequestContext&) -> DebuggerProtocolDispatcher::DispatchResult:
+            request: DebuggerDAPPayload::EvaluateRequest = DebuggerDAPPayload::evaluate_request_parse(payload, payload_length)
+            if not request.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_EVALUATE_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Evaluate, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            generation: u64 = service.controller.session.stop_generation
+            depth: usize = service.controller.engine.machine.return_stack_pointer
+            frame_index: usize = dap_frame_index_for_id(generation, depth, request.frame_id) if request.has_frame_id else RuntimeIdentifiers::DAP_CURRENT_FRAME_INDEX
+            if frame_index >= DebuggerDAPFrames::frame_capacity():
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_EVALUATE_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Evaluate, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            evaluated: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(service, request.expression.bytes[0], request.expression.length, frame_index)
+            if not evaluated.accepted:
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Evaluate, accepted: false, stop_generation: service.controller.session.stop_generation, failure: evaluated.failure}
+            context.evaluate_value <- evaluated.value
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Evaluate, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
+
         def dispatch_source_breakpoints(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize, coordinates: DebuggerDAPPayload::ClientCoordinates, response: mutable DebuggerManagedService::SourceBreakpointResult&) -> DebuggerProtocolDispatcher::DispatchResult:
             request: mutable DebuggerDAPPayload::SourceBreakpointsRequest = DebuggerDAPPayload::source_breakpoints_request_parse(payload, payload_length)
             if not request.valid:
@@ -1828,7 +1852,7 @@ module DebuggerDAPServer:
             if command_hash == CommandDispatch::COMMAND_HASH_VARIABLES:
                 return dispatch_variables(service, request_id, payload, payload_length, variables)
             if command_hash == CommandDispatch::COMMAND_HASH_EVALUATE:
-                return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Evaluate, request_id)
+                return dispatch_evaluate(service, payload, payload_length, context)
             if command_hash == CommandDispatch::COMMAND_HASH_SET_BREAKPOINTS:
                 return dispatch_source_breakpoints(service, request_id, payload, payload_length, client_coordinates, source_breakpoints)
             if command_hash == CommandDispatch::COMMAND_HASH_SET_FUNCTION_BREAKPOINTS:
@@ -1956,8 +1980,24 @@ module DebuggerDAPServer:
                 _ = printf("%02llx", memory.bytes[index].u64()) can Console
             _ = printf(Memory::DAP_MEMORY_SUCCESS_AFTER_DATA) can Console
 
+        def write_evaluate_response(value: i64, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            body_length: u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + Evaluate::DAP_EVALUATE_COMMAND_LENGTH + Evaluate::DAP_EVALUATE_SUCCESS_BEFORE_VALUE_LENGTH + signed_decimal_digits(value) + Evaluate::DAP_EVALUATE_SUCCESS_AFTER_VALUE_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
+            _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
+            _ = printf(ResponseEnvelope::DAP_BODY_PREFIX) can Console
+            _ = printf("%llu", response_sequence) can Console
+            _ = printf(ResponseEnvelope::DAP_BODY_MIDDLE) can Console
+            _ = printf("%llu", request_sequence) can Console
+            _ = printf(ResponseEnvelope::DAP_COMMAND_PREFIX) can Console
+            _ = printf(Evaluate::DAP_EVALUATE_COMMAND) can Console
+            _ = printf(Evaluate::DAP_EVALUATE_SUCCESS_BEFORE_VALUE) can Console
+            _ = printf("%lld", value) can Console
+            _ = printf(Evaluate::DAP_EVALUATE_SUCCESS_AFTER_VALUE) can Console
+
         def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, command_hash: u64, request_sequence: u64, response_sequence: u64, state_committed: bool, memory: DebuggerMemory::MemoryRead, variables: DebuggerManagedInspection::LocalPage, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, client_coordinates: DebuggerDAPPayload::ClientCoordinates, context: DAPRequestContext, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
+                if command_hash == CommandDispatch::COMMAND_HASH_EVALUATE:
+                    write_dynamic_response(response_sequence, request_sequence, Evaluate::DAP_EVALUATE_COMMAND, Evaluate::DAP_EVALUATE_COMMAND_LENGTH, Evaluate::DAP_EVALUATE_FAILURE_SUFFIX, Evaluate::DAP_EVALUATE_FAILURE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                    return
                 if command_hash == CommandDispatch::COMMAND_HASH_CONTINUE and state_committed:
                     # Continue may report a bounded-work failure after the VM
                     # has already advanced and committed a stopped position.
@@ -2038,7 +2078,7 @@ module DebuggerDAPServer:
                 write_variables_response(variables, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_EVALUATE:
-                write_dynamic_response(response_sequence, request_sequence, Evaluate::DAP_EVALUATE_COMMAND, Evaluate::DAP_EVALUATE_COMMAND_LENGTH, Evaluate::DAP_EVALUATE_SUFFIX, Evaluate::DAP_EVALUATE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                write_evaluate_response(context.evaluate_value, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_SET_BREAKPOINTS:
                 write_source_breakpoints_response(source_breakpoints, client_coordinates, request_sequence, response_sequence) can Console, Unsafe.PointerCast

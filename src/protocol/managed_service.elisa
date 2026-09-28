@@ -13,6 +13,7 @@ include "../replay/full_checkpoint.elisa"
 include "../replay/branches.elisa"
 include "../metadata/source.elisa"
 include "../inspect/store.elisa"
+include "../inspect/expression_parser.elisa"
 include "../query/timeline.elisa"
 include "../query/edir_provenance.elisa"
 include "../query/engine.elisa"
@@ -33,6 +34,8 @@ module DebuggerManagedService:
             DETAIL_MEMORY_HISTORY_CORRUPT: u32 = 9
             DETAIL_RECORDING_DIVERGED: u32 = 10
             DETAIL_ALLOCATION_UNAVAILABLE: u32 = 11
+            DETAIL_EVALUATION_FRAME: u32 = 12
+            DETAIL_EVALUATION_ENVIRONMENT: u32 = 13
 
         const module EventCapture:
             SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
@@ -54,6 +57,41 @@ module DebuggerManagedService:
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_EXPECTED_GENERATION: u64 = 0
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_NO_REQUEST_ID: u64 = 0
             PROTOCOL_MANAGED_SERVICE_REQUEST_STATE_REQUEST_METHOD_MAX: u16 = 32
+
+        const module EvaluationNames:
+            LOCAL_PREFIX: cstr = "local"
+            GLOBAL_PREFIX: cstr = "global"
+            LOCAL_PREFIX_LENGTH: usize = 5
+            GLOBAL_PREFIX_LENGTH: usize = 6
+            NAME_BUFFER_CAPACITY: usize = 32
+            MAX_INDEX_DIGITS: usize = 2
+            SINGLE_INDEX_DIGIT_COUNT: usize = 1
+            ASCII_ZERO: u8 = 48
+            DECIMAL_BASE: usize = 10
+            FIRST_DIGIT_INDEX: usize = 0
+            SECOND_DIGIT_INDEX: usize = 1
+
+        const module EvaluationBounds:
+            FIRST_PAGE_OFFSET: usize = 0
+            UNBOUNDED_PAGE_REQUEST: usize = 0
+            FIRST_ENTRY_INDEX: usize = 0
+            FIRST_PREFIX_BYTE_INDEX: usize = 0
+            NO_CONSUMED_BYTES: usize = 0
+
+        def service_add_indexed_bindings(environment: mutable DebuggerExpressionParser::ExpressionEnvironment&, page: DebuggerManagedInspection::LocalPage, prefix: cstr, prefix_length: usize) -> bool:
+            for entry_index in EvaluationBounds::FIRST_ENTRY_INDEX..<page.count:
+                entry: DebuggerManagedInspection::LocalSnapshot = page.entries[entry_index]
+                name: mutable u8[EvaluationNames::NAME_BUFFER_CAPACITY] = zeroed
+                for prefix_index in EvaluationBounds::FIRST_PREFIX_BYTE_INDEX..<prefix_length:
+                    name[prefix_index] <- prefix[prefix_index]
+                digit_count: usize = EvaluationNames::MAX_INDEX_DIGITS if entry.index >= EvaluationNames::DECIMAL_BASE else EvaluationNames::SINGLE_INDEX_DIGIT_COUNT
+                if digit_count == EvaluationNames::MAX_INDEX_DIGITS:
+                    name[prefix_length + EvaluationNames::FIRST_DIGIT_INDEX] <- EvaluationNames::ASCII_ZERO + (entry.index / EvaluationNames::DECIMAL_BASE).u8()
+                    name[prefix_length + EvaluationNames::SECOND_DIGIT_INDEX] <- EvaluationNames::ASCII_ZERO + (entry.index % EvaluationNames::DECIMAL_BASE).u8()
+                else:
+                    name[prefix_length] <- EvaluationNames::ASCII_ZERO + entry.index.u8()
+                return false if not DebuggerExpressionParser::expression_environment_add(environment, name[0], prefix_length + digit_count, entry.value, entry.available)
+            return true
 
         def memory_history_error(window: DebuggerHistory::QueryWindow, failure: DebuggerErrors::DebuggerError) -> DebuggerQueryEngine::QueryExecution:
             result: mutable DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_execution_new(window)
@@ -124,6 +162,12 @@ module DebuggerManagedService:
             accepted: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct EvaluateResult:
+            accepted: mutable bool
+            value: mutable i64
+            consumed: mutable usize
+            failure: mutable DebuggerErrors::DebuggerError
+
         struct SourceBreakpointEntry:
             id: mutable DebuggerIdentity::DebugId
             line: mutable u32
@@ -153,6 +197,9 @@ module DebuggerManagedService:
 
         def result_ok() -> Result:
             return Result{accepted: true, failure: DebuggerErrors::no_error()}
+
+        def evaluate_result_error(failure: DebuggerErrors::DebuggerError, consumed: usize) -> EvaluateResult:
+            return EvaluateResult{accepted: false, value: 0, consumed: consumed, failure: failure}
 
         def source_breakpoint_result_error(failure: DebuggerErrors::DebuggerError) -> SourceBreakpointResult:
             return SourceBreakpointResult{accepted: false, points: zeroed, count: 0, failure: failure}
@@ -317,6 +364,22 @@ module DebuggerManagedService:
 
         def service_globals(service: mutable Service&, offset: usize, requested: usize) -> DebuggerManagedInspection::LocalPage:
             return DebuggerManagedInspection::globals_page(service.controller.engine, offset, requested)
+
+        # Resolve only the selected stopped frame's scalar locals and the
+        # current scalar globals. The evaluator receives a copied bounded
+        # environment and cannot read or mutate engine state itself.
+        def service_evaluate_expression(service: mutable Service&, expression: u8&, expression_length: usize, frame_index: usize) -> EvaluateResult:
+            return evaluate_result_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED), EvaluationBounds::NO_CONSUMED_BYTES) if not service.controller.session.capabilities.expression_evaluation
+            return evaluate_result_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_UNSUPPORTED), EvaluationBounds::NO_CONSUMED_BYTES) if not DebuggerSession::session_can_inspect(service.controller.session)
+            return evaluate_result_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_EVALUATION_FRAME), EvaluationBounds::NO_CONSUMED_BYTES) if service.controller.engine.machine.return_stack_pointer > DebuggerEDIR::call_depth_capacity() or frame_index > service.controller.engine.machine.return_stack_pointer
+            locals: DebuggerManagedInspection::LocalPage = service_frame_locals(service, frame_index, EvaluationBounds::FIRST_PAGE_OFFSET, EvaluationBounds::UNBOUNDED_PAGE_REQUEST)
+            globals: DebuggerManagedInspection::LocalPage = service_globals(service, EvaluationBounds::FIRST_PAGE_OFFSET, EvaluationBounds::UNBOUNDED_PAGE_REQUEST)
+            environment: mutable DebuggerExpressionParser::ExpressionEnvironment = DebuggerExpressionParser::expression_environment_new()
+            return evaluate_result_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_EVALUATION_ENVIRONMENT), EvaluationBounds::NO_CONSUMED_BYTES) if not service_add_indexed_bindings(environment, locals, EvaluationNames::LOCAL_PREFIX, EvaluationNames::LOCAL_PREFIX_LENGTH)
+            return evaluate_result_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_EVALUATION_ENVIRONMENT), EvaluationBounds::NO_CONSUMED_BYTES) if not service_add_indexed_bindings(environment, globals, EvaluationNames::GLOBAL_PREFIX, EvaluationNames::GLOBAL_PREFIX_LENGTH)
+            parsed: DebuggerExpressionParser::ExpressionParseResult = DebuggerExpressionParser::expression_parse_with_environment(expression, expression_length, environment)
+            return evaluate_result_error(parsed.failure, parsed.consumed) if not parsed.valid
+            return EvaluateResult{accepted: true, value: parsed.value, consumed: parsed.consumed, failure: DebuggerErrors::no_error()}
 
         def service_allocations(service: mutable Service&, offset: usize, requested: usize) -> DebuggerManagedAllocations::AllocationPage:
             unavailable: mutable DebuggerManagedAllocations::AllocationPage = zeroed

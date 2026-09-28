@@ -92,8 +92,15 @@ length, one space, and a newline):
 ```
 
 ```json
-{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"timeline":true,"checkpoints":true,"branches":true,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":true,"memoryRead":true,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":true,"reverseExecution":true,"timeline":true,"checkpoints":true,"branches":true,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":true,"memoryRead":true,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
 ```
+
+`expressionEvaluation: true` advertises the managed typed service operation
+`DebuggerManagedService::service_evaluate_expression`. It accepts bounded
+expression bytes and a selected frame index, and returns a checked integer or
+a structured error. The compact JSON lifecycle envelope does not yet encode
+that operand; external editor clients can use the DAP `evaluate` request,
+which accepts `expression` and an optional generation-bound `frameId`.
 
 After launching a verified artifact, a generic editor bridge can replace the
 breakpoints for one EDIR source file by its exact normalized logical path.

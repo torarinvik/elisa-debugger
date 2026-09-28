@@ -1,9 +1,11 @@
 # Bounded expression evaluation
 
-`src/inspect/expression_parser.elisa` provides the first string based
-expression evaluator for the debugger. It is deliberately small enough to be
-embedded by a DAP adapter, a JetBrains adapter, or another host without giving
-the expression language access to process state.
+`src/inspect/expression_parser.elisa` implements a pure arithmetic expression
+parser. It evaluates against an explicit, bounded environment; the parser
+cannot read a machine, value store, process, filesystem, or replay engine.
+`DebuggerManagedService::service_evaluate_expression` builds that environment
+from the selected stopped frame and current globals, then passes the copied
+bindings to the parser.
 
 The accepted grammar is:
 
@@ -12,31 +14,38 @@ expression  := additive
 additive    := multiplicative (('+' | '-') multiplicative)*
 multiplicative := unary (('*' | '/') unary)*
 unary       := '-' unary | primary
-primary     := decimal | '(' expression ')'
+primary     := decimal | identifier | '(' expression ')'
 decimal     := digit+
+identifier  := (letter | '_') (letter | digit | '_')*
 ```
 
 Spaces, tabs, carriage returns, and line feeds may occur between grammar
-elements. A decimal literal is checked against the signed 64-bit positive
-limit. Unary negation and every binary operation are checked by
-`DebuggerEvaluate::evaluate_expression`, so division by zero and signed
-overflow return an explicit debugger error instead of producing a wrapped
-value.
+elements. Decimal literals and all checked arithmetic operations use signed
+64-bit values. Division by zero, overflow, malformed syntax, unknown names,
+and unavailable bindings return structured debugger errors.
 
-The parser enforces a 256-byte source limit, a 32-level parenthesis limit, and
-a 32-operand limit. These bounds are part of the API contract and are kept in
-the parser's private constant modules. Parsing and evaluation mutate only a
-local cursor and result; no machine, replay engine, value store, filesystem,
-process, or adapter state is read or written.
+The parser limits source text to 256 bytes, nesting to 32 levels, operands to
+32, bindings to 48, and each identifier to 32 bytes. The managed service
+currently exposes locals as `local0` through `local31` (limited by the
+artifact's local count) and globals as `global0` through `global15`. A binding
+for an uninitialized slot is present but unavailable, so it cannot be
+mistaken for a zero value. The service accepts a frame index and resolves
+recursive/shadowed locals against that frame's snapshot.
 
-`DebuggerExpressionParser::expression_parse(bytes, length)` returns a public
-`ExpressionParseResult` containing the checked `i64` value, the number of source bytes
-consumed, a validity flag, and a structured `DebuggerError`. Hosts can expose
-this result directly in their own request model, preserving the same bounded
-error behavior across DAP, VS Code, and JetBrains integrations.
+Adapters can use
+`DebuggerExpressionParser::expression_parse_with_environment(bytes, length,
+environment)` for an explicit immutable input, or call
+`DebuggerManagedService::service_evaluate_expression(service, expression,
+expression_length, frame_index)` to evaluate against the stopped managed
+session. The latter does not mutate execution state. The generic lifecycle
+request envelope has no expression operand; use the typed service entry point
+or the DAP adapter until a versioned expression operand is added to that
+envelope.
 
-The current generic DAP request envelope still has no expression field and
-continues to advertise evaluate as unavailable. A future typed DAP request
-can call this parser after decoding its expression string, then attach the
-result to the protocol response without changing the parser or introducing
-host-specific semantics.
+The Elisa DAP adapter accepts the standard `evaluate` command with a required
+`arguments.expression` string and optional `arguments.frameId`. A supplied
+frame handle must match the current stop generation. Successful responses
+return the signed result as a string, `type: "integer"`, and
+`variablesReference: 0`; failures have `success: false`. Initialize advertises
+`supportsEvaluateForHovers` for the managed implementation. DAP, VS Code, and
+JetBrains clients therefore share the same bounded expression semantics.

@@ -91,6 +91,7 @@ module DebuggerDAPPayload:
             FRAME_ID: u8 = 22
             START_FRAME: u8 = 23
             LEVELS: u8 = 24
+            EXPRESSION: u8 = 25
             PROGRAM_LENGTH: usize = 7
             ARGUMENTS_LENGTH: usize = 9
             LINES_START_AT_ONE_LENGTH: usize = 13
@@ -112,6 +113,7 @@ module DebuggerDAPPayload:
             FRAME_ID_LENGTH: usize = 7
             START_FRAME_LENGTH: usize = 10
             LEVELS_LENGTH: usize = 6
+            EXPRESSION_LENGTH: usize = 10
 
         const module StackTraceParsing:
             FIRST_PROPERTY_OCCURRENCE: usize = 0
@@ -129,6 +131,7 @@ module DebuggerDAPPayload:
             POSITION_SIX: usize = 6
             POSITION_SEVEN: usize = 7
             POSITION_EIGHT: usize = 8
+            POSITION_NINE: usize = 9
 
         const module RequestParsing:
             FIRST_JSON_BYTE_INDEX: usize = 0
@@ -239,6 +242,7 @@ module DebuggerDAPPayload:
             return DapFields::FRAME_ID_LENGTH if field == DapFields::FRAME_ID
             return DapFields::START_FRAME_LENGTH if field == DapFields::START_FRAME
             return DapFields::LEVELS_LENGTH if field == DapFields::LEVELS
+            return DapFields::EXPRESSION_LENGTH if field == DapFields::EXPRESSION
             return DapFields::VARIABLES_REFERENCE_LENGTH if field == DapFields::VARIABLES_REFERENCE
             return DapFields::START_LENGTH if field == DapFields::START
             return DapFields::ARGUMENTS_LENGTH if field == DapFields::ARGUMENTS
@@ -462,6 +466,17 @@ module DebuggerDAPPayload:
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_THREE
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_L if position == FieldBytePosition::POSITION_FOUR
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_S
+            if field == DapFields::EXPRESSION:
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_ZERO
+                return Character::ASCII_LOWER_X if position == FieldBytePosition::POSITION_ONE
+                return Character::ASCII_P if position == FieldBytePosition::POSITION_TWO
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_R if position == FieldBytePosition::POSITION_THREE
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_FOUR
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_S if position == FieldBytePosition::POSITION_FIVE
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_S if position == FieldBytePosition::POSITION_SIX
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_I if position == FieldBytePosition::POSITION_SEVEN
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_O if position == FieldBytePosition::POSITION_EIGHT
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_N
             if field == DapFields::MEMORY_REFERENCE:
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_M if position == 0
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == 1
@@ -900,6 +915,12 @@ module DebuggerDAPPayload:
             levels: mutable usize
             has_levels: mutable bool
 
+        struct EvaluateRequest:
+            valid: mutable bool
+            expression: mutable ProgramPath
+            frame_id: mutable u64
+            has_frame_id: mutable bool
+
         struct SourceBreakpointsRequest:
             valid: mutable bool
             source_reference: mutable u64
@@ -923,6 +944,29 @@ module DebuggerDAPPayload:
         def frame_id_request_parse(payload: u8&, length: usize) -> ReferenceRequest:
             parsed: ParsedValue = request_handle_value_parse(payload, length, DapFields::FRAME_ID)
             return ReferenceRequest{valid: parsed.valid, reference: parsed.value}
+
+        def evaluate_request_parse(payload: u8&, length: usize) -> EvaluateRequest:
+            request: mutable EvaluateRequest = zeroed
+            root_start: mutable usize = RequestParsing::FIRST_JSON_BYTE_INDEX
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + RequestParsing::JSON_WHITESPACE_INCREMENT
+            arguments: usize = object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, StackTraceParsing::FIRST_PROPERTY_OCCURRENCE)
+            return request if arguments == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, StackTraceParsing::DUPLICATE_PROPERTY_OCCURRENCE) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            return request if arguments >= length or payload[arguments] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
+            expression_start: usize = object_field_value_start(payload, length, arguments, DapFields::EXPRESSION, StackTraceParsing::FIRST_PROPERTY_OCCURRENCE)
+            frame_start: usize = object_field_value_start(payload, length, arguments, DapFields::FRAME_ID, StackTraceParsing::FIRST_PROPERTY_OCCURRENCE)
+            return request if expression_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::EXPRESSION, StackTraceParsing::DUPLICATE_PROPERTY_OCCURRENCE) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            return request if object_field_value_start(payload, length, arguments, DapFields::FRAME_ID, StackTraceParsing::DUPLICATE_PROPERTY_OCCURRENCE) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            expression: ProgramPath = parse_program_path_string(payload, length, expression_start)
+            return request if not expression.valid
+            request.expression <- expression
+            if frame_start != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
+                frame_id: ParsedValue = parse_unsigned_bounded(payload, length, frame_start, NumberFormat::MAX_U32)
+                return request if not frame_id.valid
+                request.frame_id <- frame_id.value
+                request.has_frame_id <- true
+            request.valid <- true
+            return request
 
         def stack_trace_request_parse(payload: u8&, length: usize) -> StackTraceRequest:
             request: mutable StackTraceRequest = zeroed

@@ -11,6 +11,34 @@ const module Test:
     NO_TARGET_EVENT: u64 = 0
     TARGET_EVENT: u64 = 1
     EXPECTED_RESULT: i64 = 7
+    EVALUATION_EXPRESSION: cstr = "local0 + global0"
+    EVALUATION_EXPRESSION_LENGTH: usize = 16
+    EVALUATION_UNAVAILABLE_EXPRESSION: cstr = "local1"
+    EVALUATION_UNAVAILABLE_EXPRESSION_LENGTH: usize = 6
+    EVALUATION_UNKNOWN_EXPRESSION: cstr = "missing"
+    EVALUATION_UNKNOWN_EXPRESSION_LENGTH: usize = 7
+    EVALUATION_LOCAL_VALUE: i64 = 15
+    EVALUATION_GLOBAL_VALUE: i64 = 27
+    EVALUATION_EXPECTED_VALUE: i64 = 42
+    EVALUATION_CALLER_VALUE: i64 = 5
+    EVALUATION_EXPECTED_CALLER_VALUE: i64 = 32
+    EVALUATION_INVALID_FRAME: usize = 1
+    EVALUATION_MAIN_FRAME_INDEX: usize = 0
+    EVALUATION_CALLER_FRAME_INDEX: usize = 1
+    EVALUATION_CURRENT_FRAME_DEPTH: usize = 1
+    EVALUATION_ROOT_FRAME_DEPTH: usize = 0
+    EVALUATION_ZERO_LOCAL_INDEX: usize = 0
+    EVALUATION_ZERO_GLOBAL_INDEX: usize = 0
+    EVALUATION_LOCAL_COUNT: u64 = 2
+    EVALUATION_SERVICE_ID: u64 = 12
+    EVALUATION_UNAVAILABLE_SERVICE_ID: u64 = 13
+    RESULT_EVALUATION_VALUE: i64 = 39
+    RESULT_EVALUATION_UNAVAILABLE: i64 = 40
+    RESULT_EVALUATION_UNKNOWN: i64 = 41
+    RESULT_EVALUATION_FRAME: i64 = 42
+    RESULT_EVALUATION_CALLER_FRAME: i64 = 43
+    RESULT_EVALUATION_CAPABILITY: i64 = 44
+    RESULT_EVALUATION_SESSION: i64 = 45
     MEMORY_REQUEST_ID: u64 = 2
     MAX_U64_VALUE: u64 = 18446744073709551615
     INVALID_SEEK_RESULT: i64 = 17
@@ -508,6 +536,32 @@ def main() -> i64:
     return 3 if not stepped.accepted
     frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
     return 4 if frame.accumulator != Test::EXPECTED_RESULT or frame.event != Test::TARGET_EVENT or frame.instruction.value != Test::TARGET_EVENT
+    evaluation_session: DebuggerSession::Session = session
+    evaluation_session.state <- DebuggerSession::SessionState.Stopped
+    evaluation_image: mutable DebuggerEDIR::ProgramImage = image
+    evaluation_image.program.local_count <- Test::EVALUATION_LOCAL_COUNT
+    evaluation_service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(evaluation_session, evaluation_image, DebuggerIdentity::debug_id(Test::EVALUATION_SERVICE_ID))
+    evaluation_service.controller.engine.machine.locals[Test::EVALUATION_ZERO_LOCAL_INDEX] <- Test::EVALUATION_LOCAL_VALUE
+    evaluation_service.controller.engine.machine.locals_initialized[Test::EVALUATION_ZERO_LOCAL_INDEX] <- true
+    evaluation_service.controller.engine.machine.globals[Test::EVALUATION_ZERO_GLOBAL_INDEX] <- Test::EVALUATION_GLOBAL_VALUE
+    evaluation_service.controller.engine.machine.globals_initialized[Test::EVALUATION_ZERO_GLOBAL_INDEX] <- true
+    evaluated: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(evaluation_service, Test::EVALUATION_EXPRESSION.cast[u8&], Test::EVALUATION_EXPRESSION_LENGTH, Test::EVALUATION_MAIN_FRAME_INDEX)
+    return Test::RESULT_EVALUATION_VALUE if not evaluated.accepted or evaluated.value != Test::EVALUATION_EXPECTED_VALUE or evaluated.consumed != Test::EVALUATION_EXPRESSION_LENGTH
+    unavailable_evaluation: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(evaluation_service, Test::EVALUATION_UNAVAILABLE_EXPRESSION.cast[u8&], Test::EVALUATION_UNAVAILABLE_EXPRESSION_LENGTH, Test::EVALUATION_MAIN_FRAME_INDEX)
+    return Test::RESULT_EVALUATION_UNAVAILABLE if unavailable_evaluation.accepted or unavailable_evaluation.failure.code != DebuggerErrors::ErrorCode.Unavailable
+    unknown_evaluation: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(evaluation_service, Test::EVALUATION_UNKNOWN_EXPRESSION.cast[u8&], Test::EVALUATION_UNKNOWN_EXPRESSION_LENGTH, Test::EVALUATION_MAIN_FRAME_INDEX)
+    return Test::RESULT_EVALUATION_UNKNOWN if unknown_evaluation.accepted or unknown_evaluation.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    invalid_frame_evaluation: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(evaluation_service, Test::EVALUATION_EXPRESSION.cast[u8&], Test::EVALUATION_EXPRESSION_LENGTH, Test::EVALUATION_INVALID_FRAME)
+    return Test::RESULT_EVALUATION_FRAME if invalid_frame_evaluation.accepted or invalid_frame_evaluation.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    evaluation_service.controller.engine.machine.return_stack_pointer <- 1
+    current_frame_slot: usize = DebuggerEDIR::frame_local_slot(Test::EVALUATION_CURRENT_FRAME_DEPTH, Test::EVALUATION_ZERO_LOCAL_INDEX)
+    caller_frame_slot: usize = DebuggerEDIR::frame_local_slot(Test::EVALUATION_ROOT_FRAME_DEPTH, Test::EVALUATION_ZERO_LOCAL_INDEX)
+    evaluation_service.controller.engine.machine.frame_locals[current_frame_slot] <- Test::EVALUATION_LOCAL_VALUE
+    evaluation_service.controller.engine.machine.frame_locals_initialized[current_frame_slot] <- true
+    evaluation_service.controller.engine.machine.frame_locals[caller_frame_slot] <- Test::EVALUATION_CALLER_VALUE
+    evaluation_service.controller.engine.machine.frame_locals_initialized[caller_frame_slot] <- true
+    caller_evaluation: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(evaluation_service, Test::EVALUATION_EXPRESSION.cast[u8&], Test::EVALUATION_EXPRESSION_LENGTH, Test::EVALUATION_CALLER_FRAME_INDEX)
+    return Test::RESULT_EVALUATION_CALLER_FRAME if not caller_evaluation.accepted or caller_evaluation.value != Test::EVALUATION_EXPECTED_CALLER_VALUE
     continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: Test::STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return 5 if not continued.accepted or not DebuggerManagedService::service_is_exact(service)
@@ -655,7 +709,14 @@ def main() -> i64:
     partial_restore: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(partial_service, full_checkpoint_result.checkpoint)
     return Test::FULL_CHECKPOINT_ROLLBACK_RESULT if partial_restore.accepted or partial_restore.failure.code != DebuggerErrors::ErrorCode.Unsupported or partial_service.controller.engine.event_count != Test::INSTRUCTION_COUNT.usize()
     limited_service.controller.session.capabilities.expression_evaluation <- false
+    disabled_evaluation: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(limited_service, Test::EVALUATION_EXPRESSION.cast[u8&], Test::EVALUATION_EXPRESSION_LENGTH, Test::EVALUATION_MAIN_FRAME_INDEX)
+    return Test::RESULT_EVALUATION_CAPABILITY if disabled_evaluation.accepted or disabled_evaluation.failure.code != DebuggerErrors::ErrorCode.Unsupported
     unsupported_evaluate_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Evaluate, id: Test::STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     unsupported_evaluate: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(limited_service, unsupported_evaluate_request)
     return Test::INSPECTION_CAPABILITY_RESULT if unsupported_evaluate.accepted or unsupported_evaluate.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    evaluation_not_stopped_session: DebuggerSession::Session = evaluation_session
+    evaluation_not_stopped_session.state <- DebuggerSession::SessionState.Created
+    evaluation_not_stopped_service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(evaluation_not_stopped_session, evaluation_image, DebuggerIdentity::debug_id(Test::EVALUATION_UNAVAILABLE_SERVICE_ID))
+    evaluation_not_stopped: DebuggerManagedService::EvaluateResult = DebuggerManagedService::service_evaluate_expression(evaluation_not_stopped_service, Test::EVALUATION_EXPRESSION.cast[u8&], Test::EVALUATION_EXPRESSION_LENGTH, Test::EVALUATION_MAIN_FRAME_INDEX)
+    return Test::RESULT_EVALUATION_SESSION if evaluation_not_stopped.accepted or evaluation_not_stopped.failure.code != DebuggerErrors::ErrorCode.Unavailable
     return 0

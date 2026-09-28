@@ -180,7 +180,7 @@ module DebuggerDAPPayload:
 
         const module BreakpointCondition:
             MAX_EXPRESSION_BYTES: usize = DebuggerExpressionLimits::Source::MAX_EXPRESSION_BYTES
-            FIRST_EXPRESSION_BYTE: usize = 0
+            EMPTY_EXPRESSION_LENGTH: usize = 0
             BYTE_INCREMENT: usize = 1
             QUOTE_WIDTH: usize = 1
             TWO_QUOTE_WIDTH: usize = QUOTE_WIDTH + QUOTE_WIDTH
@@ -192,6 +192,14 @@ module DebuggerDAPPayload:
             ESCAPE_TAB: u8 = 9
             ASCII_SPACE: u8 = 32
             ASCII_ONLY_MAX: u64 = 127
+
+        const module BreakpointLog:
+            MAX_MESSAGE_BYTES: usize = DebuggerExpressionLimits::Source::MAX_LOG_MESSAGE_BYTES
+            EMPTY_MESSAGE_LENGTH: usize = 0
+
+        const module BreakpointText:
+            MAX_REQUEST_TEXT_BYTES: usize = 8192
+            FIRST_TEXT_BYTE: usize = 0
 
         const module Unicode:
             HEX_DIGITS: usize = 4
@@ -949,6 +957,22 @@ module DebuggerDAPPayload:
             has_condition: mutable bool
             valid: mutable bool
 
+        struct BreakpointConditionReference:
+            offset: mutable usize
+            length: mutable usize
+            has_condition: mutable bool
+
+        struct BreakpointLogMessage:
+            bytes: mutable u8[BreakpointLog::MAX_MESSAGE_BYTES]
+            length: mutable usize
+            has_message: mutable bool
+            valid: mutable bool
+
+        struct BreakpointLogMessageReference:
+            offset: mutable usize
+            length: mutable usize
+            has_message: mutable bool
+
         struct SourceBreakpointsRequest:
             valid: mutable bool
             source_reference: mutable u64
@@ -960,7 +984,10 @@ module DebuggerDAPPayload:
             has_columns: mutable bool[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
             hit_targets: mutable u64[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
             has_hit_targets: mutable bool[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
-            conditions: mutable BreakpointConditionExpression[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            breakpoint_text_bytes: mutable u8[BreakpointText::MAX_REQUEST_TEXT_BYTES]
+            conditions: mutable BreakpointConditionReference[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            log_messages: mutable BreakpointLogMessageReference[SourcePaths::SOURCE_BREAKPOINT_LIMIT]
+            breakpoint_text_bytes_length: mutable usize
             count: mutable usize
 
         struct SourcePathRootRequest:
@@ -1095,14 +1122,73 @@ module DebuggerDAPPayload:
             condition.has_condition <- true
             return condition
 
-        def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64, column: u64, has_column: bool, hit_target: u64, has_hit_target: bool, condition: BreakpointConditionExpression) -> bool:
+        def breakpoint_log_message_string_parse(payload: u8&, length: usize, start: usize) -> BreakpointLogMessage:
+            message: mutable BreakpointLogMessage = zeroed
+            end: usize = json_string_end(payload, length, start)
+            return message if end == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            message.valid <- true
+            message.has_message <- true
+            return message if end == start + BreakpointCondition::TWO_QUOTE_WIDTH
+            cursor: mutable usize = start + BreakpointCondition::QUOTE_WIDTH
+            content_end: usize = end - BreakpointCondition::QUOTE_WIDTH
+            while cursor < content_end:
+                decoded: mutable u8 = payload[cursor]
+                if payload[cursor] == Character::DAP_PAYLOAD_CHARACTER_ASCII_BACKSLASH:
+                    return zeroed if cursor + BreakpointCondition::ESCAPED_BYTE_WIDTH > content_end
+                    escaped: u8 = payload[cursor + BreakpointCondition::BYTE_INCREMENT]
+                    if escaped == Character::ASCII_LOWER_U:
+                        codepoint: ParsedValue = parse_unicode_quad(payload, content_end, cursor + BreakpointCondition::ESCAPED_BYTE_WIDTH)
+                        return zeroed if not codepoint.valid or codepoint.value > BreakpointCondition::ASCII_ONLY_MAX
+                        decoded <- codepoint.value.u8()
+                        cursor <- codepoint.end
+                    else:
+                        if escaped == Character::DAP_PAYLOAD_CHARACTER_ASCII_QUOTE or escaped == Character::DAP_PAYLOAD_CHARACTER_ASCII_BACKSLASH or escaped == Character::DAP_PAYLOAD_CHARACTER_ASCII_SLASH:
+                            decoded <- escaped
+                        else:
+                            if escaped == Character::ASCII_BACKSPACE:
+                                decoded <- BreakpointCondition::ESCAPE_BACKSPACE
+                            else:
+                                if escaped == Character::ASCII_FORM_FEED:
+                                    decoded <- BreakpointCondition::ESCAPE_FORM_FEED
+                                else:
+                                    if escaped == Character::ASCII_NEWLINE:
+                                        decoded <- BreakpointCondition::ESCAPE_LINE_FEED
+                                    else:
+                                        if escaped == Character::ESCAPE_CARRIAGE_RETURN:
+                                            decoded <- BreakpointCondition::ESCAPE_CARRIAGE_RETURN
+                                        else:
+                                            if escaped == Character::ESCAPE_TAB:
+                                                decoded <- BreakpointCondition::ESCAPE_TAB
+                                            else:
+                                                return zeroed
+                        cursor <- cursor + BreakpointCondition::ESCAPED_BYTE_WIDTH
+                else:
+                    return zeroed if payload[cursor] < BreakpointCondition::ASCII_SPACE
+                    cursor <- cursor + BreakpointCondition::BYTE_INCREMENT
+                return zeroed if message.length >= BreakpointLog::MAX_MESSAGE_BYTES
+                message.bytes[message.length] <- decoded
+                message.length <- message.length + BreakpointCondition::BYTE_INCREMENT
+            return message
+
+        def source_breakpoints_append(request: mutable SourceBreakpointsRequest&, line: u64, column: u64, has_column: bool, hit_target: u64, has_hit_target: bool, condition: BreakpointConditionExpression, log_message: BreakpointLogMessage) -> bool:
             return false if request.count >= SourcePaths::SOURCE_BREAKPOINT_LIMIT or line > NumberFormat::MAX_U32 or column > NumberFormat::MAX_U32
+            return false if request.breakpoint_text_bytes_length > BreakpointText::MAX_REQUEST_TEXT_BYTES
+            return false if condition.length > BreakpointText::MAX_REQUEST_TEXT_BYTES - request.breakpoint_text_bytes_length
+            return false if log_message.length > BreakpointText::MAX_REQUEST_TEXT_BYTES - request.breakpoint_text_bytes_length - condition.length
             request.lines[request.count] <- line.u32()
             request.columns[request.count] <- column.u32()
             request.has_columns[request.count] <- has_column
             request.hit_targets[request.count] <- hit_target
             request.has_hit_targets[request.count] <- has_hit_target
-            request.conditions[request.count] <- condition
+            condition_offset: usize = request.breakpoint_text_bytes_length if condition.length > BreakpointCondition::EMPTY_EXPRESSION_LENGTH else BreakpointText::FIRST_TEXT_BYTE
+            request.conditions[request.count] <- BreakpointConditionReference{offset: condition_offset, length: condition.length, has_condition: condition.has_condition}
+            for index in 0..<condition.length:
+                request.breakpoint_text_bytes[request.breakpoint_text_bytes_length + index] <- condition.bytes[index]
+            message_offset: usize = request.breakpoint_text_bytes_length + condition.length if log_message.length > BreakpointLog::EMPTY_MESSAGE_LENGTH else BreakpointText::FIRST_TEXT_BYTE
+            request.log_messages[request.count] <- BreakpointLogMessageReference{offset: message_offset, length: log_message.length, has_message: log_message.has_message}
+            for index in 0..<log_message.length:
+                request.breakpoint_text_bytes[message_offset + index] <- log_message.bytes[index]
+            request.breakpoint_text_bytes_length <- request.breakpoint_text_bytes_length + condition.length + log_message.length
             request.count <- request.count + 1
             return true
 
@@ -1122,12 +1208,15 @@ module DebuggerDAPPayload:
                 has_hit_target: mutable bool = false
                 condition: mutable BreakpointConditionExpression = zeroed
                 condition.valid <- true
+                log_message: mutable BreakpointLogMessage = zeroed
+                log_message.valid <- true
                 if object_items:
                     return false if payload[cursor] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
-                    # Reject logpoints until the engine can produce log output;
-                    # expression conditions and numeric hit conditions are
-                    # captured and applied by the managed engine.
-                    return false if object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                    log_message_start: usize = object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
+                    if log_message_start != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
+                        return false if object_field_value_start(payload, length, cursor, DapFields::LOG_MESSAGE, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+                        log_message <- breakpoint_log_message_string_parse(payload, length, log_message_start)
+                        return false if not log_message.valid
                     condition_start: usize = object_field_value_start(payload, length, cursor, DapFields::CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_FIRST_FIELD_OCCURRENCE_INDEX)
                     if condition_start != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
                         return false if object_field_value_start(payload, length, cursor, DapFields::CONDITION, SourcePaths::DAP_SOURCE_BREAKPOINT_DUPLICATE_FIELD_OCCURRENCE_INDEX) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
@@ -1150,13 +1239,13 @@ module DebuggerDAPPayload:
                         return false if not parsed_column.valid
                         column <- parsed_column.value
                         has_column <- true
-                    return false if not line.valid or not source_breakpoints_append(request, line.value, column, has_column, hit_target, has_hit_target, condition)
+                    return false if not line.valid or not source_breakpoints_append(request, line.value, column, has_column, hit_target, has_hit_target, condition, log_message)
                     item_end: usize = json_value_end(payload, length, cursor)
                     return false if item_end == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
                     cursor <- item_end
                 else:
                     line <- parse_unsigned_bounded(payload, length, cursor, NumberFormat::MAX_U32)
-                    return false if not line.valid or not source_breakpoints_append(request, line.value, SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN, false, HitCondition::NO_TARGET, false, condition)
+                    return false if not line.valid or not source_breakpoints_append(request, line.value, SourcePaths::DAP_SOURCE_BREAKPOINT_NO_COLUMN, false, HitCondition::NO_TARGET, false, condition, log_message)
                     cursor <- line.end
                 while cursor < length and is_whitespace(payload[cursor]):
                     cursor <- cursor + 1

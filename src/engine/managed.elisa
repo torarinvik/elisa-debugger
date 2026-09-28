@@ -102,6 +102,20 @@ module DebuggerManagedEngine:
             ENVIRONMENT_DETAIL: u32 = 4
             FALSE_VALUE: i64 = 0
 
+        const module Logpoint:
+            OUTPUT_CAPACITY: usize = 8192
+            DIGIT_CAPACITY: usize = 20
+            DECIMAL_BASE: u64 = 10
+            ASCII_OPEN_BRACE: u8 = 123
+            ASCII_CLOSE_BRACE: u8 = 125
+            ASCII_MINUS: u8 = 45
+            ASCII_ZERO: u8 = 48
+            LINE_FEED: u8 = 10
+            FIRST_INDEX: usize = 0
+            BYTE_INCREMENT: usize = 1
+            EMPTY_EXPRESSION_DETAIL: u32 = 5
+            OUTPUT_LIMIT_DETAIL: u32 = 6
+
 
         def managed_build_identity_matches(left: DebuggerIdentity::BuildIdentity, right: DebuggerIdentity::BuildIdentity) -> bool:
             return left.compiler.value == right.compiler.value and left.runtime.value == right.runtime.value and left.source.value == right.source.value and left.target.value == right.target.value and left.metadata_version == right.metadata_version
@@ -118,9 +132,11 @@ module DebuggerManagedEngine:
             last_breakpoint_event: mutable u64
             last_breakpoint_instruction: mutable u64
             last_breakpoint_branch: mutable DebuggerIdentity::DebugId
+            log_output: mutable u8[Logpoint::OUTPUT_CAPACITY]
+            log_output_length: mutable usize
 
         def managed_new(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage, recording: DebuggerIdentity::DebugId) -> ManagedController:
-            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error(), source_path_root: zeroed, source_path_root_length: SourcePath::ROOT_DISABLED_LENGTH, has_last_breakpoint_stop: false, last_breakpoint_event: Event::INITIAL_INDEX.u64(), last_breakpoint_instruction: Identity::ENGINE_MANAGED_IDENTITY_NO_INSTRUCTION, last_breakpoint_branch: DebuggerIdentity::debug_id(Identity::NO_BRANCH)}
+            return ManagedController{session: session, engine: DebuggerReplayEngine::replay_engine_new(image, recording), state: DebuggerManagedState::state_new(), last_error: DebuggerErrors::no_error(), source_path_root: zeroed, source_path_root_length: SourcePath::ROOT_DISABLED_LENGTH, has_last_breakpoint_stop: false, last_breakpoint_event: Event::INITIAL_INDEX.u64(), last_breakpoint_instruction: Identity::ENGINE_MANAGED_IDENTITY_NO_INSTRUCTION, last_breakpoint_branch: DebuggerIdentity::debug_id(Identity::NO_BRANCH), log_output: zeroed, log_output_length: 0}
 
         def managed_sync_position(controller: mutable ManagedController&) -> void:
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
@@ -173,12 +189,64 @@ module DebuggerManagedEngine:
                 return false if not DebuggerExpressionParser::expression_environment_add(environment, name[ConditionBinding::FIRST_INDEX], prefix_length + digit_count, value, available)
             return true
 
-        def managed_evaluate_breakpoint_condition(controller: mutable ManagedController&, point: DebuggerBreakpoints::Breakpoint) -> DebuggerExpressionParser::ExpressionParseResult:
+        def managed_evaluate_expression(controller: mutable ManagedController&, expression: u8&, expression_length: usize) -> DebuggerExpressionParser::ExpressionParseResult:
             environment: mutable DebuggerExpressionParser::ExpressionEnvironment = DebuggerExpressionParser::expression_environment_new()
             if not managed_add_condition_bindings(controller, environment, false) or not managed_add_condition_bindings(controller, environment, true):
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ConditionBinding::ENVIRONMENT_DETAIL)
                 return DebuggerExpressionParser::ExpressionParseResult{value: 0, consumed: 0, valid: false, failure: failure}
-            return DebuggerExpressionParser::expression_parse_with_environment(point.condition_expression[ConditionBinding::FIRST_INDEX], point.condition_length, environment)
+            return DebuggerExpressionParser::expression_parse_with_environment(expression[ConditionBinding::FIRST_INDEX], expression_length, environment)
+
+        def managed_evaluate_breakpoint_condition(controller: mutable ManagedController&, point: DebuggerBreakpoints::Breakpoint) -> DebuggerExpressionParser::ExpressionParseResult:
+            return managed_evaluate_expression(controller, point.condition_expression[ConditionBinding::FIRST_INDEX], point.condition_length)
+
+        def managed_log_output_append(controller: mutable ManagedController&, byte: u8) -> bool:
+            return false if controller.log_output_length >= Logpoint::OUTPUT_CAPACITY
+            controller.log_output[controller.log_output_length] <- byte
+            controller.log_output_length <- controller.log_output_length + Logpoint::BYTE_INCREMENT
+            return true
+
+        def managed_log_output_append_signed(controller: mutable ManagedController&, value: i64) -> bool:
+            digits: mutable u8[Logpoint::DIGIT_CAPACITY] = zeroed
+            magnitude: mutable u64 = value.u64()
+            magnitude <- (-(value + 1)).u64() + Logpoint::BYTE_INCREMENT.u64() if value < 0
+            digit_count: mutable usize = 0
+            while magnitude > 0:
+                return false if digit_count >= Logpoint::DIGIT_CAPACITY
+                digits[digit_count] <- Logpoint::ASCII_ZERO + (magnitude % Logpoint::DECIMAL_BASE).u8()
+                digit_count <- digit_count + Logpoint::BYTE_INCREMENT
+                magnitude <- magnitude / Logpoint::DECIMAL_BASE
+            digit_count <- Logpoint::BYTE_INCREMENT if digit_count == 0
+            digits[Logpoint::FIRST_INDEX] <- Logpoint::ASCII_ZERO if value == ConditionBinding::FALSE_VALUE
+            return false if value < 0 and not managed_log_output_append(controller, Logpoint::ASCII_MINUS)
+            while digit_count > 0:
+                digit_count <- digit_count - Logpoint::BYTE_INCREMENT
+                return false if not managed_log_output_append(controller, digits[digit_count])
+            return true
+
+        def managed_logpoint_render(controller: mutable ManagedController&, point: DebuggerBreakpoints::Breakpoint) -> DebuggerErrors::DebuggerError:
+            output_start: usize = controller.log_output_length
+            cursor: mutable usize = Logpoint::FIRST_INDEX
+            while cursor < point.log_message_length:
+                if point.log_message[cursor] == Logpoint::ASCII_OPEN_BRACE:
+                    expression_start: usize = cursor + Logpoint::BYTE_INCREMENT
+                    expression_end: mutable usize = expression_start
+                    while expression_end < point.log_message_length and point.log_message[expression_end] != Logpoint::ASCII_CLOSE_BRACE:
+                        expression_end <- expression_end + Logpoint::BYTE_INCREMENT
+                    if expression_end < point.log_message_length:
+                        expression_length: usize = expression_end - expression_start
+                        if expression_length == 0:
+                            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Logpoint::EMPTY_EXPRESSION_DETAIL)
+                        evaluated: DebuggerExpressionParser::ExpressionParseResult = managed_evaluate_expression(controller, point.log_message[expression_start], expression_length)
+                        return evaluated.failure if not evaluated.valid
+                        return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Logpoint::OUTPUT_LIMIT_DETAIL) if not managed_log_output_append_signed(controller, evaluated.value)
+                        cursor <- expression_end + Logpoint::BYTE_INCREMENT
+                        continue
+                if not managed_log_output_append(controller, point.log_message[cursor]):
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Logpoint::OUTPUT_LIMIT_DETAIL)
+                cursor <- cursor + Logpoint::BYTE_INCREMENT
+            if controller.log_output_length == output_start or controller.log_output[controller.log_output_length - Logpoint::BYTE_INCREMENT] != Logpoint::LINE_FEED:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Logpoint::OUTPUT_LIMIT_DETAIL) if not managed_log_output_append(controller, Logpoint::LINE_FEED)
+            return DebuggerErrors::no_error()
 
         def managed_breakpoint_position_matches(point: DebuggerBreakpoints::Breakpoint, table: DebuggerBreakpointManager::BreakpointTable, index: usize, branch: DebuggerIdentity::DebugId, source: DebuggerIdentity::SourceSpan, instruction: u64) -> bool:
             return point.kind == DebuggerBreakpoints::BreakpointKind.Source and point.status == DebuggerBreakpoints::BreakpointStatus.Verified and table.resolved_instructions[index] == instruction and DebuggerMetadata::source_span_contains(source, point.source) and DebuggerBreakpoints::breakpoint_matches_branch(point, branch)
@@ -215,17 +283,25 @@ module DebuggerManagedEngine:
                 if managed_breakpoint_position_matches(point, controller.state.breakpoints, index, event_branch, instruction.source, controller.engine.machine.program_counter):
                     observed: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::breakpoint_observe_hit(point, event_branch)
                     controller.state.breakpoints.points[index] <- observed
-                    if DebuggerBreakpoints::breakpoint_should_stop(observed, event_branch):
-                        if observed.condition_length == 0:
-                            should_stop <- true
-                        else:
+                    if DebuggerBreakpoints::breakpoint_hit_policy_matches(observed, event_branch):
+                        condition_matches: mutable bool = true
+                        if observed.condition_length > 0:
                             evaluated: DebuggerExpressionParser::ExpressionParseResult = managed_evaluate_breakpoint_condition(controller, observed)
                             if not evaluated.valid:
                                 controller.state.breakpoints.points[index].status <- DebuggerBreakpoints::BreakpointStatus.Disabled if evaluated.failure.code == DebuggerErrors::ErrorCode.InvalidArgument
                                 controller.last_error <- evaluated.failure
                                 should_stop <- true
                                 break
-                            should_stop <- true if evaluated.value != ConditionBinding::FALSE_VALUE
+                            condition_matches <- evaluated.value != ConditionBinding::FALSE_VALUE
+                        if condition_matches:
+                            if observed.logpoint:
+                                log_failure: DebuggerErrors::DebuggerError = managed_logpoint_render(controller, observed)
+                                if not DebuggerErrors::error_is_ok(log_failure):
+                                    controller.last_error <- log_failure
+                                    should_stop <- true
+                                    break
+                            else:
+                                should_stop <- true
             if should_stop:
                 controller.has_last_breakpoint_stop <- true
                 controller.last_breakpoint_event <- controller.engine.event_count.u64()
@@ -249,6 +325,7 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
         def managed_continue(controller: mutable ManagedController&, max_steps: u64) -> DebuggerErrors::DebuggerError:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
             # Continue checks its current position except when that exact event
             # and instruction already stopped on a breakpoint. This also lets
             # reverse navigation rediscover breakpoints at event zero.
@@ -322,6 +399,7 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
         def managed_step_over(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             return managed_step(controller) if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
             initial_instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
@@ -351,6 +429,7 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
         def managed_step_out(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             initial_depth: usize = controller.engine.machine.return_stack_pointer
             initial_event: usize = controller.engine.event_count
@@ -666,6 +745,8 @@ module DebuggerManagedEngine:
                 condition: DebuggerIdentity::debug_id(0),
                 condition_expression: zeroed,
                 condition_length: 0,
+                log_message: zeroed,
+                log_message_length: 0,
                 hit_target: 0,
                 hit_count: 0,
                 hit_stride: Value::NAME_OFFSET,

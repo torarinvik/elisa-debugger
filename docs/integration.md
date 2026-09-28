@@ -37,10 +37,19 @@ table, one `main` thread, stack and locals inspection, bounded local paging,
 artifact's logical paths. Set the adapter launch argument `sourcePathRoot` to
 the workspace root when the editor sends absolute paths; the adapter removes
 that exact root prefix before matching. It does not use basename or suffix
-matching. Conditions, hit conditions, logpoints, function and data
-breakpoints, expression evaluation, variable assignment, restart, and
-disassembly are unavailable. The initialize response advertises the relevant
-DAP capabilities; clients should honor that response.
+matching. Source breakpoints support bounded arithmetic expression conditions,
+positive numeric hit conditions, and `logMessage` logpoints with `{expression}`
+interpolation. A logpoint emits a DAP `output` event without stopping; a
+condition and hit condition are applied before the message is emitted. A
+message is limited to 256 decoded bytes, and a breakpoint replacement accepts
+at most 8192 combined decoded condition and log-message bytes. Each continue
+request buffers at most 8192 bytes of log output. If a template expression
+cannot be evaluated or the output bound is reached, continue stops with an
+error instead of silently discarding the log. Expression evaluation is bounded
+and side-effect free.
+Function and data breakpoints, variable assignment, restart, and disassembly
+remain unavailable. The initialize response advertises the relevant DAP
+capabilities; clients should honor that response.
 
 The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. `stackTrace`
 supports the standard `startFrame` and `levels` paging arguments and reports

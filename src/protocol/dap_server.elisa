@@ -178,6 +178,37 @@ module DebuggerDAPServer:
             DAP_EVENT_EXIT_BODY_SUFFIX: cstr = "}"
             DAP_EVENT_EXIT_BODY_SUFFIX_LENGTH: usize = 1
 
+        const module LogpointOutput:
+            EVENT_NAME: cstr = "output"
+            EVENT_NAME_LENGTH: usize = 6
+            BODY_PREFIX: cstr = "{\"category\":\"console\",\"output\":\""
+            BODY_PREFIX_LENGTH: usize = 32
+            BODY_SUFFIX: cstr = "\"}}"
+            BODY_SUFFIX_LENGTH: usize = 3
+            ASCII_BACKSLASH: u8 = 92
+            ASCII_QUOTE: u8 = 34
+            ASCII_ZERO: u8 = 48
+            ASCII_LOWER_U: u8 = 117
+            ASCII_LOWER_N: u8 = 110
+            ASCII_LOWER_R: u8 = 114
+            ASCII_LOWER_T: u8 = 116
+            ASCII_LOWER_B: u8 = 98
+            ASCII_LOWER_F: u8 = 102
+            ASCII_BACKSPACE: u8 = 8
+            ASCII_FORM_FEED: u8 = 12
+            ASCII_CARRIAGE_RETURN: u8 = 13
+            ASCII_LINE_FEED: u8 = 10
+            ASCII_TAB: u8 = 9
+            ASCII_SPACE: u8 = 32
+            HEX_BASE: u8 = 16
+            HEX_ALPHA_BASE: u8 = 10
+            HEX_ALPHA_OFFSET: u8 = 87
+            HEX_ESCAPE_LENGTH: usize = 6
+            JSON_PAIR_LENGTH: usize = 2
+            FIRST_BYTE_INDEX: usize = 0
+            NO_OUTPUT_BYTES: usize = 0
+            MINIMAL_FRAME_LENGTH: usize = Events::DAP_EVENT_PREFIX_LENGTH + Events::DAP_EVENT_MIDDLE_LENGTH + EVENT_NAME_LENGTH + Events::DAP_EVENT_NAME_END_LENGTH + Events::DAP_EVENT_BODY_FIELD_LENGTH + BODY_PREFIX_LENGTH + BODY_SUFFIX_LENGTH
+
         const module ExecutionControl:
             DAP_CONTINUE_COMMAND: cstr = "continue"
             DAP_CONTINUE_COMMAND_LENGTH: usize = 8
@@ -219,8 +250,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 469
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":false,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 494
 
         const module JsonWire:
             JSON_ASCII_MAX: u8 = 127
@@ -1308,6 +1339,64 @@ module DebuggerDAPServer:
                 count <- count + 1
             return count
 
+        def json_hex_digit(value: u8) -> u8:
+            return LogpointOutput::ASCII_ZERO + value if value < LogpointOutput::HEX_ALPHA_BASE
+            return LogpointOutput::HEX_ALPHA_OFFSET + value
+
+        def log_output_escaped_length(bytes: u8&, length: usize) -> usize:
+            escaped_length: mutable usize = 0
+            for index in 0..<length:
+                byte: u8 = bytes[index]
+                if byte == LogpointOutput::ASCII_BACKSLASH or byte == LogpointOutput::ASCII_QUOTE or byte == LogpointOutput::ASCII_BACKSPACE or byte == LogpointOutput::ASCII_TAB or byte == LogpointOutput::ASCII_LINE_FEED or byte == LogpointOutput::ASCII_FORM_FEED or byte == LogpointOutput::ASCII_CARRIAGE_RETURN:
+                    escaped_length <- escaped_length + LogpointOutput::JSON_PAIR_LENGTH
+                else:
+                    escaped_length <- escaped_length + LogpointOutput::HEX_ESCAPE_LENGTH if byte < LogpointOutput::ASCII_SPACE
+                    escaped_length <- escaped_length + 1 if byte >= LogpointOutput::ASCII_SPACE
+            return escaped_length
+
+        def write_log_output_json_string(bytes: u8&, length: usize) -> void can[Console, Unsafe.PointerCast]:
+            for index in 0..<length:
+                byte: u8 = bytes[index]
+                if byte == LogpointOutput::ASCII_BACKSLASH or byte == LogpointOutput::ASCII_QUOTE:
+                    _ = printf("%c%c", LogpointOutput::ASCII_BACKSLASH, byte) can Console
+                else:
+                    if byte == LogpointOutput::ASCII_BACKSPACE:
+                        _ = printf("%c%c", LogpointOutput::ASCII_BACKSLASH, LogpointOutput::ASCII_LOWER_B) can Console
+                    else:
+                        if byte == LogpointOutput::ASCII_FORM_FEED:
+                            _ = printf("%c%c", LogpointOutput::ASCII_BACKSLASH, LogpointOutput::ASCII_LOWER_F) can Console
+                        else:
+                            if byte == LogpointOutput::ASCII_LINE_FEED:
+                                _ = printf("%c%c", LogpointOutput::ASCII_BACKSLASH, LogpointOutput::ASCII_LOWER_N) can Console
+                            else:
+                                if byte == LogpointOutput::ASCII_CARRIAGE_RETURN:
+                                    _ = printf("%c%c", LogpointOutput::ASCII_BACKSLASH, LogpointOutput::ASCII_LOWER_R) can Console
+                                else:
+                                    if byte == LogpointOutput::ASCII_TAB:
+                                        _ = printf("%c%c", LogpointOutput::ASCII_BACKSLASH, LogpointOutput::ASCII_LOWER_T) can Console
+                                    else:
+                                        if byte < LogpointOutput::ASCII_SPACE:
+                                            _ = printf("%c%c%c%c%c%c", LogpointOutput::ASCII_BACKSLASH, LogpointOutput::ASCII_LOWER_U, LogpointOutput::ASCII_ZERO, LogpointOutput::ASCII_ZERO, json_hex_digit(byte / LogpointOutput::HEX_BASE), json_hex_digit(byte % LogpointOutput::HEX_BASE)) can Console
+                                        else:
+                                            _ = printf("%c", byte) can Console
+
+        def write_log_output_event(bytes: u8&, length: usize, outbound_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            body_length: usize = LogpointOutput::MINIMAL_FRAME_LENGTH + decimal_digits(outbound_sequence) + log_output_escaped_length(bytes, length)
+            _ = printf("Content-Length: %llu\r\n\r\n", body_length.u64()) can Console
+            _ = printf("%s", Events::DAP_EVENT_PREFIX) can Console
+            _ = printf("%llu", outbound_sequence) can Console
+            _ = printf("%s", Events::DAP_EVENT_MIDDLE) can Console
+            _ = printf("%s", LogpointOutput::EVENT_NAME) can Console
+            _ = printf("%s", Events::DAP_EVENT_NAME_END) can Console
+            _ = printf("%s", Events::DAP_EVENT_BODY_FIELD) can Console
+            _ = printf("%s", LogpointOutput::BODY_PREFIX) can Console
+            write_log_output_json_string(bytes, length) can Console, Unsafe.PointerCast
+            _ = printf("%s", LogpointOutput::BODY_SUFFIX) can Console
+
+        def command_can_emit_log_output(command_hash: u64) -> bool:
+            return true if command_hash == CommandDispatch::COMMAND_HASH_CONTINUE or command_hash == CommandDispatch::COMMAND_HASH_NEXT or command_hash == CommandDispatch::COMMAND_HASH_STEP_OUT
+            return false
+
         def adapter_event_name(kind: DebuggerDAP::EventKind) -> cstr:
             return Events::DAP_EVENT_INITIALIZED_NAME if kind == DebuggerDAP::EventKind.Initialized
             return Events::DAP_EVENT_CONTINUED_NAME if kind == DebuggerDAP::EventKind.Continued
@@ -1784,9 +1873,13 @@ module DebuggerDAPServer:
                         if not applied.accepted:
                             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: applied.failure}
                     if request.conditions[index].has_condition:
-                        condition_applied: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_condition(service, response.points[index].id, request.conditions[index].bytes[0], request.conditions[index].length)
+                        condition_applied: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_condition(service, response.points[index].id, request.breakpoint_text_bytes[request.conditions[index].offset], request.conditions[index].length)
                         if not condition_applied.accepted:
                             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: condition_applied.failure}
+                    if request.log_messages[index].has_message:
+                        log_message_applied: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_log_message(service, response.points[index].id, request.breakpoint_text_bytes[request.log_messages[index].offset], request.log_messages[index].length)
+                        if not log_message_applied.accepted:
+                            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: false, stop_generation: service.controller.session.stop_generation, failure: log_message_applied.failure}
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.SetBreakpoints, accepted: response.accepted, stop_generation: service.controller.session.stop_generation, failure: response.failure}
 
         def dispatch_launch(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
@@ -2163,8 +2256,13 @@ module DebuggerDAPServer:
                             has_pending_launch_response <- true
                         else:
                             write_response(service, result, decoder.command_hash, decoder.request_sequence, outbound_sequence, state_committed, memory, variables, source_breakpoints, client_coordinates, context, decoder.payload[0], decoder.command_value_start, decoder.command_value_end) can Console, Unsafe.PointerCast
+                        return TransportLimits::DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == TransportLimits::MAX_DAP_OUTBOUND_SEQUENCE
+                        outbound_sequence <- outbound_sequence + NumberFormat::DAP_DECIMAL_INCREMENT
+                        if command_can_emit_log_output(decoder.command_hash) and service.controller.log_output_length > LogpointOutput::NO_OUTPUT_BYTES:
+                            write_log_output_event(service.controller.log_output[LogpointOutput::FIRST_BYTE_INDEX], service.controller.log_output_length, outbound_sequence) can Console, Unsafe.PointerCast
                             return TransportLimits::DAP_SERVER_INVALID_FRAME_EXIT_CODE if outbound_sequence == TransportLimits::MAX_DAP_OUTBOUND_SEQUENCE
                             outbound_sequence <- outbound_sequence + NumberFormat::DAP_DECIMAL_INCREMENT
+                            service.controller.log_output_length <- 0
                         event_batch: DebuggerDAP::EventBatch = DebuggerDAP::events_after_request(event_request_kind(decoder.command_hash), result.accepted, state_committed, service.controller.session.state, service.controller.engine.machine.halted, service.controller.engine.machine.faulted, service.controller.engine.machine.result)
                         for event_index in 0..<event_batch.count:
                             write_adapter_event(event_batch.events[event_index], outbound_sequence) can Console, Unsafe.PointerCast

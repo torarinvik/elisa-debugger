@@ -149,14 +149,38 @@ const module Test:
         INVALID_CHECK_FAILURE: i64 = 64
         UNAVAILABLE_CHECK_FAILURE: i64 = 67
 
+    const module Logpoint:
+        MESSAGE: cstr = "value={local0}"
+        MESSAGE_LENGTH: usize = 14
+        EXPECTED_OUTPUT: cstr = "value=7\n"
+        EXPECTED_OUTPUT_LENGTH: usize = 8
+        MESSAGE_LOCAL_VALUE_INDEX: usize = 6
+        EXPECTED_LOCAL_VALUE_BYTE: u8 = 55
+        MESSAGE_NEWLINE_INDEX: usize = 7
+        EXPECTED_NEWLINE_BYTE: u8 = 10
+        FALSE_EXPRESSION: cstr = "local0 == 8"
+        FALSE_EXPRESSION_LENGTH: usize = 11
+        INVALID_MESSAGE: cstr = "bad={}"
+        INVALID_MESSAGE_LENGTH: usize = 6
+        PARTIAL_OUTPUT_LENGTH: usize = 4
+        EMPTY_OUTPUT_LENGTH: usize = 0
+        BREAKPOINT_SLOT: usize = 0
+        HIT_COUNT: u64 = 1
+        RESULT_FAILURE: i64 = 77
+
     const module ConditionService:
         EXPRESSION: cstr = "local0 == 15"
         EXPRESSION_LENGTH: usize = 12
         EMPTY_EXPRESSION_LENGTH: usize = 0
         FIRST_BYTE_INDEX: usize = 0
         FIRST_EXPRESSION_BYTE: u8 = 108
+        LOG_MESSAGE: cstr = "hit"
+        LOG_MESSAGE_LENGTH: usize = 3
+        LOG_OUTPUT_LENGTH: usize = 4
+        LOG_OUTPUT_NEWLINE: u8 = 10
         RESULT_SET_CONDITION: i64 = 65
         RESULT_CLEAR_CONDITION: i64 = 66
+        RESULT_SET_LOG_MESSAGE: i64 = 79
 const module ManagedReverseProgram:
     INSTRUCTION_COUNT: u64 = 13
     LOCAL_COUNT: u64 = 1
@@ -505,6 +529,51 @@ def check_managed_conditional_breakpoint() -> i64:
     return Test::BreakpointCondition::INVALID_CHECK_FAILURE if invalid_hit.code != DebuggerErrors::ErrorCode.InvalidArgument or invalid_controller.state.breakpoints.points[Test::BreakpointCondition::BREAKPOINT_SLOT].status != DebuggerBreakpoints::BreakpointStatus.Disabled or invalid_controller.engine.event_count != Test::BreakpointCondition::TARGET_EVENT
     return Test::BreakpointCondition::SUCCESS_RESULT
 
+def check_managed_logpoint() -> i64:
+    image: DebuggerEDIR::ProgramImage = managed_conditional_breakpoint_image()
+    location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(Test::MANAGED_REGRESSION_SOURCE_FILE_ID), line: Test::BreakpointCondition::TARGET_LINE, column: Test::MANAGED_REGRESSION_SOURCE_COLUMN, discriminator: 0}
+    controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::Logpoint::RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller))
+    breakpoint_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(controller, location)
+    return Test::Logpoint::RESULT_FAILURE if breakpoint_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    point: usize = Test::Logpoint::BREAKPOINT_SLOT
+    for index in 0..<Test::Logpoint::MESSAGE_LENGTH:
+        controller.state.breakpoints.points[point].log_message[index] <- Test::Logpoint::MESSAGE.cast[u8&][index]
+    controller.state.breakpoints.points[point].log_message_length <- Test::Logpoint::MESSAGE_LENGTH
+    controller.state.breakpoints.points[point].logpoint <- true
+    for index in 0..<Test::BreakpointCondition::TRUE_EXPRESSION_LENGTH:
+        controller.state.breakpoints.points[point].condition_expression[index] <- Test::BreakpointCondition::TRUE_EXPRESSION.cast[u8&][index]
+    controller.state.breakpoints.points[point].condition_length <- Test::BreakpointCondition::TRUE_EXPRESSION_LENGTH
+    continue_result: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::Logpoint::RESULT_FAILURE if not DebuggerErrors::error_is_ok(continue_result) or not controller.engine.machine.halted or controller.has_last_breakpoint_stop or controller.state.breakpoints.points[point].hit_count != Test::Logpoint::HIT_COUNT
+    return Test::Logpoint::RESULT_FAILURE if controller.log_output_length != Test::Logpoint::EXPECTED_OUTPUT_LENGTH or controller.log_output[Test::Logpoint::MESSAGE_LOCAL_VALUE_INDEX] != Test::Logpoint::EXPECTED_LOCAL_VALUE_BYTE or controller.log_output[Test::Logpoint::MESSAGE_NEWLINE_INDEX] != Test::Logpoint::EXPECTED_NEWLINE_BYTE
+
+    false_controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::Logpoint::RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(false_controller))
+    false_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(false_controller, location)
+    return Test::Logpoint::RESULT_FAILURE if false_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    for index in 0..<Test::Logpoint::MESSAGE_LENGTH:
+        false_controller.state.breakpoints.points[point].log_message[index] <- Test::Logpoint::MESSAGE.cast[u8&][index]
+    false_controller.state.breakpoints.points[point].log_message_length <- Test::Logpoint::MESSAGE_LENGTH
+    false_controller.state.breakpoints.points[point].logpoint <- true
+    for index in 0..<Test::Logpoint::FALSE_EXPRESSION_LENGTH:
+        false_controller.state.breakpoints.points[point].condition_expression[index] <- Test::Logpoint::FALSE_EXPRESSION.cast[u8&][index]
+    false_controller.state.breakpoints.points[point].condition_length <- Test::Logpoint::FALSE_EXPRESSION_LENGTH
+    false_result: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(false_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::Logpoint::RESULT_FAILURE if not DebuggerErrors::error_is_ok(false_result) or not false_controller.engine.machine.halted or false_controller.log_output_length != Test::Logpoint::EMPTY_OUTPUT_LENGTH
+
+    invalid_controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    return Test::Logpoint::RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(invalid_controller))
+    invalid_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(invalid_controller, location)
+    return Test::Logpoint::RESULT_FAILURE if invalid_id.value == Test::BreakpointCondition::NO_BREAKPOINT_ID
+    for index in 0..<Test::Logpoint::INVALID_MESSAGE_LENGTH:
+        invalid_controller.state.breakpoints.points[point].log_message[index] <- Test::Logpoint::INVALID_MESSAGE.cast[u8&][index]
+    invalid_controller.state.breakpoints.points[point].log_message_length <- Test::Logpoint::INVALID_MESSAGE_LENGTH
+    invalid_controller.state.breakpoints.points[point].logpoint <- true
+    invalid_result: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(invalid_controller, Test::MANAGED_REGRESSION_EXPECTED_BRANCH_BREAKPOINT_STEPS)
+    return Test::Logpoint::RESULT_FAILURE if invalid_result.code != DebuggerErrors::ErrorCode.InvalidArgument or invalid_controller.engine.event_count != Test::BreakpointCondition::TARGET_EVENT or invalid_controller.log_output_length != Test::Logpoint::PARTIAL_OUTPUT_LENGTH
+    return 0
+
 def check_managed_top_level_step_out() -> i64:
     controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(managed_source_step_image())
     return 1 if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
@@ -598,6 +667,8 @@ def main() -> i64:
     return Test::MANAGED_SOURCE_BREAKPOINT_RESUME_RESULT if source_breakpoint_resume_status != 0
     conditional_breakpoint_status: i64 = check_managed_conditional_breakpoint()
     return conditional_breakpoint_status if conditional_breakpoint_status != 0
+    logpoint_status: i64 = check_managed_logpoint()
+    return logpoint_status if logpoint_status != 0
     reverse_compound_status: i64 = check_managed_reverse_compound_steps()
     return ManagedReverseResult::CHECK_FAILURE_BASE + reverse_compound_status if reverse_compound_status != ManagedReverseResult::SUCCESS
     reverse_route_status: i64 = check_managed_reverse_protocol_route()
@@ -685,7 +756,11 @@ def main() -> i64:
     evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count <- Test::EVALUATION_BREAKPOINT_HIT_TARGET
     condition_clear: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_condition(evaluation_service, evaluation_breakpoint_id, Test::ConditionService::EXPRESSION.cast[u8&], Test::ConditionService::EMPTY_EXPRESSION_LENGTH)
     return Test::ConditionService::RESULT_CLEAR_CONDITION if not condition_clear.accepted or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].condition_length != Test::ConditionService::EMPTY_EXPRESSION_LENGTH or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].hit_count != Test::EVALUATION_ZERO_HIT_COUNT
+    log_message_set: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_log_message(evaluation_service, evaluation_breakpoint_id, Test::ConditionService::LOG_MESSAGE.cast[u8&], Test::ConditionService::LOG_MESSAGE_LENGTH)
+    return Test::ConditionService::RESULT_SET_LOG_MESSAGE if not log_message_set.accepted or not evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].logpoint or evaluation_service.controller.state.breakpoints.points[Test::EVALUATION_BREAKPOINT_SLOT].log_message_length != Test::ConditionService::LOG_MESSAGE_LENGTH
     continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: Test::STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
+    continued_evaluation: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(evaluation_service, continue_request)
+    return Test::ConditionService::RESULT_SET_LOG_MESSAGE if not continued_evaluation.accepted or not evaluation_service.controller.engine.machine.halted or evaluation_service.controller.log_output_length != Test::ConditionService::LOG_OUTPUT_LENGTH or evaluation_service.controller.log_output[Test::ConditionService::LOG_MESSAGE_LENGTH] != Test::ConditionService::LOG_OUTPUT_NEWLINE
     continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return 5 if not continued.accepted or not DebuggerManagedService::service_is_exact(service)
     continued_frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)

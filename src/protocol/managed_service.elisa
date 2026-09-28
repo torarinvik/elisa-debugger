@@ -38,6 +38,7 @@ module DebuggerManagedService:
             DETAIL_EVALUATION_ENVIRONMENT: u32 = 13
             DETAIL_BREAKPOINT_POLICY: u32 = 14
             DETAIL_BREAKPOINT_CONDITION: u32 = 15
+            DETAIL_BREAKPOINT_LOG_MESSAGE: u32 = 16
 
         const module EventCapture:
             SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
@@ -535,6 +536,42 @@ module DebuggerManagedService:
                     break
             if not found:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_CONDITION)
+                service.last_error <- failure
+                return result_error(failure)
+            service.last_error <- DebuggerErrors::no_error()
+            return result_ok()
+
+        def service_set_breakpoint_log_message(service: mutable Service&, breakpoint_id: DebuggerIdentity::DebugId, message: u8&, message_length: usize) -> Result:
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if breakpoint_id.value == BreakpointPolicy::NO_BREAKPOINT_ID or message_length > DebuggerBreakpoints::breakpoint_log_message_capacity():
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE)
+            if not service.controller.session.capabilities.source_breakpoints:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.session.state == DebuggerSession::SessionState.Created or service.controller.session.state == DebuggerSession::SessionState.Configuring or service.controller.session.state == DebuggerSession::SessionState.Launching:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.session.state == DebuggerSession::SessionState.Exited or service.controller.session.state == DebuggerSession::SessionState.Detached or service.controller.session.state == DebuggerSession::SessionState.Failed or service.controller.session.state == DebuggerSession::SessionState.Closed:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or service.controller.engine.machine.faulted:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE) if DebuggerErrors::error_is_ok(failure)
+            if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints):
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE) if DebuggerErrors::error_is_ok(failure)
+            if not DebuggerErrors::error_is_ok(failure):
+                service.last_error <- failure
+                return result_error(failure)
+            found: mutable bool = false
+            for index in BreakpointPolicy::FIRST_BREAKPOINT_INDEX..<service.controller.state.breakpoints.count:
+                if service.controller.state.breakpoints.points[index].id.value == breakpoint_id.value and service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source:
+                    for byte_index in 0..<DebuggerBreakpoints::breakpoint_log_message_capacity():
+                        service.controller.state.breakpoints.points[index].log_message[byte_index] <- DebuggerBreakpoints::breakpoint_empty_expression_byte()
+                    for byte_index in 0..<message_length:
+                        service.controller.state.breakpoints.points[index].log_message[byte_index] <- message[byte_index]
+                    service.controller.state.breakpoints.points[index].log_message_length <- message_length
+                    service.controller.state.breakpoints.points[index].logpoint <- true
+                    service.controller.state.breakpoints.points[index].hit_count <- 0
+                    found <- true
+                    break
+            if not found:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_LOG_MESSAGE)
                 service.last_error <- failure
                 return result_error(failure)
             service.last_error <- DebuggerErrors::no_error()

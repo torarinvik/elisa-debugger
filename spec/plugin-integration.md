@@ -45,9 +45,17 @@ produce a diagnostic and disable the breakpoint when evaluated. A known but
 unavailable value produces a diagnostic at that stop while leaving the
 breakpoint enabled, so it can match after execution reaches a state where that
 value is available.
-`logMessage` logpoints remain rejected because this adapter does not yet
-produce log output. The adapter advertises hit-conditional and
-expression-conditional breakpoints.
+`logMessage` logpoints are supported. They emit a DAP `output` event in the
+`console` category and do not stop execution. Place a bounded expression in
+braces, for example `"value = {local0}"`; expressions use the same side-effect
+free integer grammar and visible `localN`/`globalN` names as conditional
+breakpoints. Conditions and hit conditions filter logpoints before emission.
+Each decoded message is limited to 256 bytes; one replacement request accepts
+up to 8192 combined decoded condition and log-message bytes. Output
+buffered during one continue request is limited to 8192 bytes. An invalid or unavailable template
+expression and output overflow stop the request with a diagnostic; output is
+never silently truncated. The adapter advertises `supportsLogPoints`,
+hit-conditional breakpoints, and expression-conditional breakpoints.
 
 The adapter does not implement DAP `attach`. The
 [attach-configuration schema](../schemas/dap-attach-configuration.schema.json)

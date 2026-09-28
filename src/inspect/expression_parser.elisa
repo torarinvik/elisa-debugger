@@ -34,8 +34,10 @@ module DebuggerExpressionParser:
             ASCII_CLOSE_PARENTHESIS: u8 = 41
 
         const module ExpressionParserArithmetic:
-            DECIMAL_BASE: i64 = 10
-            I64_MAX: i64 = 9223372036854775807
+            DECIMAL_BASE: u64 = 10
+            I64_MAX_LITERAL_MAGNITUDE: u64 = 9223372036854775807
+            I64_MIN_LITERAL_MAGNITUDE: u64 = 9223372036854775808
+            I64_MIN: i64 = -9223372036854775807 - 1
             EVALUATION_BUDGET: usize = 2
             ZERO: i64 = 0
 
@@ -72,6 +74,22 @@ module DebuggerExpressionParser:
             evaluation: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, ExpressionParserArithmetic::EVALUATION_BUDGET)
             return invalid_node(evaluation.failure.code, evaluation.failure.retryable, evaluation.failure.detail) if not DebuggerErrors::error_is_ok(evaluation.failure)
             return valid_node(evaluation.value)
+
+        def parse_integer_literal(bytes: u8&, length: usize, position: mutable usize&, operands: mutable usize&, negative: bool) -> ExpressionParserNode:
+            return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::OPERAND_LIMIT) if operands >= ExpressionParserBounds::MAX_OPERAND_COUNT
+            maximum: u64 = ExpressionParserArithmetic::I64_MIN_LITERAL_MAGNITUDE if negative else ExpressionParserArithmetic::I64_MAX_LITERAL_MAGNITUDE
+            magnitude: mutable u64 = 0
+            while position < length and bytes[position] >= ExpressionParserCharacter::ASCII_ZERO and bytes[position] <= ExpressionParserCharacter::ASCII_NINE:
+                digit: u64 = (bytes[position] - ExpressionParserCharacter::ASCII_ZERO).u64()
+                return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::LITERAL_OVERFLOW) if magnitude > (maximum - digit) / ExpressionParserArithmetic::DECIMAL_BASE
+                magnitude <- magnitude * ExpressionParserArithmetic::DECIMAL_BASE + digit
+                position <- position + ExpressionParserCursor::INCREMENT
+            operands <- operands + ExpressionParserCursor::INCREMENT
+            signed_value: mutable i64 = ExpressionParserArithmetic::ZERO
+            signed_value <- ExpressionParserArithmetic::I64_MIN if negative and magnitude == ExpressionParserArithmetic::I64_MIN_LITERAL_MAGNITUDE
+            signed_value <- -magnitude.i64() if negative and magnitude != ExpressionParserArithmetic::I64_MIN_LITERAL_MAGNITUDE
+            signed_value <- magnitude.i64() if not negative
+            return valid_node(signed_value)
 
         def parse_additive(bytes: u8&, length: usize, position: mutable usize&, depth: usize, operands: mutable usize&) -> ExpressionParserNode:
             left: mutable ExpressionParserNode = parse_multiplicative(bytes, length, position, depth, operands)
@@ -111,6 +129,9 @@ module DebuggerExpressionParser:
             skip_whitespace(bytes, length, position)
             if position < length and bytes[position] == ExpressionParserCharacter::ASCII_MINUS:
                 position <- position + ExpressionParserCursor::INCREMENT
+                skip_whitespace(bytes, length, position)
+                if position < length and bytes[position] >= ExpressionParserCharacter::ASCII_ZERO and bytes[position] <= ExpressionParserCharacter::ASCII_NINE:
+                    return parse_integer_literal(bytes, length, position, operands, true)
                 operand: ExpressionParserNode = parse_unary(bytes, length, position, depth, operands)
                 return operand if not operand.valid
                 return apply_binary(DebuggerEvaluate::EvaluationKind.Negate, operand.value, ExpressionParserArithmetic::ZERO)
@@ -129,15 +150,7 @@ module DebuggerExpressionParser:
                 position <- position + ExpressionParserCursor::INCREMENT
                 return nested
             return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::EXPECTED_VALUE) if bytes[position] < ExpressionParserCharacter::ASCII_ZERO or bytes[position] > ExpressionParserCharacter::ASCII_NINE
-            return invalid_node(DebuggerErrors::ErrorCode.ResourceLimit, true, ExpressionParserDetail::OPERAND_LIMIT) if operands >= ExpressionParserBounds::MAX_OPERAND_COUNT
-            value: mutable i64 = ExpressionParserArithmetic::ZERO
-            while position < length and bytes[position] >= ExpressionParserCharacter::ASCII_ZERO and bytes[position] <= ExpressionParserCharacter::ASCII_NINE:
-                digit: i64 = (bytes[position] - ExpressionParserCharacter::ASCII_ZERO).i64()
-                return invalid_node(DebuggerErrors::ErrorCode.InvalidArgument, false, ExpressionParserDetail::LITERAL_OVERFLOW) if value > (ExpressionParserArithmetic::I64_MAX - digit) / ExpressionParserArithmetic::DECIMAL_BASE
-                value <- value * ExpressionParserArithmetic::DECIMAL_BASE + digit
-                position <- position + ExpressionParserCursor::INCREMENT
-            operands <- operands + ExpressionParserCursor::INCREMENT
-            return valid_node(value)
+            return parse_integer_literal(bytes, length, position, operands, false)
 
         def parse_failure(value: DebuggerErrors::DebuggerError, consumed: usize) -> ExpressionParseResult:
             return ExpressionParseResult{value: ExpressionParserArithmetic::ZERO, consumed: consumed, valid: false, failure: value}

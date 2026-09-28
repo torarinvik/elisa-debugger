@@ -95,6 +95,7 @@ SERVER_TEST_FIRST_STEP_INSTRUCTION := 1
 SERVER_TEST_FIRST_STEP_ACCUMULATOR := 17
 SERVER_TEST_SOURCE_BREAKPOINT_LINE := 42
 SERVER_TEST_LOGPOINT_LINE := 44
+SERVER_TEST_CALLEE_SOURCE_LINE := 47
 SERVER_TEST_UNRESOLVED_BREAKPOINT_LINE := 99
 SERVER_TEST_BREAKPOINT_INSTRUCTION := 1
 SERVER_TEST_STALE_BREAKPOINT_GENERATION := 0
@@ -169,6 +170,7 @@ dap-server: $(BUILD)/elisa-debugger-dap-server
 
 dap-logpoints-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 	sh tests/dap_logpoints_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_LOGPOINT_LINE)"
+	sh tests/dap_step_in_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_CALLEE_SOURCE_LINE)"
 
 cli: $(BUILD)/elisa-debugger-cli
 

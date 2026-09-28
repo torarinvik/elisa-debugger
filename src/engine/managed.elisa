@@ -398,8 +398,33 @@ module DebuggerManagedEngine:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::no_error()
 
+        def managed_step_into(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
+            controller.last_error <- DebuggerErrors::no_error()
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            initial_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+            initial_depth: usize = controller.engine.machine.return_stack_pointer
+            initial_event: usize = controller.engine.event_count
+            reached_boundary: mutable bool = false
+            failure: mutable DebuggerErrors::DebuggerError = managed_step(controller)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < Step::COMPOUND_LIMIT:
+                current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+                entered_callee: bool = controller.engine.machine.return_stack_pointer > initial_depth
+                source_changed: bool = not managed_source_position_matches(initial_source, current_source)
+                if entered_callee or source_changed:
+                    reached_boundary <- true
+                    _ = managed_breakpoint_should_stop(controller)
+                    break
+                failure <- managed_step(controller)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not reached_boundary and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT
+            return controller.last_error if not DebuggerErrors::error_is_ok(controller.last_error)
+            return DebuggerErrors::no_error()
+
         def managed_step_over(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             controller.log_output_length <- Logpoint::FIRST_INDEX
+            controller.last_error <- DebuggerErrors::no_error()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             return managed_step(controller) if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
             initial_instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
@@ -426,10 +451,12 @@ module DebuggerManagedEngine:
             call_is_active_after_limit: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
             source_position_unchanged_after_limit: bool = managed_source_position_matches(initial_source, managed_current_source(controller))
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT and (call_is_active_after_limit or source_position_unchanged_after_limit)
+            return controller.last_error if not DebuggerErrors::error_is_ok(controller.last_error)
             return DebuggerErrors::no_error()
 
         def managed_step_out(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             controller.log_output_length <- Logpoint::FIRST_INDEX
+            controller.last_error <- DebuggerErrors::no_error()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             initial_depth: usize = controller.engine.machine.return_stack_pointer
             initial_event: usize = controller.engine.event_count
@@ -446,6 +473,7 @@ module DebuggerManagedEngine:
                 return failure if not DebuggerErrors::error_is_ok(failure)
             frame_has_not_returned: bool = initial_depth == 0 or controller.engine.machine.return_stack_pointer >= initial_depth
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and frame_has_not_returned and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT
+            return controller.last_error if not DebuggerErrors::error_is_ok(controller.last_error)
             return DebuggerErrors::no_error()
 
     private:

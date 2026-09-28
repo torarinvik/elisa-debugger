@@ -80,6 +80,9 @@ fields, and errors.
 The supported compact request flow is `launch` with
 `arguments.program`, `setBreakpoints`, `pause`, `continue`, `step`,
 `reverseStep`, `seek`, the read-only `timeline` history extension, bounded managed `memory` reads, and checkpoint/branch metadata.
+The read-only `trace.verify` method also returns bounded verification metadata
+for the current managed trace; opaque trace bytes still require a separate
+transport.
 After launch, `threads` returns one logical `main` thread, including while the
 session is running. Pause before requesting `stack`, `scopes`, or `variables`.
 `program` must name a complete verified EDIR artifact. `variablesReference` is
@@ -106,8 +109,11 @@ history return `UNSUPPORTED` or `UNAVAILABLE`. Validate the wire shape with the
 [timeline schema](../schemas/session-protocol-v1.timeline.schema.json).
 
 Checkpoint and branch requests return validated metadata (`event`/`stateHash`
-or a branch ID) and preserve the same stop-generation rules. This endpoint
-does not implement attach, expression evaluation, or trace artifact transfer.
+or a branch ID) and preserve the same stop-generation rules. `trace.verify`
+returns `state`, verified chunk/event counts, and a replayability flag; a
+successful response is a snapshot and carries the current stop generation.
+This endpoint does not implement attach, expression evaluation, or trace
+artifact transfer.
 `createSession` can establish process-scoped session ownership before launch;
 after that handshake, preserve the returned `sessionId` on every request and
 the returned `ownerToken` on every state changing request. Comparison and

@@ -82,6 +82,7 @@ const module TraceServiceTestFailure:
     FRESH_CHECKPOINT_CAPABILITY_IGNORED: i64 = 30
     FRESH_CHECKPOINT_FUTURE_IMAGE_MISMATCH_ACCEPTED: i64 = 31
     UNJOURNALED_SIDE_STATE: i64 = 32
+    VERIFICATION_REQUIRES_EXPORT: i64 = 33
 
 const module TraceServiceTestUnjournaledState:
     EFFECTS: u16 = 0
@@ -481,6 +482,12 @@ def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image
 
     trace_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
     return TraceServiceTestFailure::VERIFY if trace_report.state != DebuggerTraceVerify::VerificationState.Exact or not trace_report.replayable or trace_report.verified_event != TraceServiceTestTrace::LAST_EVENT
+    service.controller.session.capabilities.trace_export <- false
+    verification_without_export: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TraceServiceTestFailure::VERIFICATION_REQUIRES_EXPORT if verification_without_export.state != DebuggerTraceVerify::VerificationState.Exact or not verification_without_export.replayable
+    unavailable_export: DebuggerTraceExport::ExportResult = DebuggerManagedTraceService::service_trace_export(service)
+    return TraceServiceTestFailure::VERIFICATION_REQUIRES_EXPORT if unavailable_export.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    service.controller.session.capabilities.trace_export <- true
     exported: DebuggerTraceExport::ExportResult = DebuggerManagedTraceService::service_trace_export(service)
     return TraceServiceTestFailure::EXPORT if not DebuggerErrors::error_is_ok(exported.failure) or exported.chunk_count == TraceServiceTestTrace::NO_CHUNKS or not DebuggerTraceBinary::writer_is_valid(exported.bytes)
     storage_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[TraceServiceTestTrace::FIRST_STORAGE_BYTE_INDEX], exported.bytes.length)
@@ -512,8 +519,8 @@ def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image
     partial_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
     return TraceServiceTestFailure::PARTIAL if partial_report.state != DebuggerTraceVerify::VerificationState.Partial or partial_report.replayable or DebuggerErrors::error_is_ok(partial_report.failure)
     service.controller.session.capabilities.trace_export <- false
-    unavailable_report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
-    return TraceServiceTestFailure::UNAVAILABLE if unavailable_report.state != DebuggerTraceVerify::VerificationState.Unavailable or unavailable_report.replayable or unavailable_report.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    partial_without_export: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+    return TraceServiceTestFailure::VERIFICATION_REQUIRES_EXPORT if partial_without_export.state != DebuggerTraceVerify::VerificationState.Partial or partial_without_export.replayable
     return TraceServiceTestFailure::OK
 
 def main() -> i64:

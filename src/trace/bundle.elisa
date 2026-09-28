@@ -43,7 +43,7 @@ module DebuggerTraceBundle:
         def bundle_new(build: DebuggerIdentity::BuildIdentity) -> TraceBundle:
             return TraceBundle{manifest: DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact), chunks: zeroed, chunk_count: 0, state: BundleState.Open, last_error: DebuggerErrors::no_error()}
 
-        def bundle_verify_chunk_at(bundle: mutable TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk, expected_sequence: u64) -> DebuggerErrors::DebuggerError:
+        def bundle_verify_chunk_at(bundle: TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk, expected_sequence: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::TRACE_BUNDLE_DETAIL_CAPACITY) if chunk.payload_length > Bundle::TRACE_BUNDLE_PAYLOAD_CAPACITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::TRACE_BUNDLE_DETAIL_CHECKSUM) if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::TRACE_BUNDLE_DETAIL_SCHEMA) if chunk.header.schema != bundle.manifest.schema.u32()
@@ -57,10 +57,10 @@ module DebuggerTraceBundle:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::TRACE_BUNDLE_DETAIL_CHECKSUM) if not DebuggerTraceBinary::writer_checksum_matches(payload, chunk.checksum)
             return DebuggerErrors::no_error()
 
-        def bundle_verify_chunk(bundle: mutable TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+        def bundle_verify_chunk(bundle: TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
             return bundle_verify_chunk_at(bundle, chunk, bundle.chunk_count.u64())
 
-        def bundle_manifest_matches_chunks(bundle: TraceBundle) -> bool:
+        def bundle_manifest_matches_chunks(bundle: TraceBundle&) -> bool:
             if bundle.chunk_count == 0:
                 return bundle.manifest.first_event == 0 and bundle.manifest.last_event == 0 and bundle.manifest.checkpoint_count == 0
             return false if bundle.chunk_count > Bundle::TRACE_BUNDLE_CHUNK_CAPACITY
@@ -87,14 +87,14 @@ module DebuggerTraceBundle:
                     return false if not DebuggerTraceStorage::storage_checkpoint_event_is_within_trace(bundle.chunks[index].header.first_event, first_event, last_event)
             return true
 
-        def bundle_event_chunk_count(bundle: TraceBundle) -> u64:
+        def bundle_event_chunk_count(bundle: TraceBundle&) -> u64:
             count: mutable u64 = 0
             return 0 if bundle.chunk_count > Bundle::TRACE_BUNDLE_CHUNK_CAPACITY
             for index in 0..<bundle.chunk_count:
                 count <- count + 1 if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events
             return count
 
-        def bundle_checkpoint_chunk_count(bundle: TraceBundle) -> u64:
+        def bundle_checkpoint_chunk_count(bundle: TraceBundle&) -> u64:
             count: mutable u64 = 0
             return 0 if bundle.chunk_count > Bundle::TRACE_BUNDLE_CHUNK_CAPACITY
             for index in 0..<bundle.chunk_count:
@@ -112,10 +112,9 @@ module DebuggerTraceBundle:
             bundle.chunks[bundle.chunk_count] <- chunk
             bundle.chunk_count <- bundle.chunk_count + 1
             updated: mutable DebuggerTraceManifest::BundleManifest = bundle.manifest
-            count_snapshot: TraceBundle = bundle
-            updated.checkpoint_count <- bundle_checkpoint_chunk_count(count_snapshot)
+            updated.checkpoint_count <- bundle_checkpoint_chunk_count(bundle)
             if chunk.header.kind == DebuggerTrace::ChunkKind.Events:
-                updated.first_event <- chunk.header.first_event if bundle_event_chunk_count(count_snapshot) == 1
+                updated.first_event <- chunk.header.first_event if bundle_event_chunk_count(bundle) == 1
                 updated.last_event <- chunk.header.last_event
             bundle.manifest <- updated
             return DebuggerErrors::no_error()
@@ -156,13 +155,12 @@ module DebuggerTraceBundle:
         def bundle_manifest_bytes(bundle: TraceBundle) -> DebuggerTraceBinary::ByteWriter:
             return DebuggerTraceManifest::manifest_encode(bundle.manifest)
 
-        def bundle_is_replayable(bundle: TraceBundle) -> bool:
+        def bundle_is_replayable(bundle: TraceBundle&) -> bool:
             return false if bundle.chunk_count == 0 or bundle.chunk_count > Bundle::TRACE_BUNDLE_CHUNK_CAPACITY or bundle.state != BundleState.Exact or not DebuggerTraceManifest::manifest_is_replayable(bundle.manifest) or not DebuggerErrors::error_is_ok(bundle.last_error) or not bundle_manifest_matches_chunks(bundle)
-            checked_bundle: mutable TraceBundle = bundle
             saw_events: mutable bool = false
             for index in 0..<bundle.chunk_count:
                 return false if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Manifest
-                return false if not DebuggerErrors::error_is_ok(bundle_verify_chunk_at(checked_bundle, bundle.chunks[index], index.u64()))
+                return false if not DebuggerErrors::error_is_ok(bundle_verify_chunk_at(bundle, bundle.chunks[index], index.u64()))
                 saw_events <- true if bundle.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events
             return false if not saw_events
             manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(bundle.manifest)

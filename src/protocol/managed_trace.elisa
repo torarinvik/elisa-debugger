@@ -199,9 +199,9 @@ module DebuggerManagedTraceService:
             service <- temporary
             return DebuggerManagedService::result_ok()
 
-        def trace_service_bundle(service: mutable DebuggerManagedService::Service&) -> DebuggerTracePipeline::BundleBuildResult:
+        def trace_service_bundle(service: mutable DebuggerManagedService::Service&, require_export_capability: bool) -> DebuggerTracePipeline::BundleBuildResult:
             capabilities: DebuggerCapabilities::CapabilitySet = service.controller.session.capabilities
-            return trace_build_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_TRACE_CAPABILITY)) if capabilities.engine != DebuggerCapabilities::EngineKind.Managed or capabilities.history != DebuggerCapabilities::HistoryKind.Exact or not capabilities.trace_verification or not capabilities.trace_export
+            return trace_build_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_TRACE_CAPABILITY)) if capabilities.engine != DebuggerCapabilities::EngineKind.Managed or capabilities.history != DebuggerCapabilities::HistoryKind.Exact or not capabilities.trace_verification or (require_export_capability and not capabilities.trace_export)
             return trace_build_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_TRACE_STATE)) if not DebuggerSession::session_can_inspect(service.controller.session)
             DebuggerManagedService::service_capture_trace_events(service)
             return trace_build_error(service.trace_failure) if service.trace_partial
@@ -236,10 +236,10 @@ module DebuggerManagedTraceService:
         # Build a stable snapshot; later service operations do not mutate it.
         # Rewinds and child-branch execution are reported as partial captures.
         def service_trace_bundle(service: mutable DebuggerManagedService::Service&) -> DebuggerTracePipeline::BundleBuildResult:
-            return trace_service_bundle(service)
+            return trace_service_bundle(service, true)
 
         def service_trace_export(service: mutable DebuggerManagedService::Service&) -> DebuggerTraceExport::ExportResult:
-            built: DebuggerTracePipeline::BundleBuildResult = trace_service_bundle(service)
+            built: DebuggerTracePipeline::BundleBuildResult = trace_service_bundle(service, true)
             failed: mutable DebuggerTraceExport::ExportResult = zeroed
             failed.bytes <- DebuggerTraceBinary::writer_new()
             failed.failure <- built.failure
@@ -247,7 +247,7 @@ module DebuggerManagedTraceService:
             return DebuggerTraceExport::export_bundle(built.bundle)
 
         def service_trace_verify(service: mutable DebuggerManagedService::Service&) -> DebuggerTraceVerify::VerificationReport:
-            built: DebuggerTracePipeline::BundleBuildResult = trace_service_bundle(service)
+            built: DebuggerTracePipeline::BundleBuildResult = trace_service_bundle(service, false)
             return trace_report_for_failure(service, built.failure) if not built.accepted
             return DebuggerTraceVerify::verify_bundle(built.bundle)
 

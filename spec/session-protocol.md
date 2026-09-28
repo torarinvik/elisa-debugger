@@ -66,8 +66,10 @@ capacity.
 
 `discover.result.features` includes a boolean for every capability in the
 shared `CapabilitySet`. The process clears features whose request operands or
-result payloads are not wired to this compact transport, including trace verification, trace export, and historical queries. Managed memory
-reads and source breakpoints are supported through bounded payloads. Managed EDIR source breakpoints are supported through the bounded
+result payloads are not wired to this compact transport, including trace
+export and historical queries. Managed memory reads, source breakpoints, and
+read-only trace verification are supported through bounded payloads. Managed
+EDIR source breakpoints are supported through the bounded
 `setBreakpoints` payload below. Threads, frames, scopes, and locals are
 available through the managed inspection surface. Expression evaluation and
 trace artifact transfer are not wired to this process. Clients must honor the
@@ -90,7 +92,7 @@ length, one space, and a newline):
 ```
 
 ```json
-{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"timeline":true,"checkpoints":true,"branches":true,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":false,"memoryRead":true,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
+{"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":false,"reverseExecution":true,"timeline":true,"checkpoints":true,"branches":true,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":true,"memoryRead":true,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
 ```
 
 After launching a verified artifact, a generic editor bridge can replace the
@@ -230,6 +232,20 @@ returning bytes as lowercase hexadecimal in the bounded result object. An
 unallocated or uninitialized range returns `UNAVAILABLE` without exposing
 runtime pointers. Validate requests and successful responses against the
 [`memory` JSON schema](../schemas/session-protocol-v1.memory.schema.json).
+
+The compact `trace.verify` method is a read-only snapshot over the current
+managed recording. It captures the bounded root event prefix, validates its
+checksummed bundle, and returns `state` (`exact`, `partial`, `unavailable`,
+`corrupt`, or `empty`), decimal-string `verifiedChunks` and `verifiedEvent`
+counts, and a `replayable` flag. It never upgrades an incomplete capture to
+exact and does not transfer trace bytes. Validate its request and successful
+response against the [`trace.verify` JSON schema](../schemas/session-protocol-v1.trace-verify.schema.json).
+
+For example, an exact response is:
+
+```json
+{"kind":"response","id":"9","ok":true,"result":{"accepted":true,"stopGeneration":"2","verification":{"state":"exact","verifiedChunks":"1","verifiedEvent":"7","replayable":true}}}
+```
 
 The typed managed service and compact endpoint expose checkpoint creation and
 reverse navigation. The compact endpoint returns checkpoint metadata without

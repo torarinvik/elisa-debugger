@@ -7,9 +7,11 @@ include "./dispatcher.elisa"
 include "./encoding.elisa"
 include "../engine/default_image.elisa"
 include "./managed_service.elisa"
+include "./managed_trace.elisa"
 include "../vm/edir_file.elisa"
 include "../inspect/managed.elisa"
 include "../inspect/memory.elisa"
+include "../trace/verify.elisa"
 
 extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
 extern printf(format: cstr, ...) -> int can[Console]
@@ -29,6 +31,7 @@ module DebuggerProtocolServer:
             PROTOCOL_SERVER_ERROR_DETAIL_UNKNOWN_SOURCE_PATH: u32 = 10
             PROTOCOL_SERVER_ERROR_DETAIL_CORRUPT_SOURCE_TABLE: u32 = 11
             PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN: u32 = 12
+            TRACE_VERIFY_STALE_GENERATION: u32 = 13
 
         const module InitializationState:
             INITIALIZE_NOT_REQUESTED: u8 = 0
@@ -98,6 +101,10 @@ module DebuggerProtocolServer:
             dispatch: mutable DebuggerProtocolDispatcher::DispatchResult
             payload: mutable DebuggerManagedService::SourceBreakpointResult
 
+        struct TraceVerificationDispatch:
+            dispatch: mutable DebuggerProtocolDispatcher::DispatchResult
+            payload: mutable DebuggerTraceVerify::VerificationReport
+
         def decimal_digits(value: u64) -> usize:
             count: mutable usize = 1
             remaining: mutable u64 = value
@@ -124,10 +131,11 @@ module DebuggerProtocolServer:
 
         def server_capabilities(engine_capabilities: DebuggerCapabilities::CapabilitySet) -> DebuggerCapabilities::CapabilitySet:
             wire: mutable DebuggerCapabilities::CapabilitySet = engine_capabilities
-            # Source breakpoints now have a bounded path/line request and
-            # structured result on this wire. Keep other capabilities hidden
-            # when their operands or result payloads are not transported.
-            wire.trace_verification <- false
+            # Source breakpoints and trace verification have bounded,
+            # structured results on this wire. Trace export and historical
+            # queries still need transport payloads this endpoint does not
+            # carry.
+            wire.trace_verification <- true
             wire.historical_queries <- false
             wire.trace_export <- false
             return wire
@@ -163,7 +171,7 @@ module DebuggerProtocolServer:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN) if request_requires_owner(request.method) and (not operands.has_owner_token or operands.owner_token != owner_token)
             return DebuggerErrors::no_error()
 
-        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, memory: DebuggerMemory::MemoryRead, owner_token: u64) -> void can[Console, Unsafe.PointerCast]:
+        def write_response(service: DebuggerManagedService::Service, result: DebuggerProtocolDispatcher::DispatchResult, id: u64, capabilities: DebuggerCapabilities::CapabilitySet, page_size: u64, page_start: u64, initialization: InitializationResponse, source_breakpoints: DebuggerManagedService::SourceBreakpointResult, memory: DebuggerMemory::MemoryRead, trace_verification: DebuggerTraceVerify::VerificationReport, owner_token: u64) -> void can[Console, Unsafe.PointerCast]:
             if initialization.status == InitializationState::INITIALIZE_COMPATIBLE:
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::initialize_response_encode(id, initialization.requested_minor)
                 write_json_buffer_response(encoded) can Console
@@ -226,6 +234,10 @@ module DebuggerProtocolServer:
                 encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_branch_response_encode(id, result.stop_generation, DebuggerManagedService::service_last_branch(service).value)
                 write_json_buffer_response(encoded) can Console
                 return
+            if result.accepted and result.method == DebuggerProtocolRequest::RequestMethod.TraceVerify:
+                encoded: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_trace_verification_response_encode(id, result.stop_generation, trace_verification)
+                write_json_buffer_response(encoded) can Console
+                return
             if result.accepted and response_requires_missing_payload(result.method):
                 write_dynamic_response(id, ResponseEncoding::RESPONSE_RESULT_UNAVAILABLE_SUFFIX, ResponseEncoding::RESPONSE_RESULT_UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
@@ -279,6 +291,18 @@ module DebuggerProtocolServer:
             result: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, 0)
             service.controller.session <- result.session
             return result
+
+        def dispatch_trace_verification(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request) -> TraceVerificationDispatch:
+            if request.expected_generation != RequestDefaults::PROTOCOL_SERVER_REQUEST_DEFAULTS_NO_EXPECTED_GENERATION and request.expected_generation != service.controller.session.stop_generation:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::TRACE_VERIFY_STALE_GENERATION)
+                dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
+                return TraceVerificationDispatch{dispatch: dispatch, payload: zeroed}
+            report: DebuggerTraceVerify::VerificationReport = DebuggerManagedTraceService::service_trace_verify(service)
+            if report.failure.code == DebuggerErrors::ErrorCode.Unsupported:
+                dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, report.failure)
+                return TraceVerificationDispatch{dispatch: dispatch, payload: report}
+            dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
+            return TraceVerificationDispatch{dispatch: dispatch, payload: report}
 
         def dispatch_launch(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if not operands.valid or not operands.has_program:
@@ -359,6 +383,7 @@ module DebuggerProtocolServer:
                         initialization: mutable InitializationResponse = zeroed
                         source_breakpoint_payload: mutable DebuggerManagedService::SourceBreakpointResult = zeroed
                         memory_payload: mutable DebuggerMemory::MemoryRead = zeroed
+                        trace_verification_payload: mutable DebuggerTraceVerify::VerificationReport = zeroed
                         if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.Initialize:
                             if not operands.valid or not operands.has_protocol_major or not operands.has_protocol_minor:
                                 initialization.status <- InitializationState::INITIALIZE_INVALID_REQUEST
@@ -402,7 +427,12 @@ module DebuggerProtocolServer:
                                                     stale_reference: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::DETAIL_STALE_VARIABLE_REFERENCE)
                                                     result <- DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, stale_reference)
                                                 else:
-                                                    result <- dispatch_request(service, request)
+                                                    if request.valid and request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify:
+                                                        verification: TraceVerificationDispatch = dispatch_trace_verification(service, request)
+                                                        result <- verification.dispatch
+                                                        trace_verification_payload <- verification.payload
+                                                    else:
+                                                        result <- dispatch_request(service, request)
                                     # createSession is intentionally opt-in for
                                     # compatibility with older compact clients.
                                     # Once accepted, subsequent requests carry a
@@ -418,7 +448,7 @@ module DebuggerProtocolServer:
                         response_id: u64 = request.id if request.has_id else RequestDefaults::FALLBACK_RESPONSE_ID
                         page_size: u64 = operands.page_size if operands.has_page_size else RequestDefaults::PROTOCOL_SERVER_REQUEST_DEFAULTS_DEFAULT_PAGE_SIZE
                         page_start: u64 = operands.page_start if operands.has_page_start else RequestDefaults::DEFAULT_PAGE_START
-                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization, source_breakpoint_payload, memory_payload, owner_token) can Console, Unsafe.PointerCast
+                        write_response(service, result, response_id, server_capabilities(service.controller.session.capabilities), page_size, page_start, initialization, source_breakpoint_payload, memory_payload, trace_verification_payload, owner_token) can Console, Unsafe.PointerCast
                         _ = fflush(null) can Console
                         DebuggerProtocolFraming::frame_decoder_reset(decoder)
                     return ServerProcess::SERVER_INVALID_FRAME_EXIT_CODE if DebuggerProtocolFraming::frame_decoder_is_failed(decoder)

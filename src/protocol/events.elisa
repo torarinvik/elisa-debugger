@@ -20,6 +20,11 @@ module DebuggerProtocolEvents:
 
         const module QueueLimits:
             EVENT_QUEUE_CAPACITY: usize = 64
+            EMPTY_COUNT: usize = 0
+            COUNT_STEP: usize = 1
+            FIRST_EVENT_INDEX: usize = 0
+            FIRST_ACK_SHIFT_INDEX: usize = 1
+            PREVIOUS_EVENT_OFFSET: usize = 1
 
         const module SequenceState:
             PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE: u64 = 1
@@ -60,8 +65,11 @@ module DebuggerProtocolEvents:
             overflowed: mutable bool
             last_error: mutable DebuggerErrors::DebuggerError
 
-        def event_queue_new() -> EventQueue:
-            return EventQueue{events: zeroed, count: 0, next_sequence: SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE, overflowed: false, last_error: DebuggerErrors::no_error()}
+        def event_queue_initialize(queue: mutable EventQueue&) -> void:
+            queue.count <- QueueLimits::EMPTY_COUNT
+            queue.next_sequence <- SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE
+            queue.overflowed <- false
+            queue.last_error <- DebuggerErrors::no_error()
 
         def event_queue_emit(queue: mutable EventQueue&, session: DebuggerIdentity::DebugId, generation: u64, kind: EventKind, channel: OutputChannel, payload: DebuggerIdentity::DebugId, completed: u64, total: u64) -> DebuggerErrors::DebuggerError:
             if queue.count > QueueLimits::EVENT_QUEUE_CAPACITY:
@@ -88,41 +96,41 @@ module DebuggerProtocolEvents:
                 queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_EVENTS_ERROR_DETAIL_DETAIL_SEQUENCE)
                 return queue.last_error
             queue.events[queue.count] <- Event{sequence: queue.next_sequence, session: session, stop_generation: generation, kind: kind, channel: channel, payload: payload, progress_completed: completed, progress_total: total}
-            queue.count <- queue.count + 1
+            queue.count <- queue.count + QueueLimits::COUNT_STEP
             queue.next_sequence <- queue.next_sequence + SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE
             queue.last_error <- DebuggerErrors::no_error()
             return DebuggerErrors::no_error()
 
         def event_queue_peek(queue: mutable EventQueue&) -> Event:
             result: mutable Event = zeroed
-            return result if queue.count == 0 or queue.count > QueueLimits::EVENT_QUEUE_CAPACITY
-            return queue.events[0]
+            return result if queue.count == QueueLimits::EMPTY_COUNT or queue.count > QueueLimits::EVENT_QUEUE_CAPACITY
+            return queue.events[QueueLimits::FIRST_EVENT_INDEX]
 
         def event_queue_ack(queue: mutable EventQueue&, sequence: u64) -> DebuggerErrors::DebuggerError:
             if queue.count > QueueLimits::EVENT_QUEUE_CAPACITY:
                 queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::PROTOCOL_EVENTS_ERROR_DETAIL_DETAIL_CAPACITY)
                 return queue.last_error
-            if queue.count == 0:
+            if queue.count == QueueLimits::EMPTY_COUNT:
                 queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::PROTOCOL_EVENTS_ERROR_DETAIL_DETAIL_SEQUENCE)
                 return queue.last_error
-            if sequence == SequenceState::NO_SEQUENCE or sequence != queue.events[0].sequence:
+            if sequence == SequenceState::NO_SEQUENCE or sequence != queue.events[QueueLimits::FIRST_EVENT_INDEX].sequence:
                 queue.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::PROTOCOL_EVENTS_ERROR_DETAIL_DETAIL_SEQUENCE)
                 return queue.last_error
-            for index in 1..<queue.count:
-                queue.events[index - 1] <- queue.events[index]
-            queue.count <- queue.count - 1
+            for index in QueueLimits::FIRST_ACK_SHIFT_INDEX..<queue.count:
+                queue.events[index - QueueLimits::PREVIOUS_EVENT_OFFSET] <- queue.events[index]
+            queue.count <- queue.count - QueueLimits::COUNT_STEP
             queue.last_error <- DebuggerErrors::no_error()
             return DebuggerErrors::no_error()
 
         def event_queue_is_valid(queue: EventQueue) -> bool:
             return false if queue.count > QueueLimits::EVENT_QUEUE_CAPACITY or queue.next_sequence == SequenceState::NO_SEQUENCE or queue.next_sequence > SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_MAX_SEQUENCE or queue.overflowed or not DebuggerErrors::error_is_ok(queue.last_error)
-            for index in 0..<queue.count:
+            for index in QueueLimits::EMPTY_COUNT..<queue.count:
                 event: Event = queue.events[index]
                 return false if event.sequence == SequenceState::NO_SEQUENCE or event.session.value == SequenceState::NO_SEQUENCE or event.stop_generation == SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_NO_GENERATION or event.kind.u16() > EnumLimits::PROTOCOL_EVENTS_ENUM_LIMITS_EVENT_KIND_MAX or event.channel.u16() > EnumLimits::OUTPUT_CHANNEL_MAX or event.progress_completed > event.progress_total
-                return false if index > 0 and queue.events[index - 1].sequence == SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_MAX_SEQUENCE
-                return false if index > 0 and event.sequence != queue.events[index - 1].sequence + SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE
-            return false if queue.count > 0 and queue.events[queue.count - 1].sequence == SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_MAX_SEQUENCE
-            return false if queue.count > 0 and queue.next_sequence != queue.events[queue.count - 1].sequence + SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE
+                return false if index > QueueLimits::EMPTY_COUNT and queue.events[index - QueueLimits::PREVIOUS_EVENT_OFFSET].sequence == SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_MAX_SEQUENCE
+                return false if index > QueueLimits::EMPTY_COUNT and event.sequence != queue.events[index - QueueLimits::PREVIOUS_EVENT_OFFSET].sequence + SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE
+            return false if queue.count > QueueLimits::EMPTY_COUNT and queue.events[queue.count - QueueLimits::COUNT_STEP].sequence == SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_MAX_SEQUENCE
+            return false if queue.count > QueueLimits::EMPTY_COUNT and queue.next_sequence != queue.events[queue.count - QueueLimits::COUNT_STEP].sequence + SequenceState::PROTOCOL_EVENTS_SEQUENCE_STATE_FIRST_SEQUENCE
             return true
 
         def event_queue_count(queue: EventQueue) -> usize:

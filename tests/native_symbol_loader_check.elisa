@@ -43,19 +43,24 @@ def main() -> i64:
     elf_name.bytes[1] <- TestName::NAME_O
     elf_name.bytes[2] <- TestName::NAME_B
     elf_symbol: DebuggerNativeElf::ElfSymbol = DebuggerNativeElf::ElfSymbol{valid: true, name_offset: 1, info: 0, other: 0, section_index: 1, value: 4096, size: 16}
-    table: mutable DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbols::symbols_new()
-    table <- DebuggerNativeSymbolLoader::add_elf_symbol(table, elf_symbol, elf_name, zeroed)
+    table: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(table)
+    _ = DebuggerNativeSymbolLoader::add_elf_symbol(table, elf_symbol, elf_name, zeroed)
     return 1 if table.count != 1 or table.symbols[0].address != 4096 or table.symbols[0].size != 16 or table.symbols[0].name.value == 0
     second_symbol: DebuggerNativeElf::ElfSymbol = elf_symbol
     second_symbol.value <- 8192
-    table <- DebuggerNativeSymbolLoader::add_elf_symbol(table, second_symbol, elf_name, zeroed)
+    _ = DebuggerNativeSymbolLoader::add_elf_symbol(table, second_symbol, elf_name, zeroed)
     return 2 if table.count != 2
     undefined_elf_symbol: mutable DebuggerNativeElf::ElfSymbol = elf_symbol
     undefined_elf_symbol.section_index <- 0
-    return 13 if DebuggerNativeSymbolLoader::add_elf_symbol(DebuggerNativeSymbols::symbols_new(), undefined_elf_symbol, elf_name, zeroed).count != 0
+    invalid_elf_table: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(invalid_elf_table)
+    invalid_elf_accepted: bool = DebuggerNativeSymbolLoader::add_elf_symbol(invalid_elf_table, undefined_elf_symbol, elf_name, zeroed)
+    return 13 if invalid_elf_accepted or invalid_elf_table.count != 0
     unnamed: mutable DebuggerNativeElf::ElfSymbolName = elf_name
     unnamed.length <- 0
-    return 3 if DebuggerNativeSymbolLoader::add_elf_symbol(table, elf_symbol, unnamed, zeroed).count != table.count
+    unnamed_elf_accepted: bool = DebuggerNativeSymbolLoader::add_elf_symbol(table, elf_symbol, unnamed, zeroed)
+    return 3 if unnamed_elf_accepted or table.count != 2
     macho_name: mutable DebuggerNativeMachO::MachOSymbolName = zeroed
     macho_name.valid <- true
     macho_name.length <- TestName::SYMBOL_NAME_LENGTH
@@ -63,12 +68,18 @@ def main() -> i64:
     macho_name.bytes[1] <- TestName::NAME_O
     macho_name.bytes[2] <- TestName::NAME_B
     macho_symbol: DebuggerNativeMachO::MachOSymbol = DebuggerNativeMachO::MachOSymbol{valid: true, name_offset: 1, symbol_type: 15, section: 1, description: 0, value: 12288}
-    table <- DebuggerNativeSymbolLoader::add_macho_symbol(table, macho_symbol, macho_name, 8, zeroed)
+    _ = DebuggerNativeSymbolLoader::add_macho_symbol(table, macho_symbol, macho_name, 8, zeroed)
     return 4 if table.count != 3 or table.symbols[2].address != 12288 or table.symbols[2].size != 8
-    return 14 if DebuggerNativeSymbolLoader::add_macho_symbol(DebuggerNativeSymbols::symbols_new(), macho_symbol, macho_name, 0, zeroed).count != 0
+    invalid_macho_table: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(invalid_macho_table)
+    invalid_macho_accepted: bool = DebuggerNativeSymbolLoader::add_macho_symbol(invalid_macho_table, macho_symbol, macho_name, 0, zeroed)
+    return 14 if invalid_macho_accepted or invalid_macho_table.count != 0
     undefined_macho_symbol: mutable DebuggerNativeMachO::MachOSymbol = macho_symbol
     undefined_macho_symbol.symbol_type <- 1
-    return 15 if DebuggerNativeSymbolLoader::add_macho_symbol(DebuggerNativeSymbols::symbols_new(), undefined_macho_symbol, macho_name, 8, zeroed).count != 0
+    undefined_macho_table: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(undefined_macho_table)
+    undefined_macho_accepted: bool = DebuggerNativeSymbolLoader::add_macho_symbol(undefined_macho_table, undefined_macho_symbol, macho_name, 8, zeroed)
+    return 15 if undefined_macho_accepted or undefined_macho_table.count != 0
 
     elf_image: mutable u8[TestElf::ELF_FIXTURE_BYTES] = zeroed
     elf_image[0] <- 127
@@ -126,11 +137,16 @@ def main() -> i64:
     unterminated_elf_image[TestElf::ELF_STRING_TABLE_OFFSET + TestName::SYMBOL_STRING_TABLE_LENGTH - 1] <- TestName::NAME_A
     unterminated_elf_name: DebuggerNativeElf::ElfSymbolName = DebuggerNativeElf::elf_symbol_name(unterminated_elf_image[0], TestElf::ELF_FIXTURE_BYTES, elf_header, 1, 1)
     return 19 if unterminated_elf_name.valid or not unterminated_elf_name.truncated
-    elf_loaded: DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbolLoader::load_elf_section(DebuggerNativeSymbols::symbols_new(), elf_image[0], TestElf::ELF_FIXTURE_BYTES, elf_header, 1, zeroed)
-    return 8 if elf_loaded.count != 2 or elf_loaded.symbols[0].address != 4096 or elf_loaded.symbols[1].address != 8192
+    elf_loaded: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(elf_loaded)
+    elf_load_accepted: bool = DebuggerNativeSymbolLoader::load_elf_section(elf_loaded, elf_image[0], TestElf::ELF_FIXTURE_BYTES, elf_header, 1, zeroed)
+    return 8 if not elf_load_accepted or elf_loaded.count != 2 or elf_loaded.symbols[0].address != 4096 or elf_loaded.symbols[1].address != 8192
     put_u32(elf_image[0], TestElf::ELF_SYMBOL_TABLE_OFFSET + 48, 99)
-    malformed_elf_loaded: DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbolLoader::load_elf_section(DebuggerNativeSymbols::symbols_new(), elf_image[0], TestElf::ELF_FIXTURE_BYTES, elf_header, 1, zeroed)
-    return 9 if malformed_elf_loaded.count != 0
+    malformed_elf_loaded: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(malformed_elf_loaded)
+    _ = DebuggerNativeSymbolLoader::add_elf_symbol(malformed_elf_loaded, elf_symbol, elf_name, zeroed)
+    malformed_elf_load_accepted: bool = DebuggerNativeSymbolLoader::load_elf_section(malformed_elf_loaded, elf_image[0], TestElf::ELF_FIXTURE_BYTES, elf_header, 1, zeroed)
+    return 9 if malformed_elf_load_accepted or malformed_elf_loaded.count != 1
 
     macho_image: mutable u8[TestMachO::MACHO_FIXTURE_BYTES] = zeroed
     macho_image[0] <- 207
@@ -187,16 +203,21 @@ def main() -> i64:
     unterminated_macho_name: DebuggerNativeMachO::MachOSymbolName = DebuggerNativeMachO::macho_symbol_name(macho_header, unterminated_macho_image[0], TestMachO::MACHO_FIXTURE_BYTES, 1)
     return 21 if unterminated_macho_name.valid or not unterminated_macho_name.truncated
     macho_sizes: mutable u64[5] = [0, 4, 8, 8, 4]
-    macho_fixture_loaded: DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbolLoader::load_macho_symbols(DebuggerNativeSymbols::symbols_new(), macho_image[0], TestMachO::MACHO_FIXTURE_BYTES, macho_header, 5, macho_sizes[0], 5, zeroed)
-    return 11 if macho_fixture_loaded.count != 2 or macho_fixture_loaded.symbols[0].address != 12288 or macho_fixture_loaded.symbols[1].address != 16384
+    macho_fixture_loaded: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(macho_fixture_loaded)
+    macho_load_accepted: bool = DebuggerNativeSymbolLoader::load_macho_symbols(macho_fixture_loaded, macho_image[0], TestMachO::MACHO_FIXTURE_BYTES, macho_header, 5, macho_sizes[0], 5, zeroed)
+    return 11 if not macho_load_accepted or macho_fixture_loaded.count != 2 or macho_fixture_loaded.symbols[0].address != 12288 or macho_fixture_loaded.symbols[1].address != 16384
     put_u32(macho_image[0], TestMachO::MACHO_SYMBOL_TABLE_OFFSET + 32, 99)
-    malformed_macho_loaded: DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbolLoader::load_macho_symbols(DebuggerNativeSymbols::symbols_new(), macho_image[0], TestMachO::MACHO_FIXTURE_BYTES, macho_header, 5, macho_sizes[0], 5, zeroed)
-    return 12 if malformed_macho_loaded.count != 0
+    malformed_macho_loaded: mutable DebuggerNativeSymbols::SymbolTable = zeroed
+    DebuggerNativeSymbols::symbols_initialize(malformed_macho_loaded)
+    _ = DebuggerNativeSymbolLoader::add_macho_symbol(malformed_macho_loaded, macho_symbol, macho_name, 8, zeroed)
+    malformed_macho_load_accepted: bool = DebuggerNativeSymbolLoader::load_macho_symbols(malformed_macho_loaded, macho_image[0], TestMachO::MACHO_FIXTURE_BYTES, macho_header, 5, macho_sizes[0], 5, zeroed)
+    return 12 if malformed_macho_load_accepted or malformed_macho_loaded.count != 1
 
     empty_bytes: mutable u8[1] = zeroed
     invalid_header: DebuggerNativeElf::ElfHeader = zeroed
-    loaded: DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbolLoader::load_elf_section(table, empty_bytes[0], 0, invalid_header, 0, zeroed)
-    return 5 if loaded.count != table.count
-    macho_loaded: DebuggerNativeSymbols::SymbolTable = DebuggerNativeSymbolLoader::load_macho_symbols(table, empty_bytes[0], 0, zeroed, 0, empty_bytes[0], 0, zeroed)
-    return 6 if macho_loaded.count != table.count
+    loaded: bool = DebuggerNativeSymbolLoader::load_elf_section(table, empty_bytes[0], 0, invalid_header, 0, zeroed)
+    return 5 if loaded or table.count != 3
+    macho_loaded: bool = DebuggerNativeSymbolLoader::load_macho_symbols(table, empty_bytes[0], 0, zeroed, 0, empty_bytes[0], 0, zeroed)
+    return 6 if macho_loaded or table.count != 3
     return 0

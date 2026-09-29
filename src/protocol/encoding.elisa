@@ -80,6 +80,10 @@ module DebuggerProtocolEncoding:
             SOURCE_BREAKPOINT_RESPONSE_LINE_PREFIX: cstr = ",\"line\":"
             SOURCE_BREAKPOINT_RESPONSE_VERIFIED_PREFIX: cstr = ",\"verified\":"
 
+        const module EvaluationEncoding:
+            EVALUATION_FIELD_PREFIX: cstr = ",\"evaluation\":{\"type\":\"i64\",\"value\":"
+            EVALUATION_CONSUMED_PREFIX: cstr = ",\"consumed\":"
+
         const module Sentinels:
             NO_PAGE: u64 = 0
             PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID: u64 = 0
@@ -627,6 +631,21 @@ module DebuggerProtocolEncoding:
             buffer_put_id_string(buffer, page.next.u64()) if page.next > 0
             buffer_put_cstr(buffer, JsonValues::JSON_NULL) if page.next == 0
             buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        # Expression values are returned as decimal strings so clients with
+        # IEEE-754 number semantics retain every signed 64-bit result.
+        def managed_evaluate_response_encode(request_id: u64, generation: u64, result: DebuggerManagedService::EvaluateResult) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or not result.accepted or not DebuggerErrors::error_is_ok(result.failure):
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, EvaluationEncoding::EVALUATION_FIELD_PREFIX)
+            buffer_put_i64_string(buffer, result.value)
+            buffer_put_cstr(buffer, EvaluationEncoding::EVALUATION_CONSUMED_PREFIX)
+            buffer_put_u64(buffer, result.consumed.u64())
+            buffer_put_cstr(buffer, "}}}")
             return buffer
 
         def managed_memory_response_encode(request_id: u64, generation: u64, read: DebuggerMemory::MemoryRead) -> JsonBuffer:

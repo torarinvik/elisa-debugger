@@ -40,10 +40,12 @@ Adapters can use
 environment)` for an explicit immutable input, or call
 `DebuggerManagedService::service_evaluate_expression(service, expression,
 expression_length, frame_index)` to evaluate against the stopped managed
-session. The latter does not mutate execution state. The generic lifecycle
-request envelope has no expression operand; use the typed service entry point
-or the DAP adapter until a versioned expression operand is added to that
-envelope.
+session. The latter does not mutate execution state. The compact headless
+process also accepts `evaluate` with `arguments.expression`, optional
+`arguments.frameIndex`, and optional `expectedStopGeneration`; JSON string
+escapes are decoded before the same evaluator runs. Its response encodes the
+checked `i64` value as a decimal string. Validate this process exchange against
+the [`evaluate` schema](../schemas/session-protocol-v1.evaluate.schema.json).
 
 The Elisa DAP adapter accepts the standard `evaluate` command with a required
 `arguments.expression` string and optional `arguments.frameId`. A supplied

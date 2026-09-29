@@ -1,4 +1,5 @@
 include "../src/protocol/request.elisa"
+include "../src/core/expression_limits.elisa"
 
 const module Test:
     U64_MAX: u64 = 18446744073709551615
@@ -98,6 +99,42 @@ const module Test:
     PATH_REQUEST_PREFIX: cstr = "{\"method\":\"launch\",\"id\":1,\"arguments\":{\"program\":\""
     PATH_REQUEST_SUFFIX: cstr = "\"}}"
 
+const module EvaluationCases:
+    EVALUATE_JSON: cstr = "{\"method\":\"evaluate\",\"id\":9,\"expectedStopGeneration\":\"4\",\"arguments\":{\"expression\":\"local0 + global0\",\"frameIndex\":2}}"
+    ESCAPED_EVALUATE_JSON: cstr = "{\"method\":\"evaluate\",\"id\":10,\"arguments\":{\"expression\":\"local0\\n+\\u0031\"}}"
+    MISSING_EVALUATE_EXPRESSION_JSON: cstr = "{\"method\":\"evaluate\",\"id\":11,\"arguments\":{}}"
+    DUPLICATE_EVALUATE_EXPRESSION_JSON: cstr = "{\"method\":\"evaluate\",\"id\":12,\"arguments\":{\"expression\":\"1\",\"expression\":\"2\"}}"
+    ESCAPED_DUPLICATE_EVALUATE_EXPRESSION_JSON: cstr = "{\"method\":\"evaluate\",\"id\":13,\"arguments\":{\"expression\":\"1\",\"express\\u0069on\":\"2\"}}"
+    INVALID_EVALUATE_TYPE_JSON: cstr = "{\"method\":\"evaluate\",\"id\":14,\"arguments\":{\"expression\":7}}"
+    INVALID_EVALUATE_FRAME_JSON: cstr = "{\"method\":\"evaluate\",\"id\":15,\"arguments\":{\"expression\":\"1\",\"frameIndex\":\"1\"}}"
+    DUPLICATE_EVALUATE_FRAME_JSON: cstr = "{\"method\":\"evaluate\",\"id\":16,\"arguments\":{\"expression\":\"1\",\"frameIndex\":0,\"frameIndex\":1}}"
+    OVERFLOW_EVALUATE_FRAME_JSON: cstr = "{\"method\":\"evaluate\",\"id\":17,\"arguments\":{\"expression\":\"1\",\"frameIndex\":4294967296}}"
+    EMPTY_EVALUATE_JSON: cstr = "{\"method\":\"evaluate\",\"id\":18,\"arguments\":{\"expression\":\"\"}}"
+    EXPECTED_EXPRESSION_LENGTH: usize = 16
+    EXPECTED_ESCAPED_EXPRESSION_LENGTH: usize = 9
+    EXPECTED_FRAME_INDEX: u64 = 2
+    EXPRESSION_NEWLINE_OFFSET: usize = 6
+    EXPRESSION_LITERAL_OFFSET: usize = 8
+
+    const module ExpectedBytes:
+        ASCII_LINE_FEED: u8 = 10
+        ASCII_ONE: u8 = 49
+
+    const module Failure:
+        VALID_OPERANDS: i64 = 46
+        ESCAPED_OPERAND: i64 = 47
+        REQUIRED_AND_UNIQUE: i64 = 48
+        INVALID_SHAPES: i64 = 49
+        SOURCE_BOUNDARY: i64 = 50
+
+const module EvaluationBounds:
+    MAX_EXPRESSION_BYTES: usize = DebuggerExpressionLimits::Source::MAX_EXPRESSION_BYTES
+    REQUEST_OVERHEAD_CAPACITY: usize = 64
+    ASCII_ONE: u8 = 49
+    INDEX_INCREMENT: usize = 1
+    REQUEST_PREFIX: cstr = "{\"method\":\"evaluate\",\"id\":20,\"arguments\":{\"expression\":\""
+    REQUEST_SUFFIX: cstr = "\"}}"
+
 
 
 def test_cstr_length(value: cstr) -> usize:
@@ -108,6 +145,28 @@ def test_cstr_length(value: cstr) -> usize:
 
 def parse_operands(payload: cstr) -> DebuggerProtocolRequest::RequestOperands:
     return DebuggerProtocolRequest::request_operands_parse(payload.cast[u8&], test_cstr_length(payload))
+
+def expression_bytes_match(expression: DebuggerProtocolRequest::ExpressionText, expected: cstr) -> bool:
+    expected_length: usize = test_cstr_length(expected)
+    return false if not expression.valid or expression.length != expected_length
+    for index in 0..<expected_length:
+        return false if expression.bytes[index] != expected[index].u8()
+    return true
+
+def build_evaluate_request(payload: mutable u8&, expression_length: usize, expression_byte: u8) -> usize:
+    prefix_length: usize = test_cstr_length(EvaluationBounds::REQUEST_PREFIX)
+    cursor: mutable usize = 0
+    for index in 0..<prefix_length:
+        payload[cursor] <- EvaluationBounds::REQUEST_PREFIX[index].u8()
+        cursor <- cursor + EvaluationBounds::INDEX_INCREMENT
+    for index in 0..<expression_length:
+        payload[cursor] <- expression_byte
+        cursor <- cursor + EvaluationBounds::INDEX_INCREMENT
+    suffix_length: usize = test_cstr_length(EvaluationBounds::REQUEST_SUFFIX)
+    for index in 0..<suffix_length:
+        payload[cursor] <- EvaluationBounds::REQUEST_SUFFIX[index].u8()
+        cursor <- cursor + EvaluationBounds::INDEX_INCREMENT
+    return cursor
 
 def path_is_ascii(path: DebuggerProtocolRequest::ProgramPath, expected: cstr) -> bool:
     expected_length: usize = test_cstr_length(expected)
@@ -180,6 +239,22 @@ def main() -> i64:
     escaped_variables_reference: DebuggerProtocolRequest::RequestOperands = parse_operands(Test::ESCAPED_VARIABLES_REFERENCE_JSON)
     return Test::FAILURE_NON_LAUNCH_OPERANDS if not escaped_variables_reference.valid or not escaped_variables_reference.has_variables_reference or escaped_variables_reference.variables_reference != Test::EXPECTED_VARIABLES_REFERENCE
     return Test::FAILURE_NON_LAUNCH_OPERANDS if parse_operands(Test::DUPLICATE_VARIABLES_REFERENCE_JSON).valid
+
+    evaluate: DebuggerProtocolRequest::RequestOperands = parse_operands(EvaluationCases::EVALUATE_JSON)
+    return EvaluationCases::Failure::VALID_OPERANDS if not evaluate.valid or not evaluate.has_expression or evaluate.expression.length != EvaluationCases::EXPECTED_EXPRESSION_LENGTH or not evaluate.has_frame_index or evaluate.frame_index != EvaluationCases::EXPECTED_FRAME_INDEX or not evaluate.has_expected_generation
+    return EvaluationCases::Failure::VALID_OPERANDS if not expression_bytes_match(evaluate.expression, "local0 + global0")
+    escaped_evaluate: DebuggerProtocolRequest::RequestOperands = parse_operands(EvaluationCases::ESCAPED_EVALUATE_JSON)
+    return EvaluationCases::Failure::ESCAPED_OPERAND if not escaped_evaluate.valid or escaped_evaluate.expression.length != EvaluationCases::EXPECTED_ESCAPED_EXPRESSION_LENGTH or escaped_evaluate.expression.bytes[EvaluationCases::EXPRESSION_NEWLINE_OFFSET] != EvaluationCases::ExpectedBytes::ASCII_LINE_FEED or escaped_evaluate.expression.bytes[EvaluationCases::EXPRESSION_LITERAL_OFFSET] != EvaluationCases::ExpectedBytes::ASCII_ONE
+    return EvaluationCases::Failure::REQUIRED_AND_UNIQUE if parse_operands(EvaluationCases::MISSING_EVALUATE_EXPRESSION_JSON).valid or parse_operands(EvaluationCases::DUPLICATE_EVALUATE_EXPRESSION_JSON).valid or parse_operands(EvaluationCases::ESCAPED_DUPLICATE_EVALUATE_EXPRESSION_JSON).valid
+    return EvaluationCases::Failure::INVALID_SHAPES if parse_operands(EvaluationCases::INVALID_EVALUATE_TYPE_JSON).valid or parse_operands(EvaluationCases::INVALID_EVALUATE_FRAME_JSON).valid or parse_operands(EvaluationCases::DUPLICATE_EVALUATE_FRAME_JSON).valid or parse_operands(EvaluationCases::OVERFLOW_EVALUATE_FRAME_JSON).valid or parse_operands(EvaluationCases::EMPTY_EVALUATE_JSON).valid
+    bounded_expression_request: mutable u8[EvaluationBounds::MAX_EXPRESSION_BYTES + EvaluationBounds::REQUEST_OVERHEAD_CAPACITY] = zeroed
+    bounded_expression_length: usize = build_evaluate_request(bounded_expression_request[0], EvaluationBounds::MAX_EXPRESSION_BYTES, EvaluationBounds::ASCII_ONE)
+    bounded_expression: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(bounded_expression_request[0], bounded_expression_length)
+    return EvaluationCases::Failure::SOURCE_BOUNDARY if not bounded_expression.valid or bounded_expression.expression.length != EvaluationBounds::MAX_EXPRESSION_BYTES
+    oversized_expression_request: mutable u8[EvaluationBounds::MAX_EXPRESSION_BYTES + EvaluationBounds::REQUEST_OVERHEAD_CAPACITY] = zeroed
+    oversized_expression_length: usize = build_evaluate_request(oversized_expression_request[0], EvaluationBounds::MAX_EXPRESSION_BYTES + EvaluationBounds::INDEX_INCREMENT, EvaluationBounds::ASCII_ONE)
+    oversized_expression: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(oversized_expression_request[0], oversized_expression_length)
+    return EvaluationCases::Failure::SOURCE_BOUNDARY if oversized_expression.valid
 
     initialize_version: DebuggerProtocolRequest::RequestOperands = parse_operands(Test::VALID_INITIALIZE_VERSION_JSON)
     return Test::FAILURE_INITIALIZE_VERSION if not initialize_version.valid or not initialize_version.has_protocol_major or initialize_version.protocol_major != Test::PROTOCOL_MAJOR or not initialize_version.has_protocol_minor or initialize_version.protocol_minor != Test::PROTOCOL_MINOR

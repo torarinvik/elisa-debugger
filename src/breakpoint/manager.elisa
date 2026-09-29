@@ -9,6 +9,10 @@ module DebuggerBreakpointManager:
     private:
         const module Breakpoint:
             BREAKPOINT_MANAGER_CAPACITY: usize = 256
+            COUNT_INCREMENT: usize = 1
+            BREAKPOINT_MANAGER_ID_INCREMENT: u64 = 1
+            NO_BREAKPOINT_ID: u64 = 0
+            NO_REQUESTED_BREAKPOINTS: usize = 0
             BREAKPOINT_MANAGER_FIRST_ID: u64 = 1
             BREAKPOINT_MANAGER_MAX_ID: u64 = 18446744073709551615
             NO_SOURCE: u64 = 0
@@ -39,7 +43,6 @@ module DebuggerBreakpointManager:
 
         struct BreakpointReplacement:
             accepted: mutable bool
-            table: mutable BreakpointTable
             results: mutable BreakpointResult[Breakpoint::BREAKPOINT_MANAGER_CAPACITY]
             count: mutable usize
 
@@ -49,60 +52,64 @@ module DebuggerBreakpointManager:
             table.next_id <- Breakpoint::BREAKPOINT_MANAGER_FIRST_ID
             return table
 
-        def breakpoint_table_add(table: BreakpointTable, point: DebuggerBreakpoints::Breakpoint) -> BreakpointTable:
-            updated: mutable BreakpointTable = table
-            return updated if table.count >= Breakpoint::BREAKPOINT_MANAGER_CAPACITY or table.next_id == 0 or table.next_id == Breakpoint::BREAKPOINT_MANAGER_MAX_ID
-            return updated if point.kind.u16() > Breakpoint::BREAKPOINT_MANAGER_KIND_MAX or point.status.u16() > Breakpoint::BREAKPOINT_MANAGER_STATUS_MAX or point.status == DebuggerBreakpoints::BreakpointStatus.Invalid
-            return updated if point.condition_length > DebuggerBreakpoints::breakpoint_condition_capacity() or point.log_message_length > DebuggerBreakpoints::breakpoint_log_message_capacity()
-            return updated if point.function_name_length > DebuggerBreakpoints::breakpoint_function_name_capacity()
-            return updated if point.logpoint and point.kind != DebuggerBreakpoints::BreakpointKind.Source
-            return updated if not point.logpoint and point.log_message_length > DebuggerBreakpoints::breakpoint_empty_log_message_length()
-            return updated if point.kind == DebuggerBreakpoints::BreakpointKind.Source and not DebuggerMetadata::source_location_is_valid(point.source)
-            return updated if point.kind == DebuggerBreakpoints::BreakpointKind.Function and point.function_name_length == DebuggerBreakpoints::breakpoint_empty_function_name_length()
-            return updated if point.kind != DebuggerBreakpoints::BreakpointKind.Function and point.function_name_length != DebuggerBreakpoints::breakpoint_empty_function_name_length()
-            return updated if point.kind == DebuggerBreakpoints::BreakpointKind.Function and not DebuggerMetadata::metadata_text_utf8_is_valid(point.function_name[FunctionName::FIRST_BYTE_INDEX], point.function_name_length, DebuggerBreakpoints::breakpoint_function_name_capacity())
+        def breakpoint_table_add(table: mutable BreakpointTable&, point: DebuggerBreakpoints::Breakpoint) -> bool:
+            return false if table.count >= Breakpoint::BREAKPOINT_MANAGER_CAPACITY or table.next_id == Breakpoint::NO_BREAKPOINT_ID or table.next_id == Breakpoint::BREAKPOINT_MANAGER_MAX_ID
+            return false if point.kind.u16() > Breakpoint::BREAKPOINT_MANAGER_KIND_MAX or point.status.u16() > Breakpoint::BREAKPOINT_MANAGER_STATUS_MAX or point.status == DebuggerBreakpoints::BreakpointStatus.Invalid
+            return false if point.condition_length > DebuggerBreakpoints::breakpoint_condition_capacity() or point.log_message_length > DebuggerBreakpoints::breakpoint_log_message_capacity()
+            return false if point.function_name_length > DebuggerBreakpoints::breakpoint_function_name_capacity()
+            return false if point.logpoint and point.kind != DebuggerBreakpoints::BreakpointKind.Source
+            return false if not point.logpoint and point.log_message_length > DebuggerBreakpoints::breakpoint_empty_log_message_length()
+            return false if point.kind == DebuggerBreakpoints::BreakpointKind.Source and not DebuggerMetadata::source_location_is_valid(point.source)
+            return false if point.kind == DebuggerBreakpoints::BreakpointKind.Function and point.function_name_length == DebuggerBreakpoints::breakpoint_empty_function_name_length()
+            return false if point.kind != DebuggerBreakpoints::BreakpointKind.Function and point.function_name_length != DebuggerBreakpoints::breakpoint_empty_function_name_length()
+            return false if point.kind == DebuggerBreakpoints::BreakpointKind.Function and not DebuggerMetadata::metadata_text_utf8_is_valid(point.function_name[FunctionName::FIRST_BYTE_INDEX], point.function_name_length, DebuggerBreakpoints::breakpoint_function_name_capacity())
             for index in 0..<table.count:
-                return updated if table.points[index].id.value == table.next_id
-            updated.points[table.count] <- point
-            updated.resolved_instructions[table.count] <- Breakpoint::BREAKPOINT_MANAGER_NO_INSTRUCTION
-            updated.points[table.count].id <- DebuggerIdentity::debug_id(table.next_id)
-            updated.points[table.count].status <- DebuggerBreakpoints::BreakpointStatus.Pending
-            updated.count <- table.count + 1
-            updated.next_id <- table.next_id + 1
-            return updated
+                return false if table.points[index].id.value == table.next_id
+            table.points[table.count] <- point
+            table.resolved_instructions[table.count] <- Breakpoint::BREAKPOINT_MANAGER_NO_INSTRUCTION
+            table.points[table.count].id <- DebuggerIdentity::debug_id(table.next_id)
+            table.points[table.count].status <- DebuggerBreakpoints::BreakpointStatus.Pending
+            table.count <- table.count + Breakpoint::COUNT_INCREMENT
+            table.next_id <- table.next_id + Breakpoint::BREAKPOINT_MANAGER_ID_INCREMENT
+            return true
+
+        def breakpoint_table_can_allocate_ids(table: BreakpointTable&, requested_count: usize) -> bool:
+            return true if requested_count == Breakpoint::NO_REQUESTED_BREAKPOINTS
+            return false if table.next_id == Breakpoint::NO_BREAKPOINT_ID or table.next_id == Breakpoint::BREAKPOINT_MANAGER_MAX_ID
+            return requested_count.u64() <= Breakpoint::BREAKPOINT_MANAGER_MAX_ID - table.next_id
 
         # DAP setBreakpoints replaces the source's full set in one operation.
         # Validate capacity and IDs before constructing a changed table so an
         # invalid request can never remove the client's previous breakpoints.
-        def breakpoint_table_replace_source(table: BreakpointTable, source: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, lines: u32&, requested_count: usize) -> BreakpointReplacement:
+        def breakpoint_table_replace_source(table: mutable BreakpointTable&, source: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, lines: u32&, requested_count: usize) -> BreakpointReplacement:
             columns: mutable u32[Breakpoint::BREAKPOINT_MANAGER_CAPACITY] = zeroed
             has_columns: mutable bool[Breakpoint::BREAKPOINT_MANAGER_CAPACITY] = zeroed
             return breakpoint_table_replace_source_with_columns(table, source, branch, lines, columns[Breakpoint::BREAKPOINT_MANAGER_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX], has_columns[Breakpoint::BREAKPOINT_MANAGER_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX], requested_count)
 
-        def breakpoint_table_replace_source_with_columns(table: BreakpointTable, source: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, lines: u32&, columns: u32&, has_columns: bool&, requested_count: usize) -> BreakpointReplacement:
+        def breakpoint_table_replace_source_with_columns(table: mutable BreakpointTable&, source: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, lines: u32&, columns: u32&, has_columns: bool&, requested_count: usize) -> BreakpointReplacement:
             replacement: mutable BreakpointReplacement = zeroed
             return replacement if not breakpoint_table_is_valid(table) or requested_count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY or source.value == Breakpoint::NO_SOURCE
+            original_count: usize = table.count
             retained_count: mutable usize = 0
-            for index in 0..<table.count:
+            for index in 0..<original_count:
                 point: DebuggerBreakpoints::Breakpoint = table.points[index]
-                retained_count <- retained_count + 1 if point.kind != DebuggerBreakpoints::BreakpointKind.Source or point.source.file.value != source.value
+                retained_count <- retained_count + Breakpoint::COUNT_INCREMENT if point.kind != DebuggerBreakpoints::BreakpointKind.Source or point.source.file.value != source.value
             return replacement if retained_count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY or requested_count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY - retained_count
             return replacement if requested_count.u64() > Breakpoint::BREAKPOINT_MANAGER_MAX_ID - table.next_id
             for index in 0..<requested_count:
                 return replacement if lines[index] == Breakpoint::BREAKPOINT_MANAGER_NO_LINE
-            updated: mutable BreakpointTable = table
-            updated.count <- 0
-            for index in 0..<table.count:
+            table.count <- 0
+            for index in 0..<original_count:
                 point: DebuggerBreakpoints::Breakpoint = table.points[index]
                 if point.kind != DebuggerBreakpoints::BreakpointKind.Source or point.source.file.value != source.value:
-                    updated.points[updated.count] <- point
-                    updated.resolved_instructions[updated.count] <- table.resolved_instructions[index]
-                    updated.count <- updated.count + 1
+                    table.points[table.count] <- point
+                    table.resolved_instructions[table.count] <- table.resolved_instructions[index]
+                    table.count <- table.count + Breakpoint::COUNT_INCREMENT
             for index in 0..<requested_count:
                 column: mutable u32 = Breakpoint::BREAKPOINT_MANAGER_SOURCE_BREAKPOINT_NO_COLUMN
                 column <- columns[index] if has_columns[index]
                 point: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{
-                    id: DebuggerIdentity::debug_id(updated.next_id),
+                    id: DebuggerIdentity::debug_id(table.next_id),
                     branch: branch,
                     kind: DebuggerBreakpoints::BreakpointKind.Source,
                     status: DebuggerBreakpoints::BreakpointStatus.Pending,
@@ -121,12 +128,11 @@ module DebuggerBreakpointManager:
                     logpoint: false,
                     temporary: false
                 }
-                updated.points[updated.count] <- point
-                updated.resolved_instructions[updated.count] <- Breakpoint::BREAKPOINT_MANAGER_NO_INSTRUCTION
+                table.points[table.count] <- point
+                table.resolved_instructions[table.count] <- Breakpoint::BREAKPOINT_MANAGER_NO_INSTRUCTION
                 replacement.results[index] <- BreakpointResult{id: point.id, line: lines[index], column: point.source.column, has_column: has_columns[index], verified: false}
-                updated.count <- updated.count + 1
-                updated.next_id <- updated.next_id + 1
-            replacement.table <- updated
+                table.count <- table.count + Breakpoint::COUNT_INCREMENT
+                table.next_id <- table.next_id + Breakpoint::BREAKPOINT_MANAGER_ID_INCREMENT
             replacement.count <- requested_count
             replacement.accepted <- true
             return replacement
@@ -142,15 +148,13 @@ module DebuggerBreakpointManager:
 
         # Bind a verified source breakpoint to the exact executable instruction
         # chosen by source resolution. IDs distinguish same-line locations.
-        def breakpoint_table_resolve_at_instruction(table: BreakpointTable, breakpoint: DebuggerIdentity::DebugId, instruction: u64) -> BreakpointTable:
-            updated: mutable BreakpointTable = table
-            return updated if table.count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY or breakpoint.value == 0 or instruction == Breakpoint::BREAKPOINT_MANAGER_NO_INSTRUCTION
+        def breakpoint_table_resolve_at_instruction(table: mutable BreakpointTable&, breakpoint: DebuggerIdentity::DebugId, instruction: u64) -> void:
+            return if table.count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY or breakpoint.value == Breakpoint::NO_BREAKPOINT_ID or instruction == Breakpoint::BREAKPOINT_MANAGER_NO_INSTRUCTION
             for index in 0..<table.count:
                 if table.points[index].id.value == breakpoint.value and table.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source:
-                    updated.points[index].status <- DebuggerBreakpoints::BreakpointStatus.Verified
-                    updated.resolved_instructions[index] <- instruction
+                    table.points[index].status <- DebuggerBreakpoints::BreakpointStatus.Verified
+                    table.resolved_instructions[index] <- instruction
                     break
-            return updated
 
         def breakpoint_table_count(table: BreakpointTable) -> usize:
             return table.count
@@ -158,11 +162,11 @@ module DebuggerBreakpointManager:
         def breakpoint_table_capacity() -> usize:
             return Breakpoint::BREAKPOINT_MANAGER_CAPACITY
 
-        def breakpoint_table_is_valid(table: BreakpointTable) -> bool:
-            return false if table.count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY or table.next_id == 0 or table.next_id > Breakpoint::BREAKPOINT_MANAGER_MAX_ID
+        def breakpoint_table_is_valid(table: BreakpointTable&) -> bool:
+            return false if table.count > Breakpoint::BREAKPOINT_MANAGER_CAPACITY or table.next_id == Breakpoint::NO_BREAKPOINT_ID or table.next_id > Breakpoint::BREAKPOINT_MANAGER_MAX_ID
             for index in 0..<table.count:
                 point: DebuggerBreakpoints::Breakpoint = table.points[index]
-                return false if point.id.value == 0 or point.id.value >= table.next_id
+                return false if point.id.value == Breakpoint::NO_BREAKPOINT_ID or point.id.value >= table.next_id
                 return false if point.kind.u16() > Breakpoint::BREAKPOINT_MANAGER_KIND_MAX or point.status.u16() > Breakpoint::BREAKPOINT_MANAGER_STATUS_MAX or point.status == DebuggerBreakpoints::BreakpointStatus.Invalid
                 return false if point.kind == DebuggerBreakpoints::BreakpointKind.Source and not DebuggerMetadata::source_location_is_valid(point.source)
                 return false if point.condition_length > DebuggerBreakpoints::breakpoint_condition_capacity() or point.log_message_length > DebuggerBreakpoints::breakpoint_log_message_capacity()

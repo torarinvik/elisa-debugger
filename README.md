@@ -171,9 +171,11 @@ single `main` thread, accepts `setBreakpoints` for normalized logical paths
 in the launched EDIR artifact, supports bounded managed-memory reads with
 `arguments.address` and `arguments.length`, and returns checkpoint/branch
 metadata for validated managed history. It also exposes read-only
-`trace.verify` metadata for the bounded current recording. Expression
-evaluation, trace artifact transfer, and provider selection are not wired on
-this endpoint;
+`trace.verify` metadata for the bounded current recording. The `evaluate`
+request accepts the shared bounded expression grammar, a zero-based frame
+index, and an optional expected stop generation; signed results are decimal
+strings. Trace artifact transfer and provider selection are not wired on this
+endpoint;
 discovery reports the smaller process capability set. See [the integration
 guide](docs/integration.md) for the exact process boundaries and limitations.
 

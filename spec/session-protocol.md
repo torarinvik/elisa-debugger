@@ -69,12 +69,13 @@ shared `CapabilitySet`. The process clears features whose request operands or
 result payloads are not wired to this compact transport, including trace
 export and historical queries. Managed memory reads, source breakpoints, and
 read-only trace verification are supported through bounded payloads. Managed
-EDIR source breakpoints are supported through the bounded
+EDIR source breakpoints and frame-aware expression evaluation are supported
+through bounded payloads. Managed source breakpoints use the bounded
 `setBreakpoints` payload below. Threads, frames, scopes, and locals are
-available through the managed inspection surface. Expression evaluation and
-trace artifact transfer are not wired to this process. Clients must honor the
-process's discovery result; method names in the typed in-process API or the
-protocol vocabulary alone do not imply wire support.
+available through the managed inspection surface. Trace artifact transfer is
+not wired to this process. Clients must honor the process's discovery result;
+method names in the typed in-process API or the protocol vocabulary alone do
+not imply wire support.
 
 The compact `discover` request and response are described by
 [`schemas/session-protocol-v1.discover.schema.json`](../schemas/session-protocol-v1.discover.schema.json).
@@ -95,12 +96,30 @@ length, one space, and a newline):
 {"kind":"response","id":"7","ok":true,"result":{"protocolMajor":1,"protocolMinor":0,"server":"elisa-debugger","productVersion":"0.1.0","engines":["managed"],"traceSchema":1,"features":{"sourceBreakpoints":true,"functionBreakpoints":false,"dataBreakpoints":false,"typedValues":true,"expressionEvaluation":true,"reverseExecution":true,"timeline":true,"checkpoints":true,"branches":true,"concurrencyGraph":false,"provenance":false,"remoteTransport":false,"traceVerification":true,"memoryRead":true,"historicalQueries":false,"traceExport":false,"scheduleExploration":false,"nativeAttach":false,"postmortemInspection":false},"installationHealthy":true}}
 ```
 
-`expressionEvaluation: true` advertises the managed typed service operation
-`DebuggerManagedService::service_evaluate_expression`. It accepts bounded
-expression bytes and a selected frame index, and returns a checked integer or
-a structured error. The compact JSON lifecycle envelope does not yet encode
-that operand; external editor clients can use the DAP `evaluate` request,
-which accepts `expression` and an optional generation-bound `frameId`.
+`expressionEvaluation: true` advertises the managed `evaluate` operation over
+both the typed service and compact JSON process. Send a non-empty bounded
+`arguments.expression` string and optionally select a zero-based stopped frame
+with `arguments.frameIndex` (omitted selects frame zero). The endpoint decodes
+JSON escapes and applies the same side-effect-free, 256-byte expression grammar
+as DAP. A request may carry `expectedStopGeneration`; a stale value is rejected
+before evaluation. Successful results include the current stop generation and
+an `evaluation` object with `type: "i64"`, the exact signed result as a decimal
+string, and the number of consumed expression bytes. Errors preserve the
+normal protocol error code, including `INVALID_ARGUMENT`, `UNAVAILABLE`, and
+`STALE_GENERATION`. The
+[`evaluate` schema](../schemas/session-protocol-v1.evaluate.schema.json)
+defines the compact request and response.
+
+```json
+{"method":"evaluate","id":20,"expectedStopGeneration":"6","arguments":{"expression":"local0 + global0","frameIndex":0}}
+```
+
+```json
+{"kind":"response","id":"20","ok":true,"result":{"accepted":true,"stopGeneration":"6","evaluation":{"type":"i64","value":"46","consumed":16}}}
+```
+
+The DAP `evaluate` request continues to accept the standard `expression` and
+generation-bound `frameId` operands.
 
 After launching a verified artifact, a generic editor bridge can replace the
 breakpoints for one EDIR source file by its exact normalized logical path.

@@ -1,5 +1,7 @@
 # Length-prefixed protocol framing shared by DAP and the advanced session API.
 
+extern malloc(size: usize) -> mutable heap void&? can[Memory.Allocate]
+
 module DebuggerProtocolFraming:
     private:
 
@@ -18,6 +20,16 @@ module DebuggerProtocolFraming:
         const module NumberFormat:
             PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE: usize = 10
 
+        def frame_storage_from_raw(raw: heap void&) -> mutable heap u8&:
+            trusted Unsafe.PointerCast:
+                return raw.cast[mutable heap u8&]
+
+        def frame_storage_allocate(capacity: usize) -> mutable heap u8& can Memory.Allocate, Abort.Panic:
+            storage: mutable heap void&? = malloc(capacity)
+            if storage == null:
+                panic("protocol frame storage allocation failed")
+            return frame_storage_from_raw(storage)
+
     public:
         enum FrameDecoderState:
             Header
@@ -33,15 +45,22 @@ module DebuggerProtocolFraming:
 
         struct FrameDecoder:
             state: mutable FrameDecoderState
-            payload: mutable u8[FrameLimits::FRAME_MAX_PAYLOAD]
+            payload: mutable heap u8&
             payload_length: mutable usize
             payload_received: mutable usize
             header_value: mutable usize
             header_digits: mutable usize
 
-        def frame_decoder_new() -> FrameDecoder:
-            decoder: FrameDecoder = zeroed
-            decoder.state <- FrameDecoderState.Header
+        def frame_decoder_new() -> FrameDecoder can Memory.Allocate, Abort.Panic:
+            payload: mutable heap u8& = frame_storage_allocate(FrameLimits::FRAME_MAX_PAYLOAD)
+            decoder: FrameDecoder = FrameDecoder{
+                state: FrameDecoderState.Header,
+                payload: payload,
+                payload_length: 0,
+                payload_received: 0,
+                header_value: 0,
+                header_digits: 0
+            }
             return decoder
 
         def frame_decoder_reset(decoder: mutable FrameDecoder&) -> void:

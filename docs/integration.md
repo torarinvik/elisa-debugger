@@ -97,7 +97,7 @@ and [wire specification](../spec/session-protocol.md) for exact framing,
 fields, and errors.
 
 The supported compact request flow is `launch` with
-`arguments.program`, `setBreakpoints`, `pause`, `continue`, `step`,
+`arguments.program`, `setBreakpoints`, `evaluate`, `pause`, `continue`, `step`,
 `reverseStep`, `seek`, the read-only `timeline` history extension, bounded managed `memory` reads, and checkpoint/branch metadata.
 The read-only `trace.verify` method also returns bounded verification metadata
 for the current managed trace; opaque trace bytes still require a separate
@@ -108,6 +108,15 @@ session is running. Pause before requesting `stack`, `scopes`, or `variables`.
 generation-bound; request a fresh scopes response after execution advances.
 Variable pages use top-level `pageSize` and decimal-string
 `pageStart`/`next` offsets. The current page-size limit is 256 entries.
+
+For read-only expression evaluation, send `evaluate` with a bounded
+`arguments.expression` and an optional zero-based `arguments.frameIndex`.
+The evaluator reads the selected stopped frame and current globals without
+changing execution state. Successful signed 64-bit results are decimal
+strings. Send `expectedStopGeneration` when the client has a current stop
+snapshot so an evaluation cannot silently use a newer state. Validate the
+request and result with the
+[`evaluate` schema](../schemas/session-protocol-v1.evaluate.schema.json).
 
 For source breakpoints, send `setBreakpoints` with
 `arguments.source.path` equal to the artifact's normalized logical source path
@@ -131,8 +140,7 @@ Checkpoint and branch requests return validated metadata (`event`/`stateHash`
 or a branch ID) and preserve the same stop-generation rules. `trace.verify`
 returns `state`, verified chunk/event counts, and a replayability flag; a
 successful response is a snapshot and carries the current stop generation.
-This endpoint does not implement attach, expression evaluation, or trace
-artifact transfer.
+This endpoint does not implement attach or trace artifact transfer.
 `createSession` can establish process-scoped session ownership before launch;
 after that handshake, preserve the returned `sessionId` on every request and
 the returned `ownerToken` on every state changing request. Comparison and
@@ -153,8 +161,8 @@ the compact process.
 
 | Host | Map host actions to | Current adapter guidance |
 | --- | --- | --- |
-| VS Code | DAP initialize/launch, source and function breakpoints, threads/frames/scopes/variables, execution requests, and lifecycle | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. This repository supplies the backend, not the extension manifest or TypeScript host glue. |
-| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter; otherwise the compact JSON requests the host can support | No JetBrains plugin or platform-version qualification is included. A host-specific bridge must only translate UI/session requests and render responses; it cannot obtain attach, evaluate, or advanced trace operations from the current compact endpoint. |
+| VS Code | DAP initialize/launch, source and function breakpoints, threads/frames/scopes/variables, expression evaluation, execution requests, and lifecycle | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. This repository supplies the backend, not the extension manifest or TypeScript host glue. |
+| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter; otherwise the compact JSON requests the host can support | No JetBrains plugin or platform-version qualification is included. A host-specific bridge translates UI/session requests and renders responses; attach and trace artifact transfer are not available through these process transports. |
 | Other editors and tools | DAP for standard debugger UI; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve decimal IDs/offsets as strings where the protocol says strings, and report unavailable operations from endpoint behavior rather than parsing messages. |
 
 For a DAP host, the mapping is direct: source-line breakpoints use

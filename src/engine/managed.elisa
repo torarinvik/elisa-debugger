@@ -93,6 +93,7 @@ module DebuggerManagedEngine:
             FIRST_REQUEST_INDEX: usize = 0
             NO_TEXT_BYTES: usize = 0
             COUNT_INCREMENT: usize = 1
+            ID_INCREMENT: u64 = 1
             NO_BREAKPOINT_ID: u64 = 0
             NO_HIT_TARGET: u64 = 0
             NO_HIT_COUNT: u64 = 0
@@ -698,13 +699,12 @@ module DebuggerManagedEngine:
                             resolved_column <- candidate_column
                             resolved_instruction <- instruction_index.u64()
                 if resolved:
-                    for breakpoint_index in 0..<replacement.table.count:
-                        if replacement.table.points[breakpoint_index].id.value == replacement.results[request_index].id.value:
-                            replacement.table.points[breakpoint_index].source.column <- resolved_column
+                    for breakpoint_index in 0..<controller.state.breakpoints.count:
+                        if controller.state.breakpoints.points[breakpoint_index].id.value == replacement.results[request_index].id.value:
+                            controller.state.breakpoints.points[breakpoint_index].source.column <- resolved_column
                             replacement.results[request_index].column <- resolved_column if not has_requested_column
-                    replacement.table <- DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(replacement.table, replacement.results[request_index].id, resolved_instruction)
+                    DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(controller.state.breakpoints, replacement.results[request_index].id, resolved_instruction)
                     replacement.results[request_index].verified <- true
-            controller.state.breakpoints <- replacement.table
             return replacement
 
         def managed_replace_function_breakpoints(controller: mutable ManagedController&, names: u8&, text_length: usize, name_offsets: usize&, name_lengths: usize&, requested_count: usize) -> DebuggerBreakpointManager::BreakpointReplacement:
@@ -712,28 +712,31 @@ module DebuggerManagedEngine:
             return replacement if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
             return replacement if not DebuggerBreakpointManager::breakpoint_table_is_valid(controller.state.breakpoints)
             return replacement if requested_count > DebuggerBreakpointManager::breakpoint_table_capacity()
+            original_count: usize = controller.state.breakpoints.count
             retained_count: mutable usize = FunctionBreakpoint::NO_TEXT_BYTES
-            for index in 0..<controller.state.breakpoints.count:
-                retained_count <- retained_count + 1 if controller.state.breakpoints.points[index].kind != DebuggerBreakpoints::BreakpointKind.Function
+            for index in 0..<original_count:
+                retained_count <- retained_count + FunctionBreakpoint::COUNT_INCREMENT if controller.state.breakpoints.points[index].kind != DebuggerBreakpoints::BreakpointKind.Function
             return replacement if retained_count > DebuggerBreakpointManager::breakpoint_table_capacity() or requested_count > DebuggerBreakpointManager::breakpoint_table_capacity() - retained_count
+            return replacement if not DebuggerBreakpointManager::breakpoint_table_can_allocate_ids(controller.state.breakpoints, requested_count)
             for request_index in 0..<requested_count:
                 return replacement if name_lengths[request_index] == FunctionBreakpoint::NO_TEXT_BYTES or name_lengths[request_index] > DebuggerBreakpoints::breakpoint_function_name_capacity()
                 return replacement if name_offsets[request_index] > text_length or name_lengths[request_index] > text_length - name_offsets[request_index]
-            updated: mutable DebuggerBreakpointManager::BreakpointTable = controller.state.breakpoints
-            updated.count <- FunctionBreakpoint::NO_TEXT_BYTES
-            for index in 0..<controller.state.breakpoints.count:
+                preflight: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(controller.engine.image, names[name_offsets[request_index]], name_lengths[request_index])
+                return replacement if preflight.status == DebuggerMetadata::BreakpointResolution.Invalid
+            controller.state.breakpoints.count <- FunctionBreakpoint::NO_TEXT_BYTES
+            for index in 0..<original_count:
                 point: DebuggerBreakpoints::Breakpoint = controller.state.breakpoints.points[index]
                 if point.kind != DebuggerBreakpoints::BreakpointKind.Function:
-                    updated.points[updated.count] <- point
-                    updated.resolved_instructions[updated.count] <- controller.state.breakpoints.resolved_instructions[index]
-                    updated.count <- updated.count + 1
+                    controller.state.breakpoints.points[controller.state.breakpoints.count] <- point
+                    controller.state.breakpoints.resolved_instructions[controller.state.breakpoints.count] <- controller.state.breakpoints.resolved_instructions[index]
+                    controller.state.breakpoints.count <- controller.state.breakpoints.count + FunctionBreakpoint::COUNT_INCREMENT
             for request_index in 0..<requested_count:
                 name_offset: usize = name_offsets[request_index]
                 name_length: usize = name_lengths[request_index]
                 resolution: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(controller.engine.image, names[name_offset], name_length)
-                return replacement if resolution.status == DebuggerMetadata::BreakpointResolution.Invalid
+                breakpoint_id: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(controller.state.breakpoints.next_id)
                 point: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{
-                    id: DebuggerIdentity::debug_id(updated.next_id),
+                    id: breakpoint_id,
                     branch: controller.engine.branch,
                     kind: DebuggerBreakpoints::BreakpointKind.Function,
                     status: DebuggerBreakpoints::BreakpointStatus.Pending,
@@ -754,18 +757,18 @@ module DebuggerManagedEngine:
                 }
                 for name_index in 0..<name_length:
                     point.function_name[name_index] <- names[name_offset + name_index]
-                added: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_add(updated, point)
-                return replacement if added.count != updated.count + FunctionBreakpoint::COUNT_INCREMENT
-                updated <- added
-                replacement.results[request_index] <- DebuggerBreakpointManager::BreakpointResult{id: updated.points[updated.count - FunctionBreakpoint::COUNT_INCREMENT].id, line: FunctionBreakpoint::NO_SOURCE_LINE, column: FunctionBreakpoint::NO_SOURCE_COLUMN, has_column: false, verified: false}
+                table_index: usize = controller.state.breakpoints.count
+                controller.state.breakpoints.points[table_index] <- point
+                controller.state.breakpoints.resolved_instructions[table_index] <- Identity::ENGINE_MANAGED_IDENTITY_NO_INSTRUCTION
+                replacement.results[request_index] <- DebuggerBreakpointManager::BreakpointResult{id: breakpoint_id, line: FunctionBreakpoint::NO_SOURCE_LINE, column: FunctionBreakpoint::NO_SOURCE_COLUMN, has_column: false, verified: false}
                 if resolution.matched > FunctionBreakpoint::NO_TEXT_BYTES:
-                    updated.points[updated.count - FunctionBreakpoint::COUNT_INCREMENT].status <- DebuggerBreakpoints::BreakpointStatus.Verified
-                    updated.resolved_instructions[updated.count - FunctionBreakpoint::COUNT_INCREMENT] <- resolution.instruction
+                    controller.state.breakpoints.points[table_index].status <- DebuggerBreakpoints::BreakpointStatus.Verified
+                    controller.state.breakpoints.resolved_instructions[table_index] <- resolution.instruction
                     replacement.results[request_index].verified <- true
-            replacement.table <- updated
+                controller.state.breakpoints.count <- controller.state.breakpoints.count + FunctionBreakpoint::COUNT_INCREMENT
+                controller.state.breakpoints.next_id <- controller.state.breakpoints.next_id + FunctionBreakpoint::ID_INCREMENT
             replacement.count <- requested_count
             replacement.accepted <- true
-            controller.state.breakpoints <- updated
             return replacement
 
         def managed_source_root_is_valid(root: u8&, root_length: usize) -> bool:
@@ -902,15 +905,13 @@ module DebuggerManagedEngine:
                 temporary: false
             }
             next_id: u64 = controller.state.breakpoints.next_id
-            previous_count: usize = controller.state.breakpoints.count
-            updated: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_add(controller.state.breakpoints, point)
-            return DebuggerIdentity::debug_id(0) if updated.count == previous_count
+            added: bool = DebuggerBreakpointManager::breakpoint_table_add(controller.state.breakpoints, point)
+            return DebuggerIdentity::debug_id(0) if not added
             for instruction_index in 0..<controller.engine.image.program.instruction_count.usize():
                 span: DebuggerIdentity::SourceSpan = controller.engine.image.instructions[instruction_index].source
                 if DebuggerMetadata::source_span_contains(span, location):
-                    updated <- DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(updated, DebuggerIdentity::debug_id(next_id), instruction_index.u64())
+                    DebuggerBreakpointManager::breakpoint_table_resolve_at_instruction(controller.state.breakpoints, DebuggerIdentity::debug_id(next_id), instruction_index.u64())
                     break
-            controller.state.breakpoints <- updated
             return DebuggerIdentity::debug_id(next_id)
 
         def managed_values(controller: mutable ManagedController&) -> DebuggerValueStore::ValueStore:

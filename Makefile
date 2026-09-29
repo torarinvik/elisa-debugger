@@ -93,6 +93,8 @@ DAP_ZERO_SEQUENCE_LAUNCH_PAYLOAD_LENGTH := 45
 SERVER_TEST_PAGE_SIZE := 1
 SERVER_TEST_STALE_GENERATION := 1
 SERVER_TEST_CURRENT_GENERATION := 2
+SERVER_TEST_EVALUATE_VALUE := 46
+SERVER_TEST_EVALUATE_CONSUMED_BYTES := 15
 SERVER_TEST_FIRST_STEP_INSTRUCTION := 1
 SERVER_TEST_FIRST_STEP_ACCUMULATOR := 17
 SERVER_TEST_SOURCE_BREAKPOINT_LINE := 42
@@ -164,9 +166,13 @@ server-ownership-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
 	set -e; server_ownership_input=$$(for payload in '{"method":"initialize","id":1,"protocolMajor":$(SERVER_PROTOCOL_MAJOR),"protocolMinor":$(SERVER_PROTOCOL_MINOR)}' '{"method":"createSession","id":2}' '{"method":"launch","id":3,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"launch","id":4,"sessionId":"$(SERVER_OWNER_SESSION_ID)","ownerToken":"$(SERVER_OWNER_TOKEN)","arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"pause","id":5,"sessionId":"$(SERVER_OWNER_SESSION_ID)","ownerToken":"2"}' '{"method":"pause","id":6,"sessionId":"$(SERVER_OWNER_SESSION_ID)","ownerToken":"$(SERVER_OWNER_TOKEN)"}' '{"method":"stack","id":7,"sessionId":"$(SERVER_OWNER_SESSION_ID)"}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$frame_length" "$$payload"; done); server_ownership_output=$$(printf '%s\n' "$$server_ownership_input" | "$(BUILD)/elisa-debugger-server"); echo "$$server_ownership_output" | grep -F '"id":"2","ok":true' | grep -F '"sessionId":"$(SERVER_OWNER_SESSION_ID)"' | grep -F '"ownerToken":"$(SERVER_OWNER_TOKEN)"'; echo "$$server_ownership_output" | grep -F '"id":"3","ok":false' | grep -F '"code":"PERMISSION_DENIED"'; echo "$$server_ownership_output" | grep -F '"id":"4","ok":true'; echo "$$server_ownership_output" | grep -F '"id":"5","ok":false' | grep -F '"code":"PERMISSION_DENIED"'; echo "$$server_ownership_output" | grep -F '"id":"6","ok":true'; echo "$$server_ownership_output" | grep -F '"id":"7","ok":true'
 
 .PHONY: server-source-breakpoints-check
+.PHONY: server-evaluate-check
 server-source-breakpoints-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
 	printf '21 {"method":"discover"}\n' | "$(BUILD)/elisa-debugger-server" | grep -F '"sourceBreakpoints":true'
 	set -e; server_breakpoint_input=$$(for payload in '$(SERVER_INITIALIZE_PAYLOAD)' '{"method":"launch","id":1,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"setBreakpoints","id":2,"arguments":{"source":{"path":"main.elisa"},"breakpoints":[{"line":$(SERVER_TEST_SOURCE_BREAKPOINT_LINE)},{"line":$(SERVER_TEST_UNRESOLVED_BREAKPOINT_LINE)}]}}' '{"method":"setBreakpoints","id":3,"arguments":{"source":{"path":"main.elisa"},"breakpoints":[{"line":$(SERVER_TEST_SOURCE_BREAKPOINT_LINE),"condition":"false"}]}}' '{"method":"continue","id":4}' '{"method":"stack","id":5}' '{"method":"setBreakpoints","id":6,"expectedStopGeneration":"$(SERVER_TEST_STALE_BREAKPOINT_GENERATION)","arguments":{"source":{"path":"main.elisa"},"breakpoints":[]}}' '{"method":"setBreakpoints","id":7,"arguments":{"source":{"path":"missing.elisa"},"breakpoints":[]}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$frame_length" "$$payload"; done); server_breakpoint_output=$$(printf '%s\n' "$$server_breakpoint_input" | "$(BUILD)/elisa-debugger-server"); echo "$$server_breakpoint_output" | grep -F '"id":"2","ok":true' | grep -F '"breakpoints":[{"id":"1","line":$(SERVER_TEST_SOURCE_BREAKPOINT_LINE),"verified":true},{"id":"2","line":$(SERVER_TEST_UNRESOLVED_BREAKPOINT_LINE),"verified":false}]'; echo "$$server_breakpoint_output" | grep -F '"id":"3","ok":false' | grep -F '"code":"INVALID_ARGUMENT"'; echo "$$server_breakpoint_output" | grep -F '"id":"4","ok":true'; echo "$$server_breakpoint_output" | grep -F '"id":"5","ok":true' | grep -F '"instruction":"$(SERVER_TEST_BREAKPOINT_INSTRUCTION)"'; echo "$$server_breakpoint_output" | grep -F '"id":"6","ok":false' | grep -F '"code":"STALE_GENERATION"'; echo "$$server_breakpoint_output" | grep -F '"id":"7","ok":false' | grep -F '"code":"INVALID_ARGUMENT"'
+
+server-evaluate-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
+	set -e; server_evaluate_input=$$(for payload in '$(SERVER_INITIALIZE_PAYLOAD)' '{"method":"launch","id":1,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"pause","id":2}' '{"method":"step","id":3}' '{"method":"step","id":4}' '{"method":"step","id":5}' '{"method":"step","id":6}' '{"method":"evaluate","id":7,"arguments":{"expression":"local0 + local1","frameIndex":0}}' '{"method":"evaluate","id":8,"expectedStopGeneration":"$(SERVER_TEST_STALE_GENERATION)","arguments":{"expression":"local0 + local1"}}' '{"method":"evaluate","id":9,"arguments":{"expression":"1 / 0"}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$frame_length" "$$payload"; done); server_evaluate_output=$$(printf '%s\n' "$$server_evaluate_input" | "$(BUILD)/elisa-debugger-server"); echo "$$server_evaluate_output" | grep -F '"id":"7","ok":true' | grep -F '"evaluation":{"type":"i64","value":"$(SERVER_TEST_EVALUATE_VALUE)","consumed":$(SERVER_TEST_EVALUATE_CONSUMED_BYTES)}'; echo "$$server_evaluate_output" | grep -F '"id":"8","ok":false' | grep -F '"code":"STALE_GENERATION"'; echo "$$server_evaluate_output" | grep -F '"id":"9","ok":false' | grep -F '"code":"INVALID_ARGUMENT"'
 
 dap-server: $(BUILD)/elisa-debugger-dap-server
 
@@ -209,6 +215,7 @@ endif
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
 module-check: server-source-breakpoints-check
+module-check: server-evaluate-check
 module-check: dap-logpoints-check
 module-check: server-ownership-check
 module-check: $(BUILD)/elisa-debugger-replay-branches-check

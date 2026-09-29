@@ -3,6 +3,7 @@
 # value decoding is layered behind the same request type.
 
 include "./vocabulary.elisa"
+include "../core/expression_limits.elisa"
 
 module DebuggerProtocolRequest:
     private:
@@ -49,6 +50,7 @@ module DebuggerProtocolRequest:
 
         const module JsonParser:
             NESTING_CAPACITY: usize = 64
+            CURSOR_INCREMENT: usize = 1
             STATE_VALUE: u8 = 0
             STATE_KEY_OR_END: u8 = 1
             STATE_COLON: u8 = 2
@@ -147,6 +149,18 @@ module DebuggerProtocolRequest:
             MEMORY_ADDRESS_MAX: u64 = 512
             MEMORY_LENGTH_MAX: u64 = 64
 
+        const module ExpressionOperand:
+            MAX_BYTES: usize = DebuggerExpressionLimits::Source::MAX_EXPRESSION_BYTES
+            NO_EXPRESSION_BYTES: usize = 0
+            MAX_FRAME_INDEX: u64 = 4294967295
+            ASCII_MAX: u64 = 127
+            ASCII_NUL: u8 = 0
+            ASCII_BACKSPACE: u8 = 8
+            ASCII_FORM_FEED: u8 = 12
+            INDEX_INCREMENT: usize = 1
+            QUOTE_WIDTH: usize = 1
+            ESCAPED_BYTE_WIDTH: usize = 2
+
         const module Unicode:
             ESCAPE_DIGITS: usize = 4
             ESCAPE_MARKER_BYTES: usize = 1
@@ -244,6 +258,11 @@ module DebuggerProtocolRequest:
             length: mutable usize
             valid: mutable bool
 
+        struct ExpressionText:
+            bytes: mutable u8[ExpressionOperand::MAX_BYTES]
+            length: mutable usize
+            valid: mutable bool
+
         struct SourceBreakpointRequest:
             source_path: mutable ProgramPath
             has_source_path: mutable bool
@@ -271,6 +290,10 @@ module DebuggerProtocolRequest:
             has_page_size: mutable bool
             page_start: mutable u64
             has_page_start: mutable bool
+            expression: mutable ExpressionText
+            has_expression: mutable bool
+            frame_index: mutable u64
+            has_frame_index: mutable bool
             memory_address: mutable u64
             has_memory_address: mutable bool
             memory_length: mutable u64
@@ -840,6 +863,60 @@ module DebuggerProtocolRequest:
                 value <- value * NumberFormat::REQUEST_NUMBERFORMAT_HEX_BASE + digit.value
             return ParsedOperandNumber{valid: true, value: value, end: start + Unicode::ESCAPE_DIGITS}
 
+        def expression_text_append(expression: mutable ExpressionText&, byte: u8) -> bool:
+            return false if expression.length >= ExpressionOperand::MAX_BYTES or byte == ExpressionOperand::ASCII_NUL
+            expression.bytes[expression.length] <- byte
+            expression.length <- expression.length + ExpressionOperand::INDEX_INCREMENT
+            return true
+
+        # The expression language is ASCII. Decode JSON escapes before
+        # evaluation so clients can use ordinary JSON serializers while the
+        # evaluator still receives its canonical bounded byte representation.
+        def request_expression_string_parse(payload: u8&, length: usize, start: usize) -> ExpressionText:
+            expression: mutable ExpressionText = zeroed
+            end: usize = json_string_end(payload, length, start)
+            return expression if end == JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            cursor: mutable usize = start + ExpressionOperand::QUOTE_WIDTH
+            content_end: usize = end - ExpressionOperand::QUOTE_WIDTH
+            while cursor < content_end:
+                decoded: mutable u8 = payload[cursor]
+                if payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BACKSLASH:
+                    return zeroed if cursor + ExpressionOperand::ESCAPED_BYTE_WIDTH > content_end
+                    escaped: u8 = payload[cursor + JsonParser::CURSOR_INCREMENT]
+                    if escaped == Character::REQUEST_CHARACTER_ASCII_U:
+                        codepoint: ParsedOperandNumber = request_parse_unicode_quad(payload, content_end, cursor + ExpressionOperand::ESCAPED_BYTE_WIDTH)
+                        return zeroed if not codepoint.valid or codepoint.value > ExpressionOperand::ASCII_MAX
+                        decoded <- codepoint.value.u8()
+                        cursor <- codepoint.end
+                    else:
+                        if escaped == Character::REQUEST_CHARACTER_ASCII_QUOTE or escaped == Character::REQUEST_CHARACTER_ASCII_BACKSLASH or escaped == Character::REQUEST_CHARACTER_ASCII_SLASH:
+                            decoded <- escaped
+                        else:
+                            if escaped == Character::REQUEST_CHARACTER_ASCII_B:
+                                decoded <- ExpressionOperand::ASCII_BACKSPACE
+                            else:
+                                if escaped == Character::REQUEST_CHARACTER_ASCII_F:
+                                    decoded <- ExpressionOperand::ASCII_FORM_FEED
+                                else:
+                                    if escaped == Character::REQUEST_CHARACTER_ASCII_N:
+                                        decoded <- Character::REQUEST_CHARACTER_ASCII_LINE_FEED
+                                    else:
+                                        if escaped == Character::REQUEST_CHARACTER_ASCII_R:
+                                            decoded <- Character::REQUEST_CHARACTER_ASCII_CARRIAGE_RETURN
+                                        else:
+                                            if escaped == Character::REQUEST_CHARACTER_ASCII_T:
+                                                decoded <- Character::REQUEST_CHARACTER_ASCII_TAB
+                                            else:
+                                                return zeroed
+                            cursor <- cursor + ExpressionOperand::ESCAPED_BYTE_WIDTH
+                else:
+                    return zeroed if payload[cursor] < Character::REQUEST_CHARACTER_ASCII_SPACE or payload[cursor].u64() > ExpressionOperand::ASCII_MAX
+                    cursor <- cursor + JsonParser::CURSOR_INCREMENT
+                return zeroed if not expression_text_append(expression, decoded)
+            return zeroed if expression.length == ExpressionOperand::NO_EXPRESSION_BYTES
+            expression.valid <- true
+            return expression
+
         def request_program_path_string_parse(payload: u8&, length: usize, start: usize) -> ProgramPath:
             path: mutable ProgramPath = zeroed
             path.valid <- true
@@ -888,7 +965,7 @@ module DebuggerProtocolRequest:
             field_count: mutable usize = 0
             while cursor < length:
                 while cursor < length and is_json_whitespace(payload[cursor]):
-                    cursor <- cursor + 1
+                    cursor <- cursor + JsonParser::CURSOR_INCREMENT
                 return field_count == RequestLimits::REQUEST_LIMITS_SINGLE_SOURCE_BREAKPOINT_MEMBER_COUNT if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BRACE_CLOSE
                 key_start: usize = cursor
                 key_end: usize = json_string_end(payload, length, key_start)
@@ -997,6 +1074,20 @@ module DebuggerProtocolRequest:
                 return false if not memory_length.valid
                 operands.memory_length <- memory_length.value
                 operands.has_memory_length <- true
+            if method == RequestMethod.Evaluate:
+                expression_start: usize = request_object_field_value_start(payload, length, arguments, "expression", 0)
+                return false if expression_start == JsonParser::REQUEST_JSONPARSER_NO_INDEX or request_object_field_value_start(payload, length, arguments, "expression", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+                expression: ExpressionText = request_expression_string_parse(payload, length, expression_start)
+                return false if not expression.valid
+                operands.expression <- expression
+                operands.has_expression <- true
+                frame_index_start: usize = request_object_field_value_start(payload, length, arguments, "frameIndex", 0)
+                return false if request_object_field_value_start(payload, length, arguments, "frameIndex", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+                if frame_index_start != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
+                    frame_index: ParsedOperandNumber = request_parse_bounded_unsigned(payload, length, frame_index_start, ExpressionOperand::MAX_FRAME_INDEX, false)
+                    return false if not frame_index.valid
+                    operands.frame_index <- frame_index.value
+                    operands.has_frame_index <- true
             if method == RequestMethod.SetBreakpoints:
                 source_breakpoints: SourceBreakpointRequest = request_source_breakpoints_parse(payload, length, arguments)
                 return false if not source_breakpoints.valid
@@ -1384,6 +1475,7 @@ module DebuggerProtocolRequest:
             if arguments != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
                 return operands if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
             return operands if request.method == RequestMethod.Launch and not operands.has_program
+            return operands if request.method == RequestMethod.Evaluate and (arguments == JsonParser::REQUEST_JSONPARSER_NO_INDEX or not operands.has_expression)
             return operands if request.method == RequestMethod.Variables and not operands.has_variables_reference
             return operands if request.method == RequestMethod.Memory and (not operands.has_memory_address or not operands.has_memory_length)
             return operands if not request_session_operands_parse(payload, length, root_start, operands)

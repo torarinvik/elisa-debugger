@@ -10,6 +10,8 @@ module DebuggerTypeMetadata:
 
         const module Metadata:
             METADATA_TYPES_NO_ID: u64 = 0
+            EMPTY_COUNT: usize = 0
+            COUNT_STEP: usize = 1
 
         const module Scope:
             METADATA_TYPES_SCOPE_CAPACITY: usize = 512
@@ -67,9 +69,10 @@ module DebuggerTypeMetadata:
             bindings: mutable BindingInfo[Binding::METADATA_TYPES_BINDING_CAPACITY]
             binding_count: mutable usize
 
-        def metadata_new() -> MetadataStore:
-            store: mutable MetadataStore = zeroed
-            return store
+        def metadata_initialize(store: mutable MetadataStore&) -> void:
+            store.type_count <- Metadata::EMPTY_COUNT
+            store.scope_count <- Metadata::EMPTY_COUNT
+            store.binding_count <- Metadata::EMPTY_COUNT
 
         def type_info_is_valid(info: TypeInfo) -> bool:
             return info.id.value != Metadata::METADATA_TYPES_NO_ID and info.name.value != Metadata::METADATA_TYPES_NO_ID and info.kind.u16() <= Type::METADATA_TYPES_TYPE_KIND_MAX and info.kind != TypeKind.Unknown
@@ -85,26 +88,24 @@ module DebuggerTypeMetadata:
             return false if scope.end_event != Metadata::METADATA_TYPES_NO_ID and (binding.lifetime_end == Metadata::METADATA_TYPES_NO_ID or binding.lifetime_end > scope.end_event)
             return true
 
-        def metadata_add_type(store: MetadataStore, info: TypeInfo) -> MetadataStore:
-            updated: mutable MetadataStore = store
-            return updated if store.type_count >= Type::METADATA_TYPES_TYPE_CAPACITY or not type_info_is_valid(info)
+        def metadata_add_type(store: mutable MetadataStore&, info: TypeInfo) -> bool:
+            return false if store.type_count >= Type::METADATA_TYPES_TYPE_CAPACITY or not type_info_is_valid(info)
             for index in 0..<store.type_count:
-                return updated if store.types[index].id.value == info.id.value
-            updated.types[store.type_count] <- info
-            updated.type_count <- store.type_count + 1
-            return updated
+                return false if store.types[index].id.value == info.id.value
+            store.types[store.type_count] <- info
+            store.type_count <- store.type_count + Metadata::COUNT_STEP
+            return true
 
-        def metadata_add_scope(store: MetadataStore, info: ScopeInfo) -> MetadataStore:
-            updated: mutable MetadataStore = store
-            return updated if store.scope_count >= Scope::METADATA_TYPES_SCOPE_CAPACITY or not scope_info_is_valid(info)
-            return updated if not metadata_scope_parent_is_valid(store, info.parent)
+        def metadata_add_scope(store: mutable MetadataStore&, info: ScopeInfo) -> bool:
+            return false if store.scope_count >= Scope::METADATA_TYPES_SCOPE_CAPACITY or not scope_info_is_valid(info)
+            return false if not metadata_scope_parent_is_valid(store, info.parent)
             for index in 0..<store.scope_count:
-                return updated if store.scopes[index].id.value == info.id.value
-            updated.scopes[store.scope_count] <- info
-            updated.scope_count <- store.scope_count + 1
-            return updated
+                return false if store.scopes[index].id.value == info.id.value
+            store.scopes[store.scope_count] <- info
+            store.scope_count <- store.scope_count + Metadata::COUNT_STEP
+            return true
 
-        def metadata_scope_parent_is_valid(store: MetadataStore, start: DebuggerIdentity::DebugId) -> bool:
+        def metadata_scope_parent_is_valid(store: MetadataStore&, start: DebuggerIdentity::DebugId) -> bool:
             visited: mutable bool[Scope::METADATA_TYPES_SCOPE_CAPACITY] = zeroed
             current: mutable DebuggerIdentity::DebugId = start
             for hop in 0..<Scope::METADATA_TYPES_SCOPE_CAPACITY:
@@ -119,33 +120,32 @@ module DebuggerTypeMetadata:
                 current <- store.scopes[index].parent
             return false
 
-        def metadata_add_binding(store: MetadataStore, info: BindingInfo) -> MetadataStore:
-            updated: mutable MetadataStore = store
-            return updated if store.binding_count >= Binding::METADATA_TYPES_BINDING_CAPACITY or not binding_info_is_valid(info)
+        def metadata_add_binding(store: mutable MetadataStore&, info: BindingInfo) -> bool:
+            return false if store.binding_count >= Binding::METADATA_TYPES_BINDING_CAPACITY or not binding_info_is_valid(info)
             resolved_scope: ScopeInfo = metadata_find_scope(store, info.scope)
-            return updated if metadata_find_type(store, info.type_id).id.value == Metadata::METADATA_TYPES_NO_ID or resolved_scope.id.value == Metadata::METADATA_TYPES_NO_ID
-            return updated if not binding_lifetime_fits_scope(info, resolved_scope)
+            return false if metadata_find_type(store, info.type_id).id.value == Metadata::METADATA_TYPES_NO_ID or resolved_scope.id.value == Metadata::METADATA_TYPES_NO_ID
+            return false if not binding_lifetime_fits_scope(info, resolved_scope)
             for index in 0..<store.binding_count:
-                return updated if DebuggerIdentity::binding_identity_equal(store.bindings[index].id, info.id)
-            updated.bindings[store.binding_count] <- info
-            updated.binding_count <- store.binding_count + 1
-            return updated
+                return false if DebuggerIdentity::binding_identity_equal(store.bindings[index].id, info.id)
+            store.bindings[store.binding_count] <- info
+            store.binding_count <- store.binding_count + Metadata::COUNT_STEP
+            return true
 
-        def metadata_find_type(store: MetadataStore, id: DebuggerIdentity::DebugId) -> TypeInfo:
+        def metadata_find_type(store: MetadataStore&, id: DebuggerIdentity::DebugId) -> TypeInfo:
             result: mutable TypeInfo = zeroed
             return result if store.type_count > Type::METADATA_TYPES_TYPE_CAPACITY
             for index in 0..<store.type_count:
                 return store.types[index] if store.types[index].id.value == id.value
             return result
 
-        def metadata_find_scope(store: MetadataStore, id: DebuggerIdentity::DebugId) -> ScopeInfo:
+        def metadata_find_scope(store: MetadataStore&, id: DebuggerIdentity::DebugId) -> ScopeInfo:
             result: mutable ScopeInfo = zeroed
             return result if store.scope_count > Scope::METADATA_TYPES_SCOPE_CAPACITY
             for index in 0..<store.scope_count:
                 return store.scopes[index] if store.scopes[index].id.value == id.value
             return result
 
-        def metadata_find_binding(store: MetadataStore, id: DebuggerIdentity::BindingIdentity) -> BindingInfo:
+        def metadata_find_binding(store: MetadataStore&, id: DebuggerIdentity::BindingIdentity) -> BindingInfo:
             result: mutable BindingInfo = zeroed
             return result if store.binding_count > Binding::METADATA_TYPES_BINDING_CAPACITY
             for index in 0..<store.binding_count:

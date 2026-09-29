@@ -147,7 +147,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
-.PHONY: managed-allocations-check concurrency-races-check expression-parser-check timeline-capability-check
+.PHONY: managed-allocations-check concurrency-races-check expression-parser-check timeline-capability-check type-metadata-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool
@@ -231,6 +231,7 @@ module-check: dap-column-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-protocol-client-ordering-check
 module-check: $(BUILD)/elisa-debugger-session-ownership-check
 module-check: edir-file-loader-check
+module-check: $(BUILD)/elisa-debugger-type-metadata-check
 
 	"$(BUILD)/elisa-debugger-module-core-check"
 	"$(BUILD)/elisa-debugger-module-data-check"
@@ -305,6 +306,7 @@ endif
 	"$(BUILD)/elisa-debugger-path-policy-check"
 	"$(BUILD)/elisa-debugger-process-spawn-check" $(PROCESS_SPAWN_CHECK_PARENT_MODE) $(PROCESS_SPAWN_CHECK_RESERVED_FIRST) $(PROCESS_SPAWN_CHECK_RESERVED_SECOND)
 	"$(BUILD)/elisa-debugger-build-runner-check"
+	"$(BUILD)/elisa-debugger-type-metadata-check"
 	test "$$(printf 'ELI' | "$(BUILD)/elisa-debugger-ffi-probe")" = 'ELI'
 
 managed-inspection-check: $(BUILD)/elisa-debugger-managed-inspection-check
@@ -953,6 +955,13 @@ expression-parser-check: $(EXPRESSION_PARSER_CHECK)
 $(BUILD)/elisa-debugger-source-store-check: tests/source_store_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-type-metadata-check: tests/type_metadata_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+type-metadata-check: $(BUILD)/elisa-debugger-type-metadata-check
+	"$(BUILD)/elisa-debugger-type-metadata-check"
 
 $(BUILD)/elisa-debugger-request-whitespace-check: tests/request_whitespace_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

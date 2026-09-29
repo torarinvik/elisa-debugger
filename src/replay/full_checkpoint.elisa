@@ -43,6 +43,7 @@ module DebuggerFullCheckpoint:
             CHECKPOINT_HASH_TRUE: u8 = 1
             CHECKPOINT_INVALID_HASH: u64 = 0
             CHECKPOINT_INVALID_METADATA_VERSION: u32 = 0
+            CHECKPOINT_EMPTY_INDEX: usize = 0
             CHECKPOINT_MAX_ERROR_CODE: u16 = 12
             CHECKPOINT_MAX_ERROR_SEVERITY: u16 = 2
 
@@ -173,7 +174,7 @@ module DebuggerFullCheckpoint:
                 hash <- checkpoint_hash_u16(hash, decision.kind.u16())
                 hash <- checkpoint_hash_u64(hash, decision.synchronization)
 
-            effects: DebuggerEffects::EffectOracle = checkpoint.effects
+            effects: DebuggerEffects::EffectOracle& = checkpoint.effects
             hash <- checkpoint_hash_u64(hash, effects.count.u64())
             hash <- checkpoint_hash_u64(hash, effects.cursor.u64())
             hash <- checkpoint_hash_u16(hash, effects.mode.u16())
@@ -245,7 +246,7 @@ module DebuggerFullCheckpoint:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INTEGRITY) if checkpoint.side_state_hash != checkpoint_hash_side_state(checkpoint)
             return DebuggerErrors::no_error()
 
-        def full_checkpoint_capture_with_adapters(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle, resources: DebuggerVirtualResources::ResourceStore, adapters: DebuggerReplayAdapters::AdapterSnapshot, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64, build: DebuggerIdentity::BuildIdentity, image_fingerprint: u64, image_fingerprint_valid: bool) -> ManagedCheckpoint:
+        def full_checkpoint_capture_with_adapters(machine: DebuggerEDIR::Machine, tasks: DebuggerConcurrencyCheckpoint::TaskSnapshot, effects: DebuggerEffects::EffectOracle&, resources: DebuggerVirtualResources::ResourceStore, adapters: DebuggerReplayAdapters::AdapterSnapshot&, recording: DebuggerIdentity::DebugId, branch: DebuggerIdentity::DebugId, event: u64, state_hash: u64, build: DebuggerIdentity::BuildIdentity, image_fingerprint: u64, image_fingerprint_valid: bool) -> ManagedCheckpoint:
             checkpoint: mutable ManagedCheckpoint = ManagedCheckpoint{
                 schema: Full::CHECKPOINT_SCHEMA,
                 recording: recording,
@@ -286,10 +287,18 @@ module DebuggerFullCheckpoint:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_FULL_CHECKPOINT_DETAIL_TASKS) if not DebuggerConcurrencyCheckpoint::task_snapshot_matches(runtime, checkpoint.tasks)
             return DebuggerErrors::no_error()
 
-        def full_checkpoint_effects(checkpoint: ManagedCheckpoint&) -> DebuggerEffects::EffectOracle:
-            result: mutable DebuggerEffects::EffectOracle = zeroed
-            return result if not full_checkpoint_is_valid(checkpoint)
-            return checkpoint.effects
+        def full_checkpoint_restore_effects(effects: mutable DebuggerEffects::EffectOracle&, checkpoint: ManagedCheckpoint&) -> DebuggerErrors::DebuggerError:
+            failure: DebuggerErrors::DebuggerError = full_checkpoint_validate(checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            effects.count <- checkpoint.effects.count
+            effects.cursor <- checkpoint.effects.cursor
+            effects.mode <- checkpoint.effects.mode
+            effects.exactness <- checkpoint.effects.exactness
+            effects.overflowed <- checkpoint.effects.overflowed
+            effects.last_error <- checkpoint.effects.last_error
+            for index in Full::CHECKPOINT_EMPTY_INDEX..<checkpoint.effects.count:
+                effects.records[index] <- checkpoint.effects.records[index]
+            return DebuggerErrors::no_error()
 
         def full_checkpoint_resources(checkpoint: ManagedCheckpoint&) -> DebuggerVirtualResources::ResourceStore:
             result: mutable DebuggerVirtualResources::ResourceStore = zeroed

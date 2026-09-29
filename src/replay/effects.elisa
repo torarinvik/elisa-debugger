@@ -12,7 +12,17 @@ module DebuggerEffects:
 
         const module Effect:
             ORACLE_CAPACITY: usize = 256
+            EMPTY_COUNT: usize = 0
+            EMPTY_CURSOR: usize = 0
+            COUNT_INCREMENT: usize = 1
+            CURSOR_INCREMENT: usize = 1
+            PREVIOUS_RECORD_OFFSET: usize = 1
             SEQUENCE_START: u64 = 0
+            INITIAL_OVERFLOWED: bool = false
+            EMPTY_HASH: u64 = 0
+            EMPTY_VALUE: i64 = 0
+            NO_WRITE_SUPPRESSION: bool = false
+            INITIAL_ACCEPTED: bool = false
             REPLAY_EFFECTS_EFFECT_KIND_MAX: u16 = 9
             REPLAY_EFFECTS_EFFECT_MODE_MAX: u16 = 4
             EXACTNESS_MAX: u16 = 3
@@ -61,30 +71,28 @@ module DebuggerEffects:
             overflowed: mutable bool
             last_error: mutable DebuggerErrors::DebuggerError
 
-        # Result of consuming one recorded effect.  The updated oracle is
-        # returned with the result so callers cannot observe a value without
-        # also committing the cursor advance that produced it.
+        # A small reply carries the recorded value and write policy. The
+        # cursor advances in the caller-owned oracle before this returns.
         struct EffectReplay:
-            oracle: mutable EffectOracle
             accepted: mutable bool
             result_hash: mutable u64
             result_value: mutable i64
             suppress_external_write: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
-        def effect_oracle_new(mode: EffectMode) -> EffectOracle:
-            oracle: mutable EffectOracle = zeroed
-            oracle.count <- 0
-            oracle.cursor <- 0
+        # The caller owns the fixed record buffer. Empty logical extent makes
+        # old slots unreachable; recording overwrites each slot before commit.
+        def effect_oracle_initialize(oracle: mutable EffectOracle&, mode: EffectMode) -> void:
+            oracle.count <- Effect::EMPTY_COUNT
+            oracle.cursor <- Effect::EMPTY_CURSOR
             oracle.mode <- mode
             oracle.exactness <- Exactness.Observational if mode == EffectMode.Live or mode == EffectMode.Barrier
             oracle.exactness <- Exactness.Exact if mode != EffectMode.Live and mode != EffectMode.Barrier
             if mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
                 oracle.exactness <- Exactness.Diverged
                 oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
-            oracle.overflowed <- false
+            oracle.overflowed <- Effect::INITIAL_OVERFLOWED
             oracle.last_error <- DebuggerErrors::no_error() if mode.u16() <= Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX
-            return oracle
 
         def effect_is_external_write(kind: EffectKind) -> bool:
             return true if kind == EffectKind.ConsoleOutput
@@ -98,95 +106,87 @@ module DebuggerEffects:
         def effect_kind_is_fully_captured(kind: EffectKind) -> bool:
             return kind == EffectKind.Clock
 
-        def effect_oracle_record(oracle: EffectOracle, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> EffectOracle:
-            updated: mutable EffectOracle = oracle
-            return updated if oracle.exactness == Exactness.Diverged or (not DebuggerErrors::error_is_ok(oracle.last_error) and oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported)
+        def effect_oracle_record(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> void:
+            return if oracle.exactness == Exactness.Diverged or (not DebuggerErrors::error_is_ok(oracle.last_error) and oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported)
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
+                return
             if kind.u16() > Effect::REPLAY_EFFECTS_EFFECT_KIND_MAX:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
+                return
             if oracle.mode == EffectMode.Replaying:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_WRITE)
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_WRITE)
+                return
             if oracle.count >= Effect::ORACLE_CAPACITY:
-                updated.overflowed <- true
-                updated.exactness <- Exactness.Incomplete
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32())
-                return updated
-            updated.records[oracle.count] <- EffectRecord{sequence: oracle.count.u64(), kind: kind, request_hash: request_hash, result_hash: result_hash, result_value: value, suppress_external_write: effect_is_external_write(kind)}
-            updated.count <- oracle.count + 1
-            updated.exactness <- Exactness.Observational if oracle.mode == EffectMode.Live or oracle.mode == EffectMode.Barrier
+                oracle.overflowed <- true
+                oracle.exactness <- Exactness.Incomplete
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32())
+                return
+            oracle.records[oracle.count] <- EffectRecord{sequence: oracle.count.u64(), kind: kind, request_hash: request_hash, result_hash: result_hash, result_value: value, suppress_external_write: effect_is_external_write(kind)}
+            oracle.count <- oracle.count + Effect::COUNT_INCREMENT
+            oracle.exactness <- Exactness.Observational if oracle.mode == EffectMode.Live or oracle.mode == EffectMode.Barrier
             if oracle.mode != EffectMode.Live and oracle.mode != EffectMode.Barrier:
                 if not effect_kind_is_fully_captured(kind):
-                    updated.exactness <- Exactness.Incomplete
-                    updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT) if DebuggerErrors::error_is_ok(oracle.last_error)
-                else:
-                    updated.exactness <- oracle.exactness if oracle.exactness != Exactness.Exact
-            return updated
+                    oracle.exactness <- Exactness.Incomplete
+                    oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT) if DebuggerErrors::error_is_ok(oracle.last_error)
 
-        def effect_oracle_replay(oracle: EffectOracle, kind: EffectKind, request_hash: u64) -> EffectOracle:
-            updated: mutable EffectOracle = oracle
+        def effect_oracle_replay(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64) -> void:
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
-                return updated
-            return updated if oracle.mode != EffectMode.Replaying
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
+                return
+            return if oracle.mode != EffectMode.Replaying
             if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor > oracle.count:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Effect::ORACLE_CAPACITY.u32())
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Effect::ORACLE_CAPACITY.u32())
+                return
             if oracle.overflowed:
-                updated.exactness <- Exactness.Incomplete
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32()) if DebuggerErrors::error_is_ok(oracle.last_error)
-                return updated
+                oracle.exactness <- Exactness.Incomplete
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32()) if DebuggerErrors::error_is_ok(oracle.last_error)
+                return
             if oracle.exactness == Exactness.Exact and DebuggerErrors::error_is_ok(oracle.last_error):
-                for index in 0..<oracle.count:
+                for index in Effect::EMPTY_COUNT..<oracle.count:
                     if not effect_kind_is_fully_captured(oracle.records[index].kind):
-                        updated.exactness <- Exactness.Incomplete
-                        updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT)
-                        return updated
-            return updated if oracle.exactness != Exactness.Exact or not DebuggerErrors::error_is_ok(oracle.last_error)
+                        oracle.exactness <- Exactness.Incomplete
+                        oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT)
+                        return
+            return if oracle.exactness != Exactness.Exact or not DebuggerErrors::error_is_ok(oracle.last_error)
             if kind.u16() > Effect::REPLAY_EFFECTS_EFFECT_KIND_MAX:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
+                return
             if oracle.cursor >= oracle.count:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
+                return
             record: EffectRecord = oracle.records[oracle.cursor]
             if record.suppress_external_write != effect_is_external_write(record.kind):
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
-                return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
+                return
             if record.sequence != oracle.cursor.u64() or record.kind != kind or record.request_hash != request_hash:
-                updated.exactness <- Exactness.Diverged
-                updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
-                return updated
-            updated.cursor <- oracle.cursor + 1
-            return updated
+                oracle.exactness <- Exactness.Diverged
+                oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
+                return
+            oracle.cursor <- oracle.cursor + Effect::CURSOR_INCREMENT
 
-        def effect_replay_failure(oracle: EffectOracle, failure: DebuggerErrors::DebuggerError) -> EffectReplay:
-            updated: mutable EffectOracle = oracle
-            updated.exactness <- Exactness.Diverged
-            updated.last_error <- failure
-            return EffectReplay{oracle: updated, accepted: false, result_hash: 0, result_value: 0, suppress_external_write: false, failure: failure}
+        def effect_replay_failure(oracle: mutable EffectOracle&, failure: DebuggerErrors::DebuggerError) -> EffectReplay:
+            oracle.exactness <- Exactness.Diverged
+            oracle.last_error <- failure
+            return EffectReplay{accepted: Effect::INITIAL_ACCEPTED, result_hash: Effect::EMPTY_HASH, result_value: Effect::EMPTY_VALUE, suppress_external_write: Effect::NO_WRITE_SUPPRESSION, failure: failure}
 
-        def effect_replay_unavailable(oracle: EffectOracle, failure: DebuggerErrors::DebuggerError) -> EffectReplay:
-            updated: mutable EffectOracle = oracle
-            updated.last_error <- failure if DebuggerErrors::error_is_ok(oracle.last_error)
-            return EffectReplay{oracle: updated, accepted: false, result_hash: 0, result_value: 0, suppress_external_write: false, failure: failure}
+        def effect_replay_unavailable(oracle: mutable EffectOracle&, failure: DebuggerErrors::DebuggerError) -> EffectReplay:
+            oracle.last_error <- failure if DebuggerErrors::error_is_ok(oracle.last_error)
+            return EffectReplay{accepted: Effect::INITIAL_ACCEPTED, result_hash: Effect::EMPTY_HASH, result_value: Effect::EMPTY_VALUE, suppress_external_write: Effect::NO_WRITE_SUPPRESSION, failure: failure}
 
         # Consume one recorded result and expose the external-write policy
         # together with the value.  Replay callers must use this API instead
         # of reading records directly, so mismatched requests stop at the
         # first divergence and cannot accidentally send a real write.
-        def effect_oracle_replay_result(oracle: EffectOracle, kind: EffectKind, request_hash: u64) -> EffectReplay:
+        def effect_oracle_replay_result(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64) -> EffectReplay:
             initial_failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
@@ -199,10 +199,9 @@ module DebuggerEffects:
                 return effect_replay_failure(oracle, initial_failure)
             if oracle.overflowed:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32())
-                incomplete: mutable EffectOracle = oracle
-                incomplete.exactness <- Exactness.Incomplete
-                incomplete.last_error <- initial_failure if DebuggerErrors::error_is_ok(oracle.last_error)
-                return effect_replay_unavailable(incomplete, initial_failure)
+                oracle.exactness <- Exactness.Incomplete
+                oracle.last_error <- initial_failure if DebuggerErrors::error_is_ok(oracle.last_error)
+                return effect_replay_unavailable(oracle, initial_failure)
             if oracle.exactness == Exactness.Incomplete:
                 initial_failure <- oracle.last_error if not DebuggerErrors::error_is_ok(oracle.last_error) else DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT)
                 return effect_replay_unavailable(oracle, initial_failure)
@@ -212,12 +211,11 @@ module DebuggerEffects:
             if kind.u16() > Effect::REPLAY_EFFECTS_EFFECT_KIND_MAX:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
                 return effect_replay_failure(oracle, initial_failure)
-            for index in 0..<oracle.count:
+            for index in Effect::EMPTY_COUNT..<oracle.count:
                 if not effect_kind_is_fully_captured(oracle.records[index].kind):
                     initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT)
-                    incomplete: mutable EffectOracle = oracle
-                    incomplete.exactness <- Exactness.Incomplete
-                    return effect_replay_unavailable(incomplete, initial_failure)
+                    oracle.exactness <- Exactness.Incomplete
+                    return effect_replay_unavailable(oracle, initial_failure)
             if oracle.cursor >= oracle.count:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
                 return effect_replay_failure(oracle, initial_failure)
@@ -225,28 +223,27 @@ module DebuggerEffects:
             if record.suppress_external_write != effect_is_external_write(record.kind) or record.sequence != oracle.cursor.u64() or record.kind != kind or record.request_hash != request_hash:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
                 return effect_replay_failure(oracle, initial_failure)
-            updated: mutable EffectOracle = oracle
-            updated.cursor <- oracle.cursor + 1
-            return EffectReplay{oracle: updated, accepted: true, result_hash: record.result_hash, result_value: record.result_value, suppress_external_write: record.suppress_external_write, failure: DebuggerErrors::no_error()}
+            oracle.cursor <- oracle.cursor + Effect::CURSOR_INCREMENT
+            return EffectReplay{accepted: true, result_hash: record.result_hash, result_value: record.result_value, suppress_external_write: record.suppress_external_write, failure: DebuggerErrors::no_error()}
 
-        def effect_oracle_is_exact(oracle: EffectOracle) -> bool:
+        def effect_oracle_is_exact(oracle: EffectOracle&) -> bool:
             return false if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor > oracle.count or oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX or oracle.exactness.u16() > Effect::EXACTNESS_MAX or not DebuggerErrors::error_is_ok(oracle.last_error)
             return false if oracle.mode == EffectMode.Live or oracle.mode == EffectMode.Barrier
-            for index in 0..<oracle.count:
+            for index in Effect::EMPTY_COUNT..<oracle.count:
                 return false if oracle.records[index].sequence != index.u64() or oracle.records[index].kind.u16() > Effect::REPLAY_EFFECTS_EFFECT_KIND_MAX or oracle.records[index].suppress_external_write != effect_is_external_write(oracle.records[index].kind)
                 return false if not effect_kind_is_fully_captured(oracle.records[index].kind)
             return oracle.exactness == Exactness.Exact and not oracle.overflowed
 
-        def effect_oracle_last_value(oracle: EffectOracle) -> i64:
-            return 0 if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor == 0 or oracle.cursor > oracle.count
-            return oracle.records[oracle.cursor - 1].result_value
+        def effect_oracle_last_value(oracle: EffectOracle&) -> i64:
+            return Effect::EMPTY_VALUE if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor == Effect::EMPTY_CURSOR or oracle.cursor > oracle.count
+            return oracle.records[oracle.cursor - Effect::PREVIOUS_RECORD_OFFSET].result_value
 
-        def effect_oracle_last_record(oracle: EffectOracle) -> EffectRecord:
+        def effect_oracle_last_record(oracle: EffectOracle&) -> EffectRecord:
             result: mutable EffectRecord = zeroed
-            return result if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor == 0 or oracle.cursor > oracle.count
-            return oracle.records[oracle.cursor - 1]
+            return result if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor == Effect::EMPTY_CURSOR or oracle.cursor > oracle.count
+            return oracle.records[oracle.cursor - Effect::PREVIOUS_RECORD_OFFSET]
 
-        def effect_oracle_replay_complete(oracle: EffectOracle) -> bool:
+        def effect_oracle_replay_complete(oracle: EffectOracle&) -> bool:
             return false if not effect_oracle_is_exact(oracle)
             return oracle.mode != EffectMode.Replaying or oracle.cursor == oracle.count
 

@@ -1,0 +1,107 @@
+# Exercise recording and replay against caller-owned oracle storage.
+
+include "../src/replay/effects.elisa"
+
+const module Test:
+    SOURCE_REQUEST_HASH: u64 = 11
+    SOURCE_RESULT_HASH: u64 = 22
+    SOURCE_RESULT_VALUE: i64 = 3
+    CLOCK_REQUEST_HASH: u64 = 31
+    CLOCK_RESULT_HASH: u64 = 32
+    CLOCK_RESULT_VALUE: i64 = 33
+    CLOCK_REPLAY_REQUEST_HASH: u64 = 41
+    CLOCK_REPLAY_RESULT_HASH: u64 = 42
+    CLOCK_REPLAY_RESULT_VALUE: i64 = 43
+    INITIAL_SEQUENCE: u64 = 0
+    EMPTY_CURSOR: usize = 0
+    ONE_RECORDED_EFFECT: usize = 1
+    TWO_RECORDED_EFFECTS: usize = 2
+    ONE_REPLAYED_EFFECT: usize = 1
+    TEST_SUCCESS: i64 = 0
+    INVALID_SEQUENCE: u64 = 9
+    FIRST_RECORD_INDEX: usize = 0
+    FAILURE_UNSUPPORTED_RECORD: i64 = 1
+    FAILURE_INCOMPLETE_UPGRADE: i64 = 2
+    FAILURE_UNSUPPORTED_REPLAY: i64 = 3
+    FAILURE_FORGED_REPLAY: i64 = 4
+    FAILURE_CLOCK_REPLAY: i64 = 5
+    FAILURE_OVERFLOW_REPLAY: i64 = 6
+    FAILURE_MISMATCH: i64 = 7
+    FAILURE_INVALID_RECORD: i64 = 8
+    FAILURE_LIVE_EXACTNESS: i64 = 9
+    FAILURE_BARRIER_EXACTNESS: i64 = 10
+    FAILURE_TAMPERED_SEQUENCE: i64 = 11
+    FAILURE_REPLAY_CURSOR: i64 = 12
+    FAILURE_REPLAY_COMPLETE: i64 = 13
+
+def main() -> i64:
+    oracle: mutable DebuggerEffects::EffectOracle = zeroed
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.NetworkWrite, Test::SOURCE_REQUEST_HASH, Test::SOURCE_RESULT_HASH, Test::SOURCE_RESULT_VALUE)
+    return Test::FAILURE_UNSUPPORTED_RECORD if oracle.count != Test::ONE_RECORDED_EFFECT or not oracle.records[Test::FIRST_RECORD_INDEX].suppress_external_write or oracle.exactness != DebuggerEffects::Exactness.Incomplete or oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported
+    return Test::FAILURE_UNSUPPORTED_RECORD if DebuggerEffects::effect_oracle_is_exact(oracle)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    return Test::FAILURE_INCOMPLETE_UPGRADE if oracle.count != Test::TWO_RECORDED_EFFECTS or oracle.exactness != DebuggerEffects::Exactness.Incomplete or oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    unavailable: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(oracle, DebuggerEffects::EffectKind.NetworkWrite, Test::SOURCE_REQUEST_HASH)
+    return Test::FAILURE_UNSUPPORTED_REPLAY if unavailable.accepted or oracle.cursor != Test::EMPTY_CURSOR or oracle.exactness != DebuggerEffects::Exactness.Incomplete or unavailable.failure.code != DebuggerErrors::ErrorCode.Unsupported
+    return Test::FAILURE_UNSUPPORTED_REPLAY if DebuggerEffects::effect_oracle_replay_complete(oracle)
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.NetworkWrite, Test::SOURCE_REQUEST_HASH, Test::SOURCE_RESULT_HASH, Test::SOURCE_RESULT_VALUE)
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    oracle.exactness <- DebuggerEffects::Exactness.Exact
+    oracle.last_error <- DebuggerErrors::no_error()
+    return Test::FAILURE_FORGED_REPLAY if DebuggerEffects::effect_oracle_is_exact(oracle)
+    DebuggerEffects::effect_oracle_replay(oracle, DebuggerEffects::EffectKind.NetworkWrite, Test::SOURCE_REQUEST_HASH)
+    return Test::FAILURE_FORGED_REPLAY if oracle.exactness != DebuggerEffects::Exactness.Incomplete or oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported or oracle.cursor != Test::EMPTY_CURSOR
+    forged: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(oracle, DebuggerEffects::EffectKind.NetworkWrite, Test::SOURCE_REQUEST_HASH)
+    return Test::FAILURE_FORGED_REPLAY if forged.accepted or forged.failure.code != DebuggerErrors::ErrorCode.Unsupported
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REPLAY_REQUEST_HASH, Test::CLOCK_REPLAY_RESULT_HASH, Test::CLOCK_REPLAY_RESULT_VALUE)
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    replayed: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REPLAY_REQUEST_HASH)
+    return Test::FAILURE_CLOCK_REPLAY if not replayed.accepted or replayed.result_hash != Test::CLOCK_REPLAY_RESULT_HASH or replayed.result_value != Test::CLOCK_REPLAY_RESULT_VALUE or replayed.suppress_external_write or oracle.cursor != Test::ONE_REPLAYED_EFFECT or not DebuggerErrors::error_is_ok(replayed.failure)
+    return Test::FAILURE_CLOCK_REPLAY if not DebuggerEffects::effect_oracle_replay_complete(oracle)
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REPLAY_REQUEST_HASH, Test::CLOCK_REPLAY_RESULT_HASH, Test::CLOCK_REPLAY_RESULT_VALUE)
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    DebuggerEffects::effect_oracle_replay(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REPLAY_REQUEST_HASH)
+    return Test::FAILURE_REPLAY_CURSOR if oracle.cursor != Test::ONE_REPLAYED_EFFECT
+    return Test::FAILURE_REPLAY_COMPLETE if not DebuggerEffects::effect_oracle_replay_complete(oracle)
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    oracle.overflowed <- true
+    DebuggerEffects::effect_oracle_replay(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH)
+    overflowed: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH)
+    return Test::FAILURE_OVERFLOW_REPLAY if overflowed.accepted or oracle.cursor != Test::EMPTY_CURSOR or oracle.exactness != DebuggerEffects::Exactness.Incomplete or overflowed.failure.code != DebuggerErrors::ErrorCode.ResourceLimit
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    mismatch: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(oracle, DebuggerEffects::EffectKind.Random, Test::CLOCK_REQUEST_HASH)
+    return Test::FAILURE_MISMATCH if mismatch.accepted or oracle.exactness != DebuggerEffects::Exactness.Diverged or mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    oracle.records[Test::FIRST_RECORD_INDEX] <- DebuggerEffects::EffectRecord{sequence: Test::INITIAL_SEQUENCE, kind: DebuggerEffects::EffectKind.Clock, request_hash: Test::CLOCK_REQUEST_HASH, result_hash: Test::CLOCK_RESULT_HASH, result_value: Test::CLOCK_RESULT_VALUE, suppress_external_write: true}
+    return Test::FAILURE_INVALID_RECORD if DebuggerEffects::effect_oracle_is_exact(oracle)
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Live)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    return Test::FAILURE_LIVE_EXACTNESS if DebuggerEffects::effect_oracle_is_exact(oracle)
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Barrier)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Foreign, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    return Test::FAILURE_BARRIER_EXACTNESS if DebuggerEffects::effect_oracle_is_exact(oracle)
+
+    DebuggerEffects::effect_oracle_initialize(oracle, DebuggerEffects::EffectMode.Recording)
+    DebuggerEffects::effect_oracle_record(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH, Test::CLOCK_RESULT_HASH, Test::CLOCK_RESULT_VALUE)
+    oracle.mode <- DebuggerEffects::EffectMode.Replaying
+    oracle.records[Test::FIRST_RECORD_INDEX] <- DebuggerEffects::EffectRecord{sequence: Test::INVALID_SEQUENCE, kind: DebuggerEffects::EffectKind.Clock, request_hash: Test::CLOCK_REQUEST_HASH, result_hash: Test::CLOCK_RESULT_HASH, result_value: Test::CLOCK_RESULT_VALUE, suppress_external_write: false}
+    DebuggerEffects::effect_oracle_replay(oracle, DebuggerEffects::EffectKind.Clock, Test::CLOCK_REQUEST_HASH)
+    return Test::FAILURE_TAMPERED_SEQUENCE if oracle.exactness != DebuggerEffects::Exactness.Diverged or oracle.last_error.code != DebuggerErrors::ErrorCode.Diverged
+    return Test::TEST_SUCCESS

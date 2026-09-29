@@ -118,12 +118,12 @@ configuration, continue, next, reverse-step, pause, threads, stack, scopes,
 variables, evaluate, source and function breakpoints, `readMemory`, and
 lifecycle commands. It correlates every response with the request sequence and applies the shared
 session state machine. Its current `initialize` response advertises
-`configurationDone`, `supportsFunctionBreakpoints`, `stepBack`, `terminate`,
-and bounded `readMemory` support for the managed provider. Conditional and
-numeric hit-condition support applies to both source and function breakpoints.
-Data breakpoints; hover evaluation; restart; set-variable; and disassembly
-remain unsupported. Plugins should use the actual capability response rather
-than the broader typed Elisa module surface.
+`configurationDone`, function, conditional and hit-conditional breakpoints,
+logpoints, hover evaluation, `stepBack`, `terminate`, and bounded `readMemory`
+for the managed provider. Conditional and numeric hit-condition support
+applies to both source and function breakpoints. Data breakpoints, restart,
+`setVariable`, and disassembly remain unsupported. Plugins should use the
+actual capability response rather than the broader typed Elisa module surface.
 
 `build/elisa-debugger-jetsam` is a read-only macOS memory-pressure report
 inspector. Build it with `make ELISA_ALLOW_STALE_STAGE1=0 native-jetsam-tool`,

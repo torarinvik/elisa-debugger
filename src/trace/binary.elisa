@@ -8,6 +8,8 @@ module DebuggerTraceBinary:
         # scanned from caller-owned byte ranges instead of one writer buffer.
         const module Buffer:
             BINARY_BUFFER_CAPACITY: usize = 131072
+            EMPTY_LENGTH: usize = 0
+            APPEND_STEP: usize = 1
 
         const module Checksum:
             BINARY_CHECKSUM_OFFSET_BASIS: u64 = 14695981039346656037
@@ -16,8 +18,13 @@ module DebuggerTraceBinary:
             INVALID: u64 = 0
 
         const module ByteEncoding:
+            ZERO_VALUE: u64 = 0
+            ZERO_BYTE: u8 = 0
             BITS: u64 = 8
             MASK: u64 = 255
+            U16_BYTE_COUNT: usize = 2
+            U32_BYTE_COUNT: usize = 4
+            U64_BYTE_COUNT: usize = 8
 
 
     public:
@@ -32,20 +39,16 @@ module DebuggerTraceBinary:
             offset: mutable usize
             failed: mutable bool
 
-        def writer_new() -> ByteWriter:
-            writer: mutable ByteWriter = zeroed
-            writer.length <- 0
+        def writer_initialize(writer: mutable ByteWriter&) -> void:
+            writer.length <- Buffer::EMPTY_LENGTH
             writer.failed <- false
-            return writer
 
-        def writer_put_byte(writer: ByteWriter, value: u8) -> ByteWriter:
-            updated: mutable ByteWriter = writer
+        def writer_put_byte(writer: mutable ByteWriter&, value: u8) -> void:
             if writer.failed or writer.length >= Buffer::BINARY_BUFFER_CAPACITY:
-                updated.failed <- true
-                return updated
-            updated.bytes[writer.length] <- value
-            updated.length <- writer.length + 1
-            return updated
+                writer.failed <- true
+                return
+            writer.bytes[writer.length] <- value
+            writer.length <- writer.length + Buffer::APPEND_STEP
 
         # Append a complete writer without copying the fixed-size writer for
         # every byte.  Callers use this for trace frames, where the bounded
@@ -57,40 +60,27 @@ module DebuggerTraceBinary:
             if source.length > Buffer::BINARY_BUFFER_CAPACITY - writer.length:
                 writer.failed <- true
                 return
-            for index in 0..<source.length:
+            for index in Buffer::EMPTY_LENGTH..<source.length:
                 writer.bytes[writer.length + index] <- source.bytes[index]
             writer.length <- writer.length + source.length
 
-        def writer_put_u16(writer: ByteWriter, value: u16) -> ByteWriter:
-            updated: mutable ByteWriter = writer_put_byte(writer, (value.u64() & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value.u64() >> ByteEncoding::BITS) & ByteEncoding::MASK).u8())
-            return updated
+        def writer_put_u16(writer: mutable ByteWriter&, value: u16) -> void:
+            for byte_index in Buffer::EMPTY_LENGTH..<ByteEncoding::U16_BYTE_COUNT:
+                writer_put_byte(writer, ((value.u64() >> (ByteEncoding::BITS * byte_index.u64())) & ByteEncoding::MASK).u8())
 
-        def writer_put_u32(writer: ByteWriter, value: u32) -> ByteWriter:
-            updated: mutable ByteWriter = writer
-            updated <- writer_put_byte(updated, (value.u64() & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value.u64() >> ByteEncoding::BITS) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value.u64() >> (ByteEncoding::BITS * 2)) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value.u64() >> (ByteEncoding::BITS * 3)) & ByteEncoding::MASK).u8())
-            return updated
+        def writer_put_u32(writer: mutable ByteWriter&, value: u32) -> void:
+            for byte_index in Buffer::EMPTY_LENGTH..<ByteEncoding::U32_BYTE_COUNT:
+                writer_put_byte(writer, ((value.u64() >> (ByteEncoding::BITS * byte_index.u64())) & ByteEncoding::MASK).u8())
 
-        def writer_put_u64(writer: ByteWriter, value: u64) -> ByteWriter:
-            updated: mutable ByteWriter = writer
-            updated <- writer_put_byte(updated, (value & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> ByteEncoding::BITS) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> (ByteEncoding::BITS * 2)) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> (ByteEncoding::BITS * 3)) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> (ByteEncoding::BITS * 4)) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> (ByteEncoding::BITS * 5)) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> (ByteEncoding::BITS * 6)) & ByteEncoding::MASK).u8())
-            updated <- writer_put_byte(updated, ((value >> (ByteEncoding::BITS * 7)) & ByteEncoding::MASK).u8())
-            return updated
+        def writer_put_u64(writer: mutable ByteWriter&, value: u64) -> void:
+            for byte_index in Buffer::EMPTY_LENGTH..<ByteEncoding::U64_BYTE_COUNT:
+                writer_put_byte(writer, ((value >> (ByteEncoding::BITS * byte_index.u64())) & ByteEncoding::MASK).u8())
 
     private:
         def bytes_checksum_with_basis(bytes: u8&, length: usize, offset_basis: u64) -> u64:
             return Checksum::INVALID if length > Buffer::BINARY_BUFFER_CAPACITY
             checksum: mutable u64 = offset_basis
-            for index in 0..<length:
+            for index in Buffer::EMPTY_LENGTH..<length:
                 checksum <- (checksum ^ bytes[index].u64()) * Checksum::BINARY_CHECKSUM_PRIME
             return checksum
 
@@ -102,35 +92,34 @@ module DebuggerTraceBinary:
             return false if length > Buffer::BINARY_BUFFER_CAPACITY
             return bytes_checksum_with_basis(bytes, length, Checksum::BINARY_CHECKSUM_OFFSET_BASIS) == expected or bytes_checksum_with_basis(bytes, length, Checksum::LEGACY_OFFSET_BASIS) == expected
 
-        def writer_checksum(writer: ByteWriter) -> u64:
+        def writer_checksum(writer: ByteWriter&) -> u64:
             return Checksum::INVALID if writer.failed or writer.length > Buffer::BINARY_BUFFER_CAPACITY
-            return bytes_checksum(writer.bytes[0], writer.length)
+            return bytes_checksum(writer.bytes[Buffer::EMPTY_LENGTH], writer.length)
 
-        def writer_checksum_matches(writer: ByteWriter, expected: u64) -> bool:
+        def writer_checksum_matches(writer: ByteWriter&, expected: u64) -> bool:
             return false if writer.failed or writer.length > Buffer::BINARY_BUFFER_CAPACITY
-            return bytes_checksum_matches(writer.bytes[0], writer.length, expected)
+            return bytes_checksum_matches(writer.bytes[Buffer::EMPTY_LENGTH], writer.length, expected)
 
-        def writer_is_valid(writer: ByteWriter) -> bool:
+        def writer_is_valid(writer: ByteWriter&) -> bool:
             return not writer.failed and writer.length <= Buffer::BINARY_BUFFER_CAPACITY
 
-        def reader_new(bytes: u8&, length: usize) -> ByteReader:
-            reader: mutable ByteReader = zeroed
+        def reader_initialize(reader: mutable ByteReader&, bytes: u8&, length: usize) -> void:
+            reader.length <- Buffer::EMPTY_LENGTH
+            reader.offset <- Buffer::EMPTY_LENGTH
+            reader.failed <- false
             if length > Buffer::BINARY_BUFFER_CAPACITY:
                 reader.failed <- true
-                return reader
-            for index in 0..<length:
+                return
+            for index in Buffer::EMPTY_LENGTH..<length:
                 reader.bytes[index] <- bytes[index]
             reader.length <- length
-            reader.offset <- 0
-            reader.failed <- false
-            return reader
 
         def reader_take_byte(reader: mutable ByteReader&) -> u8:
             if reader.failed or reader.length > Buffer::BINARY_BUFFER_CAPACITY or reader.offset >= reader.length:
                 reader.failed <- true
-                return 0
+                return ByteEncoding::ZERO_BYTE
             value: u8 = reader.bytes[reader.offset]
-            reader.offset <- reader.offset + 1
+            reader.offset <- reader.offset + Buffer::APPEND_STEP
             return value
 
         def reader_take_u16(reader: mutable ByteReader&) -> u16:
@@ -139,16 +128,16 @@ module DebuggerTraceBinary:
             return (low | (high << ByteEncoding::BITS)).u16()
 
         def reader_take_u32(reader: mutable ByteReader&) -> u32:
-            value: mutable u64 = 0
-            for shift in 0..<4:
+            value: mutable u64 = ByteEncoding::ZERO_VALUE
+            for shift in Buffer::EMPTY_LENGTH..<ByteEncoding::U32_BYTE_COUNT:
                 value <- value | (reader_take_byte(reader).u64() << (ByteEncoding::BITS * shift.u64()))
             return value.u32()
 
         def reader_take_u64(reader: mutable ByteReader&) -> u64:
-            value: mutable u64 = 0
-            for shift in 0..<8:
+            value: mutable u64 = ByteEncoding::ZERO_VALUE
+            for shift in Buffer::EMPTY_LENGTH..<ByteEncoding::U64_BYTE_COUNT:
                 value <- value | (reader_take_byte(reader).u64() << (ByteEncoding::BITS * shift.u64()))
             return value
 
-        def reader_is_valid(reader: ByteReader) -> bool:
+        def reader_is_valid(reader: ByteReader&) -> bool:
             return not reader.failed and reader.length <= Buffer::BINARY_BUFFER_CAPACITY and reader.offset <= reader.length

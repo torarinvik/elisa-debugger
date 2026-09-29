@@ -57,6 +57,19 @@ expression and output overflow stop the request with a diagnostic; output is
 never silently truncated. The adapter advertises `supportsLogPoints`,
 hit-conditional breakpoints, and expression-conditional breakpoints.
 
+Managed DAP function breakpoints use `setFunctionBreakpoints` with a
+`functionBreakpoints` array of objects containing a required exact `name` and
+optional `condition` and `hitCondition`. Each request replaces the complete
+function-breakpoint set. A name matches all EDIR function descriptors with that
+name, so overloads receive the same breakpoint policy. A well-formed name that
+does not occur in the loaded artifact is returned with `verified: false`; the
+current static EDIR image has no later module-load resolution. Conditions use
+the same bounded integer expression grammar and hit conditions use the same
+positive decimal form as source breakpoints. Function log messages are not
+supported. The initialize response advertises
+`supportsFunctionBreakpoints: true` for the managed provider. Data breakpoints
+remain unavailable.
+
 The adapter does not implement DAP `attach`. The
 [attach-configuration schema](../schemas/dap-attach-configuration.schema.json)
 intentionally rejects every attach configuration so a plugin can disable that

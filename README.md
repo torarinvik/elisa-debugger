@@ -115,13 +115,14 @@ published at
 `build/elisa-debugger-dap-server` is the standard DAP transport entrypoint. It
 accepts `Content-Length` framed messages and dispatches initialize, launch,
 configuration, continue, next, reverse-step, pause, threads, stack, scopes,
-variables, evaluate, breakpoint, `readMemory`, and lifecycle commands. It
-correlates every response with the request sequence and applies the shared
+variables, evaluate, source and function breakpoints, `readMemory`, and
+lifecycle commands. It correlates every response with the request sequence and applies the shared
 session state machine. Its current `initialize` response advertises
-`configurationDone`, `stepBack`, `terminate`, and bounded `readMemory` support
-for the managed provider. It reports function, conditional, hit-conditional,
-and data breakpoints; hover evaluation; restart; set-variable; and disassembly
-as unsupported. Plugins should use the actual capability response rather
+`configurationDone`, `supportsFunctionBreakpoints`, `stepBack`, `terminate`,
+and bounded `readMemory` support for the managed provider. Conditional and
+numeric hit-condition support applies to both source and function breakpoints.
+Data breakpoints; hover evaluation; restart; set-variable; and disassembly
+remain unsupported. Plugins should use the actual capability response rather
 than the broader typed Elisa module surface.
 
 `build/elisa-debugger-jetsam` is a read-only macOS memory-pressure report

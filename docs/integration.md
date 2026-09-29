@@ -31,7 +31,8 @@ compile source or apply `args`, `cwd`, `env`, or `stopOnEntry` from a launch
 configuration. DAP attach is unavailable.
 
 The current adapter supports source-line breakpoints against the EDIR source
-table, one `main` thread, stack and locals inspection, bounded local paging,
+table and exact function-name breakpoints against EDIR function descriptors,
+one `main` thread, stack and locals inspection, bounded local paging,
 `readMemory`, continue, pause, `next`, `stepIn`, `stepOut`, `stepBack`,
 `reverseContinue`, disconnect, and terminate. Source paths must match the
 artifact's logical paths. Set the adapter launch argument `sourcePathRoot` to
@@ -39,17 +40,26 @@ the workspace root when the editor sends absolute paths; the adapter removes
 that exact root prefix before matching. It does not use basename or suffix
 matching. Source breakpoints support bounded arithmetic expression conditions,
 positive numeric hit conditions, and `logMessage` logpoints with `{expression}`
-interpolation. A logpoint emits a DAP `output` event without stopping; a
-condition and hit condition are applied before the message is emitted. A
-message is limited to 256 decoded bytes, and a breakpoint replacement accepts
+interpolation. Conditions and hit conditions are applied before a logpoint
+message is emitted.
+
+An `setFunctionBreakpoints` request replaces the complete function breakpoint set.
+Names match exactly and apply to every same-named function descriptor, including
+overloads. A name absent from the loaded artifact is returned unverified.
+Function breakpoints accept the same bounded expression conditions and positive
+numeric hit conditions as source breakpoints; function log messages are not supported.
+The initialize response advertises `supportsFunctionBreakpoints`.
+
+Each logpoint emits a DAP `output` event without stopping. A message is limited
+to 256 decoded bytes, and a breakpoint replacement accepts
 at most 8192 combined decoded condition and log-message bytes. Each continue
 request buffers at most 8192 bytes of log output. If a template expression
 cannot be evaluated or the output bound is reached, continue stops with an
 error instead of silently discarding the log. Expression evaluation is bounded
 and side-effect free.
-Function and data breakpoints, variable assignment, restart, and disassembly
-remain unavailable. The initialize response advertises the relevant DAP
-capabilities; clients should honor that response.
+Data breakpoints, variable assignment, restart, and disassembly remain
+unavailable. The initialize response advertises the relevant DAP capabilities;
+clients should honor that response.
 
 The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. `stackTrace`
 supports the standard `startFrame` and `levels` paging arguments and reports
@@ -143,7 +153,7 @@ the compact process.
 
 | Host | Map host actions to | Current adapter guidance |
 | --- | --- | --- |
-| VS Code | DAP initialize/launch, source breakpoints, threads/frames/scopes/variables, execution requests, and lifecycle | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. This repository supplies the backend, not the extension manifest or TypeScript host glue. |
+| VS Code | DAP initialize/launch, source and function breakpoints, threads/frames/scopes/variables, execution requests, and lifecycle | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. This repository supplies the backend, not the extension manifest or TypeScript host glue. |
 | JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter; otherwise the compact JSON requests the host can support | No JetBrains plugin or platform-version qualification is included. A host-specific bridge must only translate UI/session requests and render responses; it cannot obtain attach, evaluate, or advanced trace operations from the current compact endpoint. |
 | Other editors and tools | DAP for standard debugger UI; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve decimal IDs/offsets as strings where the protocol says strings, and report unavailable operations from endpoint behavior rather than parsing messages. |
 

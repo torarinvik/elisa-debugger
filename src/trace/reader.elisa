@@ -127,18 +127,14 @@ module DebuggerTraceReader:
             return DebuggerEvents::EventQuality.Diverged if code == 3
             return DebuggerEvents::EventQuality.Corrupt
 
-        def reader_ingest_manifest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+        def reader_ingest_manifest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if reader.manifest_seen
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.sequence != reader.next_sequence
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if chunk.payload_length > Capacity::READER_CAPACITY_MAX_PAYLOAD_BYTES
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.payload_length == 0
-            payload: mutable DebuggerTraceBinary::ByteWriter = zeroed
-            DebuggerTraceBinary::writer_initialize(payload)
-            for index in 0..<chunk.payload_length:
-                DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::writer_checksum_matches(payload, chunk.checksum)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::bytes_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum)
             payload_reader: mutable DebuggerTraceBinary::ByteReader = zeroed
             DebuggerTraceBinary::reader_initialize(payload_reader, chunk.payload[0], chunk.payload_length)
             reader.manifest <- DebuggerTraceManifest::manifest_decode(payload_reader)
@@ -154,7 +150,7 @@ module DebuggerTraceReader:
             reader.state <- ReaderState.Ready
             return DebuggerErrors::no_error()
 
-        def reader_ingest_events(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+        def reader_ingest_events(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if not reader.manifest_seen
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.payload_length == 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
@@ -163,11 +159,7 @@ module DebuggerTraceReader:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.sequence != reader.next_sequence
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
-            payload: mutable DebuggerTraceBinary::ByteWriter = zeroed
-            DebuggerTraceBinary::writer_initialize(payload)
-            for index in 0..<chunk.payload_length:
-                DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::writer_checksum_matches(payload, chunk.checksum)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::bytes_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if reader.event_count >= Capacity::READER_CAPACITY_EVENTS
             event_count_in_chunk: u64 = (chunk.payload_length / EventEncoding::READER_EVENTENCODING_ENCODED_BYTES).u64()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if reader.event_exhausted
@@ -228,16 +220,12 @@ module DebuggerTraceReader:
             reader.state <- ReaderState.Ready
             return DebuggerErrors::no_error()
 
-        def reader_ingest_opaque(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+        def reader_ingest_opaque(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if not reader.manifest_seen
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if chunk.payload_length > Capacity::READER_CAPACITY_MAX_PAYLOAD_BYTES
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.sequence != reader.next_sequence
-            payload: mutable DebuggerTraceBinary::ByteWriter = zeroed
-            DebuggerTraceBinary::writer_initialize(payload)
-            for index in 0..<chunk.payload_length:
-                DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::writer_checksum_matches(payload, chunk.checksum)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::bytes_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32() or not DebuggerTrace::trace_chunk_range_valid(chunk.header)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(chunk)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not DebuggerTraceStorage::storage_checkpoint_event_is_within_trace(chunk.header.first_event, reader.manifest.first_event, reader.manifest.last_event)
@@ -254,7 +242,7 @@ module DebuggerTraceReader:
             reader.state <- ReaderState.Ready
             return DebuggerErrors::no_error()
 
-        def reader_ingest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk) -> DebuggerErrors::DebuggerError:
+        def reader_ingest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk&) -> DebuggerErrors::DebuggerError:
             return reader.last_error if reader.state == ReaderState.Corrupt
             if chunk.header.kind.u16() > ChunkKind::READER_CHUNKKIND_MAX_CHUNK_KIND:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::READER_DETAIL_ENUM)

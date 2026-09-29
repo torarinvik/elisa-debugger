@@ -136,7 +136,7 @@ ELISA_COMPILER_SOURCE_FILES := $(shell find "$(ELISA_COMPILER_SOURCE_ROOT)/src" 
 ELISA_COMPILER_BUILD_INPUTS := $(ELISA_COMPILER_SOURCE_FILES) $(call ELISA_ESCAPE_PATH,$(ELISA_COMPILER_COMMAND_BUILD_DEPENDENCY)) $(call ELISA_ESCAPE_PATH,$(ELISA_COMPILER_WRAPPER_BUILD_DEPENDENCY)) $(call ELISA_ESCAPE_PATH,$(ELISA_COMPILER_BUILD_DEPENDENCY)) $(call ELISA_ESCAPE_PATH,$(ELISA_RUNTIME_BUILD_DEPENDENCY))
 ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 
-.PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check dap-logpoints-check
+.PHONY: cli-flush-check concurrency-scheduler-check native-breakpoint-lifecycle-check dap-logpoints-check dap-function-breakpoints-check
 .PHONY: trace-file-check
 .PHONY: remote-authorization-check server-version-check server-ownership-check compiler-edir-loop-check compiler-edir-calls-check compiler-edir-calls-unsupported-check compiler-edir-core-ir-check
 .PHONY: protocol-client-ordering-check session-ownership-check
@@ -172,6 +172,9 @@ dap-logpoints-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 	sh tests/dap_logpoints_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_LOGPOINT_LINE)"
 	sh tests/dap_step_in_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_CALLEE_SOURCE_LINE)"
 
+dap-function-breakpoints-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
+	sh tests/dap_function_breakpoints_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir"
+
 cli: $(BUILD)/elisa-debugger-cli
 
 cli-flush-check: $(BUILD)/elisa-debugger-cli
@@ -183,6 +186,7 @@ module-check: $(CONCURRENCY_RACES_CHECK)
 module-check: $(EXPRESSION_PARSER_CHECK)
 module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
+module-check: dap-function-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 module-check: $(MANAGED_ALLOCATIONS_CHECK)
 

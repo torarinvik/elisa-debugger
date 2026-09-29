@@ -8,6 +8,7 @@ include "../replay/engine.elisa"
 include "../replay/checkpoint_codec.elisa"
 include "../breakpoint/breakpoint.elisa"
 include "../breakpoint/manager.elisa"
+include "../breakpoint/resolver.elisa"
 include "../metadata/source.elisa"
 include "../inspect/store.elisa"
 include "../inspect/expression_parser.elisa"
@@ -85,6 +86,19 @@ module DebuggerManagedEngine:
             ENGINE_MANAGED_SOURCE_BREAKPOINT_CAPACITY: usize = 256
             ENGINE_MANAGED_SOURCE_BREAKPOINT_NO_COLUMN: u32 = 0
             ENGINE_MANAGED_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX: usize = 0
+
+        const module FunctionBreakpoint:
+            FIRST_REQUEST_INDEX: usize = 0
+            NO_TEXT_BYTES: usize = 0
+            COUNT_INCREMENT: usize = 1
+            NO_BREAKPOINT_ID: u64 = 0
+            NO_HIT_TARGET: u64 = 0
+            NO_HIT_COUNT: u64 = 0
+            DEFAULT_HIT_STRIDE: u64 = 1
+            NO_TASK: u64 = 0
+            NO_CONDITION_LENGTH: usize = 0
+            NO_SOURCE_LINE: u32 = 0
+            NO_SOURCE_COLUMN: u32 = 0
 
         const module ConditionBinding:
             LOCAL_PREFIX: cstr = "local"
@@ -248,14 +262,27 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Logpoint::OUTPUT_LIMIT_DETAIL) if not managed_log_output_append(controller, Logpoint::LINE_FEED)
             return DebuggerErrors::no_error()
 
-        def managed_breakpoint_position_matches(point: DebuggerBreakpoints::Breakpoint, table: DebuggerBreakpointManager::BreakpointTable, index: usize, branch: DebuggerIdentity::DebugId, source: DebuggerIdentity::SourceSpan, instruction: u64) -> bool:
-            return point.kind == DebuggerBreakpoints::BreakpointKind.Source and point.status == DebuggerBreakpoints::BreakpointStatus.Verified and table.resolved_instructions[index] == instruction and DebuggerMetadata::source_span_contains(source, point.source) and DebuggerBreakpoints::breakpoint_matches_branch(point, branch)
+        def managed_function_breakpoint_matches(controller: mutable ManagedController&, point: DebuggerBreakpoints::Breakpoint, instruction: u64) -> bool:
+            return false if point.function_name_length == DebuggerBreakpoints::breakpoint_empty_function_name_length() or controller.engine.image.function_count > DebuggerEDIR::function_capacity()
+            for function_index in 0..<controller.engine.image.function_count:
+                function: DebuggerEDIR::FunctionDescriptor = controller.engine.image.functions[function_index]
+                continue if function.entry_instruction != instruction or function.name_length != point.function_name_length
+                name_matches: mutable bool = true
+                for name_index in 0..<point.function_name_length:
+                    name_matches <- false if function.name_bytes[name_index] != point.function_name[name_index]
+                return true if name_matches
+            return false
+
+        def managed_breakpoint_position_matches(controller: mutable ManagedController&, point: DebuggerBreakpoints::Breakpoint, table: DebuggerBreakpointManager::BreakpointTable, index: usize, branch: DebuggerIdentity::DebugId, source: DebuggerIdentity::SourceSpan, instruction: u64) -> bool:
+            source_match: bool = point.kind == DebuggerBreakpoints::BreakpointKind.Source and table.resolved_instructions[index] == instruction and DebuggerMetadata::source_span_contains(source, point.source)
+            function_match: bool = point.kind == DebuggerBreakpoints::BreakpointKind.Function and managed_function_breakpoint_matches(controller, point, instruction)
+            return point.status == DebuggerBreakpoints::BreakpointStatus.Verified and (source_match or function_match) and DebuggerBreakpoints::breakpoint_matches_branch(point, branch)
 
         def managed_breakpoint_would_stop_at_instruction(controller: mutable ManagedController&, branch: DebuggerIdentity::DebugId, source: DebuggerIdentity::SourceSpan, instruction: u64) -> bool:
             return false if controller.state.breakpoints.count > DebuggerBreakpointManager::breakpoint_table_capacity()
             for index in 0..<controller.state.breakpoints.count:
                 point: DebuggerBreakpoints::Breakpoint = controller.state.breakpoints.points[index]
-                if managed_breakpoint_position_matches(point, controller.state.breakpoints, index, branch, source, instruction):
+                if managed_breakpoint_position_matches(controller, point, controller.state.breakpoints, index, branch, source, instruction):
                     observed: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::breakpoint_observe_hit(point, branch)
                     if DebuggerBreakpoints::breakpoint_should_stop(observed, branch):
                         return true if observed.condition_length == 0
@@ -280,7 +307,7 @@ module DebuggerManagedEngine:
             should_stop: mutable bool = false
             for index in 0..<controller.state.breakpoints.count:
                 point: DebuggerBreakpoints::Breakpoint = controller.state.breakpoints.points[index]
-                if managed_breakpoint_position_matches(point, controller.state.breakpoints, index, event_branch, instruction.source, controller.engine.machine.program_counter):
+                if managed_breakpoint_position_matches(controller, point, controller.state.breakpoints, index, event_branch, instruction.source, controller.engine.machine.program_counter):
                     observed: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::breakpoint_observe_hit(point, event_branch)
                     controller.state.breakpoints.points[index] <- observed
                     if DebuggerBreakpoints::breakpoint_hit_policy_matches(observed, event_branch):
@@ -662,6 +689,67 @@ module DebuggerManagedEngine:
             controller.state.breakpoints <- replacement.table
             return replacement
 
+        def managed_replace_function_breakpoints(controller: mutable ManagedController&, names: u8&, text_length: usize, name_offsets: usize&, name_lengths: usize&, requested_count: usize) -> DebuggerBreakpointManager::BreakpointReplacement:
+            replacement: mutable DebuggerBreakpointManager::BreakpointReplacement = zeroed
+            return replacement if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or controller.engine.machine.faulted
+            return replacement if not DebuggerBreakpointManager::breakpoint_table_is_valid(controller.state.breakpoints)
+            return replacement if requested_count > DebuggerBreakpointManager::breakpoint_table_capacity()
+            retained_count: mutable usize = FunctionBreakpoint::NO_TEXT_BYTES
+            for index in 0..<controller.state.breakpoints.count:
+                retained_count <- retained_count + 1 if controller.state.breakpoints.points[index].kind != DebuggerBreakpoints::BreakpointKind.Function
+            return replacement if retained_count > DebuggerBreakpointManager::breakpoint_table_capacity() or requested_count > DebuggerBreakpointManager::breakpoint_table_capacity() - retained_count
+            for request_index in 0..<requested_count:
+                return replacement if name_lengths[request_index] == FunctionBreakpoint::NO_TEXT_BYTES or name_lengths[request_index] > DebuggerBreakpoints::breakpoint_function_name_capacity()
+                return replacement if name_offsets[request_index] > text_length or name_lengths[request_index] > text_length - name_offsets[request_index]
+            updated: mutable DebuggerBreakpointManager::BreakpointTable = controller.state.breakpoints
+            updated.count <- FunctionBreakpoint::NO_TEXT_BYTES
+            for index in 0..<controller.state.breakpoints.count:
+                point: DebuggerBreakpoints::Breakpoint = controller.state.breakpoints.points[index]
+                if point.kind != DebuggerBreakpoints::BreakpointKind.Function:
+                    updated.points[updated.count] <- point
+                    updated.resolved_instructions[updated.count] <- controller.state.breakpoints.resolved_instructions[index]
+                    updated.count <- updated.count + 1
+            for request_index in 0..<requested_count:
+                name_offset: usize = name_offsets[request_index]
+                name_length: usize = name_lengths[request_index]
+                resolution: DebuggerBreakpointResolver::Resolution = DebuggerBreakpointResolver::resolver_edir_function_name(controller.engine.image, names[name_offset], name_length)
+                return replacement if resolution.status == DebuggerMetadata::BreakpointResolution.Invalid
+                point: DebuggerBreakpoints::Breakpoint = DebuggerBreakpoints::Breakpoint{
+                    id: DebuggerIdentity::debug_id(updated.next_id),
+                    branch: controller.engine.branch,
+                    kind: DebuggerBreakpoints::BreakpointKind.Function,
+                    status: DebuggerBreakpoints::BreakpointStatus.Pending,
+                    source: zeroed,
+                    condition: DebuggerIdentity::debug_id(FunctionBreakpoint::NO_BREAKPOINT_ID),
+                    condition_expression: zeroed,
+                    condition_length: FunctionBreakpoint::NO_CONDITION_LENGTH,
+                    function_name: zeroed,
+                    function_name_length: name_length,
+                    log_message: zeroed,
+                    log_message_length: FunctionBreakpoint::NO_TEXT_BYTES,
+                    hit_target: FunctionBreakpoint::NO_HIT_TARGET,
+                    hit_count: FunctionBreakpoint::NO_HIT_COUNT,
+                    hit_stride: FunctionBreakpoint::DEFAULT_HIT_STRIDE,
+                    task: DebuggerIdentity::debug_id(FunctionBreakpoint::NO_TASK),
+                    logpoint: false,
+                    temporary: false
+                }
+                for name_index in 0..<name_length:
+                    point.function_name[name_index] <- names[name_offset + name_index]
+                added: mutable DebuggerBreakpointManager::BreakpointTable = DebuggerBreakpointManager::breakpoint_table_add(updated, point)
+                return replacement if added.count != updated.count + FunctionBreakpoint::COUNT_INCREMENT
+                updated <- added
+                replacement.results[request_index] <- DebuggerBreakpointManager::BreakpointResult{id: updated.points[updated.count - FunctionBreakpoint::COUNT_INCREMENT].id, line: FunctionBreakpoint::NO_SOURCE_LINE, column: FunctionBreakpoint::NO_SOURCE_COLUMN, has_column: false, verified: false}
+                if resolution.matched > FunctionBreakpoint::NO_TEXT_BYTES:
+                    updated.points[updated.count - FunctionBreakpoint::COUNT_INCREMENT].status <- DebuggerBreakpoints::BreakpointStatus.Verified
+                    updated.resolved_instructions[updated.count - FunctionBreakpoint::COUNT_INCREMENT] <- resolution.instruction
+                    replacement.results[request_index].verified <- true
+            replacement.table <- updated
+            replacement.count <- requested_count
+            replacement.accepted <- true
+            controller.state.breakpoints <- updated
+            return replacement
+
         def managed_source_root_is_valid(root: u8&, root_length: usize) -> bool:
             return false if root_length < SourcePath::ROOT_MINIMUM_LENGTH or root_length > DebuggerMetadataSourcePath::SOURCE_PATH_CAPACITY
             return false if not DebuggerMetadata::source_path_utf8_is_valid(root, root_length)
@@ -773,6 +861,8 @@ module DebuggerManagedEngine:
                 condition: DebuggerIdentity::debug_id(0),
                 condition_expression: zeroed,
                 condition_length: 0,
+                function_name: zeroed,
+                function_name_length: DebuggerBreakpoints::breakpoint_empty_function_name_length(),
                 log_message: zeroed,
                 log_message_length: 0,
                 hit_target: 0,

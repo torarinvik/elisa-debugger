@@ -53,6 +53,9 @@ module DebuggerManagedService:
         const module SourceBreakpoints:
             PROTOCOL_MANAGED_SERVICE_SOURCE_BREAKPOINT_FIRST_REQUEST_INDEX: usize = 0
 
+        const module FunctionBreakpoints:
+            NO_BREAKPOINT_COUNT: usize = 0
+
         const module BreakpointPolicy:
             NO_BREAKPOINT_ID: u64 = 0
             FIRST_BREAKPOINT_INDEX: usize = 0
@@ -188,6 +191,16 @@ module DebuggerManagedService:
             count: mutable usize
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct FunctionBreakpointEntry:
+            id: mutable DebuggerIdentity::DebugId
+            verified: mutable bool
+
+        struct FunctionBreakpointResult:
+            accepted: mutable bool
+            points: mutable FunctionBreakpointEntry[HistoryLimits::MAX_SOURCE_BREAKPOINTS]
+            count: mutable usize
+            failure: mutable DebuggerErrors::DebuggerError
+
         struct CheckpointResult:
             accepted: mutable bool
             checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint
@@ -210,6 +223,9 @@ module DebuggerManagedService:
 
         def source_breakpoint_result_error(failure: DebuggerErrors::DebuggerError) -> SourceBreakpointResult:
             return SourceBreakpointResult{accepted: false, points: zeroed, count: 0, failure: failure}
+
+        def function_breakpoint_result_error(failure: DebuggerErrors::DebuggerError) -> FunctionBreakpointResult:
+            return FunctionBreakpointResult{accepted: false, points: zeroed, count: FunctionBreakpoints::NO_BREAKPOINT_COUNT, failure: failure}
 
         def checkpoint_error(failure: DebuggerErrors::DebuggerError) -> CheckpointResult:
             return CheckpointResult{accepted: false, checkpoint: zeroed, failure: failure}
@@ -475,11 +491,40 @@ module DebuggerManagedService:
             result.failure <- DebuggerErrors::no_error()
             return result
 
+        def service_replace_function_breakpoints(service: mutable Service&, names: u8&, text_length: usize, name_offsets: usize&, name_lengths: usize&, requested_count: usize) -> FunctionBreakpointResult:
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if requested_count > HistoryLimits::MAX_SOURCE_BREAKPOINTS:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY)
+            if not service.controller.session.capabilities.function_breakpoints:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.session.state == DebuggerSession::SessionState.Created or service.controller.session.state == DebuggerSession::SessionState.Configuring or service.controller.session.state == DebuggerSession::SessionState.Launching:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.session.state == DebuggerSession::SessionState.Exited or service.controller.session.state == DebuggerSession::SessionState.Detached or service.controller.session.state == DebuggerSession::SessionState.Failed or service.controller.session.state == DebuggerSession::SessionState.Closed:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            if service.controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault or service.controller.engine.machine.faulted:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+            service.last_error <- failure
+            return function_breakpoint_result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            replacement: DebuggerBreakpointManager::BreakpointReplacement = DebuggerManagedEngine::managed_replace_function_breakpoints(service.controller, names, text_length, name_offsets, name_lengths, requested_count)
+            if not replacement.accepted:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if not DebuggerBreakpointManager::breakpoint_table_is_valid(service.controller.state.breakpoints)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
+                service.last_error <- failure
+                return function_breakpoint_result_error(failure)
+            service.last_error <- DebuggerErrors::no_error()
+            result: mutable FunctionBreakpointResult = zeroed
+            result.accepted <- true
+            result.count <- replacement.count
+            for index in 0..<replacement.count:
+                result.points[index] <- FunctionBreakpointEntry{id: replacement.results[index].id, verified: replacement.results[index].verified}
+            result.failure <- DebuggerErrors::no_error()
+            return result
+
         def service_set_breakpoint_hit_target(service: mutable Service&, breakpoint_id: DebuggerIdentity::DebugId, hit_target: u64) -> Result:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if breakpoint_id.value == BreakpointPolicy::NO_BREAKPOINT_ID:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY)
-            if not service.controller.session.capabilities.source_breakpoints:
+            if not service.controller.session.capabilities.source_breakpoints and not service.controller.session.capabilities.function_breakpoints:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
             if service.controller.session.state == DebuggerSession::SessionState.Created or service.controller.session.state == DebuggerSession::SessionState.Configuring or service.controller.session.state == DebuggerSession::SessionState.Launching:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_BREAKPOINT_POLICY) if DebuggerErrors::error_is_ok(failure)
@@ -494,7 +539,7 @@ module DebuggerManagedService:
                 return result_error(failure)
             found: mutable bool = false
             for index in BreakpointPolicy::FIRST_BREAKPOINT_INDEX..<service.controller.state.breakpoints.count:
-                if service.controller.state.breakpoints.points[index].id.value == breakpoint_id.value and service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source:
+                if service.controller.state.breakpoints.points[index].id.value == breakpoint_id.value and (service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source or service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Function):
                     service.controller.state.breakpoints.points[index].hit_target <- hit_target
                     service.controller.state.breakpoints.points[index].hit_count <- 0
                     found <- true
@@ -510,7 +555,7 @@ module DebuggerManagedService:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if breakpoint_id.value == BreakpointPolicy::NO_BREAKPOINT_ID or expression_length > DebuggerBreakpoints::breakpoint_condition_capacity():
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_BREAKPOINT_CONDITION)
-            if not service.controller.session.capabilities.source_breakpoints or not service.controller.session.capabilities.expression_evaluation:
+            if (not service.controller.session.capabilities.source_breakpoints and not service.controller.session.capabilities.function_breakpoints) or not service.controller.session.capabilities.expression_evaluation:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_BREAKPOINT_CONDITION) if DebuggerErrors::error_is_ok(failure)
             if service.controller.session.state == DebuggerSession::SessionState.Created or service.controller.session.state == DebuggerSession::SessionState.Configuring or service.controller.session.state == DebuggerSession::SessionState.Launching:
                 failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::DETAIL_BREAKPOINT_CONDITION) if DebuggerErrors::error_is_ok(failure)
@@ -525,7 +570,7 @@ module DebuggerManagedService:
                 return result_error(failure)
             found: mutable bool = false
             for index in BreakpointPolicy::FIRST_BREAKPOINT_INDEX..<service.controller.state.breakpoints.count:
-                if service.controller.state.breakpoints.points[index].id.value == breakpoint_id.value and service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source:
+                if service.controller.state.breakpoints.points[index].id.value == breakpoint_id.value and (service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Source or service.controller.state.breakpoints.points[index].kind == DebuggerBreakpoints::BreakpointKind.Function):
                     for byte_index in 0..<DebuggerBreakpoints::breakpoint_condition_capacity():
                         service.controller.state.breakpoints.points[index].condition_expression[byte_index] <- DebuggerBreakpoints::breakpoint_empty_expression_byte()
                     for byte_index in 0..<expression_length:

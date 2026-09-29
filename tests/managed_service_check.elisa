@@ -196,6 +196,52 @@ const module Test:
         EXPECTED_EVENT_COUNT: usize = 1
         EXPECTED_FRAME_DEPTH: usize = 1
         SOURCE_STEP_EVENT_COUNT: usize = Test::MANAGED_REGRESSION_NEXT_INSTRUCTION
+
+    const module FunctionBreakpointTest:
+        FUNCTION_NAME: cstr = "callee"
+        FUNCTION_NAME_LENGTH: usize = 6
+        FUNCTION_NAME_OFFSET: usize = 0
+        CONDITION: cstr = "local0 == 0"
+        CONDITION_LENGTH: usize = 11
+        LOCAL_COUNT: u64 = 1
+        CONDITION_HIT_TARGET: u64 = 1
+        REQUESTED_COUNT: usize = 1
+        FIRST_REQUEST_INDEX: usize = 0
+        FIRST_FUNCTION_INDEX: usize = 0
+        SECOND_FUNCTION_INDEX: usize = 1
+        FUNCTION_COUNT: usize = 2
+        SOURCE_BREAKPOINT_INDEX: usize = 0
+        FUNCTION_BREAKPOINT_INDEX: usize = 1
+        TOTAL_BREAKPOINT_COUNT: usize = 2
+        NO_DEBUG_ID: u64 = 0
+        NO_DISCRIMINATOR: u32 = 0
+        FIRST_FUNCTION_ID: u64 = 820
+        SECOND_FUNCTION_ID: u64 = 821
+        FIRST_FUNCTION_ENTRY: u64 = Test::MANAGED_REGRESSION_CALLEE_INSTRUCTION.u64()
+        FIRST_FUNCTION_END: u64 = Test::MANAGED_REGRESSION_RETURN_INSTRUCTION.u64()
+        SECOND_FUNCTION_ENTRY: u64 = Test::MANAGED_REGRESSION_RETURN_INSTRUCTION.u64()
+        SECOND_FUNCTION_END: u64 = Test::MANAGED_REGRESSION_CALL_INSTRUCTION_COUNT
+        FIRST_EVENT: u64 = 1
+        SECOND_EVENT: u64 = 2
+        HIT_COUNT_INCREMENT: u64 = 1
+        CALLEE_FRAME_DEPTH: usize = 1
+        REQUEST_ID: u64 = 820
+        NO_EXPECTED_GENERATION: u64 = 0
+        NO_TARGET_EVENT: u64 = 0
+        MISSING_NAME: cstr = "missing"
+        MISSING_NAME_LENGTH: usize = 7
+        MISSING_FAILURE: i64 = 1
+        LAUNCH_FAILURE: i64 = 2
+        REPLACEMENT_FAILURE: i64 = 3
+        PENDING_FAILURE: i64 = 4
+        HIT_TARGET_FAILURE: i64 = 5
+        CONDITION_FAILURE: i64 = 6
+        CONTINUE_FAILURE: i64 = 7
+        STOP_POSITION_FAILURE: i64 = 8
+        HIT_COUNT_FAILURE: i64 = 9
+        OVERLOAD_ENTRY_FAILURE: i64 = 10
+        OVERLOAD_HIT_COUNT_FAILURE: i64 = 11
+        CHECK_RESULT: i64 = 95
 const module ManagedReverseProgram:
     INSTRUCTION_COUNT: u64 = 13
     LOCAL_COUNT: u64 = 1
@@ -445,6 +491,65 @@ def managed_call_breakpoint_image() -> DebuggerEDIR::ProgramImage:
     image.instructions[Test::MANAGED_REGRESSION_CALLEE_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Nop, a: Test::MANAGED_REGRESSION_NO_OPERAND, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: managed_regression_source_span(Test::MANAGED_REGRESSION_CALLEE_SOURCE_LINE, 4)}
     image.instructions[Test::MANAGED_REGRESSION_RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::MANAGED_REGRESSION_NO_OPERAND, b: Test::MANAGED_REGRESSION_NO_OPERAND, source: managed_regression_source_span(Test::MANAGED_REGRESSION_CALLEE_RETURN_LINE, 5)}
     return image
+
+def check_managed_function_breakpoints() -> i64:
+    image: mutable DebuggerEDIR::ProgramImage = managed_call_breakpoint_image()
+    image.program.local_count <- Test::FunctionBreakpointTest::LOCAL_COUNT
+    image.function_count <- Test::FunctionBreakpointTest::FUNCTION_COUNT
+    first_function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+    first_function.id <- DebuggerIdentity::debug_id(Test::FunctionBreakpointTest::FIRST_FUNCTION_ID)
+    first_function.name_length <- Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH
+    first_function.entry_instruction <- Test::FunctionBreakpointTest::FIRST_FUNCTION_ENTRY
+    first_function.end_instruction_exclusive <- Test::FunctionBreakpointTest::FIRST_FUNCTION_END
+    second_function: mutable DebuggerEDIR::FunctionDescriptor = zeroed
+    second_function.id <- DebuggerIdentity::debug_id(Test::FunctionBreakpointTest::SECOND_FUNCTION_ID)
+    second_function.name_length <- Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH
+    second_function.entry_instruction <- Test::FunctionBreakpointTest::SECOND_FUNCTION_ENTRY
+    second_function.end_instruction_exclusive <- Test::FunctionBreakpointTest::SECOND_FUNCTION_END
+    for name_index in 0..<Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH:
+        first_function.name_bytes[name_index] <- Test::FunctionBreakpointTest::FUNCTION_NAME.cast[u8&][name_index]
+        second_function.name_bytes[name_index] <- Test::FunctionBreakpointTest::FUNCTION_NAME.cast[u8&][name_index]
+    image.functions[Test::FunctionBreakpointTest::FIRST_FUNCTION_INDEX] <- first_function
+    image.functions[Test::FunctionBreakpointTest::SECOND_FUNCTION_INDEX] <- second_function
+    seed_controller: DebuggerManagedEngine::ManagedController = managed_regression_controller(image)
+    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(seed_controller.session, image, DebuggerIdentity::debug_id(Test::MANAGED_REGRESSION_RECORDING_ID))
+    launch_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: Test::FunctionBreakpointTest::REQUEST_ID, has_id: true, expected_generation: Test::FunctionBreakpointTest::NO_EXPECTED_GENERATION, target_event: Test::FunctionBreakpointTest::NO_TARGET_EVENT, valid: true}
+    launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, launch_request)
+    return Test::FunctionBreakpointTest::LAUNCH_FAILURE if not launched.accepted
+    retained_source_location: DebuggerMetadata::SourceLocation = DebuggerMetadata::SourceLocation{file: DebuggerIdentity::debug_id(Test::MANAGED_REGRESSION_SOURCE_FILE_ID), line: Test::MANAGED_REGRESSION_CALLEE_SOURCE_LINE, column: Test::MANAGED_REGRESSION_SOURCE_COLUMN, discriminator: Test::FunctionBreakpointTest::NO_DISCRIMINATOR}
+    retained_source_id: DebuggerIdentity::DebugId = DebuggerManagedEngine::managed_set_source_breakpoint(service.controller, retained_source_location)
+    return Test::FunctionBreakpointTest::MISSING_FAILURE if retained_source_id.value == Test::FunctionBreakpointTest::NO_DEBUG_ID or service.controller.state.breakpoints.points[Test::FunctionBreakpointTest::SOURCE_BREAKPOINT_INDEX].status != DebuggerBreakpoints::BreakpointStatus.Verified
+    missing_names: mutable u8[Test::FunctionBreakpointTest::MISSING_NAME_LENGTH] = zeroed
+    for name_index in 0..<Test::FunctionBreakpointTest::MISSING_NAME_LENGTH:
+        missing_names[name_index] <- Test::FunctionBreakpointTest::MISSING_NAME.cast[u8&][name_index]
+    request_offsets: mutable usize[Test::FunctionBreakpointTest::REQUESTED_COUNT] = zeroed
+    missing_lengths: mutable usize[Test::FunctionBreakpointTest::REQUESTED_COUNT] = zeroed
+    request_offsets[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX] <- Test::FunctionBreakpointTest::FUNCTION_NAME_OFFSET
+    missing_lengths[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX] <- Test::FunctionBreakpointTest::MISSING_NAME_LENGTH
+    pending: DebuggerManagedService::FunctionBreakpointResult = DebuggerManagedService::service_replace_function_breakpoints(service, missing_names[request_offsets[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX]], Test::FunctionBreakpointTest::MISSING_NAME_LENGTH, request_offsets[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX], missing_lengths[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX], Test::FunctionBreakpointTest::REQUESTED_COUNT)
+    return Test::FunctionBreakpointTest::MISSING_FAILURE if not pending.accepted
+    return Test::FunctionBreakpointTest::PENDING_FAILURE if pending.count != Test::FunctionBreakpointTest::REQUESTED_COUNT or pending.points[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX].verified
+    function_names: mutable u8[Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH] = zeroed
+    for name_index in 0..<Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH:
+        function_names[name_index] <- Test::FunctionBreakpointTest::FUNCTION_NAME.cast[u8&][name_index]
+    name_lengths: mutable usize[Test::FunctionBreakpointTest::REQUESTED_COUNT] = zeroed
+    name_lengths[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX] <- Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH
+    replacement: DebuggerManagedService::FunctionBreakpointResult = DebuggerManagedService::service_replace_function_breakpoints(service, function_names[request_offsets[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX]], Test::FunctionBreakpointTest::FUNCTION_NAME_LENGTH, request_offsets[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX], name_lengths[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX], Test::FunctionBreakpointTest::REQUESTED_COUNT)
+    return Test::FunctionBreakpointTest::REPLACEMENT_FAILURE if not replacement.accepted or replacement.count != Test::FunctionBreakpointTest::REQUESTED_COUNT or not replacement.points[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX].verified or service.controller.state.breakpoints.count != Test::FunctionBreakpointTest::TOTAL_BREAKPOINT_COUNT or service.controller.state.breakpoints.points[Test::FunctionBreakpointTest::SOURCE_BREAKPOINT_INDEX].id.value != retained_source_id.value or service.controller.state.breakpoints.points[Test::FunctionBreakpointTest::SOURCE_BREAKPOINT_INDEX].status != DebuggerBreakpoints::BreakpointStatus.Verified
+    hit_target: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_hit_target(service, replacement.points[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX].id, Test::FunctionBreakpointTest::CONDITION_HIT_TARGET)
+    return Test::FunctionBreakpointTest::HIT_TARGET_FAILURE if not hit_target.accepted
+    condition_applied: DebuggerManagedService::Result = DebuggerManagedService::service_set_breakpoint_condition(service, replacement.points[Test::FunctionBreakpointTest::FIRST_REQUEST_INDEX].id, Test::FunctionBreakpointTest::CONDITION.cast[u8&], Test::FunctionBreakpointTest::CONDITION_LENGTH)
+    return Test::FunctionBreakpointTest::CONDITION_FAILURE if not condition_applied.accepted
+    continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: Test::FunctionBreakpointTest::REQUEST_ID, has_id: true, expected_generation: Test::FunctionBreakpointTest::NO_EXPECTED_GENERATION, target_event: Test::FunctionBreakpointTest::NO_TARGET_EVENT, valid: true}
+    continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
+    return Test::FunctionBreakpointTest::CONTINUE_FAILURE if not continued.accepted
+    return Test::FunctionBreakpointTest::STOP_POSITION_FAILURE if service.controller.engine.event_count != Test::FunctionBreakpointTest::FIRST_EVENT or service.controller.engine.machine.program_counter != Test::FunctionBreakpointTest::FIRST_FUNCTION_ENTRY or service.controller.engine.machine.return_stack_pointer != Test::FunctionBreakpointTest::CALLEE_FRAME_DEPTH or service.controller.session.state != DebuggerSession::SessionState.Stopped
+    return Test::FunctionBreakpointTest::HIT_COUNT_FAILURE if service.controller.state.breakpoints.points[Test::FunctionBreakpointTest::FUNCTION_BREAKPOINT_INDEX].hit_count != Test::FunctionBreakpointTest::CONDITION_HIT_TARGET
+    return Test::FunctionBreakpointTest::HIT_COUNT_FAILURE if service.controller.state.breakpoints.points[Test::FunctionBreakpointTest::SOURCE_BREAKPOINT_INDEX].hit_count != Test::FunctionBreakpointTest::CONDITION_HIT_TARGET
+    continued_overload: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
+    return Test::FunctionBreakpointTest::OVERLOAD_ENTRY_FAILURE if not continued_overload.accepted or service.controller.engine.event_count != Test::FunctionBreakpointTest::SECOND_EVENT or service.controller.engine.machine.program_counter != Test::FunctionBreakpointTest::SECOND_FUNCTION_ENTRY or service.controller.session.state != DebuggerSession::SessionState.Stopped
+    return Test::FunctionBreakpointTest::OVERLOAD_HIT_COUNT_FAILURE if service.controller.state.breakpoints.points[Test::FunctionBreakpointTest::FUNCTION_BREAKPOINT_INDEX].hit_count != Test::FunctionBreakpointTest::CONDITION_HIT_TARGET + Test::FunctionBreakpointTest::HIT_COUNT_INCREMENT
+    return 0
 
 def check_managed_source_step_over() -> i64:
     controller: mutable DebuggerManagedEngine::ManagedController = managed_regression_controller(managed_source_step_image())
@@ -711,6 +816,8 @@ def main() -> i64:
     return Test::MANAGED_STEP_OUT_DESTINATION_BREAKPOINT_RESULT if step_out_destination_breakpoint_status != 0
     step_into_status: i64 = check_managed_step_into_enters_callee()
     return Test::StepInto::CHECK_RESULT + step_into_status if step_into_status != 0
+    function_breakpoint_status: i64 = check_managed_function_breakpoints()
+    return Test::FunctionBreakpointTest::CHECK_RESULT + function_breakpoint_status if function_breakpoint_status != 0
     source_breakpoint_resume_status: i64 = check_managed_source_breakpoint_resume()
     return Test::MANAGED_SOURCE_BREAKPOINT_RESUME_RESULT if source_breakpoint_resume_status != 0
     conditional_breakpoint_status: i64 = check_managed_conditional_breakpoint()

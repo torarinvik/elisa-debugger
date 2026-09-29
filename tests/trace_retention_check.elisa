@@ -13,6 +13,9 @@ const module Test:
     STALE_DEPENDENCY_RESULT: i64 = 16
     MALFORMED_COLLECTION_COUNT_RESULT: i64 = 17
     MALFORMED_COLLECTION_PIN_COUNT_RESULT: i64 = 18
+    REINITIALIZATION_RESULT: i64 = 25
+    ATOMIC_REFERENCE_RESULT: i64 = 26
+    MAX_REFERENCE_COUNT: u64 = 18446744073709551615
     RETENTION_CHUNK_CAPACITY: usize = 128
     RETENTION_PIN_CAPACITY: usize = 64
     RETENTION_INVALID_CHUNK_COUNT: usize = Test::RETENTION_CHUNK_CAPACITY + 1
@@ -33,50 +36,69 @@ const module Test:
 
 
 def main() -> i64:
-    store: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_new()
-    store <- DebuggerTraceRetention::retention_add_chunk(store, Test::FIRST_CHUNK, 0)
-    store <- DebuggerTraceRetention::retention_add_chunk(store, Test::SECOND_CHUNK, Test::PARENT_CHUNK)
-    malformed_collection_store: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_add_chunk(DebuggerTraceRetention::retention_new(), Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
+    store: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(store)
+    _ = DebuggerTraceRetention::retention_add_chunk(store, Test::FIRST_CHUNK, 0)
+    _ = DebuggerTraceRetention::retention_add_chunk(store, Test::SECOND_CHUNK, Test::PARENT_CHUNK)
+    malformed_collection_store: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(malformed_collection_store)
+    _ = DebuggerTraceRetention::retention_add_chunk(malformed_collection_store, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
     malformed_collection_plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(malformed_collection_store)
     malformed_collection_store.count <- Test::RETENTION_INVALID_CHUNK_COUNT
-    rejected_malformed_collection: DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_apply_collection(malformed_collection_store, malformed_collection_plan)
-    return Test::MALFORMED_COLLECTION_COUNT_RESULT if rejected_malformed_collection.count != Test::RETENTION_INVALID_CHUNK_COUNT or not rejected_malformed_collection.chunks[0].live
-    malformed_pin_store: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_add_chunk(DebuggerTraceRetention::retention_new(), Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
+    malformed_collection_accepted: bool = DebuggerTraceRetention::retention_apply_collection(malformed_collection_store, malformed_collection_plan)
+    return Test::MALFORMED_COLLECTION_COUNT_RESULT if malformed_collection_accepted or malformed_collection_store.count != Test::RETENTION_INVALID_CHUNK_COUNT or not malformed_collection_store.chunks[0].live
+    malformed_pin_store: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(malformed_pin_store)
+    _ = DebuggerTraceRetention::retention_add_chunk(malformed_pin_store, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
     malformed_pin_plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(malformed_pin_store)
     malformed_pin_store.pin_count <- Test::RETENTION_INVALID_PIN_COUNT
-    rejected_malformed_pin_store: DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_apply_collection(malformed_pin_store, malformed_pin_plan)
-    return Test::MALFORMED_COLLECTION_PIN_COUNT_RESULT if rejected_malformed_pin_store.pin_count != Test::RETENTION_INVALID_PIN_COUNT or not rejected_malformed_pin_store.chunks[0].live
-    store <- DebuggerTraceRetention::retention_add_reference(store, Test::FIRST_CHUNK)
-    store <- DebuggerTraceRetention::retention_pin(store, Test::SECOND_CHUNK)
+    malformed_pin_collection_accepted: bool = DebuggerTraceRetention::retention_apply_collection(malformed_pin_store, malformed_pin_plan)
+    return Test::MALFORMED_COLLECTION_PIN_COUNT_RESULT if malformed_pin_collection_accepted or malformed_pin_store.pin_count != Test::RETENTION_INVALID_PIN_COUNT or not malformed_pin_store.chunks[0].live
+    _ = DebuggerTraceRetention::retention_add_reference(store, Test::FIRST_CHUNK)
+    _ = DebuggerTraceRetention::retention_pin(store, Test::SECOND_CHUNK)
     return 5 if store.chunks[0].references == 0 or store.chunks[1].references == 0
     plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(store)
     return 1 if plan.count != 0
-    store <- DebuggerTraceRetention::retention_unpin(store, Test::SECOND_CHUNK)
-    store <- DebuggerTraceRetention::retention_apply_collection(store, DebuggerTraceRetention::retention_plan_collection(store))
+    _ = DebuggerTraceRetention::retention_unpin(store, Test::SECOND_CHUNK)
+    after_unpin_plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(store)
+    _ = DebuggerTraceRetention::retention_apply_collection(store, after_unpin_plan)
     return 2 if store.chunks[1].live
-    store <- DebuggerTraceRetention::retention_remove_reference(store, Test::FIRST_CHUNK)
-    store <- DebuggerTraceRetention::retention_apply_collection(store, DebuggerTraceRetention::retention_plan_collection(store))
+    _ = DebuggerTraceRetention::retention_remove_reference(store, Test::FIRST_CHUNK)
+    after_release_plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(store)
+    _ = DebuggerTraceRetention::retention_apply_collection(store, after_release_plan)
     return 6 if store.chunks[0].live
-    rejected_child: DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_add_chunk(store, Test::THIRD_CHUNK, Test::SECOND_CHUNK)
-    return Test::COLLECTED_PARENT_RESULT if rejected_child.count != store.count
-    dead_reference_attempt: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_add_reference(store, Test::SECOND_CHUNK)
-    return 9 if dead_reference_attempt.chunks[1].references != 0 or dead_reference_attempt.chunks[1].live
-    dead_pin_attempt: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_pin(store, Test::SECOND_CHUNK)
-    return 10 if dead_pin_attempt.chunks[1].pinned or dead_pin_attempt.chunks[1].references != 0
-    stale_store: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_new()
-    stale_store <- DebuggerTraceRetention::retention_add_chunk(stale_store, Test::SECOND_CHUNK, Test::PARENT_CHUNK)
+    rejected_child: bool = DebuggerTraceRetention::retention_add_chunk(store, Test::THIRD_CHUNK, Test::SECOND_CHUNK)
+    return Test::COLLECTED_PARENT_RESULT if rejected_child or store.count != 2
+    dead_reference_attempt: bool = DebuggerTraceRetention::retention_add_reference(store, Test::SECOND_CHUNK)
+    return 9 if dead_reference_attempt or store.chunks[1].references != 0 or store.chunks[1].live
+    dead_pin_attempt: bool = DebuggerTraceRetention::retention_pin(store, Test::SECOND_CHUNK)
+    return 10 if dead_pin_attempt or store.chunks[1].pinned or store.chunks[1].references != 0
+    stale_store: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(stale_store)
+    _ = DebuggerTraceRetention::retention_add_chunk(stale_store, Test::SECOND_CHUNK, Test::PARENT_CHUNK)
     return 8 if stale_store.count != 0
-    stale_store <- DebuggerTraceRetention::retention_add_chunk(stale_store, Test::FIRST_CHUNK, 0)
+    _ = DebuggerTraceRetention::retention_add_chunk(stale_store, Test::FIRST_CHUNK, 0)
     stale_plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(stale_store)
-    stale_store <- DebuggerTraceRetention::retention_pin(stale_store, Test::FIRST_CHUNK)
-    stale_store <- DebuggerTraceRetention::retention_apply_collection(stale_store, stale_plan)
+    _ = DebuggerTraceRetention::retention_pin(stale_store, Test::FIRST_CHUNK)
+    _ = DebuggerTraceRetention::retention_apply_collection(stale_store, stale_plan)
     return 7 if not stale_store.chunks[0].live or not stale_store.chunks[0].pinned
-    stale_dependency_store: mutable DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_new()
-    stale_dependency_store <- DebuggerTraceRetention::retention_add_chunk(stale_dependency_store, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
+    stale_dependency_store: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(stale_dependency_store)
+    _ = DebuggerTraceRetention::retention_add_chunk(stale_dependency_store, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
     stale_dependency_plan: DebuggerTraceRetention::CollectionPlan = DebuggerTraceRetention::retention_plan_collection(stale_dependency_store)
-    stale_dependency_store <- DebuggerTraceRetention::retention_add_chunk(stale_dependency_store, Test::LATE_CHILD_CHUNK, Test::FIRST_CHUNK)
-    stale_dependency_store <- DebuggerTraceRetention::retention_apply_collection(stale_dependency_store, stale_dependency_plan)
+    _ = DebuggerTraceRetention::retention_add_chunk(stale_dependency_store, Test::LATE_CHILD_CHUNK, Test::FIRST_CHUNK)
+    _ = DebuggerTraceRetention::retention_apply_collection(stale_dependency_store, stale_dependency_plan)
     return Test::STALE_DEPENDENCY_RESULT if not stale_dependency_store.chunks[0].live or not DebuggerTraceRetention::retention_chain_is_valid(stale_dependency_store, Test::LATE_CHILD_CHUNK)
+    stale_dependency_store.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Test::HEALTH_FIRST_FAILURE_DETAIL)
+    DebuggerTraceRetention::retention_initialize(stale_dependency_store)
+    return Test::REINITIALIZATION_RESULT if stale_dependency_store.count != 0 or stale_dependency_store.pin_count != 0 or not DebuggerErrors::error_is_ok(stale_dependency_store.last_error)
+    atomic_store: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(atomic_store)
+    _ = DebuggerTraceRetention::retention_add_chunk(atomic_store, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
+    _ = DebuggerTraceRetention::retention_add_chunk(atomic_store, Test::SECOND_CHUNK, Test::FIRST_CHUNK)
+    atomic_store.chunks[0].references <- Test::MAX_REFERENCE_COUNT
+    atomic_reference_accepted: bool = DebuggerTraceRetention::retention_add_reference(atomic_store, Test::SECOND_CHUNK)
+    return Test::ATOMIC_REFERENCE_RESULT if atomic_reference_accepted or atomic_store.chunks[0].references != Test::MAX_REFERENCE_COUNT or atomic_store.chunks[1].references != 0
     unverified_health: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_exact()
     return Test::HEALTH_UNVERIFIED_REPLAY_RESULT if DebuggerTraceHealth::health_can_replay(unverified_health, Test::FIRST_TRACE_EVENT)
     verified_first_event: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_verify(unverified_health, Test::FIRST_TRACE_EVENT)
@@ -94,15 +116,22 @@ def main() -> i64:
     earlier_partial: DebuggerTraceHealth::Health = DebuggerTraceHealth::health_downgrade(diverged, DebuggerTraceHealth::HealthState.Partial, Test::EVENT, DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Test::HEALTH_EARLIER_FAILURE_DETAIL))
     return Test::HEALTH_EARLIER_FAILURE_RESULT if earlier_partial.state != DebuggerTraceHealth::HealthState.Diverged or earlier_partial.failure_event != Test::EVENT or earlier_partial.failure.code != DebuggerErrors::ErrorCode.InvalidArgument or earlier_partial.failure.detail != Test::HEALTH_EARLIER_FAILURE_DETAIL
     return Test::HEALTH_FAILURE_PREFIX_RESULT if not earlier_partial.has_verified_event or earlier_partial.last_verified_event != Test::HEALTH_EXPECTED_CLAMPED_EVENT
-    malformed_count: mutable DebuggerTraceRetention::RetentionStore = store
+    malformed_count: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(malformed_count)
+    _ = DebuggerTraceRetention::retention_add_chunk(malformed_count, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
     malformed_count.count <- Test::RETENTION_CHUNK_CAPACITY + 1
     return 12 if DebuggerTraceRetention::retention_find(malformed_count, Test::FIRST_CHUNK) != Test::RETENTION_CHUNK_CAPACITY
-    malformed_pins: mutable DebuggerTraceRetention::RetentionStore = store
+    malformed_pins: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(malformed_pins)
+    _ = DebuggerTraceRetention::retention_add_chunk(malformed_pins, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
+    _ = DebuggerTraceRetention::retention_pin(malformed_pins, Test::FIRST_CHUNK)
     malformed_pins.pin_count <- Test::RETENTION_PIN_CAPACITY + 1
     _ = DebuggerTraceRetention::retention_unpin(malformed_pins, Test::FIRST_CHUNK)
-    orphan_pin: mutable DebuggerTraceRetention::RetentionStore = store
+    orphan_pin: mutable DebuggerTraceRetention::RetentionStore = zeroed
+    DebuggerTraceRetention::retention_initialize(orphan_pin)
+    _ = DebuggerTraceRetention::retention_add_chunk(orphan_pin, Test::FIRST_CHUNK, Test::ROOT_PARENT_CHUNK)
     orphan_pin.chunks[0].pinned <- true
     orphan_pin.chunks[0].references <- 1
-    orphan_result: DebuggerTraceRetention::RetentionStore = DebuggerTraceRetention::retention_unpin(orphan_pin, Test::FIRST_CHUNK)
-    return 13 if orphan_result.chunks[0].references != 1 or not orphan_result.chunks[0].pinned
+    orphan_result: bool = DebuggerTraceRetention::retention_unpin(orphan_pin, Test::FIRST_CHUNK)
+    return 13 if orphan_result or orphan_pin.chunks[0].references != 1 or not orphan_pin.chunks[0].pinned
     return 0

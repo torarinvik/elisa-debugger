@@ -212,7 +212,8 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     _ = DebuggerVirtualResources::resources_seek(resources, handle, Test::RESOURCE_CURSOR)
 
     source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_SOURCE_ID)
-    clock: mutable DebuggerReplayAdapters::Clock = DebuggerReplayAdapters::clock_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    clock: mutable DebuggerReplayAdapters::Clock = zeroed
+    DebuggerReplayAdapters::clock_initialize(clock, DebuggerReplayAdapters::AdapterMode.Recording)
     _ = DebuggerReplayAdapters::clock_record(clock, source, Test::ADAPTER_CLOCK_FIRST)
     _ = DebuggerReplayAdapters::clock_record(clock, source, Test::ADAPTER_CLOCK_SECOND)
     clock.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
@@ -220,7 +221,8 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     if not first_clock_read.accepted:
         clock.exact <- false
 
-    random: mutable DebuggerReplayAdapters::Random = DebuggerReplayAdapters::random_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    random: mutable DebuggerReplayAdapters::Random = zeroed
+    DebuggerReplayAdapters::random_initialize(random, DebuggerReplayAdapters::AdapterMode.Recording)
     _ = DebuggerReplayAdapters::random_record(random, source, Test::ADAPTER_RANDOM_FIRST)
     _ = DebuggerReplayAdapters::random_record(random, source, Test::ADAPTER_RANDOM_SECOND)
     random.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
@@ -230,7 +232,8 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
 
     input: mutable u8[Test::ADAPTER_INPUT_LENGTH] = [Test::ADAPTER_INPUT_BYTE]
     output: mutable u8[Test::ADAPTER_OUTPUT_LENGTH] = [Test::ADAPTER_OUTPUT_BYTE]
-    console: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Recording)
+    console: mutable DebuggerReplayAdapters::Console = zeroed
+    DebuggerReplayAdapters::console_initialize(console, DebuggerReplayAdapters::AdapterMode.Recording)
     _ = DebuggerReplayAdapters::console_record_input(console, DebuggerReplayAdapters::ConsoleChannel.Stdout, input[0], Test::ADAPTER_INPUT_LENGTH)
     recorded_output: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], Test::ADAPTER_OUTPUT_LENGTH)
     if not recorded_output.accepted:
@@ -260,11 +263,12 @@ def check_resource_snapshot_isolation() -> i64:
     return Test::TEST_SUCCESS
 
 def check_empty_recording_adapter_checkpoint() -> i64:
-    managed_state: DebuggerManagedState::State = DebuggerManagedState::state_new()
+    managed_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(managed_state)
     return Test::EMPTY_RECORDING_ADAPTER_CHECKPOINT_FAILURE if not DebuggerReplayAdapters::adapter_snapshot_is_valid(managed_state.adapters)
     return Test::EMPTY_RECORDING_ADAPTER_CHECKPOINT_FAILURE if managed_state.adapters.clock.mode != DebuggerReplayAdapters::AdapterMode.Recording or managed_state.adapters.random.mode != DebuggerReplayAdapters::AdapterMode.Recording or managed_state.adapters.console.mode != DebuggerReplayAdapters::AdapterMode.Recording
     checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
-    checkpoint.adapters <- DebuggerReplayAdapters::adapter_snapshot_empty_recording()
+    DebuggerReplayAdapters::adapter_snapshot_initialize_recording(checkpoint.adapters)
     DebuggerFullCheckpoint::full_checkpoint_seal_side_state(checkpoint)
     return Test::EMPTY_RECORDING_ADAPTER_CHECKPOINT_FAILURE if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
     encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
@@ -505,11 +509,13 @@ def check_round_trip() -> i64:
     output: mutable u8[Test::ADAPTER_OUTPUT_LENGTH] = [Test::ADAPTER_OUTPUT_BYTE]
     next_console_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(restored_adapters.console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], Test::ADAPTER_OUTPUT_LENGTH)
     return Test::ADAPTER_RESTORE_FAILURE if not next_clock.accepted or next_clock.value != Test::ADAPTER_CLOCK_SECOND or not next_random.accepted or next_random.value != Test::ADAPTER_RANDOM_SECOND or not next_console_write.accepted or not next_console_write.suppressed or not DebuggerReplayAdapters::console_replay_complete(restored_adapters.console)
-    branch_console: mutable DebuggerReplayAdapters::Console = DebuggerReplayAdapters::console_new(DebuggerReplayAdapters::AdapterMode.Branch)
+    branch_console: mutable DebuggerReplayAdapters::Console = zeroed
+    DebuggerReplayAdapters::console_initialize(branch_console, DebuggerReplayAdapters::AdapterMode.Branch)
     branch_console.output_suppressed <- false
     branch_write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(branch_console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], Test::ADAPTER_OUTPUT_LENGTH)
     return Test::BRANCH_WRITE_NOT_SUPPRESSED if not branch_write.accepted or not branch_write.suppressed
-    managed_state: mutable DebuggerManagedState::State = DebuggerManagedState::state_new()
+    managed_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(managed_state)
     return Test::ADAPTER_RESTORE_FAILURE if not DebuggerErrors::error_is_ok(DebuggerManagedState::state_restore(managed_state, decoded.checkpoint)) or not adapter_snapshot_is_equal(managed_state.adapters, checkpoint.adapters)
     restored_machine: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(decoded.checkpoint)
     recaptured: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedState::state_capture(managed_state, restored_machine, decoded.checkpoint.build, DebuggerEDIRCodec::ArtifactFingerprint{value: decoded.checkpoint.image_fingerprint, valid: decoded.checkpoint.image_fingerprint_valid}, decoded.checkpoint.recording, decoded.checkpoint.branch, decoded.checkpoint.event, decoded.checkpoint.state_hash)

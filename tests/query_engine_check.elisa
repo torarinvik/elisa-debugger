@@ -46,18 +46,25 @@ def main() -> i64:
         value_hash: 99,
         source: DebuggerIdentity::SourceSpan{file: DebuggerIdentity::debug_id(Test::SOURCE), start_byte: 0, end_byte: 1, start_line: 1, start_column: 0, end_line: 1, end_column: 1, discriminator: 0}
     }
-    index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_append(DebuggerProvenance::provenance_new(), mutation)
+    index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(index)
+    _ = DebuggerProvenance::provenance_append(index, mutation)
     window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: Test::QUERY_FIRST_EVENT, last_event: Test::QUERY_LAST_EVENT, max_results: Test::QUERY_MAX_RESULTS, max_steps: Test::QUERY_MAX_STEPS}
     token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
     cancelled_empty_token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_cancel(token)
-    cancelled_empty: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(DebuggerProvenance::provenance_new(), binding, window, cancelled_empty_token)
+    empty_index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(empty_index)
+    cancelled_empty: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(empty_index, binding, window, cancelled_empty_token)
     return Test::EMPTY_CANCEL_FAILURE if not cancelled_empty.cancelled or cancelled_empty.failure.code != DebuggerErrors::ErrorCode.Cancelled
     result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, window, token)
     return Test::MATCH_RESULT if result.count != 1 or result.matches[0].event != mutation.event or not result.complete
     lifecycle_mutation: mutable DebuggerProvenance::Mutation = mutation
     lifecycle_mutation.event <- 9
     lifecycle_mutation.kind <- DebuggerProvenance::MutationKind.Deallocation
-    lifecycle_index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_append(index, lifecycle_mutation)
+    lifecycle_index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(lifecycle_index)
+    _ = DebuggerProvenance::provenance_append(lifecycle_index, mutation)
+    _ = DebuggerProvenance::provenance_append(lifecycle_index, lifecycle_mutation)
     lifecycle_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(lifecycle_index, binding, window, token)
     return Test::NON_WRITE_FILTER_RESULT if lifecycle_result.count != 1 or lifecycle_result.matches[0].event != mutation.event
     return Test::NON_WRITE_FILTER_RESULT if DebuggerQueryEngine::query_find_next_write(lifecycle_index, binding, mutation.event, window).event != 0
@@ -66,32 +73,36 @@ def main() -> i64:
     capped_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: Test::QUERY_FIRST_EVENT, last_event: Test::QUERY_LAST_EVENT, max_results: Test::SINGLE_RESULT_LIMIT, max_steps: Test::QUERY_MAX_STEPS}
     capped_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, capped_window, token)
     return Test::MATCH_RESULT if capped_result.count != Test::SINGLE_RESULT_LIMIT or not capped_result.complete
-    large_index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+    large_index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(large_index)
     for event_index in 0..<Test::LARGE_INDEX_COUNT:
         large_mutation: mutable DebuggerProvenance::Mutation = mutation
         large_mutation.event <- event_index.u64()
-        large_index <- DebuggerProvenance::provenance_append(large_index, large_mutation)
+        _ = DebuggerProvenance::provenance_append(large_index, large_mutation)
     large_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: Test::QUERY_FIRST_EVENT, last_event: Test::QUERY_LAST_EVENT + Test::LARGE_INDEX_COUNT.u64(), max_results: Test::LARGE_RESULT_LIMIT, max_steps: Test::QUERY_MAX_STEPS}
     large_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(large_index, binding, large_window, token)
     return Test::LARGE_RESULT_FAILURE if large_result.count != Test::QUERY_RESULT_CAPACITY or large_result.complete or large_result.failure.code != DebuggerErrors::ErrorCode.ResourceLimit
-    exact_capacity_index: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+    exact_capacity_index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(exact_capacity_index)
     for event_index in 0..<Test::QUERY_RESULT_CAPACITY:
         exact_capacity_mutation: mutable DebuggerProvenance::Mutation = mutation
         exact_capacity_mutation.event <- event_index.u64()
-        exact_capacity_index <- DebuggerProvenance::provenance_append(exact_capacity_index, exact_capacity_mutation)
+        _ = DebuggerProvenance::provenance_append(exact_capacity_index, exact_capacity_mutation)
     exact_capacity_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: Test::QUERY_FIRST_EVENT, last_event: Test::EXACT_CAPACITY_LAST_EVENT, max_results: Test::LARGE_RESULT_LIMIT, max_steps: Test::EXACT_CAPACITY_STEP_LIMIT}
     exact_capacity: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(exact_capacity_index, binding, exact_capacity_window, token)
     return Test::EXACT_CAPACITY_RESULT if exact_capacity.count != Test::QUERY_RESULT_CAPACITY or not exact_capacity.complete or exact_capacity.next_index != Test::QUERY_RESULT_CAPACITY or not DebuggerErrors::error_is_ok(exact_capacity.failure)
-    invalid_index: mutable DebuggerProvenance::ProvenanceIndex = index
+    invalid_index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(invalid_index)
     invalid_index.count <- Test::INVALID_PROVENANCE_COUNT
     invalid_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(invalid_index, binding, window, token)
     return Test::INVALID_PROVENANCE_RESULT if invalid_result.failure.code != DebuggerErrors::ErrorCode.ResourceLimit or invalid_result.scanned != 0
     invalid_next: DebuggerProvenance::Mutation = DebuggerQueryEngine::query_find_next_write(invalid_index, binding, 0, window)
     return Test::INVALID_PROVENANCE_RESULT if invalid_next.event != 0
-    malformed_provenance: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
+    malformed_provenance: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(malformed_provenance)
     malformed_mutation: DebuggerProvenance::Mutation = mutation
     malformed_mutation.binding.declaration <- DebuggerIdentity::debug_id(0)
-    malformed_provenance <- DebuggerProvenance::provenance_append(malformed_provenance, malformed_mutation)
+    _ = DebuggerProvenance::provenance_append(malformed_provenance, malformed_mutation)
     return 12 if not malformed_provenance.overflowed or DebuggerProvenance::provenance_is_complete(malformed_provenance)
     deadline_token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(1)
     deadline_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(index, binding, window, deadline_token)
@@ -103,7 +114,10 @@ def main() -> i64:
     return Test::CANCELLED_RESULT if not cancelled.cancelled or cancelled.failure.code != DebuggerErrors::ErrorCode.Cancelled
     max_mutation: DebuggerProvenance::Mutation = mutation
     max_mutation.event <- Test::MAX_EVENT
-    max_index: DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_append(index, max_mutation)
+    max_index: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(max_index)
+    _ = DebuggerProvenance::provenance_append(max_index, mutation)
+    _ = DebuggerProvenance::provenance_append(max_index, max_mutation)
     max_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: 0, last_event: Test::MAX_EVENT, max_results: Test::QUERY_MAX_RESULTS, max_steps: Test::QUERY_MAX_STEPS}
     max_result: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_find_writes(max_index, binding, max_window, token)
     return Test::BUDGET_RESULT if max_result.next_event != Test::MAX_EVENT
@@ -116,9 +130,10 @@ def main() -> i64:
     earlier_mutation: DebuggerProvenance::Mutation = mutation
     earlier_mutation.event <- 3
     earlier_mutation.value_hash <- 101
-    unordered: mutable DebuggerProvenance::ProvenanceIndex = DebuggerProvenance::provenance_new()
-    unordered <- DebuggerProvenance::provenance_append(unordered, later_mutation)
-    unordered <- DebuggerProvenance::provenance_append(unordered, earlier_mutation)
+    unordered: mutable DebuggerProvenance::ProvenanceIndex = zeroed
+    DebuggerProvenance::provenance_initialize(unordered)
+    _ = DebuggerProvenance::provenance_append(unordered, later_mutation)
+    _ = DebuggerProvenance::provenance_append(unordered, earlier_mutation)
     first_change: DebuggerQueryEngine::QueryExecution = DebuggerQueryEngine::query_first_change(unordered, binding, window, 0, token)
     return Test::FIRST_CHANGE_RESULT if first_change.count != 1 or first_change.matches[0].event != 3
     partial_window: DebuggerHistory::QueryWindow = DebuggerHistory::QueryWindow{first_event: 0, last_event: Test::QUERY_LAST_EVENT, max_results: 1, max_steps: Test::QUERY_MAX_STEPS}

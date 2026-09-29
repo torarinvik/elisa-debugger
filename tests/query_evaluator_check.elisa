@@ -10,6 +10,7 @@ const module Test:
     QUERY_MISMATCH_COMPARE_BUDGET: u64 = 12
     QUERY_COMPARE_INNER_LIMIT: u64 = 2
     QUERY_COMPARE_DEADLINE: u64 = 2
+    EVENT_INDEX_REINITIALIZATION_RESULT: i64 = 9
     EXPECTED_SCANNED: u64 = 1
     EXPECTED_COMPARE_SCANNED: u64 = 10
     EXPECTED_MISMATCH_COMPARE_SCANNED: u64 = 12
@@ -23,36 +24,49 @@ const module Test:
 
 
 def main() -> i64:
-    index: mutable DebuggerQueryIndex::EventIndex = DebuggerQueryIndex::event_index_new()
-    index <- DebuggerQueryIndex::event_index_append(index, DebuggerQueryIndex::EventIndexEntry{event: Test::OUT_OF_RANGE_FIRST_EVENT, task: zeroed, statement: zeroed, state_hash: 1})
-    index <- DebuggerQueryIndex::event_index_append(index, DebuggerQueryIndex::EventIndexEntry{event: Test::OUT_OF_RANGE_SECOND_EVENT, task: zeroed, statement: zeroed, state_hash: 1})
+    index: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(index)
+    _ = DebuggerQueryIndex::event_index_append(index, DebuggerQueryIndex::EventIndexEntry{event: Test::OUT_OF_RANGE_FIRST_EVENT, task: zeroed, statement: zeroed, state_hash: 1})
+    _ = DebuggerQueryIndex::event_index_append(index, DebuggerQueryIndex::EventIndexEntry{event: Test::OUT_OF_RANGE_SECOND_EVENT, task: zeroed, statement: zeroed, state_hash: 1})
     token: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(0)
     result: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_first(index, DebuggerQueryEvaluator::Predicate{kind: DebuggerQueryEvaluator::PredicateKind.StateHashEquals, value: 1, second: 0}, Test::QUERY_FIRST_EVENT, Test::QUERY_LAST_EVENT, token, Test::QUERY_BUDGET)
     return 1 if result.status != DebuggerQueryEvaluator::QueryStatus.ResourceLimit
     return 2 if result.scanned != Test::EXPECTED_SCANNED
+    DebuggerQueryIndex::event_index_initialize(index)
+    return Test::EVENT_INDEX_REINITIALIZATION_RESULT if index.count != 0 or index.overflowed or DebuggerQueryIndex::event_index_find(index, Test::OUT_OF_RANGE_FIRST_EVENT).event != 0
     empty_deadline: DebuggerCancellation::CancellationToken = DebuggerCancellation::cancellation_token_new(1)
-    empty_result: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_first(DebuggerQueryIndex::event_index_new(), DebuggerQueryEvaluator::Predicate{kind: DebuggerQueryEvaluator::PredicateKind.StateHashEquals, value: 1, second: 0}, Test::QUERY_FIRST_EVENT, Test::QUERY_LAST_EVENT, empty_deadline, Test::QUERY_BUDGET)
+    empty_index: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(empty_index)
+    empty_result: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_first(empty_index, DebuggerQueryEvaluator::Predicate{kind: DebuggerQueryEvaluator::PredicateKind.StateHashEquals, value: 1, second: 0}, Test::QUERY_FIRST_EVENT, Test::QUERY_LAST_EVENT, empty_deadline, Test::QUERY_BUDGET)
     return Test::DEADLINE_RESULT if empty_result.status != DebuggerQueryEvaluator::QueryStatus.Cancelled or empty_result.scanned != 0
-    ordered_left: mutable DebuggerQueryIndex::EventIndex = DebuggerQueryIndex::event_index_new()
-    ordered_left <- DebuggerQueryIndex::event_index_append(ordered_left, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 80})
-    ordered_left <- DebuggerQueryIndex::event_index_append(ordered_left, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 20})
-    ordered_right: mutable DebuggerQueryIndex::EventIndex = DebuggerQueryIndex::event_index_new()
-    ordered_right <- DebuggerQueryIndex::event_index_append(ordered_right, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 20})
-    ordered_right <- DebuggerQueryIndex::event_index_append(ordered_right, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 80})
+    ordered_left: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(ordered_left)
+    _ = DebuggerQueryIndex::event_index_append(ordered_left, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 80})
+    _ = DebuggerQueryIndex::event_index_append(ordered_left, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 20})
+    ordered_right: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(ordered_right)
+    _ = DebuggerQueryIndex::event_index_append(ordered_right, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 20})
+    _ = DebuggerQueryIndex::event_index_append(ordered_right, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 80})
     reordered_compare: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_compare_with_cancellation(ordered_left, ordered_right, token, Test::QUERY_COMPARE_BUDGET)
     return Test::EVENT_ORDER_COMPARE_RESULT if reordered_compare.status != DebuggerQueryEvaluator::QueryStatus.NoMatch or reordered_compare.scanned != Test::EXPECTED_COMPARE_SCANNED
-    changed_event: mutable DebuggerQueryIndex::EventIndex = ordered_right
-    changed_event.entries[1].state_hash <- 81
+    changed_event: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(changed_event)
+    _ = DebuggerQueryIndex::event_index_append(changed_event, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 20})
+    _ = DebuggerQueryIndex::event_index_append(changed_event, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 81})
     changed_compare: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_compare_with_cancellation(ordered_left, changed_event, token, Test::QUERY_COMPARE_BUDGET)
     return Test::EVENT_VALUE_COMPARE_RESULT if changed_compare.status != DebuggerQueryEvaluator::QueryStatus.Match or changed_compare.event != 8
-    missing_compare: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_compare_with_cancellation(DebuggerQueryIndex::event_index_new(), ordered_left, token, Test::QUERY_COMPARE_BUDGET)
+    missing_index: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(missing_index)
+    missing_compare: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_compare_with_cancellation(missing_index, ordered_left, token, Test::QUERY_COMPARE_BUDGET)
     return Test::EVENT_MISSING_COMPARE_RESULT if missing_compare.status != DebuggerQueryEvaluator::QueryStatus.Match or missing_compare.event != 2
-    mismatch_left: mutable DebuggerQueryIndex::EventIndex = DebuggerQueryIndex::event_index_new()
-    mismatch_left <- DebuggerQueryIndex::event_index_append(mismatch_left, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 80})
-    mismatch_left <- DebuggerQueryIndex::event_index_append(mismatch_left, DebuggerQueryIndex::EventIndexEntry{event: 10, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 100})
-    mismatch_right: mutable DebuggerQueryIndex::EventIndex = DebuggerQueryIndex::event_index_new()
-    mismatch_right <- DebuggerQueryIndex::event_index_append(mismatch_right, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(5), statement: DebuggerIdentity::debug_id(6), state_hash: 20})
-    mismatch_right <- DebuggerQueryIndex::event_index_append(mismatch_right, DebuggerQueryIndex::EventIndexEntry{event: 10, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 100})
+    mismatch_left: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(mismatch_left)
+    _ = DebuggerQueryIndex::event_index_append(mismatch_left, DebuggerQueryIndex::EventIndexEntry{event: 8, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 80})
+    _ = DebuggerQueryIndex::event_index_append(mismatch_left, DebuggerQueryIndex::EventIndexEntry{event: 10, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 100})
+    mismatch_right: mutable DebuggerQueryIndex::EventIndex = zeroed
+    DebuggerQueryIndex::event_index_initialize(mismatch_right)
+    _ = DebuggerQueryIndex::event_index_append(mismatch_right, DebuggerQueryIndex::EventIndexEntry{event: 2, task: DebuggerIdentity::debug_id(5), statement: DebuggerIdentity::debug_id(6), state_hash: 20})
+    _ = DebuggerQueryIndex::event_index_append(mismatch_right, DebuggerQueryIndex::EventIndexEntry{event: 10, task: DebuggerIdentity::debug_id(3), statement: DebuggerIdentity::debug_id(4), state_hash: 100})
     earliest_mismatch: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_compare_with_cancellation(mismatch_left, mismatch_right, token, Test::QUERY_MISMATCH_COMPARE_BUDGET)
     return Test::EARLIEST_EVENT_MISMATCH_RESULT if earliest_mismatch.status != DebuggerQueryEvaluator::QueryStatus.Match or earliest_mismatch.event != 2 or earliest_mismatch.scanned != Test::EXPECTED_MISMATCH_COMPARE_SCANNED
     limited_compare: DebuggerQueryEvaluator::QueryResult = DebuggerQueryEvaluator::query_compare_with_cancellation(ordered_left, ordered_right, token, Test::QUERY_BUDGET)

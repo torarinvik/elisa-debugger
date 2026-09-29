@@ -2,14 +2,16 @@
 set -eu
 
 server=${1:?expected DAP server path}
+fixture=${2:?expected EDIR fixture path}
 initialize_payload='{"seq":1,"type":"request","command":"initialize","arguments":{"linesStartAt1":false}}'
-launch_payload='{"seq":2,"type":"request","command":"launch","arguments":{"program":"build/edir-fixture.edir"}}'
-breakpoint_payload='{"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"sourceReference":7},"breakpoints":[{"line":9}]}}'
-next_response_payload='{"seq":4,"type":"request","command":"threads"}'
-expected_frame_count=5
+launch_payload=$(printf '{"seq":2,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$fixture")
+configuration_done_payload='{"seq":3,"type":"request","command":"configurationDone"}'
+breakpoint_payload='{"seq":4,"type":"request","command":"setBreakpoints","arguments":{"source":{"sourceReference":7},"breakpoints":[{"line":9}]}}'
+next_response_payload='{"seq":5,"type":"request","command":"threads"}'
+expected_frame_count=6
 input=''
 
-for payload in "$initialize_payload" "$launch_payload" "$breakpoint_payload" "$next_response_payload"; do
+for payload in "$initialize_payload" "$launch_payload" "$configuration_done_payload" "$breakpoint_payload" "$next_response_payload"; do
     payload_length=$(printf '%s' "$payload" | wc -c | tr -d ' ')
     frame=$(printf 'Content-Length: %s\r\n\r\n%s' "$payload_length" "$payload")
     input="${input}${frame}"
@@ -39,7 +41,7 @@ Content-Length:/g' |
         }
         END {
             if (frame_count != expected_frame_count || !saw_breakpoint || expected_bytes != "") {
-                print "DAP response stream did not contain four complete frames" > "/dev/stderr"
+                print "DAP response stream did not contain six complete frames" > "/dev/stderr"
                 exit 1
             }
         }

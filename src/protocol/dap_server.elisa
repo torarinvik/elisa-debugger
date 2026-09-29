@@ -1954,17 +1954,20 @@ module DebuggerDAPServer:
             loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(path.bytes[0], path.length) can Blocking.IO, Unsafe.PointerCast
             if not loaded.valid:
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
-            recording: DebuggerIdentity::DebugId = service.controller.engine.recording
-            session: DebuggerSession::Session = service.controller.session
-            candidate: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, loaded.image, recording)
-            if source_root.has_root and not DebuggerManagedEngine::managed_set_source_path_root(candidate.controller, source_root.root.bytes[0], source_root.root.length):
+            if source_root.has_root and not DebuggerManagedEngine::managed_source_path_root_is_valid(source_root.root.bytes[0], source_root.root.length):
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_MEMORY_DETAIL_ARGUMENT)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
-            result: DebuggerProtocolDispatcher::DispatchResult = dispatch_managed(candidate, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
-            if not result.accepted:
-                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: result.failure}
-            service <- candidate
-            return result
+            recording: DebuggerIdentity::DebugId = service.controller.engine.recording
+            session: DebuggerSession::Session = service.controller.session
+            launch_session: DebuggerSession::Session = DebuggerSession::session_launch(session)
+            if launch_session.last_error != DebuggerSession::SessionError.None:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_MEMORY_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            DebuggerManagedService::service_initialize(service, session, loaded.image, recording)
+            if source_root.has_root and not DebuggerManagedEngine::managed_set_source_path_root(service.controller, source_root.root.bytes[0], source_root.root.length):
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_MEMORY_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
 
         def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates&, context: mutable DAPRequestContext&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if command_hash == CommandDispatch::COMMAND_HASH_INITIALIZE:
@@ -2292,7 +2295,8 @@ module DebuggerDAPServer:
             outbound_sequence: mutable u64 = 1
             client_coordinates: mutable DebuggerDAPPayload::ClientCoordinates = DebuggerDAPPayload::client_coordinates_default()
             session: DebuggerSession::Session = initial_session()
-            service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
+            service: mutable DebuggerManagedService::Service = zeroed
+            DebuggerManagedService::service_initialize(service, session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
             memory: mutable DebuggerMemory::MemoryRead = zeroed
             variables: mutable DebuggerManagedInspection::LocalPage = zeroed
             source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult = zeroed

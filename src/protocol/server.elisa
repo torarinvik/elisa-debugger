@@ -46,9 +46,14 @@ module DebuggerProtocolServer:
         const module RequestDefaults:
             FALLBACK_RESPONSE_ID: u64 = 1
             PROTOCOL_SERVER_REQUEST_DEFAULTS_NO_EXPECTED_GENERATION: u64 = 0
+            PROTOCOL_SERVER_REQUEST_DEFAULTS_NO_REQUEST_ID: u64 = 0
             PROTOCOL_SERVER_REQUEST_DEFAULTS_DEFAULT_PAGE_SIZE: u64 = 0
             DEFAULT_PAGE_START: u64 = 0
             PROTOCOL_SERVER_NO_SOURCE_FILE_ID: u64 = 0
+
+        const module LaunchPreflight:
+            REQUEST_ID_DETAIL: u32 = 4
+            ENGINE_FAULT_DETAIL: u32 = 1
 
         const module ResponseEncoding:
             RESPONSE_BODY_PREFIX_LENGTH: usize = 25
@@ -319,12 +324,18 @@ module DebuggerProtocolServer:
             loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(operands.program.bytes[0], operands.program.length) can Blocking.IO, Unsafe.PointerCast
             if not loaded.valid:
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
+            if not request.has_id or request.id == RequestDefaults::PROTOCOL_SERVER_REQUEST_DEFAULTS_NO_REQUEST_ID:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, LaunchPreflight::REQUEST_ID_DETAIL)
+                return DebuggerProtocolDispatcher::dispatch_error(session, request.method, failure)
+            launch_session: DebuggerSession::Session = DebuggerSession::session_launch(session)
+            if launch_session.last_error != DebuggerSession::SessionError.None:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, LaunchPreflight::ENGINE_FAULT_DETAIL)
+                return DebuggerProtocolDispatcher::dispatch_error(session, request.method, failure)
             recording: DebuggerIdentity::DebugId = service.controller.engine.recording
-            candidate: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, loaded.image, recording)
-            result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(candidate, request)
+            DebuggerManagedService::service_initialize(service, session, loaded.image, recording)
+            result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
             if not result.accepted:
                 return DebuggerProtocolDispatcher::dispatch_error(session, request.method, result.failure)
-            service <- candidate
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
 
         def source_breakpoint_dispatch_error(service: DebuggerManagedService::Service, request: DebuggerProtocolRequest::Request, code: DebuggerErrors::ErrorCode, detail: u32) -> SourceBreakpointDispatch:
@@ -366,7 +377,8 @@ module DebuggerProtocolServer:
             }
             session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Ownership::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
             session.capabilities <- server_capabilities(session.capabilities)
-            service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Ownership::SESSION_ID))
+            service: mutable DebuggerManagedService::Service = zeroed
+            DebuggerManagedService::service_initialize(service, session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Ownership::SESSION_ID))
             protocol_initialized: mutable bool = false
             ownership_active: mutable bool = false
             owner_token: mutable u64 = 0

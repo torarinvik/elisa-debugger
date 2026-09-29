@@ -13,6 +13,15 @@ module DebuggerQueryEngine:
         const module Capacity:
             MATCHES: usize = 64
 
+        const module ExecutionDefaults:
+            EMPTY_COUNT: usize = 0
+            EMPTY_SCANNED: u64 = 0
+            EMPTY_NEXT_INDEX: usize = 0
+            INCOMPLETE: bool = false
+            NOT_CANCELLED: bool = false
+            NOT_FIRST_CHANGE_SEARCH: bool = false
+            NO_FIRST_CHANGE: bool = false
+
         const module Event:
             ENGINE_EVENT_NO_EVENT: u64 = 18446744073709551615
             ENGINE_EVENT_MAX: u64 = 18446744073709551615
@@ -61,25 +70,35 @@ module DebuggerQueryEngine:
             first_change: mutable QueryMatch
             failure: mutable DebuggerErrors::DebuggerError
 
-        def query_execution_new(window: DebuggerHistory::QueryWindow) -> QueryExecution:
-            return QueryExecution{window: window, matches: zeroed, count: 0, scanned: 0, next_event: window.first_event, next_index: 0, complete: false, cancelled: false, first_change_search: false, has_first_change: false, first_change: zeroed, failure: DebuggerErrors::no_error()}
+        def query_execution_initialize(execution: mutable QueryExecution&, window: DebuggerHistory::QueryWindow) -> void:
+            execution.window <- window
+            execution.count <- ExecutionDefaults::EMPTY_COUNT
+            execution.scanned <- ExecutionDefaults::EMPTY_SCANNED
+            execution.next_event <- window.first_event
+            execution.next_index <- ExecutionDefaults::EMPTY_NEXT_INDEX
+            execution.complete <- ExecutionDefaults::INCOMPLETE
+            execution.cancelled <- ExecutionDefaults::NOT_CANCELLED
+            execution.first_change_search <- ExecutionDefaults::NOT_FIRST_CHANGE_SEARCH
+            execution.has_first_change <- ExecutionDefaults::NO_FIRST_CHANGE
+            execution.first_change <- zeroed
+            execution.failure <- DebuggerErrors::no_error()
 
-        def query_execution_is_valid(execution: QueryExecution) -> bool:
+        def query_execution_is_valid(execution: QueryExecution&) -> bool:
             return false if not DebuggerHistory::query_window_is_valid(execution.window) or execution.count > Capacity::MATCHES or execution.next_event < execution.window.first_event or execution.scanned > execution.window.max_steps or (execution.complete and execution.cancelled)
             return false if execution.has_first_change and not execution.first_change_search
             return false if execution.first_change_search and execution.has_first_change != (execution.count == 1)
             return true
 
-        def query_record(execution: QueryExecution, mutation: DebuggerProvenance::Mutation) -> QueryExecution:
-            updated: mutable QueryExecution = execution
-            return updated if execution.count >= Capacity::MATCHES
-            return updated if execution.count.u64() >= execution.window.max_results
-            updated.matches[execution.count] <- QueryMatch{event: mutation.event, mutation: mutation}
-            updated.count <- execution.count + 1
-            return updated
+        def query_record(execution: mutable QueryExecution&, mutation: DebuggerProvenance::Mutation) -> bool:
+            return false if execution.count >= Capacity::MATCHES
+            return false if execution.count.u64() >= execution.window.max_results
+            execution.matches[execution.count] <- QueryMatch{event: mutation.event, mutation: mutation}
+            execution.count <- execution.count + 1
+            return true
 
         def query_find_writes(index: DebuggerProvenance::ProvenanceIndex&, binding: DebuggerIdentity::BindingIdentity, window: DebuggerHistory::QueryWindow, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
-            result: mutable QueryExecution = query_execution_new(window)
+            result: mutable QueryExecution = zeroed
+            query_execution_initialize(result, window)
             if not DebuggerHistory::query_window_is_valid(window):
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FailureDetail::WINDOW)
                 return result
@@ -105,7 +124,7 @@ module DebuggerQueryEngine:
                         result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
                         return result
                     continue
-                result <- query_record(result, candidate)
+                _ = query_record(result, candidate)
                 if result.count.u64() >= window.max_results:
                     result.complete <- position + 1 >= index.count
                     if not result.complete and result.scanned >= window.max_steps:
@@ -127,7 +146,8 @@ module DebuggerQueryEngine:
         # requiring a lexical binding. Storage identity includes generation
         # and byte offset so address reuse cannot merge unrelated lifetimes.
         def query_find_allocation_lifetime(index: DebuggerProvenance::ProvenanceIndex&, allocation: DebuggerIdentity::AllocationIdentity, window: DebuggerHistory::QueryWindow, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
-            result: mutable QueryExecution = query_execution_new(window)
+            result: mutable QueryExecution = zeroed
+            query_execution_initialize(result, window)
             if not DebuggerHistory::query_window_is_valid(window):
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, FailureDetail::WINDOW)
                 return result
@@ -157,7 +177,7 @@ module DebuggerQueryEngine:
                         result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, FailureDetail::ENGINE_FAILUREDETAIL_CAPACITY)
                         return result
                     continue
-                result <- query_record(result, candidate)
+                _ = query_record(result, candidate)
                 if result.count.u64() >= window.max_results:
                     result.complete <- position + 1 >= index.count
                     if not result.complete and result.scanned >= window.max_steps:
@@ -234,28 +254,27 @@ module DebuggerQueryEngine:
             return result
 
         private:
-            def query_first_change_consider_page(result: QueryExecution, previous_hash: u64) -> QueryExecution:
-                updated: mutable QueryExecution = result
-                updated.first_change_search <- true
+            def query_first_change_consider_page(result: mutable QueryExecution&, previous_hash: u64) -> void:
+                result.first_change_search <- true
                 for position in 0..<result.count:
                     candidate: QueryMatch = result.matches[position]
-                    if candidate.mutation.value_hash != previous_hash and (not updated.has_first_change or candidate.event < updated.first_change.event):
-                        updated.first_change <- candidate
-                        updated.has_first_change <- true
-                if updated.has_first_change:
-                    updated.matches[0] <- updated.first_change
-                    updated.count <- 1
+                    if candidate.mutation.value_hash != previous_hash and (not result.has_first_change or candidate.event < result.first_change.event):
+                        result.first_change <- candidate
+                        result.has_first_change <- true
+                if result.has_first_change:
+                    result.matches[0] <- result.first_change
+                    result.count <- 1
                 else:
-                    updated.count <- 0
-                return updated
+                    result.count <- ExecutionDefaults::EMPTY_COUNT
 
         public:
             def query_first_change(index: DebuggerProvenance::ProvenanceIndex&, binding: DebuggerIdentity::BindingIdentity, window: DebuggerHistory::QueryWindow, previous_hash: u64, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
-                result: QueryExecution = query_find_writes(index, binding, window, token)
+                result: mutable QueryExecution = query_find_writes(index, binding, window, token)
                 return result if result.cancelled or not DebuggerErrors::error_is_ok(result.failure)
                 # Keep the earliest candidate found so far in the cursor. It is
                 # provisional until every bounded page has been inspected.
-                return query_first_change_consider_page(result, previous_hash)
+                query_first_change_consider_page(result, previous_hash)
+                return result
 
             def query_resume_first_change(execution: QueryExecution, index: DebuggerProvenance::ProvenanceIndex&, binding: DebuggerIdentity::BindingIdentity, previous_hash: u64, token: DebuggerCancellation::CancellationToken) -> QueryExecution:
                 if not execution.first_change_search:
@@ -271,7 +290,8 @@ module DebuggerQueryEngine:
                 resumed.first_change_search <- true
                 resumed.first_change <- execution.first_change
                 resumed.has_first_change <- execution.has_first_change
-                return query_first_change_consider_page(resumed, previous_hash)
+                query_first_change_consider_page(resumed, previous_hash)
+                return resumed
 
         def query_compare(left: StateSample, right: StateSample) -> StateDifference:
             return StateDifference{left: left, right: right, different: left.value_hash != right.value_hash}

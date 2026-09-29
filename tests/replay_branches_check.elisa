@@ -2,6 +2,18 @@ include "../src/replay/branches.elisa"
 include "../src/replay/engine.elisa"
 
 const module Test:
+    const module BranchStore:
+        ROOT_STATE_HASH: u64 = 10
+        CHILD_STATE_HASH: u64 = 20
+        CORRUPT_FORK_STATE_HASH: u64 = 30
+        CORRUPT_FORK_NEXT_ID: u64 = 9
+        DIRTY_BRANCH_COUNT: usize = 9
+        DIRTY_NEXT_ID: u64 = 9
+        EMPTY_COUNT: usize = 0
+        TWO_STORED_BRANCHES: usize = 2
+        BRANCH_STORE_FORK_RESULT: i64 = 19
+        BRANCH_STORE_INTERVENTION_RESULT: i64 = 20
+        REINITIALIZED_STORAGE_RESULT: i64 = 21
     ROOT_EVENT: u64 = 4
     CHILD_EVENT: u64 = 7
     VALUE_HASH: u64 = 99
@@ -197,13 +209,21 @@ def check_seek_preserves_branch_prefix() -> i64:
     return 0
 
 def main() -> i64:
-    store: mutable DebuggerBranches::BranchStore = DebuggerBranches::branches_new()
-    store <- DebuggerBranches::branches_fork(store, DebuggerIdentity::debug_id(0), Test::ROOT_EVENT, 10)
-    root: DebuggerIdentity::DebugId = store.branches[0].id
-    store <- DebuggerBranches::branches_fork(store, root, Test::CHILD_EVENT, 20)
-    child: DebuggerIdentity::DebugId = store.branches[1].id
+    reused_store: mutable DebuggerBranches::BranchStore = zeroed
+    DebuggerBranches::branches_initialize(reused_store)
+    reused_store.count <- Test::BranchStore::DIRTY_BRANCH_COUNT
+    reused_store.next_id <- Test::BranchStore::DIRTY_NEXT_ID
+    DebuggerBranches::branches_initialize(reused_store)
+    return Test::BranchStore::REINITIALIZED_STORAGE_RESULT if reused_store.count != Test::BranchStore::EMPTY_COUNT or reused_store.next_id != Test::FIRST_BRANCH_ID or not DebuggerBranches::branches_is_valid(reused_store)
+
+    store: mutable DebuggerBranches::BranchStore = zeroed
+    DebuggerBranches::branches_initialize(store)
+    root: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(store, DebuggerIdentity::debug_id(Test::ROOT_BRANCH_ID), Test::ROOT_EVENT, Test::BranchStore::ROOT_STATE_HASH)
+    return Test::BranchStore::BRANCH_STORE_FORK_RESULT if root.value != Test::FIRST_BRANCH_ID
+    child: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(store, root, Test::CHILD_EVENT, Test::BranchStore::CHILD_STATE_HASH)
+    return Test::BranchStore::BRANCH_STORE_FORK_RESULT if child.value != Test::SECOND_BRANCH_ID
     intervention: DebuggerBranches::Intervention = DebuggerBranches::Intervention{event: Test::CHILD_EVENT, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(8), value_hash: Test::VALUE_HASH}
-    store <- DebuggerBranches::branches_add_intervention(store, child, intervention)
+    return Test::BranchStore::BRANCH_STORE_INTERVENTION_RESULT if not DebuggerBranches::branches_add_intervention(store, child, intervention)
     return 1 if not DebuggerBranches::branches_is_valid(store)
 
     malformed: mutable DebuggerBranches::BranchStore = store
@@ -217,15 +237,16 @@ def main() -> i64:
     malformed <- store
     malformed.next_id <- 1
     return 4 if DebuggerBranches::branches_is_valid(malformed)
-    empty_counter: DebuggerBranches::BranchStore = DebuggerBranches::branches_new()
+    empty_counter: mutable DebuggerBranches::BranchStore = zeroed
+    DebuggerBranches::branches_initialize(empty_counter)
     empty_counter.next_id <- 9
     return 5 if DebuggerBranches::branches_is_valid(empty_counter)
 
     corrupt_fork_store: mutable DebuggerBranches::BranchStore = store
     corrupt_fork_store.next_id <- 9
     return Test::BRANCH_CORRUPT_STORE_FORK_RESULT if DebuggerBranches::branches_is_valid(corrupt_fork_store)
-    rejected_corrupt_store_fork: DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(corrupt_fork_store, root, Test::CHILD_EVENT, 30)
-    return Test::BRANCH_CORRUPT_STORE_FORK_RESULT if rejected_corrupt_store_fork.count != corrupt_fork_store.count or rejected_corrupt_store_fork.next_id != corrupt_fork_store.next_id
+    rejected_corrupt_store_fork: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(corrupt_fork_store, root, Test::CHILD_EVENT, Test::BranchStore::CORRUPT_FORK_STATE_HASH)
+    return Test::BRANCH_CORRUPT_STORE_FORK_RESULT if rejected_corrupt_store_fork.value != Test::ROOT_BRANCH_ID or corrupt_fork_store.count != Test::BranchStore::TWO_STORED_BRANCHES or corrupt_fork_store.next_id != Test::BranchStore::CORRUPT_FORK_NEXT_ID
 
     image: mutable DebuggerEDIR::ProgramImage = zeroed
     image.program <- DebuggerEDIR::Program{version: 1, instruction_count: 1, local_count: 0, has_return: true}

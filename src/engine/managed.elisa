@@ -985,33 +985,35 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
         def managed_create_branch(controller: mutable ManagedController&) -> DebuggerIdentity::DebugId:
-            parent_engine: DebuggerReplayEngine::ReplayEngine = controller.engine
-            allocation_engine: mutable DebuggerReplayEngine::ReplayEngine = parent_engine
-            branch_value: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_next_branch(allocation_engine)
+            original_next_branch_id: u64 = controller.engine.next_branch_id
+            parent_branch: DebuggerIdentity::DebugId = controller.engine.branch
+            fork_event: u64 = controller.engine.event_count.u64()
+            state_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(controller.engine)
+            branch_value: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_next_branch(controller.engine)
             return DebuggerIdentity::debug_id(0) if branch_value.value == 0
-            updated: DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(controller.state.branches, parent_engine.branch, parent_engine.event_count.u64(), DebuggerReplayEngine::replay_engine_state_hash(parent_engine))
-            return DebuggerIdentity::debug_id(0) if updated.count == controller.state.branches.count
-            return DebuggerIdentity::debug_id(0) if updated.branches[updated.count - 1].id.value != branch_value.value
-            forked: DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_fork(parent_engine, branch_value)
-            return DebuggerIdentity::debug_id(0) if forked.branch.value != branch_value.value or forked.engine_error != DebuggerReplayEngine::EngineError.None
-            forked.next_branch_id <- allocation_engine.next_branch_id
-            controller.state.branches <- updated
+            if controller.state.branches.next_id != branch_value.value:
+                controller.engine.next_branch_id <- original_next_branch_id
+                return DebuggerIdentity::debug_id(0)
+            forked: DebuggerReplayEngine::ReplayEngine = DebuggerReplayEngine::replay_engine_fork(controller.engine, branch_value)
+            if forked.branch.value != branch_value.value or forked.engine_error != DebuggerReplayEngine::EngineError.None:
+                controller.engine.next_branch_id <- original_next_branch_id
+                return DebuggerIdentity::debug_id(0)
+            previous_branch_count: usize = controller.state.branches.count
+            previous_branch_next_id: u64 = controller.state.branches.next_id
+            created_branch: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(controller.state.branches, parent_branch, fork_event, state_hash)
+            if created_branch.value != branch_value.value:
+                controller.state.branches.count <- previous_branch_count
+                controller.state.branches.next_id <- previous_branch_next_id
+                controller.engine.next_branch_id <- original_next_branch_id
+                return DebuggerIdentity::debug_id(0)
+            forked.next_branch_id <- controller.engine.next_branch_id
             controller.engine <- forked
             managed_sync_position(controller)
             return DebuggerIdentity::debug_id(branch_value.value)
 
         def managed_add_intervention(controller: mutable ManagedController&, branch: DebuggerIdentity::DebugId, intervention: DebuggerBranches::Intervention) -> DebuggerErrors::DebuggerError:
-            updated: DebuggerBranches::BranchStore = DebuggerBranches::branches_add_intervention(controller.state.branches, branch, intervention)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HISTORY) if updated.count != controller.state.branches.count
-            found: mutable bool = false
-            changed: mutable bool = false
-            for index in 0..<controller.state.branches.count:
-                if controller.state.branches.branches[index].id.value == branch.value:
-                    found <- true
-                    changed <- updated.branches[index].intervention_count > controller.state.branches.branches[index].intervention_count
-                    break
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HISTORY) if not found or not changed
-            controller.state.branches <- updated
+            added: bool = DebuggerBranches::branches_add_intervention(controller.state.branches, branch, intervention)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HISTORY) if not added
             return DebuggerErrors::no_error()
 
         def managed_is_exact(controller: mutable ManagedController&) -> bool:

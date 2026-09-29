@@ -19,6 +19,17 @@ include "../src/replay/resources.elisa"
 include "../src/concurrency/checkpoint.elisa"
 
 const module Test:
+    const module BranchHistory:
+        ROOT_BRANCH_ID: u64 = 0
+        ROOT_FORK_EVENT: u64 = 3
+        CHILD_BEFORE_PARENT_EVENT: u64 = 2
+        BRANCH_STATE_HASH: u64 = 7
+        INTERVENTION_TARGET_ID: u64 = 8
+        FIRST_INTERVENTION_EVENT: u64 = 4
+        FIRST_INTERVENTION_HASH: u64 = 99
+        REJECTED_INTERVENTION_HASH: u64 = 100
+        EXTRA_INTERVENTION_HASH: u64 = 101
+        ONE_BRANCH: usize = 1
     VALUE_STORE_GENERATION: u64 = 7
     VALUE_FIRST_ID: u64 = 1
     VALUE_NAME_ID: u64 = 100
@@ -443,20 +454,24 @@ def main() -> i64:
     other_clock: DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_tick(DebuggerConcurrencyAnalysis::vector_clock_new(), 1)
     merged_clock: DebuggerConcurrencyAnalysis::VectorClock = DebuggerConcurrencyAnalysis::vector_clock_merge(clock, other_clock)
     return 26 if not DebuggerConcurrencyAnalysis::vector_clock_concurrent(clock, other_clock) or merged_clock.values[1] != 1
-    branches: mutable DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(DebuggerBranches::branches_new(), DebuggerIdentity::debug_id(0), 3, 7)
-    branch_id: DebuggerIdentity::DebugId = branches.branches[0].id
-    branches <- DebuggerBranches::branches_add_intervention(branches, branch_id, DebuggerBranches::Intervention{event: 4, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(8), value_hash: 99})
+    branches: mutable DebuggerBranches::BranchStore = zeroed
+    DebuggerBranches::branches_initialize(branches)
+    branch_id: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(branches, DebuggerIdentity::debug_id(Test::BranchHistory::ROOT_BRANCH_ID), Test::BranchHistory::ROOT_FORK_EVENT, Test::BranchHistory::BRANCH_STATE_HASH)
+    return 8 if branch_id.value == Test::BranchHistory::ROOT_BRANCH_ID
+    first_intervention: DebuggerBranches::Intervention = DebuggerBranches::Intervention{event: Test::BranchHistory::FIRST_INTERVENTION_EVENT, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(Test::BranchHistory::INTERVENTION_TARGET_ID), value_hash: Test::BranchHistory::FIRST_INTERVENTION_HASH}
+    return 8 if not DebuggerBranches::branches_add_intervention(branches, branch_id, first_intervention)
     return 8 if branches.branches[0].intervention_count != 1
-    rejected_child_branch: DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(branches, branch_id, 2, 7)
-    return 154 if rejected_child_branch.count != branches.count
+    rejected_child_branch: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(branches, branch_id, Test::BranchHistory::CHILD_BEFORE_PARENT_EVENT, Test::BranchHistory::BRANCH_STATE_HASH)
+    return 154 if rejected_child_branch.value != Test::BranchHistory::ROOT_BRANCH_ID or branches.count != Test::BranchHistory::ONE_BRANCH
     invalid_branch_store: mutable DebuggerBranches::BranchStore = branches
     invalid_branch_store.count <- Test::INVALID_BRANCH_COUNT
     return 157 if DebuggerBranches::branches_parent_event_is_valid(invalid_branch_store, branch_id, 3)
-    return 32 if not DebuggerBranches::branches_intervention_is_valid(branches.branches[0], DebuggerBranches::Intervention{event: 4, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(8), value_hash: 99})
-    return 49 if DebuggerBranches::branches_intervention_is_valid(branches.branches[0], DebuggerBranches::Intervention{event: 4, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(0), value_hash: 99})
-    branches_before_invalid: DebuggerBranches::BranchStore = branches
-    branches <- DebuggerBranches::branches_add_intervention(branches, branch_id, DebuggerBranches::Intervention{event: 2, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(8), value_hash: 100})
-    return 33 if branches.branches[0].intervention_count != branches_before_invalid.branches[0].intervention_count
+    return 32 if not DebuggerBranches::branches_intervention_is_valid(branches.branches[0], first_intervention)
+    invalid_target_intervention: DebuggerBranches::Intervention = DebuggerBranches::Intervention{event: Test::BranchHistory::FIRST_INTERVENTION_EVENT, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(Test::BranchHistory::ROOT_BRANCH_ID), value_hash: Test::BranchHistory::FIRST_INTERVENTION_HASH}
+    return 49 if DebuggerBranches::branches_intervention_is_valid(branches.branches[0], invalid_target_intervention)
+    rejected_intervention: DebuggerBranches::Intervention = DebuggerBranches::Intervention{event: Test::BranchHistory::CHILD_BEFORE_PARENT_EVENT, kind: DebuggerBranches::InterventionKind.Value, target: DebuggerIdentity::debug_id(Test::BranchHistory::INTERVENTION_TARGET_ID), value_hash: Test::BranchHistory::REJECTED_INTERVENTION_HASH}
+    previous_intervention_count: usize = branches.branches[0].intervention_count
+    return 33 if DebuggerBranches::branches_add_intervention(branches, branch_id, rejected_intervention) or branches.branches[0].intervention_count != previous_intervention_count
     parent_branch: DebuggerBranches::BranchRecord = branches.branches[0]
     child_branch: mutable DebuggerBranches::BranchRecord = parent_branch
     child_branch.interventions[0].value_hash <- 100
@@ -465,10 +480,14 @@ def main() -> i64:
     child_branch.interventions[0].target <- DebuggerIdentity::debug_id(9)
     return 67 if DebuggerBranches::branches_first_divergence(parent_branch, child_branch) != 4
     return 68 if DebuggerBranches::branches_first_divergence(parent_branch, parent_branch) != Test::BRANCH_NO_DIVERGENCE_EVENT
-    extra_branch_store: mutable DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(DebuggerBranches::branches_new(), DebuggerIdentity::debug_id(0), 3, 7)
-    extra_branch_id: DebuggerIdentity::DebugId = extra_branch_store.branches[0].id
-    extra_branch_store <- DebuggerBranches::branches_add_intervention(extra_branch_store, extra_branch_id, DebuggerBranches::Intervention{event: Test::BRANCH_EXTRA_INTERVENTION_EVENT, kind: DebuggerBranches::InterventionKind.Input, target: DebuggerIdentity::debug_id(8), value_hash: 101})
-    empty_branch_store: mutable DebuggerBranches::BranchStore = DebuggerBranches::branches_fork(DebuggerBranches::branches_new(), DebuggerIdentity::debug_id(0), 3, 7)
+    extra_branch_store: mutable DebuggerBranches::BranchStore = zeroed
+    DebuggerBranches::branches_initialize(extra_branch_store)
+    extra_branch_id: DebuggerIdentity::DebugId = DebuggerBranches::branches_fork(extra_branch_store, DebuggerIdentity::debug_id(Test::BranchHistory::ROOT_BRANCH_ID), Test::BranchHistory::ROOT_FORK_EVENT, Test::BranchHistory::BRANCH_STATE_HASH)
+    extra_intervention: DebuggerBranches::Intervention = DebuggerBranches::Intervention{event: Test::BRANCH_EXTRA_INTERVENTION_EVENT, kind: DebuggerBranches::InterventionKind.Input, target: DebuggerIdentity::debug_id(Test::BranchHistory::INTERVENTION_TARGET_ID), value_hash: Test::BranchHistory::EXTRA_INTERVENTION_HASH}
+    return Test::BRANCH_EXTRA_INTERVENTION_EVENT.i64() if not DebuggerBranches::branches_add_intervention(extra_branch_store, extra_branch_id, extra_intervention)
+    empty_branch_store: mutable DebuggerBranches::BranchStore = zeroed
+    DebuggerBranches::branches_initialize(empty_branch_store)
+    _ = DebuggerBranches::branches_fork(empty_branch_store, DebuggerIdentity::debug_id(Test::BranchHistory::ROOT_BRANCH_ID), Test::BranchHistory::ROOT_FORK_EVENT, Test::BranchHistory::BRANCH_STATE_HASH)
     return Test::BRANCH_EXTRA_INTERVENTION_EVENT.i64() if DebuggerBranches::branches_first_divergence(extra_branch_store.branches[0], empty_branch_store.branches[0]) != Test::BRANCH_EXTRA_INTERVENTION_EVENT
     unavailable_value: DebuggerValues::ValueDescriptor = DebuggerValues::ValueDescriptor{handle: zeroed, name: zeroed, value_kind: DebuggerValues::ValueKind.Aggregate, state: DebuggerValues::ValueState.Unavailable, type_id: zeroed, byte_size: 0, child_count: 1}
     unavailable_page: DebuggerValues::ValuePage = DebuggerValues::value_expand(unavailable_value, 0, 0, false)

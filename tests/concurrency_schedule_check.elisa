@@ -32,16 +32,16 @@ const module Test:
     EXPECTED_TASK_COUNT_AFTER_DIVERGENCE: usize = 1
 
 
-def runtime_with_running_owner_and_waiter(replaying: bool) -> DebuggerConcurrencyRuntime::TaskRuntime:
-    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(replaying)
+def runtime_with_running_owner_and_waiter(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, replaying: bool) -> void:
+    DebuggerConcurrencyRuntime::runtime_initialize(runtime, replaying)
     owner: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(Test::ROOT_TASK_ID))
     waiter: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(Test::ROOT_TASK_ID))
     _ = DebuggerConcurrencyRuntime::runtime_transition(runtime, owner, DebuggerConcurrency::TaskState.Running)
     _ = DebuggerConcurrencyRuntime::runtime_transition(runtime, waiter, DebuggerConcurrency::TaskState.Running)
-    return runtime
 
 def main() -> i64:
-    recorded: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(false)
+    recorded: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    runtime_with_running_owner_and_waiter(recorded, false)
     owner: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::FIRST_TASK_ID)
     waiter: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::SECOND_TASK_ID)
     resource: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::FIRST_RESOURCE_ID)
@@ -50,7 +50,8 @@ def main() -> i64:
 
     blocked_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(recorded)
     return Test::WAIT_CHECKPOINT_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(blocked_snapshot)
-    restored_blocked: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(false)
+    restored_blocked: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    DebuggerConcurrencyRuntime::runtime_initialize(restored_blocked, false)
     DebuggerConcurrencyCheckpoint::task_snapshot_restore(restored_blocked, blocked_snapshot)
     return Test::RESTORE_BLOCKED_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_matches(restored_blocked, blocked_snapshot) or restored_blocked.tasks[Test::OWNER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Running or restored_blocked.tasks[Test::WAITER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Blocked or restored_blocked.wait_count != Test::ONE_SCHEDULE_DECISION
     # OS thread IDs are observational host attributes; restoring the same
@@ -67,7 +68,8 @@ def main() -> i64:
     invalid_wake_state.scheduler_decisions[Test::SECOND_SCHEDULE_INDEX].task.state <- DebuggerConcurrency::TaskState.Running
     return Test::INVALID_WAKE_STATE_RESULT if DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(invalid_wake_state)
 
-    replayed: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(true)
+    replayed: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    runtime_with_running_owner_and_waiter(replayed, true)
     replayed.scheduler.count <- recorded.scheduler.count
     replayed.scheduler.decisions <- recorded.scheduler.decisions
     return Test::REPLAY_WAIT_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(replayed, waiter, owner, resource, DebuggerConcurrency::SynchronizationKind.Mutex)
@@ -76,19 +78,22 @@ def main() -> i64:
     replayed_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(replayed)
     return Test::WAKE_CHECKPOINT_RESULT if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(replayed_snapshot)
 
-    wrong_wait: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(true)
+    wrong_wait: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    runtime_with_running_owner_and_waiter(wrong_wait, true)
     wrong_wait.scheduler.count <- recorded.scheduler.count
     wrong_wait.scheduler.decisions <- recorded.scheduler.decisions
     return Test::WAIT_DIVERGENCE_RESULT if DebuggerConcurrencyRuntime::runtime_wait(wrong_wait, waiter, owner, DebuggerIdentity::debug_id(Test::WRONG_RESOURCE_ID), DebuggerConcurrency::SynchronizationKind.Mutex) or not wrong_wait.scheduler.diverged or wrong_wait.status != DebuggerConcurrencyRuntime::RuntimeStatus.Diverged or wrong_wait.wait_count != 0 or wrong_wait.tasks[Test::WAITER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Running
 
-    wrong_wake: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime_with_running_owner_and_waiter(true)
+    wrong_wake: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    runtime_with_running_owner_and_waiter(wrong_wake, true)
     wrong_wake.scheduler.count <- recorded.scheduler.count
     wrong_wake.scheduler.decisions <- recorded.scheduler.decisions
     return Test::WAKE_DIVERGENCE_RESULT if not DebuggerConcurrencyRuntime::runtime_wait(wrong_wake, waiter, owner, resource, DebuggerConcurrency::SynchronizationKind.Mutex)
     wrong_wake.scheduler.decisions[Test::SECOND_SCHEDULE_INDEX].synchronization <- Test::WRONG_RESOURCE_ID
     return Test::WAKE_DIVERGENCE_RESULT if DebuggerConcurrencyRuntime::runtime_wake(wrong_wake, waiter) or not wrong_wake.scheduler.diverged or wrong_wake.status != DebuggerConcurrencyRuntime::RuntimeStatus.Diverged or wrong_wake.wait_count != Test::ONE_SCHEDULE_DECISION or wrong_wake.tasks[Test::WAITER_TASK_INDEX].state != DebuggerConcurrency::TaskState.Blocked
 
-    post_divergence_spawn: mutable DebuggerConcurrencyRuntime::TaskRuntime = DebuggerConcurrencyRuntime::runtime_new(true)
+    post_divergence_spawn: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    DebuggerConcurrencyRuntime::runtime_initialize(post_divergence_spawn, true)
     first_divergence_task: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(post_divergence_spawn, DebuggerIdentity::debug_id(Test::ROOT_TASK_ID))
     _ = DebuggerConcurrencyRuntime::runtime_schedule(post_divergence_spawn, first_divergence_task, DebuggerScheduler::ScheduleKind.Run, DebuggerIdentity::debug_id(Test::ROOT_TASK_ID))
     rejected_spawn: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(post_divergence_spawn, DebuggerIdentity::debug_id(Test::ROOT_TASK_ID))

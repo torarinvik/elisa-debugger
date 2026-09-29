@@ -19,6 +19,10 @@ module DebuggerConcurrencyRuntime:
         const module Root:
             CONCURRENCY_RUNTIME_ROOT_TASK_ID: u64 = 0
 
+        const module Runtime:
+            EMPTY_TASK_COUNT: usize = 0
+            EMPTY_WAIT_COUNT: usize = 0
+
         const module Sentinel:
             TASK_INDEX: usize = Task::RUNTIME_CAPACITY
             WAIT_EDGE_INDEX: usize = Wait::EDGE_CAPACITY
@@ -63,12 +67,13 @@ module DebuggerConcurrencyRuntime:
             scheduler: mutable DebuggerScheduler::DeterministicScheduler
             status: mutable RuntimeStatus
 
-        def runtime_new(replaying: bool) -> TaskRuntime:
-            runtime: mutable TaskRuntime = zeroed
+        def runtime_initialize(runtime: mutable TaskRuntime&, replaying: bool) -> void:
+            runtime.task_count <- Runtime::EMPTY_TASK_COUNT
             runtime.next_id <- First::CONCURRENCY_RUNTIME_FIRST_TASK_ID
-            runtime.scheduler <- DebuggerScheduler::scheduler_new(replaying)
+            runtime.current <- DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID)
+            runtime.wait_count <- Runtime::EMPTY_WAIT_COUNT
+            DebuggerScheduler::scheduler_initialize(runtime.scheduler, replaying)
             runtime.status <- RuntimeStatus.Ready
-            return runtime
 
         def runtime_spawn(runtime: mutable TaskRuntime&, parent: DebuggerIdentity::DebugId) -> DebuggerIdentity::DebugId:
             return DebuggerIdentity::debug_id(Root::CONCURRENCY_RUNTIME_ROOT_TASK_ID) if runtime.scheduler.diverged
@@ -163,7 +168,7 @@ module DebuggerConcurrencyRuntime:
         def runtime_record_sync(runtime: mutable TaskRuntime&, id: DebuggerIdentity::DebugId, kind: DebuggerScheduler::ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> bool:
             index: usize = runtime_find_index(runtime, id)
             return false if index == Sentinel::TASK_INDEX
-            runtime.scheduler <- DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
+            DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
             if runtime.scheduler.diverged:
                 runtime.status <- RuntimeStatus.Diverged
                 return false
@@ -173,7 +178,7 @@ module DebuggerConcurrencyRuntime:
             index: usize = runtime_find_index(runtime, id)
             return false if index == Sentinel::TASK_INDEX
             return false if runtime.tasks[index].state != DebuggerConcurrency::TaskState.Runnable and runtime.tasks[index].state != DebuggerConcurrency::TaskState.Running
-            runtime.scheduler <- DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
+            DebuggerScheduler::scheduler_next_with_sync(runtime.scheduler, runtime.tasks[index], kind, synchronization)
             if runtime.scheduler.diverged:
                 runtime.status <- RuntimeStatus.Diverged
                 return false
@@ -239,10 +244,10 @@ module DebuggerConcurrencyRuntime:
                 return true if DebuggerConcurrencyAnalysis::wait_graph_has_cycle(graph, runtime.tasks[index])
             return false
 
-        def runtime_task_count(runtime: TaskRuntime) -> usize:
+        def runtime_task_count(runtime: TaskRuntime&) -> usize:
             return runtime.task_count
 
-        def runtime_status_is_consistent(runtime: TaskRuntime) -> bool:
+        def runtime_status_is_consistent(runtime: TaskRuntime&) -> bool:
             return false if runtime.task_count > Task::RUNTIME_CAPACITY
             has_runnable: mutable bool = false
             has_running: mutable bool = false

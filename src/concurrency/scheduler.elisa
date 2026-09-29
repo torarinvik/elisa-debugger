@@ -7,6 +7,13 @@ module DebuggerScheduler:
     private:
         const module Schedule:
             CONCURRENCY_SCHEDULER_SCHEDULE_CAPACITY: usize = 512
+            EMPTY_COUNT: usize = 0
+            EMPTY_CURSOR: usize = 0
+            FIRST_DECISION_INDEX: usize = 0
+            COUNT_INCREMENT: usize = 1
+            CURSOR_INCREMENT: usize = 1
+            INITIAL_DIVERGED: bool = false
+            INITIAL_OVERFLOWED: bool = false
             CONCURRENCY_SCHEDULER_SCHEDULE_KIND_MAX: u16 = 6
             CONCURRENCY_SCHEDULER_SCHEDULE_TASK_STATE_MAX: u16 = 5
             NO_TASK_ID: u64 = 0
@@ -52,66 +59,63 @@ module DebuggerScheduler:
             return decision.task.state == DebuggerConcurrency::TaskState.Blocked if decision.kind == ScheduleKind.Wake
             return decision.task.state == DebuggerConcurrency::TaskState.Runnable or decision.task.state == DebuggerConcurrency::TaskState.Running
 
-        def scheduler_new(replaying: bool) -> DeterministicScheduler:
-            scheduler: mutable DeterministicScheduler = zeroed
-            scheduler.count <- 0
-            scheduler.cursor <- 0
+        def scheduler_initialize(scheduler: mutable DeterministicScheduler&, replaying: bool) -> void:
+            scheduler.count <- Schedule::EMPTY_COUNT
+            scheduler.cursor <- Schedule::EMPTY_CURSOR
             scheduler.replaying <- replaying
-            scheduler.diverged <- false
-            scheduler.overflowed <- false
-            return scheduler
+            scheduler.diverged <- Schedule::INITIAL_DIVERGED
+            scheduler.overflowed <- Schedule::INITIAL_OVERFLOWED
 
-        def scheduler_append(scheduler: DeterministicScheduler, decision: ScheduleDecision) -> DeterministicScheduler:
-            updated: mutable DeterministicScheduler = scheduler
-            return updated if scheduler.replaying
+        # Only decisions below count are live. Reinitialization resets the
+        # logical extent; the caller owns the fixed decision buffer.
+        def scheduler_append(scheduler: mutable DeterministicScheduler&, decision: ScheduleDecision) -> void:
+            return if scheduler.replaying
             if not scheduler_decision_is_valid(decision):
-                updated.diverged <- true
-                return updated
+                scheduler.diverged <- true
+                return
             if decision.ordinal != scheduler.count.u64():
-                updated.diverged <- true
-                return updated
+                scheduler.diverged <- true
+                return
             if scheduler.count >= Schedule::CONCURRENCY_SCHEDULER_SCHEDULE_CAPACITY:
-                updated.overflowed <- true
-                updated.diverged <- true
-                return updated
-            updated.decisions[scheduler.count] <- decision
-            updated.count <- scheduler.count + 1
-            return updated
+                scheduler.overflowed <- true
+                scheduler.diverged <- true
+                return
+            scheduler.decisions[scheduler.count] <- decision
+            scheduler.count <- scheduler.count + Schedule::COUNT_INCREMENT
 
-        def scheduler_next_with_sync(scheduler: DeterministicScheduler, task: DebuggerConcurrency::TaskInfo, kind: ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> DeterministicScheduler:
-            updated: mutable DeterministicScheduler = scheduler
+        def scheduler_next_with_sync(scheduler: mutable DeterministicScheduler&, task: DebuggerConcurrency::TaskInfo, kind: ScheduleKind, synchronization: DebuggerIdentity::DebugId) -> void:
             if not scheduler.replaying:
-                return scheduler_append(scheduler, ScheduleDecision{ordinal: scheduler.count.u64(), task: task, kind: kind, synchronization: synchronization.value})
+                scheduler_append(scheduler, ScheduleDecision{ordinal: scheduler.count.u64(), task: task, kind: kind, synchronization: synchronization.value})
+                return
             if scheduler.count > Schedule::CONCURRENCY_SCHEDULER_SCHEDULE_CAPACITY or scheduler.cursor > scheduler.count:
-                updated.diverged <- true
-                return updated
+                scheduler.diverged <- true
+                return
             if scheduler.cursor >= scheduler.count:
-                updated.diverged <- true
-                return updated
+                scheduler.diverged <- true
+                return
             expected: ScheduleDecision = scheduler.decisions[scheduler.cursor]
             # OS thread numbers are host attributes and can be reused or
             # remapped between record and replay. Logical task identity,
             # state, and logical time are the deterministic scheduler
             # contract, so host thread numbers must not cause divergence.
             if expected.ordinal != scheduler.cursor.u64() or not scheduler_decision_is_valid(expected) or kind.u16() > Schedule::CONCURRENCY_SCHEDULER_SCHEDULE_KIND_MAX or task.id.value == Schedule::NO_TASK_ID or task.state.u16() > Schedule::CONCURRENCY_SCHEDULER_SCHEDULE_TASK_STATE_MAX or schedule_kind_requires_sync(kind) and synchronization.value == Schedule::NO_SYNC_ID or not schedule_kind_requires_sync(kind) and synchronization.value != Schedule::NO_SYNC_ID or expected.task.id.value != task.id.value or expected.task.parent.value != task.parent.value or expected.task.state != task.state or expected.task.logical_time != task.logical_time or expected.kind != kind or expected.synchronization != synchronization.value:
-                updated.diverged <- true
-                return updated
-            updated.cursor <- scheduler.cursor + 1
-            return updated
+                scheduler.diverged <- true
+                return
+            scheduler.cursor <- scheduler.cursor + Schedule::CURSOR_INCREMENT
 
-        def scheduler_next(scheduler: DeterministicScheduler, task: DebuggerConcurrency::TaskInfo, kind: ScheduleKind) -> DeterministicScheduler:
-            return scheduler_next_with_sync(scheduler, task, kind, DebuggerIdentity::debug_id(0))
+        def scheduler_next(scheduler: mutable DeterministicScheduler&, task: DebuggerConcurrency::TaskInfo, kind: ScheduleKind) -> void:
+            scheduler_next_with_sync(scheduler, task, kind, DebuggerIdentity::debug_id(Schedule::NO_SYNC_ID))
 
-        def scheduler_state_is_valid(scheduler: DeterministicScheduler) -> bool:
+        def scheduler_state_is_valid(scheduler: DeterministicScheduler&) -> bool:
             return false if scheduler.count > Schedule::CONCURRENCY_SCHEDULER_SCHEDULE_CAPACITY or scheduler.cursor > scheduler.count
-            return false if not scheduler.replaying and scheduler.cursor != 0
+            return false if not scheduler.replaying and scheduler.cursor != Schedule::EMPTY_CURSOR
             return false if scheduler.overflowed and not scheduler.diverged
-            for index in 0..<scheduler.count:
+            for index in Schedule::FIRST_DECISION_INDEX..<scheduler.count:
                 decision: ScheduleDecision = scheduler.decisions[index]
                 return false if decision.ordinal != index.u64() or not scheduler_decision_is_valid(decision)
             return true
 
-        def scheduler_is_exact(scheduler: DeterministicScheduler) -> bool:
+        def scheduler_is_exact(scheduler: DeterministicScheduler&) -> bool:
             return false if not scheduler_state_is_valid(scheduler) or scheduler.diverged or scheduler.overflowed
             return false if scheduler.replaying and scheduler.cursor != scheduler.count
             return true

@@ -33,6 +33,13 @@ const module TransferInput:
     SINGLE_BYTE_CHUNK_LENGTH: usize = 1
     INVALID_SEQUENCE_CHUNK_LENGTH: usize = 2
 
+const module TransferReuse:
+    REPLACEMENT_SIZE: usize = 1
+    LAST_PREVIOUS_BYTE_INDEX: usize = 4
+    EMPTY_BYTE: u8 = 0
+    TRANSFER_REUSE_RESULT: i64 = 18
+    REMOTE_CHANNEL_REUSE_RESULT: i64 = 19
+
 
 def main() -> i64:
     bytes: mutable u8[Test::ARTIFACT_SIZE] = zeroed
@@ -78,6 +85,11 @@ def main() -> i64:
     tampered_complete.chunks[0] <- tampered_complete.chunks[0] + 1
     tampered_copy: mutable u8[Test::ARTIFACT_SIZE] = zeroed
     return Test::TAMPERED_COMPLETE_ERROR if DebuggerRemoteArtifacts::transfer_is_complete(tampered_complete) or DebuggerErrors::error_is_ok(DebuggerRemoteArtifacts::transfer_copy(tampered_complete, tampered_copy[0], Test::ARTIFACT_SIZE))
+    reused_transfer: mutable DebuggerRemoteArtifacts::ArtifactTransfer = DebuggerRemoteArtifacts::transfer_begin(transfer, TransferReuse::REPLACEMENT_SIZE, DebuggerRemoteArtifacts::transfer_checksum(bytes[0], TransferReuse::REPLACEMENT_SIZE))
+    return TransferReuse::TRANSFER_REUSE_RESULT if not DebuggerRemoteArtifacts::transfer_is_receiving(reused_transfer) or reused_transfer.chunks[TransferReuse::LAST_PREVIOUS_BYTE_INDEX] != TransferReuse::EMPTY_BYTE
+    reused_transfer <- DebuggerRemoteArtifacts::transfer_push(reused_transfer, TransferInput::FIRST_SEQUENCE, bytes[0], TransferReuse::REPLACEMENT_SIZE)
+    reused_transfer <- DebuggerRemoteArtifacts::transfer_finish(reused_transfer)
+    return TransferReuse::TRANSFER_REUSE_RESULT if not DebuggerRemoteArtifacts::transfer_is_complete(reused_transfer)
     transfer <- DebuggerRemoteArtifacts::transfer_begin(DebuggerRemoteArtifacts::transfer_new(), Test::ARTIFACT_SIZE, 1)
     transfer <- DebuggerRemoteArtifacts::transfer_push(transfer, 0, bytes[0], Test::ARTIFACT_SIZE)
     transfer <- DebuggerRemoteArtifacts::transfer_finish(transfer)
@@ -96,6 +108,11 @@ def main() -> i64:
     channel <- DebuggerRemote::remote_push_artifact(channel, 1, bytes[2], 3)
     channel <- DebuggerRemote::remote_finish_artifact(channel)
     return Test::REMOTE_ARTIFACT_COMPLETE if not DebuggerRemoteArtifacts::transfer_is_complete(channel.artifact) or channel.bytes_received != Test::ARTIFACT_SIZE.u64()
+    channel <- DebuggerRemote::remote_begin_artifact(channel, TransferReuse::REPLACEMENT_SIZE, DebuggerRemoteArtifacts::transfer_checksum(bytes[0], TransferReuse::REPLACEMENT_SIZE))
+    return TransferReuse::REMOTE_CHANNEL_REUSE_RESULT if not DebuggerRemoteArtifacts::transfer_is_receiving(channel.artifact) or channel.artifact.chunks[TransferReuse::LAST_PREVIOUS_BYTE_INDEX] != TransferReuse::EMPTY_BYTE
+    channel <- DebuggerRemote::remote_push_artifact(channel, TransferInput::FIRST_SEQUENCE, bytes[0], TransferReuse::REPLACEMENT_SIZE)
+    channel <- DebuggerRemote::remote_finish_artifact(channel)
+    return TransferReuse::REMOTE_CHANNEL_REUSE_RESULT if not DebuggerRemoteArtifacts::transfer_is_complete(channel.artifact)
     invalid_channel: mutable DebuggerRemote::RemoteChannel = DebuggerRemote::remote_begin(DebuggerRemote::remote_new(DebuggerSecurity::default_policy()))
     invalid_channel <- DebuggerRemote::remote_authenticate(invalid_channel, 1, 1)
     invalid_channel <- DebuggerRemote::remote_accept_handshake(invalid_channel, DebuggerRemote::RemoteHandshake{protocol_major: 1, protocol_minor: 0, engine: 1, trace_schema: 1, authenticated: true})

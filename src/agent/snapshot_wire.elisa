@@ -74,6 +74,7 @@ module DebuggerAgentSnapshotWire:
             RESOURCE_LIMIT: u32 = 3
             THREAD_MISMATCH: u32 = 4
             INVALID_DESCRIPTOR: u32 = 5
+            STALE_GENERATION: u32 = 6
 
         const module SnapshotPayloadShape:
             U64_FIELD_COUNT: usize = 7
@@ -198,6 +199,10 @@ module DebuggerAgentSnapshotWire:
             kind <- DebuggerAgentFrames::AgentStorageKind.Unknown if code == SnapshotEnumCode::STORAGE_UNKNOWN
             return kind
 
+        def inspection_failure_status(status: DebuggerAgentFrames::ShadowStatus) -> SnapshotWireStatus:
+            return SnapshotWireStatus.StaleGeneration if status == DebuggerAgentFrames::ShadowStatus.StaleGeneration or status == DebuggerAgentFrames::ShadowStatus.GenerationMismatch
+            return SnapshotWireStatus.SnapshotUnavailable
+
         def encode_value_kind(kind: DebuggerAgentFrames::AgentValueKind) -> u16:
             return SnapshotEnumCode::VALUE_SIGNED if kind == DebuggerAgentFrames::AgentValueKind.Signed
             return SnapshotEnumCode::VALUE_UNSIGNED if kind == DebuggerAgentFrames::AgentValueKind.Unsigned
@@ -233,6 +238,7 @@ module DebuggerAgentSnapshotWire:
             return SnapshotErrorCode::RESOURCE_LIMIT if status == SnapshotWireStatus.ResourceLimit
             return SnapshotErrorCode::THREAD_MISMATCH if status == SnapshotWireStatus.ThreadMismatch
             return SnapshotErrorCode::INVALID_DESCRIPTOR if status == SnapshotWireStatus.InvalidDescriptor
+            return SnapshotErrorCode::STALE_GENERATION if status == SnapshotWireStatus.StaleGeneration
             return SnapshotProtocol::EMPTY_RESERVED_WORD
 
         def decode_snapshot_error_code(code: u32) -> SnapshotWireStatus:
@@ -241,6 +247,7 @@ module DebuggerAgentSnapshotWire:
             return SnapshotWireStatus.ResourceLimit if code == SnapshotErrorCode::RESOURCE_LIMIT
             return SnapshotWireStatus.ThreadMismatch if code == SnapshotErrorCode::THREAD_MISMATCH
             return SnapshotWireStatus.InvalidDescriptor if code == SnapshotErrorCode::INVALID_DESCRIPTOR
+            return SnapshotWireStatus.StaleGeneration if code == SnapshotErrorCode::STALE_GENERATION
             return SnapshotWireStatus.InvalidPayload
 
         def snapshot_error_response_decode(bytes: u8&, length: usize) -> SnapshotWireStatus:
@@ -298,6 +305,7 @@ module DebuggerAgentSnapshotWire:
             UnsupportedMessage
             InvalidGeneration
             GenerationMismatch
+            StaleGeneration
             ThreadMismatch
             InvalidReservedWord
             ChecksumMismatch
@@ -457,7 +465,7 @@ module DebuggerAgentSnapshotWire:
             if binding_limit == SnapshotProtocol::ZERO_LENGTH or binding_limit > SnapshotCapacity::MAX_BINDINGS_PER_PAGE:
                 return output.status
             frame_result: DebuggerAgentFrames::FrameReadResult = DebuggerAgentInspection::agent_inspection_read_frame(shadow_stack, registry, frame_index_value, generation)
-            output.status <- SnapshotWireStatus.SnapshotUnavailable
+            output.status <- inspection_failure_status(frame_result.status)
             return output.status if frame_result.status != DebuggerAgentFrames::ShadowStatus.Ready
             output.status <- SnapshotWireStatus.InvalidPage
             return output.status if binding_start > frame_result.frame.binding_count
@@ -495,7 +503,7 @@ module DebuggerAgentSnapshotWire:
 
             for page_index in SnapshotSequence::FIRST..<page_binding_count:
                 binding_result: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding_at(shadow_stack, registry, frame_result.frame.invocation, binding_start + page_index, generation)
-                output.status <- SnapshotWireStatus.SnapshotUnavailable
+                output.status <- inspection_failure_status(binding_result.status)
                 return output.status if binding_result.status != DebuggerAgentFrames::ShadowStatus.Ready and binding_result.status != DebuggerAgentFrames::ShadowStatus.ValueNotAvailable
                 descriptor: DebuggerAgentFrames::AgentStorageDescriptor = binding_result.descriptor
                 output.status <- SnapshotWireStatus.InvalidDescriptor

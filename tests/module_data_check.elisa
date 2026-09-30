@@ -24,6 +24,10 @@ const module Test:
         TYPE_ADD_FAILURE: i64 = 171
         SCOPE_ADD_FAILURE: i64 = 172
         BINDING_ADD_FAILURE: i64 = 173
+    const module ResourceValidation:
+        REPLAY_WRITE_RESULT: i64 = 167
+    const module RuntimeValidation:
+        INCONSISTENT_STATUS_RESULT: i64 = 156
     const module BranchHistory:
         ROOT_BRANCH_ID: u64 = 0
         ROOT_FORK_EVENT: u64 = 3
@@ -43,7 +47,6 @@ const module Test:
     VALUE_CHILD_VALUE: i64 = 9
     WATCH_ALLOCATION_ID: u64 = 200
     WATCH_ALLOCATION_GENERATION: u64 = 1
-    INVALID_WATCH_ACCESS: u16 = 99
     WATCH_VALUE_FIRST: u64 = 10
     WATCH_VALUE_SECOND: u64 = 11
     TASK_PARENT_ID: u64 = 0
@@ -67,13 +70,10 @@ const module Test:
     INVALID_BINDING_COUNT: usize = 1025
     INVALID_SYMBOL_COUNT: usize = 513
     INVALID_RESOURCE_COUNT: usize = 17
-    INVALID_RESOURCE_MODE: u16 = 99
-    INVALID_RESOURCE_MODE_RESULT: i64 = 167
     INVALID_EFFECT_COUNT: usize = 257
     CORRUPT_EFFECT_REQUEST_HASH: u64 = 1
     CORRUPT_EFFECT_FAILURE: i64 = 3
     INVALID_TASK_COUNT: usize = 65
-    INVALID_TASK_STATE: u16 = 99
     INVALID_BRANCH_COUNT: usize = 33
     RESOURCE_INVALID_INDEX: usize = 16
     INVALID_STREAM_PAYLOAD: u64 = 513
@@ -342,12 +342,12 @@ def check_full_checkpoint() -> i64:
     return Test::FULL_CHECKPOINT_RESULT_FAILURE if DebuggerFullCheckpoint::full_checkpoint_is_valid(corrupt)
     return 0
 
-def main() -> i64:
-    return 74 if check_corrupt_metadata() != 0
-    return 75 if check_corrupt_tables() != 0
-    return 76 if check_corrupt_runtime() != 0
-    return Test::ADAPTER_REPLAY_RESULT_FAILURE if check_managed_adapters() != 0
-    return Test::FULL_CHECKPOINT_RESULT_FAILURE if check_full_checkpoint() != 0
+def snapshot_rejects_reused_task_id(runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime&, reused_id: u64) -> bool:
+    invalid_allocator_snapshot: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
+    invalid_allocator_snapshot.next_id <- reused_id
+    return not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(invalid_allocator_snapshot)
+
+def check_evaluation_and_binding() -> i64:
     expression: DebuggerEvaluate::Expression = DebuggerEvaluate::Expression{kind: DebuggerEvaluate::EvaluationKind.Add, left: 4, right: 5, binding: zeroed}
     evaluated: DebuggerEvaluate::Evaluation = DebuggerEvaluate::evaluate_expression(expression, 8)
     return 1 if evaluated.value != 9 or not DebuggerErrors::error_is_ok(evaluated.failure)
@@ -377,6 +377,9 @@ def main() -> i64:
     unsigned_binding: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_unsigned(binding_store, DebuggerIdentity::debug_id(Test::VALUE_NAME_ID + 1), DebuggerIdentity::debug_id(Test::VALUE_TYPE_ID), Test::BINDING_UNSIGNED_VALUE)
     unsigned_binding_result: DebuggerEvaluate::Evaluation = DebuggerBindingEvaluate::evaluate_binding(binding_store, unsigned_binding, 4)
     return Test::UNSUPPORTED_UNSIGNED_RESULT_FAILURE if unsigned_binding_result.failure.code != DebuggerErrors::ErrorCode.Unsupported or unsigned_binding_result.consumed != 1
+    return 0
+
+def check_trace_stream() -> i64:
     header: DebuggerTrace::ChunkHeader = DebuggerTrace::ChunkHeader{schema: 1, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: 4953205138095159339}
     stream: mutable DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(DebuggerTraceStream::trace_stream_new(), header)
     stream <- DebuggerTraceStream::trace_stream_append(stream, 42)
@@ -398,6 +401,28 @@ def main() -> i64:
     standard_empty_header: DebuggerTrace::ChunkHeader = DebuggerTrace::ChunkHeader{schema: 1, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 0, first_event: 0, last_event: 0, payload_length: 0, checksum: Test::TRACE_STANDARD_EMPTY_CHECKSUM}
     standard_empty_stream: DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(DebuggerTraceStream::trace_stream_new(), standard_empty_header)
     return Test::STANDARD_EMPTY_STREAM_RESULT if DebuggerTraceStream::trace_stream_verify(standard_empty_stream) != DebuggerTraceStream::TraceReadStatus.Complete
+    next_header: mutable DebuggerTrace::ChunkHeader = header
+    next_header.sequence <- 1
+    next_header.first_event <- Test::TRACE_NEXT_EVENT
+    next_header.last_event <- Test::TRACE_NEXT_EVENT
+    torn_stream: DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(stream, next_header)
+    return 90 if DebuggerTraceStream::trace_stream_verify(torn_stream) != DebuggerTraceStream::TraceReadStatus.Truncated
+    bad_header: mutable DebuggerTrace::ChunkHeader = header
+    bad_header.sequence <- 1
+    bad_header.last_event <- header.last_event + 1
+    bad_header.checksum <- header.checksum + 1
+    bad_stream: mutable DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(stream, bad_header)
+    bad_stream <- DebuggerTraceStream::trace_stream_append(bad_stream, 42)
+    return 91 if DebuggerTraceStream::trace_stream_verify(bad_stream) != DebuggerTraceStream::TraceReadStatus.Corrupt or bad_stream.verified_event != stream.verified_event
+    tampered_stream: mutable DebuggerTraceStream::TraceStream = stream
+    tampered_stream.chunks[0].payload[0] <- 43
+    return 92 if DebuggerTraceStream::trace_stream_verify(tampered_stream) != DebuggerTraceStream::TraceReadStatus.Corrupt
+    oversized_stream: mutable DebuggerTraceStream::TraceStream = stream
+    oversized_stream.chunks[0].header.payload_length <- Test::INVALID_STREAM_PAYLOAD
+    return 93 if DebuggerTraceStream::trace_stream_verify(oversized_stream) != DebuggerTraceStream::TraceReadStatus.ResourceLimit
+    return 0
+
+def check_queries_and_provenance() -> i64:
     index: mutable DebuggerQueryIndex::EventIndex = zeroed
     DebuggerQueryIndex::event_index_initialize(index)
     _ = DebuggerQueryIndex::event_index_append(index, DebuggerQueryIndex::EventIndexEntry{event: 4, task: DebuggerIdentity::debug_id(1), statement: DebuggerIdentity::debug_id(2), state_hash: 99})
@@ -466,6 +491,9 @@ def main() -> i64:
     _ = DebuggerProvenance::provenance_append(overflowed_provenance, DebuggerProvenance::Mutation{event: 10, binding: provenance_binding, allocation: zeroed, kind: DebuggerProvenance::MutationKind.Assignment, value_hash: 20, source: zeroed})
     return Test::PROVENANCE_OVERFLOW_RESULT if DebuggerProvenance::provenance_is_complete(overflowed_provenance)
     return Test::PROVENANCE_OVERFLOW_RESULT if DebuggerProvenance::provenance_last_write(overflowed_provenance, provenance_binding, 20).event != 0
+    return 0
+
+def check_concurrency_analysis_and_branches() -> i64:
     task: DebuggerConcurrency::TaskInfo = DebuggerConcurrency::TaskInfo{id: DebuggerIdentity::debug_id(1), parent: DebuggerIdentity::debug_id(0), state: DebuggerConcurrency::TaskState.Blocked, logical_time: 1, os_thread: 1}
     edge: DebuggerConcurrency::WaitEdge = DebuggerConcurrency::WaitEdge{waiter: task.id, owner: task.id, resource: DebuggerIdentity::debug_id(2), kind: DebuggerConcurrency::SynchronizationKind.Mutex}
     invalid_graph: DebuggerConcurrencyAnalysis::WaitGraph = DebuggerConcurrencyAnalysis::WaitGraph{edges: zeroed, count: Test::INVALID_GRAPH_COUNT}
@@ -516,6 +544,9 @@ def main() -> i64:
     unavailable_value: DebuggerValues::ValueDescriptor = DebuggerValues::ValueDescriptor{handle: zeroed, name: zeroed, value_kind: DebuggerValues::ValueKind.Aggregate, state: DebuggerValues::ValueState.Unavailable, type_id: zeroed, byte_size: 0, child_count: 1}
     unavailable_page: DebuggerValues::ValuePage = DebuggerValues::value_expand(unavailable_value, 0, 0, false)
     return Test::VALUE_EXPAND_UNAVAILABLE_RESULT if unavailable_page.count != 0
+    return 0
+
+def check_metadata_values_and_watchpoints() -> i64:
     metadata: mutable DebuggerTypeMetadata::MetadataStore = zeroed
     DebuggerTypeMetadata::metadata_initialize(metadata)
     return Test::TypeMetadata::TYPE_ADD_FAILURE if not DebuggerTypeMetadata::metadata_add_type(metadata, DebuggerTypeMetadata::TypeInfo{id: DebuggerIdentity::debug_id(10), kind: DebuggerTypeMetadata::TypeKind.Struct, name: DebuggerIdentity::debug_id(11), size: 16, alignment: 8, child_count: 2, pointee: DebuggerIdentity::debug_id(0), flags: 0})
@@ -556,15 +587,21 @@ def main() -> i64:
     return Test::INVALID_VALUE_CYCLE_RESULT if DebuggerValueStore::value_store_add_child(values, root, root)
     page: DebuggerValueStore::ValuePage = DebuggerValueStore::value_store_page(values, root, 0)
     return 11 if page.invalid_handle or page.count != 1
-    values.nodes[0].child_count <- 17
+    corrupted_value_node: mutable DebuggerValueStore::ValueNode = values.nodes[0]
+    corrupted_value_node.child_count <- Test::INVALID_VALUE_CHILD_COUNT
+    values.nodes[0] <- corrupted_value_node
     corrupt_page: DebuggerValueStore::ValuePage = DebuggerValueStore::value_store_page(values, root, 0)
     return 60 if not corrupt_page.invalid_handle
-    values.nodes[0].child_count <- 1
+    corrupted_value_node.child_count <- 1
+    values.nodes[0] <- corrupted_value_node
     read: DebuggerValueStore::ValueNode = DebuggerValueStore::value_store_read(values, child)
     return 12 if read.signed_value != Test::VALUE_CHILD_VALUE
     return Test::INVALID_AGGREGATE_STATE_RESULT if DebuggerValueStore::value_store_set_state(values, root, DebuggerValues::ValueState.Unavailable) or values.nodes[0].state != DebuggerValues::ValueState.Available
     invalid_child: DebuggerValues::ValueHandle = DebuggerValueStore::value_store_add_scalar(values, DebuggerIdentity::debug_id(Test::VALUE_NAME_ID + 3), DebuggerIdentity::debug_id(Test::VALUE_TYPE_ID), 11)
-    values.nodes[(invalid_child.id.value - Test::VALUE_FIRST_ID).usize()].state <- DebuggerValues::ValueState.Invalid
+    invalid_child_index: usize = (invalid_child.id.value - Test::VALUE_FIRST_ID).usize()
+    invalid_child_node: mutable DebuggerValueStore::ValueNode = values.nodes[invalid_child_index]
+    invalid_child_node.state <- DebuggerValues::ValueState.Invalid
+    values.nodes[invalid_child_index] <- invalid_child_node
     return Test::INVALID_CHILD_NODE_RESULT if DebuggerValueStore::value_store_add_child(values, root, invalid_child)
     duplicate_value_store: mutable DebuggerValueStore::ValueStore = values
     duplicate_value_store.next_id <- child.id.value
@@ -603,7 +640,9 @@ def main() -> i64:
     watch_id: DebuggerIdentity::DebugId = DebuggerWatchpoints::watchpoints_add(watchpoints, allocation, DebuggerWatchpoints::AccessKind.Write, Test::VALUE_STORE_GENERATION)
     return 104 if not DebuggerWatchpoints::watchpoints_is_valid(watchpoints)
     corrupted_watchpoints: mutable DebuggerWatchpoints::WatchpointTable = watchpoints
-    corrupted_watchpoints.points[0].access <- Test::INVALID_WATCH_ACCESS
+    corrupted_watchpoint: mutable DebuggerWatchpoints::DataBreakpoint = corrupted_watchpoints.points[0]
+    corrupted_watchpoint.generation <- Test::WATCH_ALLOCATION_GENERATION - 1
+    corrupted_watchpoints.points[0] <- corrupted_watchpoint
     corrupted_observation: DebuggerWatchpoints::Observation = DebuggerWatchpoints::watchpoint_observe(corrupted_watchpoints, watch_id, allocation, Test::WATCH_VALUE_FIRST, Test::VALUE_STORE_GENERATION)
     return 105 if corrupted_observation.failure.code != DebuggerErrors::ErrorCode.Corrupt
     first_observation: DebuggerWatchpoints::Observation = DebuggerWatchpoints::watchpoint_observe(watchpoints, watch_id, allocation, Test::WATCH_VALUE_FIRST, Test::VALUE_STORE_GENERATION)
@@ -625,25 +664,31 @@ def main() -> i64:
     combined_first: DebuggerWatchpoints::Observation = DebuggerWatchpoints::watchpoint_observe_access(read_write_watchpoints, read_write_id, allocation, Test::WATCH_VALUE_FIRST, Test::VALUE_STORE_GENERATION, DebuggerWatchpoints::AccessKind.ReadWrite)
     combined_second: DebuggerWatchpoints::Observation = DebuggerWatchpoints::watchpoint_observe_access(read_write_watchpoints, read_write_id, allocation, Test::WATCH_VALUE_SECOND, Test::VALUE_STORE_GENERATION, DebuggerWatchpoints::AccessKind.ReadWrite)
     return 102 if combined_first.stop or not combined_second.stop
+    return 0
+
+def check_managed_runtime() -> i64:
     runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
     DebuggerConcurrencyRuntime::runtime_initialize(runtime, false)
     task_one: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(Test::TASK_PARENT_ID))
     task_two: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, task_one)
-    invalid_allocator_snapshot: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
-    invalid_allocator_snapshot.next_id <- task_one.value
-    return Test::INVALID_TASK_NEXT_ID_RESULT if DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(invalid_allocator_snapshot)
+    return Test::INVALID_TASK_NEXT_ID_RESULT if not snapshot_rejects_reused_task_id(runtime, task_one.value)
     invalid_runtime_status: mutable DebuggerConcurrencyRuntime::TaskRuntime = runtime
-    invalid_runtime_status.tasks[0].state <- Test::INVALID_TASK_STATE
-    return 156 if DebuggerConcurrencyRuntime::runtime_status_is_consistent(invalid_runtime_status)
+    invalid_runtime_status.status <- DebuggerConcurrencyRuntime::RuntimeStatus.Running
+    return Test::RuntimeValidation::INCONSISTENT_STATUS_RESULT if DebuggerConcurrencyRuntime::runtime_status_is_consistent(invalid_runtime_status)
     orphan_runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
     DebuggerConcurrencyRuntime::runtime_initialize(orphan_runtime, false)
     orphan_task: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(orphan_runtime, DebuggerIdentity::debug_id(Test::TASK_PARENT_ID))
-    orphan_runtime.tasks[0].state <- DebuggerConcurrency::TaskState.Blocked
+    orphan_record: mutable DebuggerConcurrency::TaskInfo = orphan_runtime.tasks[0]
+    orphan_record.state <- DebuggerConcurrency::TaskState.Blocked
+    orphan_runtime.tasks[0] <- orphan_record
     return 61 if DebuggerConcurrencyRuntime::runtime_wake(orphan_runtime, orphan_task) or orphan_runtime.tasks[0].state != DebuggerConcurrency::TaskState.Blocked
     return 50 if not DebuggerConcurrencyRuntime::runtime_schedule(runtime, task_one, DebuggerScheduler::ScheduleKind.Run, DebuggerIdentity::debug_id(0))
     return 16 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, task_one, task_two, DebuggerIdentity::debug_id(Test::TASK_RESOURCE_ONE), DebuggerConcurrency::SynchronizationKind.Mutex)
     return 17 if not DebuggerConcurrencyRuntime::runtime_wait(runtime, task_two, task_one, DebuggerIdentity::debug_id(Test::TASK_RESOURCE_TWO), DebuggerConcurrency::SynchronizationKind.Mutex)
     return 18 if not DebuggerConcurrencyRuntime::runtime_has_deadlock(runtime)
+    return 0
+
+def check_virtual_resources() -> i64:
     resource_bytes: mutable u8[3] = [Test::RESOURCE_ORIGINAL_FIRST, 8, 9]
     resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
     DebuggerVirtualResources::resources_initialize(resources, DebuggerVirtualResources::ResourceMode.Replaying)
@@ -680,22 +725,37 @@ def main() -> i64:
     branch_bytes: mutable u8[1] = zeroed
     branch_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(branch_resources, resource_handle, branch_bytes[0], 1)
     return Test::RESOURCE_BRANCH_READ_RESULT if branch_read.transferred != 1 or branch_bytes[0] != Test::RESOURCE_BRANCH_WRITE
-    invalid_mode_resources: mutable DebuggerVirtualResources::ResourceStore = resources
-    invalid_mode_resources.mode <- Test::INVALID_RESOURCE_MODE
-    invalid_mode_cursor: usize = invalid_mode_resources.files[0].cursor
-    invalid_mode_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(invalid_mode_resources, resource_handle, write_byte[0], 1)
-    return Test::INVALID_RESOURCE_MODE_RESULT if invalid_mode_write.failure.code != DebuggerErrors::ErrorCode.Corrupt or invalid_mode_write.transferred != 0 or invalid_mode_resources.files[0].cursor != invalid_mode_cursor
+    read_only_resources: mutable DebuggerVirtualResources::ResourceStore = resources
+    read_only_file: mutable DebuggerVirtualResources::VirtualFile = read_only_resources.files[0]
+    read_only_file.writable <- false
+    read_only_resources.files[0] <- read_only_file
+    read_only_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(read_only_resources, resource_handle, write_byte[0], 1)
+    return Test::ResourceValidation::REPLAY_WRITE_RESULT if read_only_write.failure.code != DebuggerErrors::ErrorCode.Diverged or read_only_write.transferred != 0
     corrupted_resources: mutable DebuggerVirtualResources::ResourceStore = resources
-    corrupted_resources.files[0].cursor <- corrupted_resources.files[0].length + 1
+    corrupted_file: mutable DebuggerVirtualResources::VirtualFile = corrupted_resources.files[0]
+    corrupted_file.cursor <- corrupted_file.length + 1
+    corrupted_resources.files[0] <- corrupted_file
     corrupted_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(corrupted_resources, resource_handle, parent_bytes[0], 1)
     return 58 if corrupted_read.failure.code != DebuggerErrors::ErrorCode.Corrupt
     corrupted_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(corrupted_resources, resource_handle, write_byte[0], 1)
     return 59 if corrupted_write.failure.code != DebuggerErrors::ErrorCode.Corrupt
     corrupted_length_resources: mutable DebuggerVirtualResources::ResourceStore = resources
-    corrupted_length_resources.files[0].length <- Test::INVALID_RESOURCE_LENGTH
+    corrupted_length_file: mutable DebuggerVirtualResources::VirtualFile = corrupted_length_resources.files[0]
+    corrupted_length_file.length <- Test::INVALID_RESOURCE_LENGTH
+    corrupted_length_resources.files[0] <- corrupted_length_file
     corrupted_length_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(corrupted_length_resources, resource_handle, parent_bytes[0], 1)
     return 94 if corrupted_length_read.failure.code != DebuggerErrors::ErrorCode.Corrupt
     return 95 if DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(corrupted_length_resources, resource_handle, 0))
+    return 0
+
+def check_task_checkpoint() -> i64:
+    runtime: mutable DebuggerConcurrencyRuntime::TaskRuntime = zeroed
+    DebuggerConcurrencyRuntime::runtime_initialize(runtime, false)
+    task_one: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, DebuggerIdentity::debug_id(Test::TASK_PARENT_ID))
+    task_two: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(runtime, task_one)
+    _ = DebuggerConcurrencyRuntime::runtime_schedule(runtime, task_one, DebuggerScheduler::ScheduleKind.Run, DebuggerIdentity::debug_id(0))
+    _ = DebuggerConcurrencyRuntime::runtime_wait(runtime, task_one, task_two, DebuggerIdentity::debug_id(Test::TASK_RESOURCE_ONE), DebuggerConcurrency::SynchronizationKind.Mutex)
+    _ = DebuggerConcurrencyRuntime::runtime_wait(runtime, task_two, task_one, DebuggerIdentity::debug_id(Test::TASK_RESOURCE_TWO), DebuggerConcurrency::SynchronizationKind.Mutex)
     task_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = DebuggerConcurrencyCheckpoint::task_snapshot_capture(runtime)
     changed_decision: mutable DebuggerConcurrencyCheckpoint::TaskSnapshot = task_snapshot
     changed_decision.scheduler_decisions[0].kind <- DebuggerScheduler::ScheduleKind.Yield
@@ -733,23 +793,30 @@ def main() -> i64:
     invalid_scheduler_snapshot: DebuggerConcurrencyCheckpoint::TaskSnapshot = task_snapshot
     invalid_scheduler_snapshot.scheduler_cursor <- 1
     return Test::INVALID_SCHEDULER_CURSOR_RESULT if DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(invalid_scheduler_snapshot)
-    next_header: mutable DebuggerTrace::ChunkHeader = header
-    next_header.sequence <- 1
-    next_header.first_event <- Test::TRACE_NEXT_EVENT
-    next_header.last_event <- Test::TRACE_NEXT_EVENT
-    torn_stream: DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(stream, next_header)
-    return 90 if DebuggerTraceStream::trace_stream_verify(torn_stream) != DebuggerTraceStream::TraceReadStatus.Truncated
-    bad_header: mutable DebuggerTrace::ChunkHeader = header
-    bad_header.sequence <- 1
-    bad_header.last_event <- header.last_event + 1
-    bad_header.checksum <- header.checksum + 1
-    bad_stream: mutable DebuggerTraceStream::TraceStream = DebuggerTraceStream::trace_stream_begin(stream, bad_header)
-    bad_stream <- DebuggerTraceStream::trace_stream_append(bad_stream, 42)
-    return 91 if DebuggerTraceStream::trace_stream_verify(bad_stream) != DebuggerTraceStream::TraceReadStatus.Corrupt or bad_stream.verified_event != stream.verified_event
-    tampered_stream: mutable DebuggerTraceStream::TraceStream = stream
-    tampered_stream.chunks[0].payload[0] <- 43
-    return 92 if DebuggerTraceStream::trace_stream_verify(tampered_stream) != DebuggerTraceStream::TraceReadStatus.Corrupt
-    oversized_stream: mutable DebuggerTraceStream::TraceStream = stream
-    oversized_stream.chunks[0].header.payload_length <- Test::INVALID_STREAM_PAYLOAD
-    return 93 if DebuggerTraceStream::trace_stream_verify(oversized_stream) != DebuggerTraceStream::TraceReadStatus.ResourceLimit
+    return 0
+
+    return 0
+
+def main() -> i64:
+    return 74 if check_corrupt_metadata() != 0
+    return 75 if check_corrupt_tables() != 0
+    return 76 if check_corrupt_runtime() != 0
+    return Test::ADAPTER_REPLAY_RESULT_FAILURE if check_managed_adapters() != 0
+    return Test::FULL_CHECKPOINT_RESULT_FAILURE if check_full_checkpoint() != 0
+    evaluation_result: i64 = check_evaluation_and_binding()
+    return evaluation_result if evaluation_result != 0
+    trace_result: i64 = check_trace_stream()
+    return trace_result if trace_result != 0
+    query_result: i64 = check_queries_and_provenance()
+    return query_result if query_result != 0
+    concurrency_result: i64 = check_concurrency_analysis_and_branches()
+    return concurrency_result if concurrency_result != 0
+    metadata_value_result: i64 = check_metadata_values_and_watchpoints()
+    return metadata_value_result if metadata_value_result != 0
+    managed_runtime_result: i64 = check_managed_runtime()
+    return managed_runtime_result if managed_runtime_result != 0
+    resource_result: i64 = check_virtual_resources()
+    return resource_result if resource_result != 0
+    checkpoint_result: i64 = check_task_checkpoint()
+    return checkpoint_result if checkpoint_result != 0
     return 0

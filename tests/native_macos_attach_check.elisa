@@ -1,0 +1,48 @@
+include "../src/native/macos_attach.elisa"
+
+@link_name("getpid")
+extern debugger_macos_attach_getpid() -> i32
+
+const module TestInput:
+    PAYLOAD_LENGTH: usize = 3
+    FIRST_INDEX: usize = 0
+    MIDDLE_INDEX: usize = 1
+    LAST_INDEX: usize = 2
+    FIRST_BYTE: u8 = 17
+    SECOND_BYTE: u8 = 34
+    THIRD_BYTE: u8 = 51
+    MAX_ADDRESS: u64 = 18446744073709551615
+    ADDRESS_OFFSET: u64 = 1
+    PROCESS_IDENTITY_INCREMENT: u64 = 1
+
+const module TestResult:
+    PROCESS_ATTACH_FAILURE: i64 = 1
+    PROCESS_READ_FAILURE: i64 = 2
+    STALE_IDENTITY_FAILURE: i64 = 3
+    ADDRESS_OVERFLOW_FAILURE: i64 = 4
+    INVALID_PROCESS_FAILURE: i64 = 5
+
+def main() -> i64 can[Unsafe.PointerCast]:
+    process_id: i32 = debugger_macos_attach_getpid()
+    return TestResult::PROCESS_ATTACH_FAILURE if process_id <= 0
+
+    payload: mutable u8[TestInput::PAYLOAD_LENGTH] = [TestInput::FIRST_BYTE, TestInput::SECOND_BYTE, TestInput::THIRD_BYTE]
+    address: u64 = (&payload[TestInput::FIRST_INDEX]).cast[u64] can Unsafe.PointerCast
+    session: mutable DebuggerNativeAttach::AttachSession = DebuggerNativeMacOSAttach::macos_attach_process(process_id.u64()) can Unsafe.PointerCast
+    return TestResult::PROCESS_ATTACH_FAILURE if not DebuggerNativeAttach::attach_validate(session) or session.process.state != DebuggerProcess::ProcessState.Running or session.process.owned or DebuggerNativeAttach::attach_is_stopped(session)
+
+    read: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(session, address, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
+    return TestResult::PROCESS_READ_FAILURE if not read.complete or read.length != TestInput::PAYLOAD_LENGTH or not DebuggerErrors::error_is_ok(read.failure)
+    return TestResult::PROCESS_READ_FAILURE if read.bytes[TestInput::FIRST_INDEX] != TestInput::FIRST_BYTE or read.bytes[TestInput::MIDDLE_INDEX] != TestInput::SECOND_BYTE or read.bytes[TestInput::LAST_INDEX] != TestInput::THIRD_BYTE
+
+    stale_session: mutable DebuggerNativeAttach::AttachSession = session
+    stale_session.process.start_identity <- session.process.start_identity + TestInput::PROCESS_IDENTITY_INCREMENT
+    stale_read: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(stale_session, address, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
+    return TestResult::STALE_IDENTITY_FAILURE if stale_read.complete or stale_read.length != 0 or stale_read.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
+
+    overflow: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(session, TestInput::MAX_ADDRESS - TestInput::ADDRESS_OFFSET, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
+    return TestResult::ADDRESS_OVERFLOW_FAILURE if overflow.complete or overflow.length != 0 or overflow.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+
+    invalid_session: DebuggerNativeAttach::AttachSession = DebuggerNativeMacOSAttach::macos_attach_process(0) can Unsafe.PointerCast
+    return TestResult::INVALID_PROCESS_FAILURE if DebuggerNativeAttach::attach_validate(invalid_session) or invalid_session.last_error.code != DebuggerErrors::ErrorCode.InvalidArgument
+    return 0

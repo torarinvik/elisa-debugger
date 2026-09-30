@@ -1,0 +1,83 @@
+# Identity-checked macOS attach reads. This adapter observes a live process
+# without suspending it or claiming a coherent register/stack snapshot.
+
+include "./attach.elisa"
+include "./macos_memory.elisa"
+
+module DebuggerNativeMacOSAttach:
+    private:
+        const module Time:
+            MICROSECONDS_PER_SECOND: u64 = 1000000
+
+        const module Identity:
+            MAX_U64: u64 = 18446744073709551615
+            NO_IDENTITY: u64 = 0
+
+        const module Detail:
+            PROCESS_SAMPLE: u32 = 1
+            START_IDENTITY: u32 = 2
+            MEMORY_LENGTH: u32 = 3
+            MEMORY_STATE: u32 = 4
+            MEMORY_RANGE: u32 = 5
+
+        def start_identity_from_fields(seconds: u64, microseconds: u64) -> u64:
+            return Identity::NO_IDENTITY if microseconds >= Time::MICROSECONDS_PER_SECOND
+            return Identity::NO_IDENTITY if seconds > Identity::MAX_U64 / Time::MICROSECONDS_PER_SECOND
+            return seconds * Time::MICROSECONDS_PER_SECOND + microseconds
+
+        def start_identity_from_sample(sample: DebuggerNativeMacOSResources::ProcessSample) -> u64:
+            return Identity::NO_IDENTITY if not DebuggerNativeMacOSResources::macos_sample_is_valid(sample)
+            return start_identity_from_fields(sample.start_seconds, sample.start_microseconds)
+
+        def invalid_attach_session(failure: DebuggerErrors::DebuggerError) -> DebuggerNativeAttach::AttachSession:
+            session: mutable DebuggerNativeAttach::AttachSession = DebuggerNativeAttach::attach_new(DebuggerProcess::invalid_process())
+            session.last_error <- failure
+            return session
+
+    public:
+        # The process remains unsuspended. AttachSession's stopped-only
+        # breakpoint operations therefore stay unavailable until a platform
+        # controller actually obtains a stop.
+        def macos_attach_process(process_id: u64) -> DebuggerNativeAttach::AttachSession can[Unsafe.PointerCast]:
+            sample: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(process_id) can Unsafe.PointerCast
+            return invalid_attach_session(sample.failure) if not DebuggerNativeMacOSResources::macos_sample_is_valid(sample)
+            start_identity: u64 = start_identity_from_sample(sample)
+            return invalid_attach_session(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::START_IDENTITY)) if start_identity == Identity::NO_IDENTITY
+            process: DebuggerProcess::ProcessHandle = DebuggerProcess::ProcessHandle{pid: process_id, start_identity: start_identity, state: DebuggerProcess::ProcessState.Running, owned: false}
+            return DebuggerNativeAttach::attach_new(process)
+
+        # Read-only memory is available while the process is live. The returned
+        # bytes are tied to the captured process start identity and do not imply
+        # that other memory, registers, or frames came from the same instant.
+        def macos_attach_read_memory(session: DebuggerNativeAttach::AttachSession, address: u64, length: usize) -> DebuggerNativeAttach::AttachMemory can[Unsafe.PointerCast]:
+            result: mutable DebuggerNativeAttach::AttachMemory = zeroed
+            result.address <- address
+            result.failure <- DebuggerErrors::no_error()
+            if not DebuggerProcess::process_is_valid(session.process) or session.process.state != DebuggerProcess::ProcessState.Running and session.process.state != DebuggerProcess::ProcessState.Stopped:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::MEMORY_STATE)
+                return result
+            if length > DebuggerNativeAttach::attach_memory_capacity():
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::MEMORY_LENGTH)
+                return result
+            if not DebuggerProcess::process_memory_range_is_valid(address, length):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::MEMORY_RANGE)
+                return result
+
+            memory: DebuggerNativeMacOSMemory::ProcessMemoryRead = DebuggerNativeMacOSMemory::macos_read_process_memory(session.process.pid, address, length) can Unsafe.PointerCast
+            if memory.length > length or memory.length > DebuggerNativeMacOSMemory::macos_memory_read_capacity():
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::MEMORY_LENGTH)
+                return result
+            if memory.status == DebuggerNativeMacOSMemory::MemoryReadStatus.Ready:
+                if not DebuggerNativeMacOSMemory::macos_memory_read_is_valid(memory) or memory.process_id != session.process.pid or memory.address != address or memory.requested_length != length:
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::MEMORY_LENGTH)
+                    return result
+            sampled_identity: u64 = start_identity_from_fields(memory.process_start_seconds, memory.process_start_microseconds)
+            if sampled_identity != Identity::NO_IDENTITY and sampled_identity != session.process.start_identity:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::START_IDENTITY)
+                return result
+            for index in 0..<memory.length:
+                result.bytes[index] <- memory.bytes[index]
+            result.length <- memory.length
+            result.complete <- memory.complete
+            result.failure <- memory.failure
+            return result

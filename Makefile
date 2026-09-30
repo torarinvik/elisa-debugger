@@ -150,7 +150,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: managed-allocations-check concurrency-races-check expression-parser-check timeline-capability-check type-metadata-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
-.PHONY: native-macos-memory-check native-macos-memory-tool
+.PHONY: native-macos-memory-check native-macos-memory-tool native-macos-attach-check
 .PHONY: native-dwarf-line-check native-elf-dwarf-line-check
 .PHONY: native-macho-dwarf-line-check
 
@@ -211,6 +211,7 @@ module-check: $(BUILD)/elisa-debugger-native-jetsam-check
 ifeq ($(shell uname -s),Darwin)
 module-check: $(BUILD)/elisa-debugger-native-macos-resources-check
 module-check: $(BUILD)/elisa-debugger-native-macos-memory-check
+module-check: $(BUILD)/elisa-debugger-native-macos-attach-check
 endif
 module-check: $(BUILD)/elisa-debugger-native-symbols-identity-check
 module-check: $(BUILD)/elisa-debugger-native-symbol-loader-check
@@ -271,6 +272,7 @@ module-check: $(BUILD)/elisa-debugger-type-metadata-check
 ifeq ($(shell uname -s),Darwin)
 	"$(BUILD)/elisa-debugger-native-macos-resources-check"
 	"$(BUILD)/elisa-debugger-native-macos-memory-check"
+	"$(BUILD)/elisa-debugger-native-macos-attach-check"
 endif
 	"$(BUILD)/elisa-debugger-native-symbols-identity-check"
 	"$(BUILD)/elisa-debugger-native-symbol-loader-check"
@@ -851,6 +853,13 @@ $(BUILD)/elisa-debugger-native-macos-memory-check: tests/native_macos_memory_che
 
 native-macos-memory-check: $(BUILD)/elisa-debugger-native-macos-memory-check
 	"$(BUILD)/elisa-debugger-native-macos-memory-check"
+
+$(BUILD)/elisa-debugger-native-macos-attach-check: tests/native_macos_attach_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-macos-attach-check: $(BUILD)/elisa-debugger-native-macos-attach-check
+	"$(BUILD)/elisa-debugger-native-macos-attach-check"
 
 $(BUILD)/elisa-debugger-memread: src/native/macos_memory_cli.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

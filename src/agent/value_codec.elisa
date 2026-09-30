@@ -1,0 +1,166 @@
+# Canonical, target-independent scalar encoding for shadow-frame values.
+# Integers use little-endian two's-complement or unsigned bytes on every host.
+
+include "./frames.elisa"
+
+module DebuggerAgentValueCodec:
+    private:
+        const module ScalarWidth:
+            BITS_PER_BYTE: u64 = 8
+            MAX_INTEGER_BYTES: usize = 8
+            BOOLEAN_BYTES: usize = 1
+
+        const module ByteValue:
+            MASK: u64 = 255
+            FALSE: u8 = 0
+            TRUE: u8 = 1
+
+        const module Index:
+            FIRST: usize = 0
+            INCREMENT: usize = 1
+
+        const module Sentinel:
+            ZERO_BITS: u64 = 0
+            ZERO_LENGTH: usize = 0
+
+        def scalar_width_is_valid(width: usize) -> bool:
+            return width > Sentinel::ZERO_LENGTH and width <= ScalarWidth::MAX_INTEGER_BYTES
+
+        def signed_value_fits_width(value: i64, width: usize) -> bool:
+            return true if width == ScalarWidth::MAX_INTEGER_BYTES
+            bits: u64 = width.u64() * ScalarWidth::BITS_PER_BYTE - Index::INCREMENT.u64()
+            negative_limit: u64 = Sentinel::ZERO_BITS + (Index::INCREMENT.u64() << bits)
+            positive_limit: u64 = negative_limit - Index::INCREMENT.u64()
+            if value < Sentinel::ZERO_LENGTH.i64():
+                magnitude: u64 = (-(value + Index::INCREMENT.i64())).u64() + Index::INCREMENT.u64()
+                return magnitude <= negative_limit
+            return value.u64() <= positive_limit
+
+        def unsigned_value_fits_width(value: u64, width: usize) -> bool:
+            return true if width == ScalarWidth::MAX_INTEGER_BYTES
+            bits: u64 = width.u64() * ScalarWidth::BITS_PER_BYTE
+            return value < (Index::INCREMENT.u64() << bits)
+
+        def read_unsigned(bytes: u8&, width: usize) -> u64:
+            value: mutable u64 = Sentinel::ZERO_BITS
+            for index in Index::FIRST..<width:
+                shift: u64 = ScalarWidth::BITS_PER_BYTE * index.u64()
+                value <- value | (bytes[index].u64() << shift)
+            return value
+
+        def write_unsigned(bytes: mutable u8&, value: u64, width: usize) -> void:
+            for index in Index::FIRST..<width:
+                shift: u64 = ScalarWidth::BITS_PER_BYTE * index.u64()
+                bytes[index] <- ((value >> shift) & ByteValue::MASK).u8()
+
+    public:
+        enum ValueCodecStatus:
+            Ready
+            InvalidWidth
+            ValueOutOfRange
+            InvalidDescriptor
+            Unavailable
+            UnsupportedKind
+            InvalidBoolean
+
+        struct EncodedScalar:
+            value_kind: mutable DebuggerAgentFrames::AgentValueKind
+            byte_count: mutable usize
+            bytes: mutable u8[ScalarWidth::MAX_INTEGER_BYTES]
+            status: mutable ValueCodecStatus
+
+        struct DecodedScalar:
+            value_kind: mutable DebuggerAgentFrames::AgentValueKind
+            signed_value: mutable i64
+            unsigned_value: mutable u64
+            boolean_value: mutable bool
+            status: mutable ValueCodecStatus
+
+        struct EncodedDescriptor:
+            descriptor: mutable DebuggerAgentFrames::AgentStorageDescriptor
+            status: mutable ValueCodecStatus
+
+        def agent_scalar_encode_signed(value: i64, width: usize) -> EncodedScalar:
+            result: mutable EncodedScalar = zeroed
+            result.value_kind <- DebuggerAgentFrames::AgentValueKind.Signed
+            result.status <- ValueCodecStatus.InvalidWidth if not scalar_width_is_valid(width)
+            return result if result.status != ValueCodecStatus.Ready
+            result.status <- ValueCodecStatus.ValueOutOfRange if not signed_value_fits_width(value, width)
+            return result if result.status != ValueCodecStatus.Ready
+            result.byte_count <- width
+            write_unsigned(result.bytes[Index::FIRST], value.u64(), width)
+            return result
+
+        def agent_scalar_encode_unsigned(value: u64, width: usize) -> EncodedScalar:
+            result: mutable EncodedScalar = zeroed
+            result.value_kind <- DebuggerAgentFrames::AgentValueKind.Unsigned
+            result.status <- ValueCodecStatus.InvalidWidth if not scalar_width_is_valid(width)
+            return result if result.status != ValueCodecStatus.Ready
+            result.status <- ValueCodecStatus.ValueOutOfRange if not unsigned_value_fits_width(value, width)
+            return result if result.status != ValueCodecStatus.Ready
+            result.byte_count <- width
+            write_unsigned(result.bytes[Index::FIRST], value, width)
+            return result
+
+        def agent_scalar_encode_boolean(value: bool) -> EncodedScalar:
+            result: mutable EncodedScalar = zeroed
+            result.value_kind <- DebuggerAgentFrames::AgentValueKind.Boolean
+            result.byte_count <- ScalarWidth::BOOLEAN_BYTES
+            result.bytes[Index::FIRST] <- ByteValue::TRUE if value
+            result.bytes[Index::FIRST] <- ByteValue::FALSE if not value
+            result.status <- ValueCodecStatus.Ready
+            return result
+
+        def agent_scalar_decode(descriptor: DebuggerAgentFrames::AgentStorageDescriptor&) -> DecodedScalar:
+            result: mutable DecodedScalar = zeroed
+            result.value_kind <- descriptor.value_kind
+            result.status <- ValueCodecStatus.InvalidDescriptor if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(descriptor)
+            return result if result.status != ValueCodecStatus.Ready
+            result.status <- ValueCodecStatus.Unavailable if descriptor.state != DebuggerAgentFrames::AgentValueState.Available
+            return result if result.status != ValueCodecStatus.Ready
+            result.status <- ValueCodecStatus.UnsupportedKind if descriptor.value_kind != DebuggerAgentFrames::AgentValueKind.Signed and descriptor.value_kind != DebuggerAgentFrames::AgentValueKind.Unsigned and descriptor.value_kind != DebuggerAgentFrames::AgentValueKind.Boolean
+            return result if result.status != ValueCodecStatus.Ready
+
+            width: usize = descriptor.byte_size.usize()
+            if descriptor.value_kind == DebuggerAgentFrames::AgentValueKind.Boolean:
+                result.status <- ValueCodecStatus.InvalidBoolean if width != ScalarWidth::BOOLEAN_BYTES or descriptor.bytes[Index::FIRST] != ByteValue::FALSE and descriptor.bytes[Index::FIRST] != ByteValue::TRUE
+                return result if result.status != ValueCodecStatus.Ready
+                result.boolean_value <- descriptor.bytes[Index::FIRST] == ByteValue::TRUE
+                return result
+
+            result.status <- ValueCodecStatus.InvalidWidth if not scalar_width_is_valid(width)
+            return result if result.status != ValueCodecStatus.Ready
+            raw_value: u64 = read_unsigned(descriptor.bytes[Index::FIRST], width)
+            if descriptor.value_kind == DebuggerAgentFrames::AgentValueKind.Unsigned:
+                result.unsigned_value <- raw_value
+                return result
+
+            if width < ScalarWidth::MAX_INTEGER_BYTES:
+                sign_bit: u64 = Index::INCREMENT.u64() << (width.u64() * ScalarWidth::BITS_PER_BYTE - Index::INCREMENT.u64())
+                if raw_value & sign_bit != Sentinel::ZERO_BITS:
+                    extension_bit: u64 = width.u64() * ScalarWidth::BITS_PER_BYTE
+                    extension_value: u64 = Index::INCREMENT.u64() << extension_bit
+                    result.signed_value <- (raw_value - extension_value).i64()
+                    return result
+            result.signed_value <- raw_value.i64()
+            return result
+
+        def agent_scalar_descriptor(binding: DebuggerIdentity::DebugId, scope: DebuggerIdentity::DebugId, type_id: DebuggerIdentity::DebugId, storage_kind: DebuggerAgentFrames::AgentStorageKind, storage_location: i64, encoded: EncodedScalar) -> EncodedDescriptor:
+            result: mutable EncodedDescriptor = zeroed
+            result.status <- encoded.status
+            return result if encoded.status != ValueCodecStatus.Ready
+            result.descriptor.binding <- binding
+            result.descriptor.scope <- scope
+            result.descriptor.type_id <- type_id
+            result.descriptor.value_kind <- encoded.value_kind
+            result.descriptor.state <- DebuggerAgentFrames::AgentValueState.Available
+            result.descriptor.storage_kind <- storage_kind
+            result.descriptor.storage_location <- storage_location
+            result.descriptor.byte_size <- encoded.byte_count.u64()
+            for index in Index::FIRST..<encoded.byte_count:
+                result.descriptor.bytes[index] <- encoded.bytes[index]
+            result.status <- ValueCodecStatus.InvalidDescriptor if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(result.descriptor)
+            return result
+
+        def agent_scalar_codec_integer_capacity() -> usize:
+            return ScalarWidth::MAX_INTEGER_BYTES

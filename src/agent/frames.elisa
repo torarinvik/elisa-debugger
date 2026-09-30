@@ -1,0 +1,324 @@
+# Compiler/runtime shadow frames and typed local-storage descriptors. One
+# caller-owned shadow_stack belongs to one registered target thread.
+
+include "../core/identity.elisa"
+
+module DebuggerAgentFrames:
+    private:
+        const module FrameCapacity:
+            MAX_ACTIVE_FRAMES: usize = 32
+
+        const module BindingCapacity:
+            MAX_BINDINGS_PER_FRAME: usize = 32
+
+        const module ValueCapacity:
+            MAX_INLINE_VALUE_BYTES: usize = 32
+
+        const module Identifier:
+            NO_ID: u64 = 0
+
+        const module StackGeneration:
+            NO_GENERATION: u64 = 0
+
+        const module Index:
+            FIRST: usize = 0
+            ADVANCE: usize = 1
+
+        const module EnumBounds:
+            MAX_VALUE_KIND: u16 = 8
+            MAX_VALUE_STATE: u16 = 5
+            MAX_STORAGE_KIND: u16 = 4
+
+        def frame_index(shadow_stack: AgentShadowStack&, invocation: DebuggerIdentity::DebugId) -> usize:
+            for index in Index::FIRST..<shadow_stack.frame_count:
+                return index if shadow_stack.frames[index].invocation.value == invocation.value
+            return FrameCapacity::MAX_ACTIVE_FRAMES
+
+        def binding_index(frame: AgentShadowFrame&, binding: DebuggerIdentity::DebugId) -> usize:
+            for index in Index::FIRST..<frame.binding_count:
+                return index if frame.bindings[index].binding.value == binding.value
+            return BindingCapacity::MAX_BINDINGS_PER_FRAME
+
+        def clear_value_bytes(descriptor: mutable AgentStorageDescriptor&) -> void:
+            for index in Index::FIRST..<ValueCapacity::MAX_INLINE_VALUE_BYTES:
+                descriptor.bytes[index] <- Identifier::NO_ID.u8()
+
+        def descriptor_is_exact(descriptor: AgentStorageDescriptor&) -> bool:
+            return false if descriptor.binding.value == Identifier::NO_ID or descriptor.scope.value == Identifier::NO_ID or descriptor.type_id.value == Identifier::NO_ID
+            return false if descriptor.value_kind.u16() > EnumBounds::MAX_VALUE_KIND or descriptor.state.u16() > EnumBounds::MAX_VALUE_STATE or descriptor.storage_kind.u16() > EnumBounds::MAX_STORAGE_KIND
+            if descriptor.state == AgentValueState.Available:
+                return false if descriptor.byte_size > ValueCapacity::MAX_INLINE_VALUE_BYTES.u64()
+                return false if descriptor.byte_size == Identifier::NO_ID and descriptor.value_kind != AgentValueKind.Void
+                return false if descriptor.storage_kind == AgentStorageKind.Unknown
+            return true
+
+        def frame_is_exact(frame: AgentShadowFrame&) -> bool:
+            return false if frame.invocation.value == Identifier::NO_ID or frame.function.value == Identifier::NO_ID or frame.task.value == Identifier::NO_ID
+            return false if frame.binding_count > BindingCapacity::MAX_BINDINGS_PER_FRAME
+            for index in Index::FIRST..<frame.binding_count:
+                return false if not descriptor_is_exact(frame.bindings[index])
+                for other_index in (index + Index::ADVANCE)..<frame.binding_count:
+                    return false if frame.bindings[index].binding.value == frame.bindings[other_index].binding.value
+            return true
+
+    public:
+        enum AgentValueKind:
+            Void
+            Signed
+            Unsigned
+            Floating
+            Boolean
+            Text
+            Aggregate
+            Reference
+            Opaque
+
+        enum AgentValueState:
+            Available
+            Unavailable
+            OptimizedAway
+            Uninitialized
+            Redacted
+            Invalid
+
+        enum AgentStorageKind:
+            Register
+            StackSlot
+            Constant
+            RuntimeSlot
+            Unknown
+
+        enum ShadowStatus:
+            Ready
+            InvalidStack
+            InvalidIdentifier
+            DuplicateInvocation
+            ParentMismatch
+            FrameCapacityReached
+            UnknownInvocation
+            FrameNotTop
+            BindingCapacityReached
+            DuplicateBinding
+            UnknownBinding
+            InvalidDescriptor
+            InvalidByteCount
+            SnapshotAlreadyActive
+            SnapshotNotActive
+            StaleGeneration
+            GenerationMismatch
+            Frozen
+            SnapshotRequired
+            ValueNotAvailable
+
+        struct AgentStorageDescriptor:
+            binding: mutable DebuggerIdentity::DebugId
+            scope: mutable DebuggerIdentity::DebugId
+            type_id: mutable DebuggerIdentity::DebugId
+            value_kind: mutable AgentValueKind
+            state: mutable AgentValueState
+            storage_kind: mutable AgentStorageKind
+            storage_location: mutable i64
+            byte_size: mutable u64
+            bytes: mutable u8[ValueCapacity::MAX_INLINE_VALUE_BYTES]
+
+        struct AgentShadowFrame:
+            invocation: mutable DebuggerIdentity::DebugId
+            parent_invocation: mutable DebuggerIdentity::DebugId
+            function: mutable DebuggerIdentity::DebugId
+            task: mutable DebuggerIdentity::DebugId
+            source_file: mutable DebuggerIdentity::DebugId
+            source_line: mutable u32
+            source_column: mutable u32
+            binding_count: mutable usize
+            bindings: mutable AgentStorageDescriptor[BindingCapacity::MAX_BINDINGS_PER_FRAME]
+
+        struct AgentShadowStack:
+            thread: mutable DebuggerIdentity::DebugId
+            frame_count: mutable usize
+            active_stop_generation: mutable u64
+            last_stop_generation: mutable u64
+            frames: mutable AgentShadowFrame[FrameCapacity::MAX_ACTIVE_FRAMES]
+
+        struct BindingReadResult:
+            status: mutable ShadowStatus
+            descriptor: mutable AgentStorageDescriptor
+
+        # Initialize the per-thread shadow_stack in caller-owned storage. Inactive
+        # frame slots are ignored by frame_count and are reset when reused.
+        def agent_shadow_stack_initialize(shadow_stack: mutable AgentShadowStack&, thread: DebuggerIdentity::DebugId) -> ShadowStatus:
+            return ShadowStatus.InvalidIdentifier if thread.value == Identifier::NO_ID
+            shadow_stack.thread <- thread
+            shadow_stack.frame_count <- Index::FIRST
+            shadow_stack.active_stop_generation <- StackGeneration::NO_GENERATION
+            shadow_stack.last_stop_generation <- StackGeneration::NO_GENERATION
+            return ShadowStatus.Ready
+
+        def agent_shadow_stack_is_exact(shadow_stack: AgentShadowStack&) -> bool:
+            return false if shadow_stack.thread.value == Identifier::NO_ID or shadow_stack.frame_count > FrameCapacity::MAX_ACTIVE_FRAMES
+            return false if shadow_stack.active_stop_generation > shadow_stack.last_stop_generation
+            for index in Index::FIRST..<shadow_stack.frame_count:
+                return false if not frame_is_exact(shadow_stack.frames[index])
+                if index == Index::FIRST:
+                    return false if shadow_stack.frames[index].parent_invocation.value != Identifier::NO_ID
+                else:
+                    return false if shadow_stack.frames[index].parent_invocation.value != shadow_stack.frames[index - Index::ADVANCE].invocation.value
+                for other_index in Index::FIRST..<index:
+                    return false if shadow_stack.frames[index].invocation.value == shadow_stack.frames[other_index].invocation.value
+            return true
+
+        def agent_shadow_frame_push(shadow_stack: mutable AgentShadowStack&, invocation: DebuggerIdentity::DebugId, parent_invocation: DebuggerIdentity::DebugId, function: DebuggerIdentity::DebugId, task: DebuggerIdentity::DebugId, source_file: DebuggerIdentity::DebugId, source_line: u32, source_column: u32) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.Frozen if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.InvalidIdentifier if invocation.value == Identifier::NO_ID or function.value == Identifier::NO_ID or task.value == Identifier::NO_ID
+            return ShadowStatus.DuplicateInvocation if frame_index(shadow_stack, invocation) < shadow_stack.frame_count
+            return ShadowStatus.FrameCapacityReached if shadow_stack.frame_count >= FrameCapacity::MAX_ACTIVE_FRAMES
+            if shadow_stack.frame_count == Index::FIRST:
+                return ShadowStatus.ParentMismatch if parent_invocation.value != Identifier::NO_ID
+            else:
+                return ShadowStatus.ParentMismatch if parent_invocation.value != shadow_stack.frames[shadow_stack.frame_count - Index::ADVANCE].invocation.value
+            slot: usize = shadow_stack.frame_count
+            shadow_stack.frames[slot].invocation <- invocation
+            shadow_stack.frames[slot].parent_invocation <- parent_invocation
+            shadow_stack.frames[slot].function <- function
+            shadow_stack.frames[slot].task <- task
+            shadow_stack.frames[slot].source_file <- source_file
+            shadow_stack.frames[slot].source_line <- source_line
+            shadow_stack.frames[slot].source_column <- source_column
+            shadow_stack.frames[slot].binding_count <- Index::FIRST
+            shadow_stack.frame_count <- shadow_stack.frame_count + Index::ADVANCE
+            return ShadowStatus.Ready
+
+        def agent_shadow_frame_pop(shadow_stack: mutable AgentShadowStack&, invocation: DebuggerIdentity::DebugId) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.Frozen if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.InvalidIdentifier if invocation.value == Identifier::NO_ID
+            return ShadowStatus.UnknownInvocation if shadow_stack.frame_count == Index::FIRST or frame_index(shadow_stack, invocation) >= shadow_stack.frame_count
+            return ShadowStatus.FrameNotTop if shadow_stack.frames[shadow_stack.frame_count - Index::ADVANCE].invocation.value != invocation.value
+            shadow_stack.frame_count <- shadow_stack.frame_count - Index::ADVANCE
+            return ShadowStatus.Ready
+
+        # A declaration records storage provenance and one bounded raw-value
+        # payload. Nonavailable states retain their semantic reason without
+        # exposing stale bytes from a reused frame slot.
+        def agent_shadow_binding_declare(shadow_stack: mutable AgentShadowStack&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, scope: DebuggerIdentity::DebugId, type_id: DebuggerIdentity::DebugId, value_kind: AgentValueKind, state: AgentValueState, storage_kind: AgentStorageKind, storage_location: i64, byte_size: u64, bytes: u8&, byte_count: usize) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.Frozen if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.InvalidIdentifier if binding.value == Identifier::NO_ID or scope.value == Identifier::NO_ID or type_id.value == Identifier::NO_ID
+            frame_slot: usize = frame_index(shadow_stack, invocation)
+            return ShadowStatus.UnknownInvocation if frame_slot >= shadow_stack.frame_count
+            return ShadowStatus.DuplicateBinding if binding_index(shadow_stack.frames[frame_slot], binding) < shadow_stack.frames[frame_slot].binding_count
+            return ShadowStatus.BindingCapacityReached if shadow_stack.frames[frame_slot].binding_count >= BindingCapacity::MAX_BINDINGS_PER_FRAME
+            if state == AgentValueState.Available:
+                return ShadowStatus.InvalidByteCount if byte_size > ValueCapacity::MAX_INLINE_VALUE_BYTES.u64() or byte_count != byte_size.usize()
+                return ShadowStatus.InvalidDescriptor if storage_kind == AgentStorageKind.Unknown or byte_size == Identifier::NO_ID and value_kind != AgentValueKind.Void
+            else:
+                return ShadowStatus.InvalidByteCount if byte_count != Index::FIRST
+            return ShadowStatus.InvalidDescriptor if value_kind.u16() > EnumBounds::MAX_VALUE_KIND or state.u16() > EnumBounds::MAX_VALUE_STATE or storage_kind.u16() > EnumBounds::MAX_STORAGE_KIND
+            slot: usize = shadow_stack.frames[frame_slot].binding_count
+            descriptor: mutable AgentStorageDescriptor = zeroed
+            descriptor.binding <- binding
+            descriptor.scope <- scope
+            descriptor.type_id <- type_id
+            descriptor.value_kind <- value_kind
+            descriptor.state <- state
+            descriptor.storage_kind <- storage_kind
+            descriptor.storage_location <- storage_location
+            descriptor.byte_size <- byte_size
+            for index in Index::FIRST..<byte_count:
+                descriptor.bytes[index] <- bytes[index]
+            shadow_stack.frames[frame_slot].bindings[slot] <- descriptor
+            shadow_stack.frames[frame_slot].binding_count <- shadow_stack.frames[frame_slot].binding_count + Index::ADVANCE
+            return ShadowStatus.Ready
+
+        def agent_shadow_binding_write(shadow_stack: mutable AgentShadowStack&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, bytes: u8&, byte_count: usize) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.Frozen if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.InvalidIdentifier if invocation.value == Identifier::NO_ID or binding.value == Identifier::NO_ID
+            frame_slot: usize = frame_index(shadow_stack, invocation)
+            return ShadowStatus.UnknownInvocation if frame_slot >= shadow_stack.frame_count
+            binding_slot: usize = binding_index(shadow_stack.frames[frame_slot], binding)
+            return ShadowStatus.UnknownBinding if binding_slot >= shadow_stack.frames[frame_slot].binding_count
+            descriptor: mutable AgentStorageDescriptor = shadow_stack.frames[frame_slot].bindings[binding_slot]
+            return ShadowStatus.InvalidByteCount if descriptor.byte_size > ValueCapacity::MAX_INLINE_VALUE_BYTES.u64() or byte_count != descriptor.byte_size.usize()
+            return ShadowStatus.InvalidDescriptor if descriptor.byte_size == Index::FIRST.u64() and descriptor.value_kind != AgentValueKind.Void
+            clear_value_bytes(descriptor)
+            for index in Index::FIRST..<byte_count:
+                descriptor.bytes[index] <- bytes[index]
+            descriptor.state <- AgentValueState.Available
+            return ShadowStatus.InvalidDescriptor if descriptor.storage_kind == AgentStorageKind.Unknown
+            shadow_stack.frames[frame_slot].bindings[binding_slot] <- descriptor
+            return ShadowStatus.Ready
+
+        def agent_shadow_binding_set_state(shadow_stack: mutable AgentShadowStack&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, state: AgentValueState) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.Frozen if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.InvalidIdentifier if invocation.value == Identifier::NO_ID or binding.value == Identifier::NO_ID
+            return ShadowStatus.InvalidDescriptor if state == AgentValueState.Available or state.u16() > EnumBounds::MAX_VALUE_STATE
+            frame_slot: usize = frame_index(shadow_stack, invocation)
+            return ShadowStatus.UnknownInvocation if frame_slot >= shadow_stack.frame_count
+            binding_slot: usize = binding_index(shadow_stack.frames[frame_slot], binding)
+            return ShadowStatus.UnknownBinding if binding_slot >= shadow_stack.frames[frame_slot].binding_count
+            descriptor: mutable AgentStorageDescriptor = shadow_stack.frames[frame_slot].bindings[binding_slot]
+            clear_value_bytes(descriptor)
+            descriptor.state <- state
+            shadow_stack.frames[frame_slot].bindings[binding_slot] <- descriptor
+            return ShadowStatus.Ready
+
+        def agent_shadow_scope_exit(shadow_stack: mutable AgentShadowStack&, invocation: DebuggerIdentity::DebugId, scope: DebuggerIdentity::DebugId) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.Frozen if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.InvalidIdentifier if invocation.value == Identifier::NO_ID or scope.value == Identifier::NO_ID
+            frame_slot: usize = frame_index(shadow_stack, invocation)
+            return ShadowStatus.UnknownInvocation if frame_slot >= shadow_stack.frame_count
+            current_index: mutable usize = Index::FIRST
+            while current_index < shadow_stack.frames[frame_slot].binding_count:
+                if shadow_stack.frames[frame_slot].bindings[current_index].scope.value == scope.value:
+                    for shift_index in current_index..<(shadow_stack.frames[frame_slot].binding_count - Index::ADVANCE):
+                        shadow_stack.frames[frame_slot].bindings[shift_index] <- shadow_stack.frames[frame_slot].bindings[shift_index + Index::ADVANCE]
+                    shadow_stack.frames[frame_slot].binding_count <- shadow_stack.frames[frame_slot].binding_count - Index::ADVANCE
+                    shadow_stack.frames[frame_slot].bindings[shadow_stack.frames[frame_slot].binding_count] <- zeroed
+                else:
+                    current_index <- current_index + Index::ADVANCE
+            return ShadowStatus.Ready
+
+        def agent_shadow_stack_begin_stop(shadow_stack: mutable AgentShadowStack&, generation: u64) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.InvalidIdentifier if generation == StackGeneration::NO_GENERATION
+            return ShadowStatus.SnapshotAlreadyActive if shadow_stack.active_stop_generation != StackGeneration::NO_GENERATION
+            return ShadowStatus.StaleGeneration if generation <= shadow_stack.last_stop_generation
+            shadow_stack.active_stop_generation <- generation
+            shadow_stack.last_stop_generation <- generation
+            return ShadowStatus.Ready
+
+        def agent_shadow_stack_resume(shadow_stack: mutable AgentShadowStack&, generation: u64) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.SnapshotNotActive if shadow_stack.active_stop_generation == StackGeneration::NO_GENERATION
+            return ShadowStatus.GenerationMismatch if generation != shadow_stack.active_stop_generation
+            shadow_stack.active_stop_generation <- StackGeneration::NO_GENERATION
+            return ShadowStatus.Ready
+
+        def agent_shadow_binding_read(shadow_stack: AgentShadowStack&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, generation: u64) -> BindingReadResult:
+            unavailable: mutable BindingReadResult = zeroed
+            unavailable.status <- ShadowStatus.InvalidStack
+            return unavailable if not agent_shadow_stack_is_exact(shadow_stack)
+            unavailable.status <- ShadowStatus.InvalidIdentifier
+            return unavailable if invocation.value == Identifier::NO_ID or binding.value == Identifier::NO_ID
+            unavailable.status <- ShadowStatus.SnapshotRequired
+            return unavailable if generation == StackGeneration::NO_GENERATION or shadow_stack.active_stop_generation == StackGeneration::NO_GENERATION
+            unavailable.status <- ShadowStatus.GenerationMismatch
+            return unavailable if generation != shadow_stack.active_stop_generation
+            frame_slot: usize = frame_index(shadow_stack, invocation)
+            unavailable.status <- ShadowStatus.UnknownInvocation
+            return unavailable if frame_slot >= shadow_stack.frame_count
+            binding_slot: usize = binding_index(shadow_stack.frames[frame_slot], binding)
+            unavailable.status <- ShadowStatus.UnknownBinding
+            return unavailable if binding_slot >= shadow_stack.frames[frame_slot].binding_count
+            result: mutable BindingReadResult = zeroed
+            result.descriptor <- shadow_stack.frames[frame_slot].bindings[binding_slot]
+            result.status <- ShadowStatus.ValueNotAvailable if result.descriptor.state != AgentValueState.Available
+            result.status <- ShadowStatus.Ready if result.descriptor.state == AgentValueState.Available
+            return result
+
+        def agent_shadow_frame_depth(shadow_stack: AgentShadowStack&) -> usize:
+            return shadow_stack.frame_count if agent_shadow_stack_is_exact(shadow_stack)
+            return Index::FIRST

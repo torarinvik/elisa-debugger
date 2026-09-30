@@ -1,0 +1,408 @@
+# Persistent local agent transport over an inherited Unix-domain socket.
+# The child descriptor is installed with posix_spawn file actions; the parent
+# retains one endpoint and drives the bounded wire stream independently.
+
+@link_name("socketpair")
+extern debugger_agent_socketpair(domain: i32, socket_type: i32, protocol: i32, descriptors: mutable i32&) -> i32 can[Blocking.IO]
+@link_name("fcntl")
+extern debugger_agent_fcntl(descriptor: i32, command: i32, argument: i32) -> i32 can[Unsafe.PointerCast]
+@link_name("posix_spawn")
+extern debugger_agent_posix_spawn(pid: mutable i32&, path: cstr, actions: mutable void&&?, attributes: mutable void&&?, argv: mutable cstr&&, environment: mutable cstr&&) -> i32 can[Blocking.IO, Unsafe.PointerCast]
+@link_name("posix_spawn_file_actions_init")
+extern debugger_agent_spawn_actions_init(actions: mutable void&&?) -> i32 can[Unsafe.PointerCast]
+@link_name("posix_spawn_file_actions_adddup2")
+extern debugger_agent_spawn_actions_adddup2(actions: mutable void&&?, source: i32, target: i32) -> i32 can[Unsafe.PointerCast]
+@link_name("posix_spawn_file_actions_destroy")
+extern debugger_agent_spawn_actions_destroy(actions: mutable void&&?) -> i32 can[Unsafe.PointerCast]
+@link_name("send")
+extern debugger_agent_send(descriptor: i32, bytes: void&, length: usize, flags: i32) -> isize can[Blocking.IO]
+@link_name("recv")
+extern debugger_agent_receive(descriptor: i32, bytes: void&, length: usize, flags: i32) -> isize can[Blocking.IO]
+@link_name("close")
+extern debugger_agent_close(descriptor: i32) -> i32 can[Blocking.IO]
+@link_name("waitpid")
+extern debugger_agent_waitpid(pid: i32, status: mutable i32&, options: i32) -> i32 can[Blocking.IO]
+@link_name("environ")
+extern debugger_agent_environment: mutable cstr&&
+
+static if ELISA_TARGET_OS_MACOS:
+    @link_name("__error")
+    extern debugger_agent_errno_location() -> mutable i32&
+static elif ELISA_TARGET_OS_LINUX:
+    @link_name("__errno_location")
+    extern debugger_agent_errno_location() -> mutable i32&
+
+static if ELISA_TARGET_OS_MACOS:
+    module DebuggerLocalAgentSignal:
+        private:
+            const module Flag:
+                MSG_NOSIGNAL: i32 = 524288
+        public:
+            def no_signal_send_flag() -> i32:
+                return Flag::MSG_NOSIGNAL
+static elif ELISA_TARGET_OS_LINUX:
+    module DebuggerLocalAgentSignal:
+        private:
+            const module Flag:
+                MSG_NOSIGNAL: i32 = 16384
+        public:
+            def no_signal_send_flag() -> i32:
+                return Flag::MSG_NOSIGNAL
+
+module DebuggerLocalAgentTransport:
+    private:
+        const module Socket:
+            UNIX_DOMAIN: i32 = 1
+            STREAM_TYPE: i32 = 1
+            DEFAULT_PROTOCOL: i32 = 0
+
+        const module Descriptor:
+            PAIR_COUNT: usize = 2
+            PARENT_INDEX: usize = 0
+            CHILD_INDEX: usize = 1
+            OWNED_DESCRIPTOR_CAPACITY: usize = 2
+            F_GETFD_COMMAND: i32 = 1
+            F_SETFD_COMMAND: i32 = 2
+            FD_CLOEXEC_FLAG: i32 = 1
+            F_GETFD_UNUSED_ARGUMENT: i32 = 0
+            CHANNEL_DESCRIPTOR_MINIMUM: i32 = 3
+            MAX_CHILD_CHANNEL_DESCRIPTOR: i32 = 1024
+
+        const module Io:
+            MAX_TRANSFER_BYTES: usize = 65536
+            EMPTY_LENGTH: usize = 0
+            FIRST_INDEX: usize = 0
+            COUNT_INCREMENT: usize = 1
+            EINTR_ERROR: i32 = 4
+            SYSCALL_FAILURE: i32 = -1
+            SUCCESS: i32 = 0
+
+        const module Spawn:
+            INITIAL_PID: i32 = 0
+            INITIAL_STATUS: i32 = 0
+            NOHANG: i32 = 1
+            EXITED_MASK: i32 = 127
+            SIGNALLED_STOPPED: i32 = 127
+            EXIT_CODE_SHIFT: i32 = 8
+            EXIT_CODE_MASK: i32 = 255
+
+        def local_agent_last_error() -> i32 can[Unsafe.PointerCast]:
+            return debugger_agent_errno_location()[Io::FIRST_INDEX]
+
+        def session_track_descriptor(session: mutable LocalAgentSession&, descriptor: i32) -> bool:
+            return false if session.owned_descriptor_count >= Descriptor::OWNED_DESCRIPTOR_CAPACITY
+            session.owned_descriptors[session.owned_descriptor_count] <- descriptor
+            session.owned_descriptor_count <- session.owned_descriptor_count + Io::COUNT_INCREMENT
+            return true
+
+        def session_remove_descriptor(session: mutable LocalAgentSession&, descriptor_index: usize) -> void:
+            return if descriptor_index >= session.owned_descriptor_count
+            for index in descriptor_index..<session.owned_descriptor_count - Io::COUNT_INCREMENT:
+                session.owned_descriptors[index] <- session.owned_descriptors[index + Io::COUNT_INCREMENT]
+            session.owned_descriptor_count <- session.owned_descriptor_count - Io::COUNT_INCREMENT
+
+        def session_close_descriptor(session: mutable LocalAgentSession&, descriptor: i32) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+            descriptor_index: mutable usize = Io::EMPTY_LENGTH
+            descriptor_found: mutable bool = false
+            for index in Io::EMPTY_LENGTH..<session.owned_descriptor_count:
+                if session.owned_descriptors[index] == descriptor:
+                    descriptor_index <- index
+                    descriptor_found <- true
+            return true if not descriptor_found
+            close_status: i32 = debugger_agent_close(descriptor) can Blocking.IO
+            if close_status == Io::SUCCESS:
+                session_remove_descriptor(session, descriptor_index)
+                return true
+            session.system_error <- local_agent_last_error() can Unsafe.PointerCast
+            return false
+
+        def session_close_all_descriptors(session: mutable LocalAgentSession&) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+            while session.owned_descriptor_count > Io::EMPTY_LENGTH:
+                descriptor: i32 = session.owned_descriptors[session.owned_descriptor_count - Io::COUNT_INCREMENT]
+                if not session_close_descriptor(session, descriptor):
+                    return false
+            session.channel_descriptor <- Io::SYSCALL_FAILURE
+            return true
+
+        def set_close_on_exec(descriptor: i32, system_error: mutable i32&) -> bool can[Unsafe.PointerCast]:
+            flags: i32 = debugger_agent_fcntl(descriptor, Descriptor::F_GETFD_COMMAND, Descriptor::F_GETFD_UNUSED_ARGUMENT) can Unsafe.PointerCast
+            if flags == Io::SYSCALL_FAILURE:
+                system_error <- local_agent_last_error() can Unsafe.PointerCast
+                return false
+            update_status: i32 = debugger_agent_fcntl(descriptor, Descriptor::F_SETFD_COMMAND, flags | Descriptor::FD_CLOEXEC_FLAG) can Unsafe.PointerCast
+            if update_status == Io::SYSCALL_FAILURE:
+                system_error <- local_agent_last_error() can Unsafe.PointerCast
+                return false
+            return true
+
+        def spawn_agent_child(pid: mutable i32&, executable: cstr, actions: mutable void&&?, argv: mutable cstr&&) -> i32 can[Blocking.IO, Unsafe.PointerCast]:
+            argument_vector: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+            return debugger_agent_posix_spawn(pid, executable, actions, null, argument_vector, debugger_agent_environment) can Blocking.IO, Unsafe.PointerCast
+
+        def wait_result_store(session: mutable LocalAgentSession&, raw_status: i32) -> void:
+            session.raw_wait_status <- raw_status
+            terminating_signal: i32 = raw_status & Spawn::EXITED_MASK
+            if terminating_signal == Io::SUCCESS:
+                session.exit_code <- (raw_status >> Spawn::EXIT_CODE_SHIFT) & Spawn::EXIT_CODE_MASK
+                session.terminated_by_signal <- false
+            elif terminating_signal != Spawn::SIGNALLED_STOPPED:
+                session.exit_code <- Io::SYSCALL_FAILURE
+                session.signal_number <- terminating_signal
+                session.terminated_by_signal <- true
+            else:
+                session.exit_code <- Io::SYSCALL_FAILURE
+                session.signal_number <- Io::SUCCESS
+                session.terminated_by_signal <- false
+
+    public:
+        enum SessionState:
+            Closed
+            Connected
+            PeerClosed
+            ChildExited
+            CleanupPending
+
+        enum TransportStatus:
+            Ready
+            InvalidArgument
+            InvalidState
+            SocketPairFailed
+            DescriptorSetupFailed
+            SpawnActionsFailed
+            SpawnFailed
+            TransferFailed
+            PeerClosed
+            CloseFailed
+            ChildRunning
+            ChildReaped
+            WaitFailed
+
+        struct LocalAgentSession:
+            process_id: mutable i32
+            channel_descriptor: mutable i32
+            owned_descriptors: mutable i32[Descriptor::OWNED_DESCRIPTOR_CAPACITY]
+            owned_descriptor_count: mutable usize
+            state: mutable SessionState
+            system_error: mutable i32
+            raw_wait_status: mutable i32
+            exit_code: mutable i32
+            signal_number: mutable i32
+            terminated_by_signal: mutable bool
+            process_reaped: mutable bool
+
+        struct TransferResult:
+            status: mutable TransportStatus
+            bytes_transferred: mutable usize
+            system_error: mutable i32
+
+        def local_agent_session_initialize(session: mutable LocalAgentSession&) -> void:
+            return if session.owned_descriptor_count != Io::EMPTY_LENGTH
+            return if session.process_id != Spawn::INITIAL_PID and not session.process_reaped
+            session.process_id <- Spawn::INITIAL_PID
+            session.channel_descriptor <- Io::SYSCALL_FAILURE
+            session.owned_descriptor_count <- Io::EMPTY_LENGTH
+            session.state <- SessionState.Closed
+            session.system_error <- Io::SUCCESS
+            session.raw_wait_status <- Spawn::INITIAL_STATUS
+            session.exit_code <- Io::SYSCALL_FAILURE
+            session.signal_number <- Io::SUCCESS
+            session.terminated_by_signal <- false
+            session.process_reaped <- false
+
+        # The debuggee links the matching Elisa agent and reads the supplied
+        # channel descriptor. This function passes only that endpoint and never
+        # interpolates executable paths or arguments through a shell.
+        def local_agent_session_launch(session: mutable LocalAgentSession&, executable: cstr, argv: mutable cstr&&, child_channel_descriptor: i32) -> TransportStatus can[Blocking.IO, Unsafe.PointerCast]:
+            return TransportStatus.InvalidState if session.state != SessionState.Closed or session.owned_descriptor_count != Io::EMPTY_LENGTH or session.process_id != Spawn::INITIAL_PID and not session.process_reaped
+            return TransportStatus.InvalidArgument if executable[Io::FIRST_INDEX].u8() == Io::EMPTY_LENGTH.u8() or child_channel_descriptor < Descriptor::CHANNEL_DESCRIPTOR_MINIMUM or child_channel_descriptor > Descriptor::MAX_CHILD_CHANNEL_DESCRIPTOR
+            session.process_id <- Spawn::INITIAL_PID
+            session.process_reaped <- false
+            session.system_error <- Io::SUCCESS
+            session.exit_code <- Io::SYSCALL_FAILURE
+            session.signal_number <- Io::SUCCESS
+            session.terminated_by_signal <- false
+
+            descriptors: mutable i32[Descriptor::PAIR_COUNT] = zeroed
+            pair_status: i32 = debugger_agent_socketpair(Socket::UNIX_DOMAIN, Socket::STREAM_TYPE, Socket::DEFAULT_PROTOCOL, descriptors[Descriptor::PARENT_INDEX]) can Blocking.IO
+            if pair_status == Io::SYSCALL_FAILURE:
+                session.system_error <- local_agent_last_error() can Unsafe.PointerCast
+                return TransportStatus.SocketPairFailed
+
+            if not session_track_descriptor(session, descriptors[Descriptor::PARENT_INDEX]) or not session_track_descriptor(session, descriptors[Descriptor::CHILD_INDEX]):
+                _ = session_close_all_descriptors(session) can Blocking.IO, Unsafe.PointerCast
+                return TransportStatus.CloseFailed
+
+            parent_descriptor: mutable i32 = descriptors[Descriptor::PARENT_INDEX]
+            child_descriptor: mutable i32 = descriptors[Descriptor::CHILD_INDEX]
+            if child_descriptor == child_channel_descriptor:
+                parent_descriptor <- descriptors[Descriptor::CHILD_INDEX]
+                child_descriptor <- descriptors[Descriptor::PARENT_INDEX]
+
+            descriptor_error: mutable i32 = Io::SUCCESS
+            if not set_close_on_exec(parent_descriptor, descriptor_error) or not set_close_on_exec(child_descriptor, descriptor_error):
+                session.system_error <- descriptor_error
+                _ = session_close_all_descriptors(session) can Blocking.IO, Unsafe.PointerCast
+                session.state <- SessionState.CleanupPending if session.owned_descriptor_count > Io::EMPTY_LENGTH
+                return TransportStatus.DescriptorSetupFailed
+
+            actions: mutable void&? = null
+            actions_pointer: mutable void&&? = (&actions).cast[mutable void&&?] can Unsafe.PointerCast
+            action_status: mutable i32 = debugger_agent_spawn_actions_init(actions_pointer) can Unsafe.PointerCast
+            if action_status != Io::SUCCESS:
+                session.system_error <- action_status
+                _ = session_close_all_descriptors(session) can Blocking.IO, Unsafe.PointerCast
+                session.state <- SessionState.CleanupPending if session.owned_descriptor_count > Io::EMPTY_LENGTH
+                return TransportStatus.SpawnActionsFailed
+
+            action_status <- debugger_agent_spawn_actions_adddup2(actions_pointer, child_descriptor, child_channel_descriptor) can Unsafe.PointerCast
+            if action_status != Io::SUCCESS:
+                _ = debugger_agent_spawn_actions_destroy(actions_pointer) can Unsafe.PointerCast
+                session.system_error <- action_status
+                _ = session_close_all_descriptors(session) can Blocking.IO, Unsafe.PointerCast
+                session.state <- SessionState.CleanupPending if session.owned_descriptor_count > Io::EMPTY_LENGTH
+                return TransportStatus.SpawnActionsFailed
+
+            child_pid: mutable i32 = Spawn::INITIAL_PID
+            spawn_status: i32 = spawn_agent_child(&child_pid, executable, actions_pointer, argv) can Blocking.IO, Unsafe.PointerCast
+            _ = debugger_agent_spawn_actions_destroy(actions_pointer) can Unsafe.PointerCast
+            if spawn_status != Io::SUCCESS:
+                session.system_error <- spawn_status
+                _ = session_close_all_descriptors(session) can Blocking.IO, Unsafe.PointerCast
+                session.state <- SessionState.CleanupPending if session.owned_descriptor_count > Io::EMPTY_LENGTH
+                return TransportStatus.SpawnFailed
+
+            session.process_id <- child_pid
+            session.channel_descriptor <- parent_descriptor
+            session.state <- SessionState.Connected
+            if not session_close_descriptor(session, child_descriptor):
+                session.state <- SessionState.CleanupPending
+                return TransportStatus.CloseFailed
+            return TransportStatus.Ready
+
+        def local_agent_channel_send(session: LocalAgentSession&, bytes: u8&, length: usize) -> TransferResult can[Blocking.IO, Unsafe.PointerCast]:
+            result: mutable TransferResult = zeroed
+            result.status <- TransportStatus.Ready
+            if session.state != SessionState.Connected or session.channel_descriptor == Io::SYSCALL_FAILURE or session.process_reaped:
+                result.status <- TransportStatus.InvalidState
+                return result
+            if length > Io::MAX_TRANSFER_BYTES:
+                result.status <- TransportStatus.InvalidArgument
+                return result
+
+            offset: mutable usize = Io::EMPTY_LENGTH
+            failed: mutable bool = false
+            system_error: mutable i32 = Io::SUCCESS
+            observed_error: mutable i32 = Io::SUCCESS
+            while offset < length and not failed:
+                input_pointer: void& = (&bytes[offset]).cast[void&] can Unsafe.PointerCast
+                written: isize = debugger_agent_send(session.channel_descriptor, input_pointer, length - offset, DebuggerLocalAgentSignal::no_signal_send_flag()) can Blocking.IO
+                if written == Io::SYSCALL_FAILURE.isize():
+                    observed_error <- local_agent_last_error() can Unsafe.PointerCast
+                    system_error <- observed_error if observed_error != Io::EINTR_ERROR
+                    failed <- observed_error != Io::EINTR_ERROR
+                elif written == Io::EMPTY_LENGTH.isize():
+                    failed <- true
+                else:
+                    offset <- offset + written.usize()
+            result.bytes_transferred <- offset
+            result.system_error <- system_error
+            result.status <- TransportStatus.TransferFailed if failed
+            return result
+
+        def local_agent_channel_receive(session: mutable LocalAgentSession&, bytes: mutable u8&, capacity: usize) -> TransferResult can[Blocking.IO, Unsafe.PointerCast]:
+            result: mutable TransferResult = zeroed
+            result.status <- TransportStatus.Ready
+            if session.state != SessionState.Connected or session.channel_descriptor == Io::SYSCALL_FAILURE:
+                result.status <- TransportStatus.InvalidState
+                return result
+            if capacity > Io::MAX_TRANSFER_BYTES:
+                result.status <- TransportStatus.InvalidArgument
+                return result
+            if capacity == Io::EMPTY_LENGTH:
+                return result
+
+            failed: mutable bool = false
+            received: mutable isize = Io::SYSCALL_FAILURE.isize()
+            observed_error: mutable i32 = Io::SUCCESS
+            while failed == false and received == Io::SYSCALL_FAILURE.isize():
+                output_pointer: void& = (&bytes[Io::FIRST_INDEX]).cast[void&] can Unsafe.PointerCast
+                received <- debugger_agent_receive(session.channel_descriptor, output_pointer, capacity, Io::SUCCESS) can Blocking.IO
+                if received == Io::SYSCALL_FAILURE.isize():
+                    observed_error <- local_agent_last_error() can Unsafe.PointerCast
+                    result.system_error <- observed_error
+                    failed <- observed_error != Io::EINTR_ERROR
+            if failed:
+                result.status <- TransportStatus.TransferFailed
+                return result
+            if received == Io::EMPTY_LENGTH.isize():
+                session.state <- SessionState.PeerClosed
+                result.status <- TransportStatus.PeerClosed
+                return result
+            result.bytes_transferred <- received.usize()
+            result.system_error <- Io::SUCCESS
+            return result
+
+        # An instrumented agent calls this in its child startup path to take
+        # ownership of the descriptor installed by local_agent_session_launch.
+        def local_agent_channel_adopt(session: mutable LocalAgentSession&, descriptor: i32) -> TransportStatus can[Blocking.IO, Unsafe.PointerCast]:
+            return TransportStatus.InvalidState if session.state != SessionState.Closed or session.owned_descriptor_count != Io::EMPTY_LENGTH
+            return TransportStatus.InvalidArgument if descriptor < Descriptor::CHANNEL_DESCRIPTOR_MINIMUM
+            if not session_track_descriptor(session, descriptor):
+                return TransportStatus.InvalidState
+            session.channel_descriptor <- descriptor
+            descriptor_error: mutable i32 = Io::SUCCESS
+            if not set_close_on_exec(descriptor, descriptor_error):
+                session.system_error <- descriptor_error
+                session.state <- SessionState.CleanupPending
+                return TransportStatus.DescriptorSetupFailed
+            session.state <- SessionState.Connected
+            return TransportStatus.Ready
+
+        def local_agent_channel_close(session: mutable LocalAgentSession&) -> TransportStatus can[Blocking.IO, Unsafe.PointerCast]:
+            if session.owned_descriptor_count == Io::EMPTY_LENGTH:
+                session.channel_descriptor <- Io::SYSCALL_FAILURE
+                session.state <- SessionState.ChildExited if session.process_reaped
+                session.state <- SessionState.Closed if not session.process_reaped
+                return TransportStatus.Ready
+            if not session_close_all_descriptors(session) can Blocking.IO, Unsafe.PointerCast:
+                session.state <- SessionState.CleanupPending
+                return TransportStatus.CloseFailed
+            session.state <- SessionState.ChildExited if session.process_reaped
+            session.state <- SessionState.Closed if not session.process_reaped
+            return TransportStatus.Ready
+
+        def local_agent_process_wait(session: mutable LocalAgentSession&) -> TransportStatus can[Blocking.IO, Unsafe.PointerCast]:
+            return TransportStatus.InvalidState if session.process_id == Spawn::INITIAL_PID
+            return TransportStatus.ChildReaped if session.process_reaped
+            raw_status: mutable i32 = Spawn::INITIAL_STATUS
+            waited_pid: mutable i32 = Io::SYSCALL_FAILURE
+            waiting: mutable bool = true
+            failed: mutable bool = false
+            observed_error: mutable i32 = Io::SUCCESS
+            while waiting and not failed:
+                waited_pid <- debugger_agent_waitpid(session.process_id, &raw_status, Io::EMPTY_LENGTH.i32()) can Blocking.IO
+                if waited_pid == session.process_id:
+                    waiting <- false
+                else:
+                    observed_error <- local_agent_last_error() can Unsafe.PointerCast
+                    failed <- waited_pid != Io::SYSCALL_FAILURE or observed_error != Io::EINTR_ERROR
+            if failed:
+                session.system_error <- observed_error
+                return TransportStatus.WaitFailed
+            wait_result_store(session, raw_status)
+            session.process_reaped <- true
+            return TransportStatus.ChildReaped
+
+        def local_agent_process_poll(session: mutable LocalAgentSession&) -> TransportStatus can[Blocking.IO, Unsafe.PointerCast]:
+            return TransportStatus.InvalidState if session.process_id == Spawn::INITIAL_PID
+            return TransportStatus.ChildReaped if session.process_reaped
+            raw_status: mutable i32 = Spawn::INITIAL_STATUS
+            waited_pid: i32 = debugger_agent_waitpid(session.process_id, &raw_status, Spawn::NOHANG) can Blocking.IO
+            if waited_pid == Io::EMPTY_LENGTH.i32():
+                return TransportStatus.ChildRunning
+            if waited_pid == session.process_id:
+                wait_result_store(session, raw_status)
+                session.process_reaped <- true
+                return TransportStatus.ChildReaped
+            session.system_error <- local_agent_last_error() can Unsafe.PointerCast if waited_pid == Io::SYSCALL_FAILURE
+            return TransportStatus.WaitFailed

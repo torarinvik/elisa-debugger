@@ -1,0 +1,147 @@
+include "../src/agent/wire.elisa"
+include "../src/agent/stream.elisa"
+include "../src/platform/local_agent_transport.elisa"
+
+const module TestArgument:
+    PARENT_COUNT: i64 = 4
+    CHILD_COUNT: i64 = 2
+    FIRST_ARGUMENT: usize = 0
+    CHILD_MODE_INDEX: usize = 1
+    ARGUMENT_TERMINATOR_INDEX: usize = 2
+    PARENT_MODE_INDEX: usize = 1
+    PARENT_RESERVED_FIRST_INDEX: usize = 2
+    PARENT_RESERVED_SECOND_INDEX: usize = 3
+    CHILD_SWITCH: cstr = "--local-agent-child"
+    PARENT_MODE: cstr = "--local-agent-parent"
+    RESERVED_FIRST: cstr = "reserved-first"
+    RESERVED_SECOND: cstr = "reserved-second"
+    CHANNEL_DESCRIPTOR: i32 = 3
+    MINIMUM_CHANNEL_DESCRIPTOR: i32 = 3
+    NULL_TERMINATOR: u8 = 0
+    INDEX_INCREMENT: usize = 1
+    NULL_POINTER_VALUE: usize = 0
+    NO_PROCESS_ID: i32 = 0
+
+const module TestFrame:
+    FRAME_LENGTH: usize = 32
+    FIRST_BYTE: usize = 0
+    EMPTY_LENGTH: usize = 0
+
+const module TestAcknowledgement:
+    GENERATION: u64 = 700
+    EVENT_COUNT: u64 = 3
+
+const module TestResult:
+    CHILD_MODE_FAILURE: i64 = 1
+    CHILD_READ_FAILURE: i64 = 2
+    CHILD_DECODE_FAILURE: i64 = 3
+    CHILD_ENCODE_FAILURE: i64 = 4
+    CHILD_SEND_FAILURE: i64 = 5
+    CHILD_CLOSE_FAILURE: i64 = 6
+    PARENT_ARGUMENT_FAILURE: i64 = 7
+    PARENT_ENCODE_FAILURE: i64 = 8
+    PARENT_LAUNCH_FAILURE: i64 = 9
+    PARENT_PROCESS_ID_FAILURE: i64 = 10
+    PARENT_CHANNEL_DESCRIPTOR_FAILURE: i64 = 11
+    PARENT_SEND_FAILURE: i64 = 12
+    PARENT_RECEIVE_FAILURE: i64 = 13
+    PARENT_WAIT_FAILURE: i64 = 15
+    PARENT_CLOSE_FAILURE: i64 = 16
+    PARENT_POLL_FAILURE: i64 = 17
+    SUCCESS: i64 = 0
+
+def child_read_frame(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement&) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    received_total: mutable usize = TestFrame::EMPTY_LENGTH
+    failed: mutable bool = false
+    while received_total < TestFrame::FRAME_LENGTH and not failed:
+        transfer: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_receive(session, frame.bytes[received_total], TestFrame::FRAME_LENGTH - received_total) can Blocking.IO, Unsafe.PointerCast
+        if transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready or transfer.bytes_transferred == TestFrame::EMPTY_LENGTH:
+            failed <- true
+        else:
+            received_total <- received_total + transfer.bytes_transferred
+    if received_total == TestFrame::FRAME_LENGTH and not failed:
+        frame.length <- TestFrame::FRAME_LENGTH
+        return true
+    return false
+
+def child_main(argc: i64) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    return TestResult::CHILD_MODE_FAILURE if argc != TestArgument::CHILD_COUNT
+    session: mutable DebuggerLocalAgentTransport::LocalAgentSession = zeroed
+    DebuggerLocalAgentTransport::local_agent_session_initialize(session)
+    adoption: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_adopt(session, TestArgument::CHANNEL_DESCRIPTOR) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_MODE_FAILURE if adoption != DebuggerLocalAgentTransport::TransportStatus.Ready
+
+    incoming: mutable DebuggerAgentWire::EncodedStopAcknowledgement = zeroed
+    return TestResult::CHILD_READ_FAILURE if not child_read_frame(session, incoming) can Blocking.IO, Unsafe.PointerCast
+    decoded: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(incoming.bytes[TestFrame::FIRST_BYTE], incoming.length)
+    return TestResult::CHILD_DECODE_FAILURE if decoded.status != DebuggerAgentWire::WireStatus.Ready or decoded.acknowledgement.generation != TestAcknowledgement::GENERATION or decoded.acknowledgement.event_count != TestAcknowledgement::EVENT_COUNT
+    response: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(decoded.acknowledgement)
+    return TestResult::CHILD_ENCODE_FAILURE if response.status != DebuggerAgentWire::WireStatus.Ready
+    sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, response.bytes[TestFrame::FIRST_BYTE], response.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_SEND_FAILURE if sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or sent.bytes_transferred != TestFrame::FRAME_LENGTH
+    closed: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_close(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_CLOSE_FAILURE if closed != DebuggerLocalAgentTransport::TransportStatus.Ready
+    return TestResult::SUCCESS
+
+def test_cstr_equal(left: cstr, right: cstr) -> bool:
+    index: mutable usize = TestFrame::EMPTY_LENGTH
+    while left[index].u8() == right[index].u8():
+        return true if left[index].u8() == TestArgument::NULL_TERMINATOR
+        index <- index + TestArgument::INDEX_INCREMENT
+    return false
+
+def parent_receive_acknowledgement(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, expected: DebuggerAgent::AgentStopAcknowledgement) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    receiver: mutable DebuggerAgentWireStream::StopAcknowledgementReceiver = zeroed
+    DebuggerAgentWireStream::stop_acknowledgement_receiver_initialize(receiver)
+    scratch: mutable u8[TestFrame::FRAME_LENGTH] = zeroed
+    acknowledgement_received: mutable bool = false
+    failed: mutable bool = false
+    while not acknowledgement_received and not failed:
+        transfer: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_receive(session, scratch[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+        if transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready or transfer.bytes_transferred == TestFrame::EMPTY_LENGTH:
+            failed <- true
+        else:
+            feed: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(receiver, scratch[TestFrame::FIRST_BYTE], transfer.bytes_transferred)
+            if feed.status == DebuggerAgentWireStream::StreamStatus.Complete:
+                acknowledgement_received <- feed.decode_status == DebuggerAgentWire::WireStatus.Ready and feed.acknowledgement.generation == expected.generation and feed.acknowledgement.event_count == expected.event_count
+                failed <- not acknowledgement_received
+            elif feed.status != DebuggerAgentWireStream::StreamStatus.NeedsMore:
+                failed <- true
+    return acknowledgement_received and not failed
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+    if argc == TestArgument::CHILD_COUNT:
+        return TestResult::CHILD_MODE_FAILURE if not test_cstr_equal(arguments[TestArgument::CHILD_MODE_INDEX].cast[cstr], TestArgument::CHILD_SWITCH)
+        return child_main(argc) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_ARGUMENT_FAILURE if argc != TestArgument::PARENT_COUNT
+    return TestResult::PARENT_ARGUMENT_FAILURE if not test_cstr_equal(arguments[TestArgument::PARENT_MODE_INDEX].cast[cstr], TestArgument::PARENT_MODE) or not test_cstr_equal(arguments[TestArgument::PARENT_RESERVED_FIRST_INDEX].cast[cstr], TestArgument::RESERVED_FIRST) or not test_cstr_equal(arguments[TestArgument::PARENT_RESERVED_SECOND_INDEX].cast[cstr], TestArgument::RESERVED_SECOND)
+
+    executable: cstr = arguments[TestArgument::FIRST_ARGUMENT].cast[cstr]
+    mutable_arguments: mutable void&& = argv.cast[mutable void&&] can Unsafe.PointerCast
+    mutable_arguments[TestArgument::CHILD_MODE_INDEX] <- TestArgument::CHILD_SWITCH.cast[mutable void&] can Unsafe.PointerCast
+    null_argument: mutable void& = TestArgument::NULL_POINTER_VALUE.cast[mutable void&] can Unsafe.PointerCast
+    mutable_arguments[TestArgument::ARGUMENT_TERMINATOR_INDEX] <- null_argument
+    child_arguments_pointer: mutable cstr&& = mutable_arguments.cast[mutable cstr&&] can Unsafe.PointerCast
+
+    expected: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestAcknowledgement::GENERATION, event_count: TestAcknowledgement::EVENT_COUNT}
+    frame: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(expected)
+    return TestResult::PARENT_ENCODE_FAILURE if frame.status != DebuggerAgentWire::WireStatus.Ready or frame.length != TestFrame::FRAME_LENGTH
+
+    session: mutable DebuggerLocalAgentTransport::LocalAgentSession = zeroed
+    DebuggerLocalAgentTransport::local_agent_session_initialize(session)
+    launch: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_session_launch(session, executable, child_arguments_pointer, TestArgument::CHANNEL_DESCRIPTOR) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_LAUNCH_FAILURE if launch != DebuggerLocalAgentTransport::TransportStatus.Ready
+    return TestResult::PARENT_PROCESS_ID_FAILURE if session.process_id == TestArgument::NO_PROCESS_ID
+    return TestResult::PARENT_CHANNEL_DESCRIPTOR_FAILURE if session.channel_descriptor < TestArgument::MINIMUM_CHANNEL_DESCRIPTOR
+
+    sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, frame.bytes[TestFrame::FIRST_BYTE], frame.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_SEND_FAILURE if sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or sent.bytes_transferred != TestFrame::FRAME_LENGTH
+    polled: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_process_poll(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_POLL_FAILURE if polled != DebuggerLocalAgentTransport::TransportStatus.ChildRunning and polled != DebuggerLocalAgentTransport::TransportStatus.ChildReaped
+    waited: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_process_wait(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_WAIT_FAILURE if waited != DebuggerLocalAgentTransport::TransportStatus.ChildReaped or session.exit_code != TestResult::SUCCESS.i32() or session.terminated_by_signal
+    return TestResult::PARENT_RECEIVE_FAILURE if not parent_receive_acknowledgement(session, expected) can Blocking.IO, Unsafe.PointerCast
+    closed: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_close(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_CLOSE_FAILURE if closed != DebuggerLocalAgentTransport::TransportStatus.Ready or session.owned_descriptor_count != TestFrame::EMPTY_LENGTH
+    return TestResult::SUCCESS

@@ -5,6 +5,7 @@ const module Width:
     ONE_BYTE: usize = 1
     FOUR_BYTES: usize = 4
     EIGHT_BYTES: usize = 8
+    TOO_MANY_BYTES: usize = 9
 
 const module Identity:
     BINDING: u64 = 101
@@ -13,6 +14,7 @@ const module Identity:
 
 const module SignedValue:
     NEGATIVE_EIGHT: i64 = -8
+    NEGATIVE_ONE_TWENTY_NINE: i64 = -129
     POSITIVE_ONE_TWENTY_EIGHT: i64 = 128
     MINIMUM: i64 = -9223372036854775807 - 1
 
@@ -51,6 +53,7 @@ const module TestResult:
     INVALID_BOOLEAN: i64 = 12
     UNAVAILABLE: i64 = 13
     UNSUPPORTED_KIND: i64 = 14
+    MALFORMED_ENCODED_DESCRIPTOR: i64 = 15
 
 def debug_id(value: u64) -> DebuggerIdentity::DebugId:
     return DebuggerIdentity::DebugId{value: value}
@@ -65,7 +68,7 @@ def main() -> i64:
     return TestResult::SIGNED_DESCRIPTOR if negative_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not DebuggerAgentFrames::agent_storage_descriptor_is_exact(negative_descriptor.descriptor)
     decoded_negative: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(negative_descriptor.descriptor)
     return TestResult::SIGNED_DECODE if decoded_negative.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_negative.signed_value != SignedValue::NEGATIVE_EIGHT
-    return TestResult::SIGNED_RANGE if DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::POSITIVE_ONE_TWENTY_EIGHT, Width::ONE_BYTE).status != DebuggerAgentValueCodec::ValueCodecStatus.ValueOutOfRange
+    return TestResult::SIGNED_RANGE if DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::POSITIVE_ONE_TWENTY_EIGHT, Width::ONE_BYTE).status != DebuggerAgentValueCodec::ValueCodecStatus.ValueOutOfRange or DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::NEGATIVE_ONE_TWENTY_NINE, Width::ONE_BYTE).status != DebuggerAgentValueCodec::ValueCodecStatus.ValueOutOfRange
 
     encoded_minimum: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::MINIMUM, Width::EIGHT_BYTES)
     return TestResult::MINIMUM_ENCODE if encoded_minimum.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or encoded_minimum.bytes[EncodedByte::FIRST] != Storage::ZERO.u8() or encoded_minimum.bytes[EncodedByte::LAST] != EncodedByte::SIGNED_MINIMUM_HIGH
@@ -88,6 +91,10 @@ def main() -> i64:
     decoded_boolean: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(boolean_descriptor.descriptor)
     return TestResult::BOOLEAN_ENCODE if encoded_boolean.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or encoded_boolean.byte_count != Width::ONE_BYTE or encoded_boolean.bytes[EncodedByte::FIRST] != EncodedByte::TRUE
     return TestResult::BOOLEAN_DECODE if boolean_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_boolean.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not decoded_boolean.boolean_value
+    encoded_false: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_boolean(false)
+    false_descriptor: DebuggerAgentValueCodec::EncodedDescriptor = descriptor_for(encoded_false)
+    decoded_false: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(false_descriptor.descriptor)
+    return TestResult::BOOLEAN_DECODE if encoded_false.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or encoded_false.bytes[EncodedByte::FIRST] != EncodedByte::ZERO or false_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_false.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_false.boolean_value
     boolean_descriptor.descriptor.bytes[EncodedByte::FIRST] <- EncodedByte::INVALID_BOOLEAN
     return TestResult::INVALID_BOOLEAN if DebuggerAgentValueCodec::agent_scalar_decode(boolean_descriptor.descriptor).status != DebuggerAgentValueCodec::ValueCodecStatus.InvalidBoolean
 
@@ -99,4 +106,7 @@ def main() -> i64:
     unsupported: mutable DebuggerAgentFrames::AgentStorageDescriptor = negative_descriptor.descriptor
     unsupported.value_kind <- DebuggerAgentFrames::AgentValueKind.Floating
     return TestResult::UNSUPPORTED_KIND if DebuggerAgentValueCodec::agent_scalar_decode(unsupported).status != DebuggerAgentValueCodec::ValueCodecStatus.UnsupportedKind
+    malformed_encoded: mutable DebuggerAgentValueCodec::EncodedScalar = encoded_negative
+    malformed_encoded.byte_count <- Width::TOO_MANY_BYTES
+    return TestResult::MALFORMED_ENCODED_DESCRIPTOR if DebuggerAgentValueCodec::agent_scalar_descriptor(debug_id(Identity::BINDING), debug_id(Identity::SCOPE), debug_id(Identity::TYPE), DebuggerAgentFrames::AgentStorageKind.StackSlot, Storage::STACK_OFFSET, malformed_encoded).status != DebuggerAgentValueCodec::ValueCodecStatus.InvalidWidth
     return TestResult::SUCCESS

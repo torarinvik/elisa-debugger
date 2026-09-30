@@ -47,10 +47,16 @@ module DebuggerProtocolRequest:
             REQUEST_CHARACTER_ASCII_UPPER_A: u8 = 65
             REQUEST_CHARACTER_ASCII_UPPER_F: u8 = 70
             REQUEST_CHARACTER_ASCII_DELETE: u64 = 127
+            REQUEST_CHARACTER_ASCII_NUL: u8 = 0
 
         const module JsonParser:
             NESTING_CAPACITY: usize = 64
-            CURSOR_INCREMENT: usize = 1
+            FIRST_INDEX: usize = 0
+            INDEX_INCREMENT: usize = 1
+            PREVIOUS_INDEX_OFFSET: usize = 1
+            BACKSLASH_PARITY_MODULUS: usize = 2
+            EVEN_BACKSLASH_PARITY: usize = 0
+            ODD_BACKSLASH_PARITY: usize = 1
             STATE_VALUE: u8 = 0
             STATE_KEY_OR_END: u8 = 1
             STATE_COLON: u8 = 2
@@ -108,6 +114,7 @@ module DebuggerProtocolRequest:
 
         const module NumberFormat:
             FIRST_NUMBER_DIGIT_COUNT: usize = 1
+            ZERO_VALUE: u64 = 0
             REQUEST_NUMBERFORMAT_DECIMAL_BASE: u64 = 10
             REQUEST_NUMBERFORMAT_HEX_BASE: u64 = 16
             HEX_LETTER_OFFSET: u64 = 10
@@ -154,7 +161,6 @@ module DebuggerProtocolRequest:
             NO_EXPRESSION_BYTES: usize = 0
             MAX_FRAME_INDEX: u64 = 4294967295
             ASCII_MAX: u64 = 127
-            ASCII_NUL: u8 = 0
             ASCII_BACKSPACE: u8 = 8
             ASCII_FORM_FEED: u8 = 12
             INDEX_INCREMENT: usize = 1
@@ -381,9 +387,9 @@ module DebuggerProtocolRequest:
             return ""
 
         def request_cstr_length(value: cstr) -> usize:
-            length: mutable usize = 0
-            while value[length] != 0:
-                length <- length + 1
+            length: mutable usize = JsonParser::FIRST_INDEX
+            while value[length] != Character::REQUEST_CHARACTER_ASCII_NUL:
+                length <- length + JsonParser::INDEX_INCREMENT
             return length
 
         # Hashes are only a quick candidate lookup.  Compare the decoded JSON
@@ -391,19 +397,19 @@ module DebuggerProtocolRequest:
         # hash collision cannot turn an unknown method into a real operation.
         def request_method_json_string_matches(payload: u8&, start: usize, end: usize, expected: cstr) -> bool:
             cursor: mutable usize = start
-            expected_index: mutable usize = 0
+            expected_index: mutable usize = JsonParser::FIRST_INDEX
             expected_length: usize = request_cstr_length(expected)
             while cursor < end:
-                character: mutable u64 = 0
+                character: mutable u64 = NumberFormat::ZERO_VALUE
                 if payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BACKSLASH:
-                    cursor <- cursor + 1
+                    cursor <- cursor + JsonParser::INDEX_INCREMENT
                     return false if cursor >= end
                     escape: u8 = payload[cursor]
                     if escape == Character::REQUEST_CHARACTER_ASCII_U:
                         return false if end - cursor <= Unicode::ESCAPE_DIGITS
                         for offset in NumberFormat::FIRST_HEX_DIGIT_OFFSET..<(Unicode::ESCAPE_DIGITS + Unicode::ESCAPE_MARKER_BYTES):
                             digit: u8 = payload[cursor + offset]
-                            hex_value: mutable u64 = 0
+                            hex_value: mutable u64 = NumberFormat::ZERO_VALUE
                             if digit >= Character::REQUEST_CHARACTER_ASCII_ZERO and digit <= Character::REQUEST_CHARACTER_ASCII_NINE:
                                 hex_value <- (digit - Character::REQUEST_CHARACTER_ASCII_ZERO).u64()
                             else:
@@ -422,11 +428,11 @@ module DebuggerProtocolRequest:
                         return false
                 else:
                     character <- payload[cursor].u64()
-                    cursor <- cursor + 1
+                    cursor <- cursor + JsonParser::INDEX_INCREMENT
                 return false if character > NumberFormat::REQUEST_NUMBERFORMAT_ASCII_MAX
                 return false if expected_index >= expected_length
                 return false if expected[expected_index].u8().u64() != character
-                expected_index <- expected_index + 1
+                expected_index <- expected_index + JsonParser::INDEX_INCREMENT
             return expected_index == expected_length
 
         def request_method_from_json_value(payload: u8&, start: usize, end: usize, hash_candidate: RequestMethod) -> RequestMethod:
@@ -486,19 +492,19 @@ module DebuggerProtocolRequest:
         # ignored while a quote preceded by an even number remains structural.
         def json_byte_is_escaped(payload: u8&, index: usize) -> bool:
             return false if payload[index] != Character::REQUEST_CHARACTER_ASCII_QUOTE
-            slash_count: mutable usize = 0
             cursor: mutable usize = index
-            while cursor > 0:
-                cursor <- cursor - 1
-                return false if payload[cursor] != Character::REQUEST_CHARACTER_ASCII_BACKSLASH and slash_count % 2 == 0
-                return true if payload[cursor] != Character::REQUEST_CHARACTER_ASCII_BACKSLASH and slash_count % 2 == 1
-                slash_count <- slash_count + 1
-            return slash_count % 2 == 1
+            slash_count: mutable usize = JsonParser::FIRST_INDEX
+            while cursor > JsonParser::FIRST_INDEX:
+                cursor <- cursor - JsonParser::PREVIOUS_INDEX_OFFSET
+                return false if payload[cursor] != Character::REQUEST_CHARACTER_ASCII_BACKSLASH and slash_count % JsonParser::BACKSLASH_PARITY_MODULUS == JsonParser::EVEN_BACKSLASH_PARITY
+                return true if payload[cursor] != Character::REQUEST_CHARACTER_ASCII_BACKSLASH and slash_count % JsonParser::BACKSLASH_PARITY_MODULUS == JsonParser::ODD_BACKSLASH_PARITY
+                slash_count <- slash_count + JsonParser::INDEX_INCREMENT
+            return slash_count % JsonParser::BACKSLASH_PARITY_MODULUS == JsonParser::ODD_BACKSLASH_PARITY
 
         def request_raw_json_key_matches(payload: u8&, start: usize, end: usize, expected: cstr) -> bool:
             expected_length: usize = request_cstr_length(expected)
             return false if end - start != expected_length
-            for offset in 0..<expected_length:
+            for offset in JsonParser::FIRST_INDEX..<expected_length:
                 return false if payload[start + offset] != expected[offset].u8()
             return true
 
@@ -864,7 +870,7 @@ module DebuggerProtocolRequest:
             return ParsedOperandNumber{valid: true, value: value, end: start + Unicode::ESCAPE_DIGITS}
 
         def expression_text_append(expression: mutable ExpressionText&, byte: u8) -> bool:
-            return false if expression.length >= ExpressionOperand::MAX_BYTES or byte == ExpressionOperand::ASCII_NUL
+            return false if expression.length >= ExpressionOperand::MAX_BYTES or byte == Character::REQUEST_CHARACTER_ASCII_NUL
             expression.bytes[expression.length] <- byte
             expression.length <- expression.length + ExpressionOperand::INDEX_INCREMENT
             return true
@@ -882,7 +888,7 @@ module DebuggerProtocolRequest:
                 decoded: mutable u8 = payload[cursor]
                 if payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BACKSLASH:
                     return zeroed if cursor + ExpressionOperand::ESCAPED_BYTE_WIDTH > content_end
-                    escaped: u8 = payload[cursor + JsonParser::CURSOR_INCREMENT]
+                    escaped: u8 = payload[cursor + JsonParser::INDEX_INCREMENT]
                     if escaped == Character::REQUEST_CHARACTER_ASCII_U:
                         codepoint: ParsedOperandNumber = request_parse_unicode_quad(payload, content_end, cursor + ExpressionOperand::ESCAPED_BYTE_WIDTH)
                         return zeroed if not codepoint.valid or codepoint.value > ExpressionOperand::ASCII_MAX
@@ -911,7 +917,7 @@ module DebuggerProtocolRequest:
                             cursor <- cursor + ExpressionOperand::ESCAPED_BYTE_WIDTH
                 else:
                     return zeroed if payload[cursor] < Character::REQUEST_CHARACTER_ASCII_SPACE or payload[cursor].u64() > ExpressionOperand::ASCII_MAX
-                    cursor <- cursor + JsonParser::CURSOR_INCREMENT
+                    cursor <- cursor + JsonParser::INDEX_INCREMENT
                 return zeroed if not expression_text_append(expression, decoded)
             return zeroed if expression.length == ExpressionOperand::NO_EXPRESSION_BYTES
             expression.valid <- true
@@ -965,7 +971,7 @@ module DebuggerProtocolRequest:
             field_count: mutable usize = 0
             while cursor < length:
                 while cursor < length and is_json_whitespace(payload[cursor]):
-                    cursor <- cursor + JsonParser::CURSOR_INCREMENT
+                    cursor <- cursor + JsonParser::INDEX_INCREMENT
                 return field_count == RequestLimits::REQUEST_LIMITS_SINGLE_SOURCE_BREAKPOINT_MEMBER_COUNT if cursor < length and payload[cursor] == Character::REQUEST_CHARACTER_ASCII_BRACE_CLOSE
                 key_start: usize = cursor
                 key_end: usize = json_string_end(payload, length, key_start)

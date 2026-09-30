@@ -1,0 +1,77 @@
+include "../src/agent/stream.elisa"
+include "../src/agent/control.elisa"
+
+const module Stream:
+    FRAME_LENGTH: usize = 32
+    STREAM_CAPACITY: usize = 64
+    FIRST_BYTE: usize = 0
+    FIRST_PART_LENGTH: usize = 13
+    SECOND_PART_LENGTH: usize = 19
+    SECOND_FRAME_OFFSET: usize = 32
+    LAST_FRAME_BYTE_INDEX: usize = 31
+    EMPTY_LENGTH: usize = 0
+    MUTATED_CHECKSUM_BYTE: u8 = 0
+    ALTERNATE_CHECKSUM_BYTE: u8 = 1
+    INVALID_RECEIVER_LENGTH: usize = 33
+
+const module TestControl:
+    FIRST_GENERATION: u64 = 1
+    SECOND_GENERATION: u64 = 2
+    ZERO_EVENT_COUNT: u64 = 0
+    SUCCESS: i64 = 0
+
+const module TestResult:
+    INITIALIZE_FAILURE: i64 = 1
+    PARTIAL_FRAME_FAILURE: i64 = 2
+    FRAME_BOUNDARY_FAILURE: i64 = 3
+    CONTROL_APPLY_FAILURE: i64 = 4
+    ACKNOWLEDGEMENT_FAILURE: i64 = 5
+    MALFORMED_FRAME_FAILURE: i64 = 6
+    RECEIVER_RECOVERY_FAILURE: i64 = 7
+    INVALID_RECEIVER_FAILURE: i64 = 8
+
+def main() -> i64:
+    stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::FIRST_GENERATION})
+    resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::FIRST_GENERATION})
+    return TestResult::INITIALIZE_FAILURE if stop_frame.status != DebuggerAgentWire::WireStatus.Ready or resume_frame.status != DebuggerAgentWire::WireStatus.Ready
+
+    incoming: mutable u8[Stream::STREAM_CAPACITY] = zeroed
+    for index in Stream::FIRST_BYTE..<Stream::FRAME_LENGTH:
+        incoming[index] <- stop_frame.bytes[index]
+        incoming[Stream::SECOND_FRAME_OFFSET + index] <- resume_frame.bytes[index]
+
+    receiver: mutable DebuggerAgentWireStream::AgentControlRequestReceiver = zeroed
+    DebuggerAgentWireStream::agent_control_request_receiver_initialize(receiver)
+    return TestResult::INITIALIZE_FAILURE if receiver.length != Stream::EMPTY_LENGTH
+
+    partial: DebuggerAgentWireStream::AgentControlRequestFeedResult = DebuggerAgentWireStream::agent_control_request_receiver_feed(receiver, incoming[Stream::FIRST_BYTE], Stream::FIRST_PART_LENGTH)
+    return TestResult::PARTIAL_FRAME_FAILURE if partial.status != DebuggerAgentWireStream::StreamStatus.NeedsMore or partial.consumed != Stream::FIRST_PART_LENGTH or receiver.length != Stream::FIRST_PART_LENGTH
+
+    boundary: DebuggerAgentWireStream::AgentControlRequestFeedResult = DebuggerAgentWireStream::agent_control_request_receiver_feed(receiver, incoming[Stream::FIRST_PART_LENGTH], Stream::SECOND_PART_LENGTH + Stream::FRAME_LENGTH)
+    return TestResult::FRAME_BOUNDARY_FAILURE if boundary.status != DebuggerAgentWireStream::StreamStatus.Complete or boundary.consumed != Stream::SECOND_PART_LENGTH or boundary.decode_status != DebuggerAgentWire::WireStatus.Ready or boundary.request.kind != DebuggerAgentWire::AgentControlKind.StopRequest or boundary.request.generation != TestControl::FIRST_GENERATION or receiver.length != Stream::EMPTY_LENGTH
+
+    coalesced: DebuggerAgentWireStream::AgentControlRequestFeedResult = DebuggerAgentWireStream::agent_control_request_receiver_feed(receiver, incoming[Stream::SECOND_FRAME_OFFSET], Stream::FRAME_LENGTH)
+    return TestResult::FRAME_BOUNDARY_FAILURE if coalesced.status != DebuggerAgentWireStream::StreamStatus.Complete or coalesced.consumed != Stream::FRAME_LENGTH or coalesced.request.kind != DebuggerAgentWire::AgentControlKind.ResumeRequest or coalesced.request.generation != TestControl::FIRST_GENERATION or receiver.length != Stream::EMPTY_LENGTH
+
+    buffer: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_buffer_new()
+    stopped: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_apply_request(boundary.request, buffer)
+    return TestResult::CONTROL_APPLY_FAILURE if stopped.status != DebuggerAgentControl::DispatchStatus.Applied or not stopped.buffer.stopped or stopped.buffer.stop_generation != TestControl::FIRST_GENERATION
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::FIRST_GENERATION, event_count: TestControl::ZERO_EVENT_COUNT}
+    acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(stopped.buffer, acknowledgement)
+    return TestResult::ACKNOWLEDGEMENT_FAILURE if not DebuggerAgent::agent_stop_is_acknowledged(acknowledged)
+    resumed: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_apply_request(coalesced.request, acknowledged)
+    return TestResult::CONTROL_APPLY_FAILURE if resumed.status != DebuggerAgentControl::DispatchStatus.Applied or resumed.buffer.stopped or resumed.buffer.stop_generation != TestControl::FIRST_GENERATION
+
+    corrupt_frame: mutable DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::SECOND_GENERATION})
+    corrupt_frame.bytes[Stream::LAST_FRAME_BYTE_INDEX] <- Stream::MUTATED_CHECKSUM_BYTE if corrupt_frame.bytes[Stream::LAST_FRAME_BYTE_INDEX] != Stream::MUTATED_CHECKSUM_BYTE
+    corrupt_frame.bytes[Stream::LAST_FRAME_BYTE_INDEX] <- Stream::ALTERNATE_CHECKSUM_BYTE if corrupt_frame.bytes[Stream::LAST_FRAME_BYTE_INDEX] == Stream::MUTATED_CHECKSUM_BYTE
+    rejected: DebuggerAgentWireStream::AgentControlRequestFeedResult = DebuggerAgentWireStream::agent_control_request_receiver_feed(receiver, corrupt_frame.bytes[Stream::FIRST_BYTE], Stream::FRAME_LENGTH)
+    return TestResult::MALFORMED_FRAME_FAILURE if rejected.status != DebuggerAgentWireStream::StreamStatus.Rejected or rejected.decode_status != DebuggerAgentWire::WireStatus.ChecksumMismatch or receiver.length != Stream::EMPTY_LENGTH
+
+    valid_after_rejection: DebuggerAgentWireStream::AgentControlRequestFeedResult = DebuggerAgentWireStream::agent_control_request_receiver_feed(receiver, stop_frame.bytes[Stream::FIRST_BYTE], Stream::FRAME_LENGTH)
+    return TestResult::RECEIVER_RECOVERY_FAILURE if valid_after_rejection.status != DebuggerAgentWireStream::StreamStatus.Complete or valid_after_rejection.request.kind != DebuggerAgentWire::AgentControlKind.StopRequest or valid_after_rejection.request.generation != TestControl::FIRST_GENERATION
+
+    receiver.length <- Stream::INVALID_RECEIVER_LENGTH
+    invalid_receiver: DebuggerAgentWireStream::AgentControlRequestFeedResult = DebuggerAgentWireStream::agent_control_request_receiver_feed(receiver, incoming[Stream::FIRST_BYTE], Stream::FIRST_PART_LENGTH)
+    return TestResult::INVALID_RECEIVER_FAILURE if invalid_receiver.status != DebuggerAgentWireStream::StreamStatus.InvalidReceiver or receiver.length != Stream::EMPTY_LENGTH
+    return TestControl::SUCCESS

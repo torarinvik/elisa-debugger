@@ -32,6 +32,16 @@ module DebuggerAgentWireStream:
             decode_status: mutable DebuggerAgentWire::WireStatus
             acknowledgement: mutable DebuggerAgent::AgentStopAcknowledgement
 
+        struct AgentControlRequestReceiver:
+            bytes: mutable u8[Frame::FRAME_CAPACITY]
+            length: mutable usize
+
+        struct AgentControlRequestFeedResult:
+            consumed: mutable usize
+            status: mutable StreamStatus
+            decode_status: mutable DebuggerAgentWire::WireStatus
+            request: mutable DebuggerAgentWire::AgentControlRequest
+
         def stop_acknowledgement_receiver_initialize(receiver: mutable StopAcknowledgementReceiver&) -> void:
             receiver.length <- Count::EMPTY_LENGTH
 
@@ -61,6 +71,39 @@ module DebuggerAgentWireStream:
             receiver.length <- Count::EMPTY_LENGTH
             result.decode_status <- decoded.status
             result.acknowledgement <- decoded.acknowledgement
+            if decoded.status == DebuggerAgentWire::WireStatus.Ready:
+                result.status <- StreamStatus.Complete
+            else:
+                result.status <- StreamStatus.Rejected
+            return result
+
+        def agent_control_request_receiver_initialize(receiver: mutable AgentControlRequestReceiver&) -> void:
+            receiver.length <- Count::EMPTY_LENGTH
+
+        # Consume only one complete control command. If a read contains a
+        # second frame, its bytes remain with the caller and can be fed again.
+        def agent_control_request_receiver_feed(receiver: mutable AgentControlRequestReceiver&, incoming: u8&, incoming_length: usize) -> AgentControlRequestFeedResult:
+            result: mutable AgentControlRequestFeedResult = zeroed
+            result.status <- StreamStatus.NeedsMore
+            if receiver.length > Frame::FRAME_LENGTH:
+                receiver.length <- Count::EMPTY_LENGTH
+                result.status <- StreamStatus.InvalidReceiver
+                return result
+
+            available: mutable usize = incoming_length
+            remaining: usize = Frame::FRAME_LENGTH - receiver.length
+            if available > remaining:
+                available <- remaining
+            for index in Count::EMPTY_LENGTH..<available:
+                receiver.bytes[receiver.length + index] <- incoming[index]
+            receiver.length <- receiver.length + available
+            result.consumed <- available
+            return result if receiver.length < Frame::FRAME_LENGTH
+
+            decoded: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(receiver.bytes[Index::FIRST_BYTE], Frame::FRAME_LENGTH)
+            receiver.length <- Count::EMPTY_LENGTH
+            result.decode_status <- decoded.status
+            result.request <- decoded.request
             if decoded.status == DebuggerAgentWire::WireStatus.Ready:
                 result.status <- StreamStatus.Complete
             else:

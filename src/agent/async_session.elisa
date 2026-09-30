@@ -79,6 +79,15 @@ module DebuggerAgentAsyncSession:
             result.snapshot_wire_status <- wire_status
             return result
 
+        def fail_snapshot_framing_operation(session: mutable AsyncSession&, wire_status: DebuggerAgentSnapshotWire::SnapshotWireStatus) -> AsyncResult:
+            # The header was rejected before its body boundary could be trusted;
+            # keep the channel terminal so unread bytes cannot be mistaken for
+            # the response to a later control command.
+            session.state <- AsyncState.Failed
+            result: mutable AsyncResult = operation_result(AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
+            result.snapshot_wire_status <- wire_status
+            return result
+
         def decode_received_frame(session: mutable AsyncSession&, controller: mutable DebuggerNative::NativeController&, read_storage: mutable AsyncReadStorage&) -> AsyncResult:
             if session.operation == AsyncOperation.Handshake:
                 response: DebuggerAgentWire::DecodedAgentHello = DebuggerAgentWire::agent_hello_response_decode(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
@@ -121,7 +130,7 @@ module DebuggerAgentAsyncSession:
             if session.snapshot_message_length == AsyncFrame::EMPTY_LENGTH and session.receive_length >= AsyncFrame::BYTE_COUNT:
                 expected_length: mutable usize = AsyncFrame::EMPTY_LENGTH
                 expected_status: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_page_expected_length(read_storage.bytes[AsyncFrame::FIRST_BYTE], AsyncFrame::BYTE_COUNT, session.request_generation, expected_length)
-                return fail_snapshot_operation(session, AsyncStatus.Failed, expected_status) if expected_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+                return fail_snapshot_framing_operation(session, expected_status) if expected_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
                 session.snapshot_message_length <- expected_length
                 return decode_received_frame(session, controller, read_storage) if session.receive_length == expected_length
 
@@ -139,7 +148,7 @@ module DebuggerAgentAsyncSession:
             if session.snapshot_message_length == AsyncFrame::EMPTY_LENGTH:
                 expected_length: mutable usize = AsyncFrame::EMPTY_LENGTH
                 expected_status: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_page_expected_length(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length, session.request_generation, expected_length)
-                return fail_snapshot_operation(session, AsyncStatus.Failed, expected_status) if expected_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+                return fail_snapshot_framing_operation(session, expected_status) if expected_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
                 session.snapshot_message_length <- expected_length
                 return pending_operation(DebuggerLocalAgentTransport::TransportStatus.Ready) if session.receive_length < session.snapshot_message_length
             if session.receive_length == session.snapshot_message_length:

@@ -22,6 +22,16 @@ module DebuggerTimeline:
         const module First:
             QUERY_TIMELINE_FIRST_BOOKMARK_ID: u64 = 1
 
+        const module Index:
+            FIRST_BOOKMARK_INDEX: usize = 0
+
+        const module Count:
+            EMPTY_BOOKMARK_COUNT: usize = 0
+            BOOKMARK_COUNT_INCREMENT: usize = 1
+
+        const module Event:
+            PREVIOUS_EVENT_DISTANCE: u64 = 1
+
         const module Sentinel:
             QUERY_TIMELINE_SENTINEL_BOOKMARK_ID: u64 = 0
             QUERY_TIMELINE_SENTINEL_EVENT: u64 = 0
@@ -73,7 +83,7 @@ module DebuggerTimeline:
             bounds.has_exact <- capabilities.history == DebuggerCapabilities::HistoryKind.Exact
             bounds.exact_first <- position.event
             bounds.exact_last <- position.event
-            return Timeline{position: position, bounds: bounds, capabilities: capabilities, bookmarks: zeroed, bookmark_count: 0, next_bookmark_id: First::QUERY_TIMELINE_FIRST_BOOKMARK_ID}
+            return Timeline{position: position, bounds: bounds, capabilities: capabilities, bookmarks: zeroed, bookmark_count: Count::EMPTY_BOOKMARK_COUNT, next_bookmark_id: First::QUERY_TIMELINE_FIRST_BOOKMARK_ID}
 
         def timeline_bookmark_capacity() -> usize:
             return BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
@@ -120,26 +130,26 @@ module DebuggerTimeline:
         def timeline_reverse(timeline: Timeline) -> TimelineResult:
             return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
             return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if timeline.bounds.current == Sentinel::QUERY_TIMELINE_SENTINEL_EVENT
-            return timeline_seek(timeline, timeline.bounds.current - 1)
+            return timeline_seek(timeline, timeline.bounds.current - Event::PREVIOUS_EVENT_DISTANCE)
 
         def timeline_add_bookmark(timeline: Timeline, label: DebuggerIdentity::DebugId, note: DebuggerIdentity::DebugId, pinned: bool) -> TimelineResult:
             updated: mutable Timeline = timeline
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_CAPACITY)} if timeline.bookmark_count > BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::QUERY_TIMELINE_DETAIL_CAPACITY)} if timeline.bookmark_count >= BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY or timeline.next_bookmark_id == Sentinel::QUERY_TIMELINE_SENTINEL_BOOKMARK_ID or timeline.next_bookmark_id == Bounds::MAX_BOOKMARK_ID
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::BOOKMARK)} if not timeline_position_is_retained(timeline, timeline.bounds.current)
-            for index in 0..<timeline.bookmark_count:
+            for index in Index::FIRST_BOOKMARK_INDEX..<timeline.bookmark_count:
                 return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::BOOKMARK)} if timeline.bookmarks[index].id.value == timeline.next_bookmark_id
             index: usize = timeline.bookmark_count
             updated.bookmarks[index] <- Bookmark{id: DebuggerIdentity::debug_id(timeline.next_bookmark_id), position: timeline.position, label: label, note: note, pinned: pinned}
             updated.bookmarks[index].position.event <- timeline.bounds.current
-            updated.bookmark_count <- timeline.bookmark_count + 1
+            updated.bookmark_count <- timeline.bookmark_count + Count::BOOKMARK_COUNT_INCREMENT
             updated.next_bookmark_id <- timeline.next_bookmark_id + First::QUERY_TIMELINE_FIRST_BOOKMARK_ID
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_find_bookmark(timeline: Timeline&, id: DebuggerIdentity::DebugId) -> Bookmark:
             result: mutable Bookmark = zeroed
             return result if timeline.bookmark_count > BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
-            for index in 0..<timeline.bookmark_count:
+            for index in Index::FIRST_BOOKMARK_INDEX..<timeline.bookmark_count:
                 return timeline.bookmarks[index] if timeline.bookmarks[index].id.value == id.value
             return result
 
@@ -151,9 +161,9 @@ module DebuggerTimeline:
         def timeline_remove_bookmark(timeline: Timeline, id: DebuggerIdentity::DebugId) -> TimelineResult:
             updated: mutable Timeline = timeline
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_CAPACITY)} if timeline.bookmark_count > BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY
-            for index in 0..<timeline.bookmark_count:
+            for index in Index::FIRST_BOOKMARK_INDEX..<timeline.bookmark_count:
                 if timeline.bookmarks[index].id.value == id.value:
-                    updated.bookmarks[index] <- timeline.bookmarks[timeline.bookmark_count - 1]
-                    updated.bookmark_count <- timeline.bookmark_count - 1
+                    updated.bookmarks[index] <- timeline.bookmarks[timeline.bookmark_count - Count::BOOKMARK_COUNT_INCREMENT]
+                    updated.bookmark_count <- timeline.bookmark_count - Count::BOOKMARK_COUNT_INCREMENT
                     return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::BOOKMARK)}

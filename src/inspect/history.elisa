@@ -17,7 +17,18 @@ module DebuggerHistoricalValues:
             VALUE_CAPACITY: usize = 128
             INSPECT_HISTORY_PAGE_CAPACITY: usize = 32
             INSPECT_HISTORY_NO_VALUE: u64 = 0
+            INSPECT_HISTORY_NO_GENERATION: u64 = 0
             INSPECT_HISTORY_STATE_MAX: u16 = 6
+
+        const module Index:
+            FIRST_HISTORY_INDEX: usize = 0
+
+        const module Count:
+            EMPTY_HISTORY_COUNT: usize = 0
+            HISTORY_COUNT_INCREMENT: usize = 1
+
+        const module Value:
+            UNAVAILABLE_SIGNED_VALUE: i64 = 0
 
 
     public:
@@ -47,28 +58,28 @@ module DebuggerHistoricalValues:
             return ValueTimeline{values: zeroed, count: 0, complete: true, generation: generation}
 
         def historical_value_is_valid(value: HistoricalValue, generation: u64) -> bool:
-            return value.handle.stop_generation == generation and value.handle.id.value != History::INSPECT_HISTORY_NO_VALUE and DebuggerIdentity::position_recording_is_valid(value.position) and value.type_id.value != History::INSPECT_HISTORY_NO_VALUE and value.state.u16() <= History::INSPECT_HISTORY_STATE_MAX and value.state != DebuggerValues::ValueState.Invalid and (value.state == DebuggerValues::ValueState.Available or value.signed_value == 0)
+            return value.handle.stop_generation == generation and value.handle.id.value != History::INSPECT_HISTORY_NO_VALUE and DebuggerIdentity::position_recording_is_valid(value.position) and value.type_id.value != History::INSPECT_HISTORY_NO_VALUE and value.state.u16() <= History::INSPECT_HISTORY_STATE_MAX and value.state != DebuggerValues::ValueState.Invalid and (value.state == DebuggerValues::ValueState.Available or value.signed_value == Value::UNAVAILABLE_SIGNED_VALUE)
 
         def timeline_append(timeline: ValueTimeline, value: HistoricalValue) -> ValueTimeline:
             updated: mutable ValueTimeline = timeline
-            if timeline.generation == 0 or timeline.count >= History::VALUE_CAPACITY or not historical_value_is_valid(value, timeline.generation):
+            if timeline.generation == History::INSPECT_HISTORY_NO_GENERATION or timeline.count >= History::VALUE_CAPACITY or not historical_value_is_valid(value, timeline.generation):
                 updated.complete <- false
                 return updated
-            if timeline.count > 0 and value.position.event <= timeline.values[timeline.count - 1].position.event:
+            if timeline.count > Count::EMPTY_HISTORY_COUNT and value.position.event <= timeline.values[timeline.count - Count::HISTORY_COUNT_INCREMENT].position.event:
                 updated.complete <- false
                 return updated
             updated.values[timeline.count] <- value
-            updated.count <- timeline.count + 1
+            updated.count <- timeline.count + Count::HISTORY_COUNT_INCREMENT
             return updated
 
         def timeline_page(timeline: ValueTimeline&, requested: usize) -> HistoricalPage:
             page: mutable HistoricalPage = zeroed
-            return HistoricalPage{entries: page.entries, first: 0, count: 0, next: 0, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INSPECT_HISTORY_DETAIL_CAPACITY)} if timeline.count > History::VALUE_CAPACITY
+            return HistoricalPage{entries: page.entries, first: Count::EMPTY_HISTORY_COUNT, count: Count::EMPTY_HISTORY_COUNT, next: Count::EMPTY_HISTORY_COUNT, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INSPECT_HISTORY_DETAIL_CAPACITY)} if timeline.count > History::VALUE_CAPACITY
             page.first <- requested if requested < timeline.count else timeline.count
-            return HistoricalPage{entries: page.entries, first: page.first, count: 0, next: page.first, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INSPECT_HISTORY_DETAIL_GENERATION)} if timeline.generation == 0
+            return HistoricalPage{entries: page.entries, first: page.first, count: Count::EMPTY_HISTORY_COUNT, next: page.first, complete: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::INSPECT_HISTORY_DETAIL_GENERATION)} if timeline.generation == History::INSPECT_HISTORY_NO_GENERATION
             remaining: usize = timeline.count - page.first
             page.count <- History::INSPECT_HISTORY_PAGE_CAPACITY if remaining > History::INSPECT_HISTORY_PAGE_CAPACITY else remaining
-            for index in 0..<page.count:
+            for index in Index::FIRST_HISTORY_INDEX..<page.count:
                 page.entries[index] <- timeline.values[page.first + index]
             page.next <- page.first + page.count
             page.complete <- timeline.complete and page.next >= timeline.count
@@ -77,8 +88,8 @@ module DebuggerHistoricalValues:
         def timeline_value_at(timeline: ValueTimeline&, event: u64) -> HistoricalValue:
             result: mutable HistoricalValue = zeroed
             result.state <- DebuggerValues::ValueState.Absent
-            return result if timeline.generation == 0 or timeline.count > History::VALUE_CAPACITY
-            for index in 0..<timeline.count:
+            return result if timeline.generation == History::INSPECT_HISTORY_NO_GENERATION or timeline.count > History::VALUE_CAPACITY
+            for index in Index::FIRST_HISTORY_INDEX..<timeline.count:
                 return timeline.values[index] if timeline.values[index].position.event == event
             return result
 

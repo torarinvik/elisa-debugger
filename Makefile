@@ -155,7 +155,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: native-local-agent-transport-check
 .PHONY: native-dwarf-line-check native-elf-dwarf-line-check
 .PHONY: native-macho-dwarf-line-check
-.PHONY: agent-wire-check agent-wire-stream-check agent-handshake-check
+.PHONY: agent-wire-check agent-wire-stream-check agent-handshake-check agent-control-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -200,6 +200,7 @@ module-check: native-agent-controller-check
 module-check: agent-wire-check
 module-check: agent-wire-stream-check
 module-check: agent-handshake-check
+module-check: agent-control-check
 ifneq ($(filter Darwin Linux,$(shell uname -s)),)
 module-check: native-local-ipc-check
 module-check: native-local-agent-transport-check
@@ -939,6 +940,13 @@ $(BUILD)/elisa-debugger-agent-handshake-check: tests/agent_handshake_check.elisa
 
 agent-handshake-check: $(BUILD)/elisa-debugger-agent-handshake-check
 	"$(BUILD)/elisa-debugger-agent-handshake-check"
+
+$(BUILD)/elisa-debugger-agent-control-check: tests/agent_control_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+agent-control-check: $(BUILD)/elisa-debugger-agent-control-check
+	"$(BUILD)/elisa-debugger-agent-control-check"
 
 $(BUILD)/elisa-debugger-native-breakpoint-lifecycle-check: tests/native_breakpoint_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

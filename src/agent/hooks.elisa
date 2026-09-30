@@ -85,6 +85,19 @@ module DebuggerAgent:
                 updated.stop_generation <- buffer.stop_generation + Generation::STOP_GENERATION_INCREMENT
             return updated
 
+        # Protocol-driven stop requests carry their generation from the
+        # controller. Reject stale or overlapping requests without changing
+        # the agent state; the dispatcher can then report the cause precisely.
+        def agent_request_stop_generation(buffer: AgentBuffer, generation: u64) -> AgentBuffer:
+            return buffer if generation == Sentinel::NO_STOP_GENERATION or generation <= buffer.stop_generation
+            return buffer if buffer.stopped or not agent_is_exact(buffer)
+            updated: mutable AgentBuffer = buffer
+            updated.stopped <- true
+            updated.stop_acknowledged <- false
+            updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
+            updated.stop_generation <- generation
+            return updated
+
         # The generation is captured with the stop request and must travel with
         # the asynchronous acknowledgement. A stale or unsolicited reply makes
         # the agent state unsafe to inspect or resume.
@@ -111,6 +124,18 @@ module DebuggerAgent:
             return updated if buffer.stopped and not buffer.stop_acknowledged
             return updated if buffer.stop_acknowledged and not buffer.stopped
             return updated if buffer.overflowed
+            updated.stopped <- false
+            updated.stop_acknowledged <- false
+            updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
+            return updated
+
+        # A wire resume must name the same acknowledged stop that is active.
+        # This protects a newer stop from delayed resume commands.
+        def agent_resume_generation(buffer: AgentBuffer, generation: u64) -> AgentBuffer:
+            return buffer if generation == Sentinel::NO_STOP_GENERATION
+            return buffer if not agent_stop_is_acknowledged(buffer) or generation != buffer.stop_generation
+            return buffer if buffer.overflowed or not agent_is_exact(buffer)
+            updated: mutable AgentBuffer = buffer
             updated.stopped <- false
             updated.stop_acknowledged <- false
             updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION

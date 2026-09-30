@@ -1,0 +1,54 @@
+# Applies validated controller commands to the target agent's cooperative
+# stop state. Framing policy stays in the wire module; state transitions stay
+# in the agent hooks module.
+
+include "./wire.elisa"
+
+module DebuggerAgentControl:
+    private:
+        const module Index:
+            FIRST_BYTE: usize = 0
+
+        def failed_dispatch(buffer: DebuggerAgent::AgentBuffer, status: DispatchStatus, wire_status: DebuggerAgentWire::WireStatus) -> DispatchResult:
+            return DispatchResult{buffer: buffer, status: status, wire_status: wire_status}
+
+        def successful_dispatch(buffer: DebuggerAgent::AgentBuffer) -> DispatchResult:
+            return DispatchResult{buffer: buffer, status: DispatchStatus.Applied, wire_status: DebuggerAgentWire::WireStatus.Ready}
+
+    public:
+        enum DispatchStatus:
+            Applied
+            MalformedFrame
+            InvalidAgentState
+            StopAlreadyPending
+            StaleGeneration
+            GenerationMismatch
+            StopNotAcknowledged
+            AgentStateRejected
+
+        struct DispatchResult:
+            buffer: mutable DebuggerAgent::AgentBuffer
+            status: mutable DispatchStatus
+            wire_status: mutable DebuggerAgentWire::WireStatus
+
+        # A rejected frame or command leaves the supplied agent buffer intact.
+        # Callers can distinguish malformed wire data from a valid command
+        # that is invalid for the current safe-point state.
+        def agent_control_dispatch(bytes: u8&, length: usize, buffer: DebuggerAgent::AgentBuffer) -> DispatchResult:
+            decoded: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(bytes, length)
+            return failed_dispatch(buffer, DispatchStatus.MalformedFrame, decoded.status) if decoded.status != DebuggerAgentWire::WireStatus.Ready
+            return failed_dispatch(buffer, DispatchStatus.InvalidAgentState, decoded.status) if not DebuggerAgent::agent_is_exact(buffer)
+
+            if decoded.request.kind == DebuggerAgentWire::AgentControlKind.StopRequest:
+                return failed_dispatch(buffer, DispatchStatus.StopAlreadyPending, decoded.status) if buffer.stopped
+                return failed_dispatch(buffer, DispatchStatus.StaleGeneration, decoded.status) if decoded.request.generation <= buffer.stop_generation
+                updated: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_request_stop_generation(buffer, decoded.request.generation)
+                return failed_dispatch(buffer, DispatchStatus.AgentStateRejected, decoded.status) if not updated.stopped or updated.stop_generation != decoded.request.generation or not DebuggerAgent::agent_is_exact(updated)
+                return successful_dispatch(updated)
+
+            return failed_dispatch(buffer, DispatchStatus.InvalidAgentState, decoded.status) if not buffer.stopped
+            return failed_dispatch(buffer, DispatchStatus.GenerationMismatch, decoded.status) if decoded.request.generation != buffer.stop_generation
+            return failed_dispatch(buffer, DispatchStatus.StopNotAcknowledged, decoded.status) if not DebuggerAgent::agent_stop_is_acknowledged(buffer)
+            resumed: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_resume_generation(buffer, decoded.request.generation)
+            return failed_dispatch(buffer, DispatchStatus.AgentStateRejected, decoded.status) if resumed.stopped or resumed.stop_acknowledged or not DebuggerAgent::agent_is_exact(resumed)
+            return successful_dispatch(resumed)

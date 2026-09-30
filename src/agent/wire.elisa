@@ -44,6 +44,11 @@ module DebuggerAgentWire:
             STOP_ACKNOWLEDGEMENT: u16 = 1
             HELLO_REQUEST: u16 = 2
             HELLO_RESPONSE: u16 = 3
+            STOP_REQUEST: u16 = 4
+            RESUME_REQUEST: u16 = 5
+
+        const module ControlPayload:
+            EMPTY_RESERVED_WORD: u64 = 0
 
         const module ByteEncoding:
             BITS_PER_BYTE: u64 = 8
@@ -105,6 +110,11 @@ module DebuggerAgentWire:
             result.status <- status
             return result
 
+        def control_decode_failure(status: WireStatus) -> DecodedAgentControlRequest:
+            result: mutable DecodedAgentControlRequest = zeroed
+            result.status <- status
+            return result
+
         def hello_encode(hello: AgentHello, message_kind: u16) -> EncodedAgentHello:
             frame: mutable EncodedAgentHello = zeroed
             frame.status <- WireStatus.InvalidProtocolMajor if hello.protocol_major == Protocol::NO_AGENT_MAJOR
@@ -126,6 +136,29 @@ module DebuggerAgentWire:
             return hello_decode_failure(WireStatus.InvalidProtocolMajor) if hello.protocol_major == Protocol::NO_AGENT_MAJOR
             return DecodedAgentHello{hello: hello, status: WireStatus.Ready}
 
+        def control_request_encode(request: AgentControlRequest, message_kind: u16) -> EncodedAgentControlRequest:
+            frame: mutable EncodedAgentControlRequest = zeroed
+            frame.status <- WireStatus.InvalidGeneration if request.generation == Sentinel::NO_GENERATION
+            return frame if frame.status == WireStatus.InvalidGeneration
+            write_frame(frame.bytes[Index::FIRST_BYTE], message_kind, request.generation, ControlPayload::EMPTY_RESERVED_WORD)
+            frame.length <- WireEnvelope::FRAME_LENGTH
+            frame.status <- WireStatus.Ready
+            return frame
+
+        def control_request_decode(bytes: u8&, length: usize) -> DecodedAgentControlRequest:
+            return control_decode_failure(WireStatus.Truncated) if length < WireEnvelope::FRAME_LENGTH
+            return control_decode_failure(WireStatus.InvalidLength) if length > WireEnvelope::FRAME_LENGTH
+            message_kind: u16 = read_u16(bytes, Offset::MESSAGE_KIND)
+            return control_decode_failure(WireStatus.UnsupportedMessage) if message_kind != Message::STOP_REQUEST and message_kind != Message::RESUME_REQUEST
+            frame_status: WireStatus = frame_decode_status(bytes, length, message_kind)
+            return control_decode_failure(frame_status) if frame_status != WireStatus.Ready
+            return control_decode_failure(WireStatus.InvalidControlPayload) if read_u64(bytes, Offset::EVENT_COUNT) != ControlPayload::EMPTY_RESERVED_WORD
+            generation: u64 = read_u64(bytes, Offset::GENERATION)
+            return control_decode_failure(WireStatus.InvalidGeneration) if generation == Sentinel::NO_GENERATION
+            request_kind: mutable AgentControlKind = AgentControlKind.StopRequest
+            request_kind <- AgentControlKind.ResumeRequest if message_kind == Message::RESUME_REQUEST
+            return DecodedAgentControlRequest{request: AgentControlRequest{kind: request_kind, generation: generation}, status: WireStatus.Ready}
+
     public:
         enum WireStatus:
             Ready
@@ -138,6 +171,11 @@ module DebuggerAgentWire:
             UnsupportedMessage
             ChecksumMismatch
             InvalidProtocolMajor
+            InvalidControlPayload
+
+        enum AgentControlKind:
+            StopRequest
+            ResumeRequest
 
         struct EncodedStopAcknowledgement:
             bytes: mutable u8[WireEnvelope::FRAME_CAPACITY]
@@ -160,6 +198,19 @@ module DebuggerAgentWire:
 
         struct DecodedAgentHello:
             hello: mutable AgentHello
+            status: mutable WireStatus
+
+        struct AgentControlRequest:
+            kind: mutable AgentControlKind
+            generation: mutable u64
+
+        struct EncodedAgentControlRequest:
+            bytes: mutable u8[WireEnvelope::FRAME_CAPACITY]
+            length: mutable usize
+            status: mutable WireStatus
+
+        struct DecodedAgentControlRequest:
+            request: mutable AgentControlRequest
             status: mutable WireStatus
 
         def stop_acknowledgement_frame_length() -> usize:
@@ -199,3 +250,14 @@ module DebuggerAgentWire:
 
         def agent_hello_response_decode(bytes: u8&, length: usize) -> DecodedAgentHello:
             return hello_decode(bytes, length, Message::HELLO_RESPONSE)
+
+        def agent_control_request_frame_length() -> usize:
+            return WireEnvelope::FRAME_LENGTH
+
+        def agent_control_request_encode(request: AgentControlRequest) -> EncodedAgentControlRequest:
+            message_kind: mutable u16 = Message::STOP_REQUEST
+            message_kind <- Message::RESUME_REQUEST if request.kind == AgentControlKind.ResumeRequest
+            return control_request_encode(request, message_kind)
+
+        def agent_control_request_decode(bytes: u8&, length: usize) -> DecodedAgentControlRequest:
+            return control_request_decode(bytes, length)

@@ -1,0 +1,110 @@
+include "../src/agent/control.elisa"
+
+const module Frame:
+    LENGTH: usize = 32
+    FIRST_BYTE: usize = 0
+    MESSAGE_KIND_OFFSET: usize = 6
+    GENERATION_OFFSET: usize = 8
+    RESERVED_WORD_OFFSET: usize = 16
+    CHECKSUM_OFFSET: usize = 24
+    CHECKSUM_PAYLOAD_LENGTH: usize = 24
+    LAST_CHECKSUM_BYTE_OFFSET: usize = 7
+    LAST_CHECKSUM_BYTE_INDEX: usize = 31
+    TRUNCATED_LENGTH: usize = 31
+    U64_BYTE_COUNT: usize = 8
+    U64_BITS_PER_BYTE: u64 = 8
+    U64_BYTE_MASK: u64 = 255
+    ZERO_LENGTH: usize = 0
+
+const module TestControl:
+    FIRST_GENERATION: u64 = 1
+    SECOND_GENERATION: u64 = 2
+    THIRD_GENERATION: u64 = 3
+    NO_GENERATION: u64 = 0
+    RESERVED_PAYLOAD: u64 = 1
+    MUTATED_CHECKSUM_BYTE: u8 = 0
+    ALTERNATE_CHECKSUM_BYTE: u8 = 1
+    ZERO_EVENT_COUNT: u64 = 0
+    SUCCESS: i64 = 0
+
+const module TestResult:
+    STOP_ENCODE_FAILURE: i64 = 1
+    STOP_DECODE_FAILURE: i64 = 2
+    STOP_DISPATCH_FAILURE: i64 = 3
+    PREMATURE_RESUME_FAILURE: i64 = 4
+    DUPLICATE_STOP_FAILURE: i64 = 5
+    ACKNOWLEDGEMENT_FAILURE: i64 = 6
+    GENERATION_MISMATCH_FAILURE: i64 = 7
+    RESUME_DISPATCH_FAILURE: i64 = 8
+    STALE_STOP_FAILURE: i64 = 9
+    MALFORMED_FRAME_FAILURE: i64 = 10
+    RESERVED_PAYLOAD_FAILURE: i64 = 11
+    INVALID_GENERATION_FAILURE: i64 = 12
+    TRUNCATED_FRAME_FAILURE: i64 = 13
+
+def write_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+    for index in Frame::ZERO_LENGTH..<Frame::U64_BYTE_COUNT:
+        bytes[offset + index] <- ((value >> (Frame::U64_BITS_PER_BYTE * index.u64())) & Frame::U64_BYTE_MASK).u8()
+
+def main() -> i64:
+    stop_request: DebuggerAgentWire::AgentControlRequest = DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::FIRST_GENERATION}
+    stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(stop_request)
+    return TestResult::STOP_ENCODE_FAILURE if stop_frame.status != DebuggerAgentWire::WireStatus.Ready or stop_frame.length != Frame::LENGTH or DebuggerAgentWire::agent_control_request_frame_length() != Frame::LENGTH
+    decoded_stop: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(stop_frame.bytes[Frame::FIRST_BYTE], stop_frame.length)
+    return TestResult::STOP_DECODE_FAILURE if decoded_stop.status != DebuggerAgentWire::WireStatus.Ready or decoded_stop.request.kind != DebuggerAgentWire::AgentControlKind.StopRequest or decoded_stop.request.generation != TestControl::FIRST_GENERATION
+
+    zero_generation: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::NO_GENERATION})
+    return TestResult::INVALID_GENERATION_FAILURE if zero_generation.status != DebuggerAgentWire::WireStatus.InvalidGeneration or zero_generation.length != Frame::ZERO_LENGTH
+
+    buffer: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_buffer_new()
+    truncated_dispatch: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stop_frame.bytes[Frame::FIRST_BYTE], Frame::TRUNCATED_LENGTH, buffer)
+    return TestResult::TRUNCATED_FRAME_FAILURE if truncated_dispatch.status != DebuggerAgentControl::DispatchStatus.MalformedFrame or truncated_dispatch.wire_status != DebuggerAgentWire::WireStatus.Truncated or truncated_dispatch.buffer.stopped or truncated_dispatch.buffer.stop_generation != TestControl::NO_GENERATION
+    stopped: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stop_frame.bytes[Frame::FIRST_BYTE], stop_frame.length, buffer)
+    return TestResult::STOP_DISPATCH_FAILURE if stopped.status != DebuggerAgentControl::DispatchStatus.Applied or not stopped.buffer.stopped or stopped.buffer.stop_acknowledged or stopped.buffer.stop_generation != TestControl::FIRST_GENERATION or not DebuggerAgent::agent_is_exact(stopped.buffer)
+
+    duplicate_stop: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stop_frame.bytes[Frame::FIRST_BYTE], stop_frame.length, stopped.buffer)
+    return TestResult::DUPLICATE_STOP_FAILURE if duplicate_stop.status != DebuggerAgentControl::DispatchStatus.StopAlreadyPending or not duplicate_stop.buffer.stopped or duplicate_stop.buffer.stop_generation != TestControl::FIRST_GENERATION or duplicate_stop.buffer.overflowed
+
+    resume_request: DebuggerAgentWire::AgentControlRequest = DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::FIRST_GENERATION}
+    resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(resume_request)
+    premature_resume: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(resume_frame.bytes[Frame::FIRST_BYTE], resume_frame.length, stopped.buffer)
+    return TestResult::PREMATURE_RESUME_FAILURE if premature_resume.status != DebuggerAgentControl::DispatchStatus.StopNotAcknowledged or not premature_resume.buffer.stopped or premature_resume.buffer.stop_acknowledged or premature_resume.buffer.stop_generation != TestControl::FIRST_GENERATION
+
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::FIRST_GENERATION, event_count: TestControl::ZERO_EVENT_COUNT}
+    acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(stopped.buffer, acknowledgement)
+    return TestResult::ACKNOWLEDGEMENT_FAILURE if not DebuggerAgent::agent_stop_is_acknowledged(acknowledged) or not DebuggerAgent::agent_is_exact(acknowledged)
+
+    wrong_resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::SECOND_GENERATION})
+    wrong_resume: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(wrong_resume_frame.bytes[Frame::FIRST_BYTE], wrong_resume_frame.length, acknowledged)
+    return TestResult::GENERATION_MISMATCH_FAILURE if wrong_resume.status != DebuggerAgentControl::DispatchStatus.GenerationMismatch or not wrong_resume.buffer.stopped or not wrong_resume.buffer.stop_acknowledged or wrong_resume.buffer.acknowledged_generation != TestControl::FIRST_GENERATION
+
+    resumed: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(resume_frame.bytes[Frame::FIRST_BYTE], resume_frame.length, acknowledged)
+    return TestResult::RESUME_DISPATCH_FAILURE if resumed.status != DebuggerAgentControl::DispatchStatus.Applied or resumed.buffer.stopped or resumed.buffer.stop_acknowledged or resumed.buffer.acknowledged_generation != TestControl::NO_GENERATION or not DebuggerAgent::agent_is_exact(resumed.buffer)
+
+    stale_stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(stop_request)
+    stale_stop: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stale_stop_frame.bytes[Frame::FIRST_BYTE], stale_stop_frame.length, resumed.buffer)
+    return TestResult::STALE_STOP_FAILURE if stale_stop.status != DebuggerAgentControl::DispatchStatus.StaleGeneration or stale_stop.buffer.stopped or stale_stop.buffer.stop_generation != TestControl::FIRST_GENERATION or stale_stop.buffer.overflowed
+
+    second_stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::SECOND_GENERATION})
+    second_stopped: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(second_stop_frame.bytes[Frame::FIRST_BYTE], second_stop_frame.length, resumed.buffer)
+    return TestResult::STOP_DISPATCH_FAILURE if second_stopped.status != DebuggerAgentControl::DispatchStatus.Applied or not second_stopped.buffer.stopped or second_stopped.buffer.stop_generation != TestControl::SECOND_GENERATION
+
+    second_acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::SECOND_GENERATION, event_count: TestControl::ZERO_EVENT_COUNT}
+    second_acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(second_stopped.buffer, second_acknowledgement)
+    second_resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::SECOND_GENERATION})
+    second_resumed: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(second_resume_frame.bytes[Frame::FIRST_BYTE], second_resume_frame.length, second_acknowledged)
+    return TestResult::RESUME_DISPATCH_FAILURE if second_resumed.status != DebuggerAgentControl::DispatchStatus.Applied or second_resumed.buffer.stopped or second_resumed.buffer.stop_generation != TestControl::SECOND_GENERATION or not DebuggerAgent::agent_is_exact(second_resumed.buffer)
+
+    third_stop_frame: mutable DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::THIRD_GENERATION})
+    third_stop_frame.bytes[Frame::CHECKSUM_OFFSET + Frame::LAST_CHECKSUM_BYTE_OFFSET] <- TestControl::MUTATED_CHECKSUM_BYTE if third_stop_frame.bytes[Frame::LAST_CHECKSUM_BYTE_INDEX] != TestControl::MUTATED_CHECKSUM_BYTE
+    third_stop_frame.bytes[Frame::CHECKSUM_OFFSET + Frame::LAST_CHECKSUM_BYTE_OFFSET] <- TestControl::ALTERNATE_CHECKSUM_BYTE if third_stop_frame.bytes[Frame::LAST_CHECKSUM_BYTE_INDEX] == TestControl::MUTATED_CHECKSUM_BYTE
+    malformed: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(third_stop_frame.bytes[Frame::FIRST_BYTE], third_stop_frame.length, second_resumed.buffer)
+    return TestResult::MALFORMED_FRAME_FAILURE if malformed.status != DebuggerAgentControl::DispatchStatus.MalformedFrame or malformed.wire_status != DebuggerAgentWire::WireStatus.ChecksumMismatch or malformed.buffer.stopped or malformed.buffer.stop_generation != TestControl::SECOND_GENERATION
+
+    reserved_payload_frame: mutable DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::THIRD_GENERATION})
+    write_u64(reserved_payload_frame.bytes[Frame::FIRST_BYTE], Frame::RESERVED_WORD_OFFSET, TestControl::RESERVED_PAYLOAD)
+    updated_checksum: u64 = DebuggerTraceBinary::bytes_checksum(reserved_payload_frame.bytes[Frame::FIRST_BYTE], Frame::CHECKSUM_PAYLOAD_LENGTH)
+    write_u64(reserved_payload_frame.bytes[Frame::FIRST_BYTE], Frame::CHECKSUM_OFFSET, updated_checksum)
+    reserved_payload: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(reserved_payload_frame.bytes[Frame::FIRST_BYTE], reserved_payload_frame.length, second_resumed.buffer)
+    return TestResult::RESERVED_PAYLOAD_FAILURE if reserved_payload.status != DebuggerAgentControl::DispatchStatus.MalformedFrame or reserved_payload.wire_status != DebuggerAgentWire::WireStatus.InvalidControlPayload or reserved_payload.buffer.stopped or reserved_payload.buffer.stop_generation != TestControl::SECOND_GENERATION
+    return TestControl::SUCCESS

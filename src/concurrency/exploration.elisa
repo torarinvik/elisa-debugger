@@ -20,6 +20,13 @@ module DebuggerConcurrencyExploration:
             CONCURRENCY_EXPLORATION_EXPLORE_TASK_CAPACITY: usize = 32
             CONCURRENCY_EXPLORATION_EXPLORE_EVENT_CAPACITY: usize = 256
             MAX_PREEMPTIONS: u64 = 1024
+            EMPTY_COUNT: usize = 0
+            FIRST_INDEX: usize = 0
+            COUNT_INCREMENT: usize = 1
+            EXPLORED_INCREMENT: u64 = 1
+            NEXT_RECORD_OFFSET: usize = 1
+            NO_TASKS: usize = 0
+            NO_BUDGET: u64 = 0
 
 
     public:
@@ -61,16 +68,16 @@ module DebuggerConcurrencyExploration:
         def explore_schedules(scheduler: DebuggerScheduler::DeterministicScheduler&, tasks: DebuggerConcurrency::TaskInfo[Explore::CONCURRENCY_EXPLORATION_EXPLORE_TASK_CAPACITY], task_count: usize, limits: ExplorationLimits) -> ExplorationResult:
             result: mutable ExplorationResult = zeroed
             result.failure <- DebuggerErrors::no_error()
-            return ExplorationResult{alternatives: result.alternatives, count: 0, explored: 0, bounded: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::LIMIT)} if not DebuggerScheduler::scheduler_is_exact(scheduler)
-            return ExplorationResult{alternatives: result.alternatives, count: 0, explored: 0, bounded: true, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::LIMIT)} if task_count == 0 or task_count > Explore::CONCURRENCY_EXPLORATION_EXPLORE_TASK_CAPACITY or limits.max_tasks == 0 or task_count.u64() > limits.max_tasks or limits.max_preemptions == 0 or limits.max_events == 0 or limits.max_branches == 0
-            return ExplorationResult{alternatives: result.alternatives, count: 0, explored: 0, bounded: true, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::LIMIT)} if scheduler.count > Explore::CONCURRENCY_EXPLORATION_EXPLORE_EVENT_CAPACITY
-            for decision_index in 0..<scheduler.count:
+            return ExplorationResult{alternatives: result.alternatives, count: Explore::EMPTY_COUNT, explored: Explore::NO_BUDGET, bounded: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::LIMIT)} if not DebuggerScheduler::scheduler_is_exact(scheduler)
+            return ExplorationResult{alternatives: result.alternatives, count: Explore::EMPTY_COUNT, explored: Explore::NO_BUDGET, bounded: true, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::LIMIT)} if task_count == Explore::NO_TASKS or task_count > Explore::CONCURRENCY_EXPLORATION_EXPLORE_TASK_CAPACITY or limits.max_tasks == Explore::NO_BUDGET or task_count.u64() > limits.max_tasks or limits.max_preemptions == Explore::NO_BUDGET or limits.max_events == Explore::NO_BUDGET or limits.max_branches == Explore::NO_BUDGET
+            return ExplorationResult{alternatives: result.alternatives, count: Explore::EMPTY_COUNT, explored: Explore::NO_BUDGET, bounded: true, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::LIMIT)} if scheduler.count > Explore::CONCURRENCY_EXPLORATION_EXPLORE_EVENT_CAPACITY
+            for decision_index in Explore::FIRST_INDEX..<scheduler.count:
                 break if decision_index.u64() >= limits.max_events
                 if result.count >= limits.max_branches.usize() or result.count >= Explore::CONCURRENCY_EXPLORATION_EXPLORE_EVENT_CAPACITY:
                     result.bounded <- true
                     return result
                 decision: DebuggerScheduler::ScheduleDecision = scheduler.decisions[decision_index]
-                for task_index in 0..<task_count:
+                for task_index in Explore::FIRST_INDEX..<task_count:
                     candidate: DebuggerConcurrency::TaskInfo = tasks[task_index]
                     continue if candidate.id.value == decision.task.id.value or candidate.state != DebuggerConcurrency::TaskState.Runnable
                     if result.explored >= limits.max_preemptions:
@@ -78,8 +85,8 @@ module DebuggerConcurrencyExploration:
                         return result
                     alternative: ScheduleAlternative = ScheduleAlternative{decision: decision_index.u64(), original_task: decision.task.id, alternate_task: candidate.id, preemptions: 1}
                     result.alternatives[result.count] <- alternative
-                    result.count <- result.count + 1
-                    result.explored <- result.explored + 1
+                    result.count <- result.count + Explore::COUNT_INCREMENT
+                    result.explored <- result.explored + Explore::EXPLORED_INCREMENT
                     break if result.count.u64() >= limits.max_branches
                 break if result.count.u64() >= limits.max_branches
             result.bounded <- result.count.u64() >= limits.max_branches or scheduler.count.u64() > limits.max_events
@@ -101,8 +108,8 @@ module DebuggerConcurrencyExploration:
             result: mutable RaceResult = zeroed
             result.failure <- DebuggerErrors::no_error()
             return RaceResult{race: false, first: result.first, second: result.second, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, true, Detail::RACE)} if count > Explore::CONCURRENCY_EXPLORATION_EXPLORE_EVENT_CAPACITY
-            for left_index in 0..<count:
-                for right_index in left_index + 1..<count:
+            for left_index in Explore::FIRST_INDEX..<count:
+                for right_index in left_index + Explore::NEXT_RECORD_OFFSET..<count:
                     if access_records_conflict(records[left_index], records[right_index]):
                         result.race <- true
                         result.first <- records[left_index]

@@ -16,6 +16,19 @@ module DebuggerTraceStream:
             TRACE_STREAM_HASH_OFFSET_BASIS: u64 = 14695981039346656037
             TRACE_STREAM_LEGACY_HASH_OFFSET_BASIS: u64 = 1469598103934665603
             TRACE_STREAM_HASH_PRIME: u64 = 1099511628211
+            EMPTY_PAYLOAD_LENGTH: u64 = 0
+
+        const module Index:
+            FIRST_STREAM_INDEX: usize = 0
+
+        const module Count:
+            EMPTY_CHUNK_COUNT: usize = 0
+            CHUNK_COUNT_INCREMENT: usize = 1
+            PAYLOAD_BYTE_INCREMENT: usize = 1
+
+        const module Event:
+            FIRST_EXPECTED_EVENT: u64 = 0
+            EVENT_SEQUENCE_INCREMENT: u64 = 1
 
 
     public:
@@ -59,7 +72,7 @@ module DebuggerTraceStream:
             if stream.chunk_count >= Trace::TRACE_STREAM_CHUNK_CAPACITY or header.payload_length > Trace::MAX_PAYLOAD.u64():
                 updated.status <- TraceReadStatus.ResourceLimit
                 return updated
-            if header.kind == DebuggerTrace::ChunkKind.Events and header.payload_length == 0:
+            if header.kind == DebuggerTrace::ChunkKind.Events and header.payload_length == Trace::EMPTY_PAYLOAD_LENGTH:
                 updated.status <- TraceReadStatus.Corrupt
                 return updated
             if header.sequence != stream.next_sequence:
@@ -72,19 +85,19 @@ module DebuggerTraceStream:
                 updated.status <- TraceReadStatus.Corrupt
                 return updated
             if header.kind == DebuggerTrace::ChunkKind.Events:
-                for previous in 0..<stream.chunk_count:
+                for previous in Index::FIRST_STREAM_INDEX..<stream.chunk_count:
                     prior: TraceChunk = stream.chunks[previous]
                     if prior.header.kind == DebuggerTrace::ChunkKind.Events:
-                        if prior.header.last_event == Trace::TRACE_STREAM_MAX_EVENT or header.first_event != prior.header.last_event + 1:
+                        if prior.header.last_event == Trace::TRACE_STREAM_MAX_EVENT or header.first_event != prior.header.last_event + Event::EVENT_SEQUENCE_INCREMENT:
                             updated.status <- TraceReadStatus.Corrupt
                             return updated
             updated.chunks[stream.chunk_count].header <- header
             updated.chunks[stream.chunk_count].payload_received <- 0
             updated.chunks[stream.chunk_count].checksum <- Trace::TRACE_STREAM_HASH_OFFSET_BASIS
             updated.chunks[stream.chunk_count].legacy_checksum <- Trace::TRACE_STREAM_LEGACY_HASH_OFFSET_BASIS
-            updated.chunks[stream.chunk_count].complete <- header.payload_length == 0
-            if header.payload_length == 0:
-                updated.chunk_count <- updated.chunk_count + 1
+            updated.chunks[stream.chunk_count].complete <- header.payload_length == Trace::EMPTY_PAYLOAD_LENGTH
+            if header.payload_length == Trace::EMPTY_PAYLOAD_LENGTH:
+                updated.chunk_count <- updated.chunk_count + Count::CHUNK_COUNT_INCREMENT
                 updated.next_sequence <- stream.next_sequence + Trace::TRACE_STREAM_SEQUENCE_INCREMENT
                 empty_checksum_matches: bool = header.checksum == Trace::TRACE_STREAM_HASH_OFFSET_BASIS or header.checksum == Trace::TRACE_STREAM_LEGACY_HASH_OFFSET_BASIS
                 updated.verified_event <- header.last_event if header.kind == DebuggerTrace::ChunkKind.Events and empty_checksum_matches
@@ -103,12 +116,12 @@ module DebuggerTraceStream:
             chunk.payload[chunk.payload_received] <- byte
             chunk.checksum <- (chunk.checksum ^ byte.u64()) * Trace::TRACE_STREAM_HASH_PRIME
             chunk.legacy_checksum <- (chunk.legacy_checksum ^ byte.u64()) * Trace::TRACE_STREAM_HASH_PRIME
-            chunk.payload_received <- chunk.payload_received + 1
+            chunk.payload_received <- chunk.payload_received + Count::PAYLOAD_BYTE_INCREMENT
             updated.chunks[index] <- chunk
             if chunk.payload_received == chunk.header.payload_length.usize():
                 chunk.complete <- true
                 updated.chunks[index] <- chunk
-                updated.chunk_count <- updated.chunk_count + 1
+                updated.chunk_count <- updated.chunk_count + Count::CHUNK_COUNT_INCREMENT
                 if stream.next_sequence == Trace::TRACE_STREAM_MAX_SEQUENCE:
                     updated.status <- TraceReadStatus.ResourceLimit
                     return updated
@@ -120,11 +133,11 @@ module DebuggerTraceStream:
         def trace_stream_verify(stream: TraceStream&) -> TraceReadStatus:
             return TraceReadStatus.ResourceLimit if stream.chunk_count > Trace::TRACE_STREAM_CHUNK_CAPACITY
             return stream.status if stream.status == TraceReadStatus.Truncated or stream.status == TraceReadStatus.Corrupt or stream.status == TraceReadStatus.ResourceLimit
-            return TraceReadStatus.Empty if stream.chunk_count == 0
+            return TraceReadStatus.Empty if stream.chunk_count == Count::EMPTY_CHUNK_COUNT
             return TraceReadStatus.Corrupt if stream.status == TraceReadStatus.Empty
-            expected_event: mutable u64 = 0
+            expected_event: mutable u64 = Event::FIRST_EXPECTED_EVENT
             event_seen: mutable bool = false
-            for index in 0..<stream.chunk_count:
+            for index in Index::FIRST_STREAM_INDEX..<stream.chunk_count:
                 chunk: TraceChunk = stream.chunks[index]
                 return TraceReadStatus.ResourceLimit if chunk.header.payload_length > Trace::MAX_PAYLOAD.u64() or chunk.payload_received > Trace::MAX_PAYLOAD
                 return TraceReadStatus.Corrupt if chunk.header.sequence != Trace::TRACE_STREAM_FIRST_SEQUENCE + index.u64()
@@ -135,10 +148,10 @@ module DebuggerTraceStream:
                 if chunk.header.kind == DebuggerTrace::ChunkKind.Events:
                     return TraceReadStatus.Corrupt if event_seen and (expected_event == Trace::TRACE_STREAM_MAX_EVENT or chunk.header.first_event != expected_event)
                     event_seen <- true
-                    expected_event <- chunk.header.last_event if chunk.header.last_event == Trace::TRACE_STREAM_MAX_EVENT else chunk.header.last_event + 1
+                    expected_event <- chunk.header.last_event if chunk.header.last_event == Trace::TRACE_STREAM_MAX_EVENT else chunk.header.last_event + Event::EVENT_SEQUENCE_INCREMENT
                 computed: mutable u64 = Trace::TRACE_STREAM_HASH_OFFSET_BASIS
                 legacy_computed: mutable u64 = Trace::TRACE_STREAM_LEGACY_HASH_OFFSET_BASIS
-                for payload_index in 0..<chunk.payload_received:
+                for payload_index in Index::FIRST_STREAM_INDEX..<chunk.payload_received:
                     computed <- (computed ^ chunk.payload[payload_index].u64()) * Trace::TRACE_STREAM_HASH_PRIME
                     legacy_computed <- (legacy_computed ^ chunk.payload[payload_index].u64()) * Trace::TRACE_STREAM_HASH_PRIME
                 return TraceReadStatus.Corrupt if chunk.checksum != computed

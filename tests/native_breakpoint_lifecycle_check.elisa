@@ -15,11 +15,26 @@ const module TestRegister:
     REGISTER_ID: u64 = 7
     REGISTER_VALUE: u64 = 42
 
+const module TestMemory:
+    MAX_ADDRESS: u64 = 18446744073709551615
+    ADDRESS_START_OFFSET: u64 = 1
+    VALID_START_OFFSET: u64 = 4
+    SOURCE_LENGTH: usize = 3
+    OVERFLOW_LENGTH: usize = 3
+    FIRST_INDEX: usize = 0
+    LAST_INDEX: usize = 2
+    FIRST_BYTE: u8 = 17
+    SECOND_BYTE: u8 = 34
+    THIRD_BYTE: u8 = 51
+
 const module TestResult:
     ADD_BREAKPOINT_FAILURE: i64 = 1
     RUNNING_REMOVE_FAILURE: i64 = 2
     STOPPED_REMOVE_FAILURE: i64 = 3
     INVALID_REGISTER_FAILURE: i64 = 4
+    ATTACH_MEMORY_VALID_RANGE_FAILURE: i64 = 5
+    ATTACH_MEMORY_OVERFLOW_FAILURE: i64 = 6
+    PROCESS_MEMORY_OVERFLOW_FAILURE: i64 = 7
 
 
 def main() -> i64:
@@ -32,6 +47,15 @@ def main() -> i64:
     valid_register: DebuggerNativeAttach::Register = DebuggerNativeAttach::Register{id: DebuggerIdentity::debug_id(TestRegister::REGISTER_ID), value: TestRegister::REGISTER_VALUE, valid: true}
     session <- DebuggerNativeAttach::attach_add_register(session, valid_register)
     return TestResult::INVALID_REGISTER_FAILURE if session.register_count != 1 or not DebuggerNativeAttach::attach_validate(session)
+
+    source: mutable u8[TestMemory::SOURCE_LENGTH] = [TestMemory::FIRST_BYTE, TestMemory::SECOND_BYTE, TestMemory::THIRD_BYTE]
+    valid_memory: DebuggerNativeAttach::AttachMemory = DebuggerNativeAttach::attach_read_memory(session, TestMemory::MAX_ADDRESS - TestMemory::VALID_START_OFFSET, source[0], TestMemory::SOURCE_LENGTH)
+    return TestResult::ATTACH_MEMORY_VALID_RANGE_FAILURE if not valid_memory.complete or valid_memory.length != TestMemory::SOURCE_LENGTH or valid_memory.bytes[TestMemory::FIRST_INDEX] != TestMemory::FIRST_BYTE or valid_memory.bytes[TestMemory::LAST_INDEX] != TestMemory::THIRD_BYTE
+    overflow_memory: DebuggerNativeAttach::AttachMemory = DebuggerNativeAttach::attach_read_memory(session, TestMemory::MAX_ADDRESS - TestMemory::ADDRESS_START_OFFSET, source[0], TestMemory::OVERFLOW_LENGTH)
+    return TestResult::ATTACH_MEMORY_OVERFLOW_FAILURE if overflow_memory.complete or overflow_memory.length != 0 or overflow_memory.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    process_overflow: DebuggerProcess::MemoryRead = DebuggerProcess::memory_read_from_buffer(TestMemory::MAX_ADDRESS - TestMemory::ADDRESS_START_OFFSET, source[0], TestMemory::OVERFLOW_LENGTH)
+    return TestResult::PROCESS_MEMORY_OVERFLOW_FAILURE if process_overflow.complete or process_overflow.length != 0 or process_overflow.failure.code != DebuggerErrors::ErrorCode.Unavailable
+
     session <- DebuggerNativeAttach::attach_add_breakpoint(session, TestBreakpoint::BREAKPOINT_ADDRESS, TestBreakpoint::ORIGINAL_INSTRUCTION_BYTE)
     return TestResult::ADD_BREAKPOINT_FAILURE if session.breakpoint_count != 1 or not DebuggerNativeAttach::attach_validate(session)
 

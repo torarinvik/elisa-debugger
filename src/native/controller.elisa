@@ -81,7 +81,9 @@ module DebuggerNative:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
             updated.status <- NativeStopStatus.Crashed
-            updated.agent_buffer <- DebuggerAgent::agent_acknowledge_stop(DebuggerAgent::agent_request_stop(controller.agent_buffer))
+            crash_stop_buffer: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_request_stop(controller.agent_buffer)
+            crash_acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: crash_stop_buffer.stop_generation, event_count: crash_stop_buffer.count}
+            updated.agent_buffer <- DebuggerAgent::agent_acknowledge_stop(crash_stop_buffer, crash_acknowledgement)
             updated.crash_detail <- detail
             updated.last_error <- DebuggerErrors::no_error()
             return updated
@@ -110,16 +112,21 @@ module DebuggerNative:
 
         # The target agent must explicitly acknowledge a cooperative stop
         # before the controller exposes a stopped inspection state.
-        def native_acknowledge_pause(controller: NativeController) -> NativeController:
+        def native_acknowledge_pause(controller: NativeController, acknowledgement: DebuggerAgent::AgentStopAcknowledgement) -> NativeController:
             updated: mutable NativeController = controller
             if controller.status != NativeStopStatus.Pausing:
                 updated.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::NATIVE_CONTROLLER_DETAIL_DETAIL_STATE)
                 return updated
-            updated.agent_buffer <- DebuggerAgent::agent_acknowledge_stop(controller.agent_buffer)
+            updated.agent_buffer <- DebuggerAgent::agent_acknowledge_stop(controller.agent_buffer, acknowledgement)
             return native_agent_failed(updated, Detail::DETAIL_AGENT_BUFFER) if not DebuggerAgent::agent_stop_is_acknowledged(updated.agent_buffer)
             updated.status <- NativeStopStatus.Stopped
             updated.last_error <- DebuggerErrors::no_error()
             return updated
+
+        # Adapters capture this immediately after native_pause and include it
+        # unchanged when reporting the corresponding asynchronous stop event.
+        def native_pending_stop_generation(controller: NativeController&) -> u64:
+            return controller.agent_buffer.stop_generation
 
         def native_resume(controller: NativeController) -> NativeController:
             updated: mutable NativeController = controller

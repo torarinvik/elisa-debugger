@@ -36,6 +36,13 @@ module DebuggerAgent:
             ordinal: mutable u64
             payload_hash: mutable u64
 
+        # Keep the acknowledged generation in a compact message record. The
+        # native ABI passes this reliably alongside the large fixed event
+        # buffer and adapters can serialize the same value as a stop reply.
+        struct AgentStopAcknowledgement:
+            generation: mutable u64
+            event_count: mutable usize
+
         struct AgentBuffer:
             events: mutable AgentEvent[Agent::AGENT_HOOKS_EVENT_CAPACITY]
             count: mutable usize
@@ -68,6 +75,7 @@ module DebuggerAgent:
             updated: mutable AgentBuffer = buffer
             updated.stopped <- true
             updated.stop_acknowledged <- false
+            updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
             if buffer.stop_generation == Generation::MAX_STOP_GENERATION:
                 updated.overflowed <- true
                 return updated
@@ -77,11 +85,25 @@ module DebuggerAgent:
                 updated.stop_generation <- buffer.stop_generation + Generation::STOP_GENERATION_INCREMENT
             return updated
 
-        def agent_acknowledge_stop(buffer: AgentBuffer) -> AgentBuffer:
+        # The generation is captured with the stop request and must travel with
+        # the asynchronous acknowledgement. A stale or unsolicited reply makes
+        # the agent state unsafe to inspect or resume.
+        def agent_acknowledge_stop(buffer: AgentBuffer, acknowledgement: AgentStopAcknowledgement) -> AgentBuffer:
             updated: mutable AgentBuffer = buffer
-            if buffer.stopped:
-                updated.stop_acknowledged <- true
-                updated.acknowledged_generation <- buffer.stop_generation
+            if not buffer.stopped:
+                updated.overflowed <- true
+                return updated
+            if acknowledgement.generation == Sentinel::NO_STOP_GENERATION:
+                updated.overflowed <- true
+                return updated
+            if acknowledgement.generation != buffer.stop_generation:
+                updated.overflowed <- true
+                return updated
+            if acknowledgement.event_count != buffer.count:
+                updated.overflowed <- true
+                return updated
+            updated.stop_acknowledged <- true
+            updated.acknowledged_generation <- acknowledgement.generation
             return updated
 
         def agent_resume(buffer: AgentBuffer) -> AgentBuffer:

@@ -1,28 +1,57 @@
 include "../src/protocol/managed_service.elisa"
 
 const module Test:
-    PROGRAM_VERSION: u32 = 1
-    INSTRUCTION_COUNT: u64 = 2
-    RECORDING_ID: u64 = 41
-    SESSION_ID: u64 = 42
-    BUILD_ID: u64 = 43
-    TERMINAL_EVENT: u64 = 0
+    const module Program:
+        VERSION: u32 = 1
+        INSTRUCTION_COUNT: u64 = 2
+        NO_LOCAL_COUNT: u32 = 0
+        CONSTANT_VALUE: i64 = 7
+        CONSTANT_INSTRUCTION_INDEX: usize = 0
+        RETURN_INDEX: u64 = 1
+        NO_OPERAND: i64 = 0
+
+    const module Identity:
+        RECORDING_ID: u64 = 41
+        SESSION_ID: u64 = 42
+        BUILD_ID: u64 = 43
+        BUILD_METADATA_VERSION: u32 = 1
+
+    const module Event:
+        TERMINAL: u64 = Program::INSTRUCTION_COUNT
+
+    const module Request:
+        LAUNCH_ID: u64 = 44
+        CONTINUE_ID: u64 = 45
+        NO_EXPECTED_GENERATION: u64 = 0
+        NO_TARGET_EVENT: u64 = 0
+
+    const module Result:
+        SUCCESS: i64 = 0
+        INITIALIZATION_FAILURE: i64 = 1
+        RESTORE_FAILURE: i64 = 2
+        HALTED_STATE_FAILURE: i64 = 3
+        PROGRAM_COUNTER_FAILURE: i64 = 4
 
 
 def main() -> i64:
-    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD_ID), runtime: DebuggerIdentity::debug_id(Test::BUILD_ID), source: DebuggerIdentity::debug_id(Test::BUILD_ID), target: DebuggerIdentity::debug_id(Test::BUILD_ID), metadata_version: 1}
-    session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
-    session.state <- DebuggerSession::SessionState.Stopped
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::Identity::BUILD_ID), runtime: DebuggerIdentity::debug_id(Test::Identity::BUILD_ID), source: DebuggerIdentity::debug_id(Test::Identity::BUILD_ID), target: DebuggerIdentity::debug_id(Test::Identity::BUILD_ID), metadata_version: Test::Identity::BUILD_METADATA_VERSION}
+    session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::Identity::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
     image: mutable DebuggerEDIR::ProgramImage = zeroed
-    image.program <- DebuggerEDIR::Program{version: Test::PROGRAM_VERSION, instruction_count: Test::INSTRUCTION_COUNT, local_count: 0, has_return: true}
-    image.instructions[0] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: 7, b: 0, source: zeroed}
-    image.instructions[1] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: zeroed}
-    service: mutable DebuggerManagedService::Service = DebuggerManagedService::service_new(session, image, DebuggerIdentity::debug_id(Test::RECORDING_ID))
-    service.controller.engine.machine.program_counter <- Test::INSTRUCTION_COUNT
-    service.controller.engine.machine.halted <- true
-    service.controller.engine.event_count <- Test::TERMINAL_EVENT.usize()
+    image.program <- DebuggerEDIR::Program{version: Test::Program::VERSION, instruction_count: Test::Program::INSTRUCTION_COUNT, local_count: Test::Program::NO_LOCAL_COUNT, has_return: true}
+    image.instructions[Test::Program::CONSTANT_INSTRUCTION_INDEX] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::Program::CONSTANT_VALUE, b: Test::Program::NO_OPERAND, source: zeroed}
+    image.instructions[Test::Program::RETURN_INDEX.usize()] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::Program::NO_OPERAND, b: Test::Program::NO_OPERAND, source: zeroed}
+    service: mutable DebuggerManagedService::Service
+    DebuggerManagedService::service_initialize(service, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    launch_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Launch, id: Test::Request::LAUNCH_ID, has_id: true, expected_generation: Test::Request::NO_EXPECTED_GENERATION, target_event: Test::Request::NO_TARGET_EVENT, valid: true}
+    launched: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, launch_request)
+    return Test::Result::INITIALIZATION_FAILURE if not launched.accepted
+    continue_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Continue, id: Test::Request::CONTINUE_ID, has_id: true, expected_generation: Test::Request::NO_EXPECTED_GENERATION, target_event: Test::Request::NO_TARGET_EVENT, valid: true}
+    continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
+    return Test::Result::INITIALIZATION_FAILURE if not continued.accepted or service.controller.engine.event_count.u64() != Test::Event::TERMINAL or not service.controller.engine.machine.halted
     checkpoint_result: DebuggerManagedService::CheckpointResult = DebuggerManagedService::service_full_checkpoint(service)
-    return 1 if not checkpoint_result.accepted or not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint_result.checkpoint)
+    return Test::Result::INITIALIZATION_FAILURE if not checkpoint_result.accepted or not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint_result.checkpoint)
     restored: DebuggerManagedService::Result = DebuggerManagedService::service_restore_full_checkpoint(service, checkpoint_result.checkpoint)
-    return 2 if not restored.accepted or not service.controller.engine.machine.halted or service.controller.engine.machine.program_counter != Test::INSTRUCTION_COUNT
-    return 0
+    return Test::Result::RESTORE_FAILURE if not restored.accepted
+    return Test::Result::HALTED_STATE_FAILURE if not service.controller.engine.machine.halted
+    return Test::Result::PROGRAM_COUNTER_FAILURE if service.controller.engine.machine.program_counter != Test::Program::RETURN_INDEX
+    return Test::Result::SUCCESS

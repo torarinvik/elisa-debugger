@@ -7,7 +7,6 @@ module DebuggerAgentSnapshotWire:
         const module SnapshotCapacity:
             MAX_PAYLOAD_BYTES: usize = 4096
             MAX_BINDINGS_PER_PAGE: usize = 16
-            MESSAGE_CAPACITY: usize = 4128
 
         const module SnapshotHeader:
             HEADER_LENGTH: usize = 32
@@ -18,7 +17,10 @@ module DebuggerAgentSnapshotWire:
             PAYLOAD_LENGTH_OFFSET: usize = 16
             RESERVED_OFFSET: usize = 20
             CHECKSUM_OFFSET: usize = 24
-            PAYLOAD_OFFSET: usize = 32
+            PAYLOAD_OFFSET: usize = HEADER_LENGTH
+
+        const module SnapshotCapacityShape:
+            MESSAGE_CAPACITY: usize = SnapshotCapacity::MAX_PAYLOAD_BYTES + SnapshotHeader::HEADER_LENGTH
 
         const module SnapshotMagic:
             FIRST: u8 = 69
@@ -67,6 +69,9 @@ module DebuggerAgentSnapshotWire:
             MAX_VALUE_KIND: u16 = 8
             MAX_VALUE_STATE: u16 = 5
             MAX_STORAGE_KIND: u16 = 4
+
+        const module SnapshotEnumInvalid:
+            CODE: u16 = 65535
 
         const module SnapshotEnumCode:
             VALUE_VOID: u16 = 0
@@ -159,6 +164,35 @@ module DebuggerAgentSnapshotWire:
             kind <- DebuggerAgentFrames::AgentStorageKind.Unknown if code == SnapshotEnumCode::STORAGE_UNKNOWN
             return kind
 
+        def encode_value_kind(kind: DebuggerAgentFrames::AgentValueKind) -> u16:
+            return SnapshotEnumCode::VALUE_SIGNED if kind == DebuggerAgentFrames::AgentValueKind.Signed
+            return SnapshotEnumCode::VALUE_UNSIGNED if kind == DebuggerAgentFrames::AgentValueKind.Unsigned
+            return SnapshotEnumCode::VALUE_FLOATING if kind == DebuggerAgentFrames::AgentValueKind.Floating
+            return SnapshotEnumCode::VALUE_BOOLEAN if kind == DebuggerAgentFrames::AgentValueKind.Boolean
+            return SnapshotEnumCode::VALUE_TEXT if kind == DebuggerAgentFrames::AgentValueKind.Text
+            return SnapshotEnumCode::VALUE_AGGREGATE if kind == DebuggerAgentFrames::AgentValueKind.Aggregate
+            return SnapshotEnumCode::VALUE_REFERENCE if kind == DebuggerAgentFrames::AgentValueKind.Reference
+            return SnapshotEnumCode::VALUE_OPAQUE if kind == DebuggerAgentFrames::AgentValueKind.Opaque
+            return SnapshotEnumCode::VALUE_VOID if kind == DebuggerAgentFrames::AgentValueKind.Void
+            return SnapshotEnumInvalid::CODE
+
+        def encode_value_state(state: DebuggerAgentFrames::AgentValueState) -> u16:
+            return SnapshotEnumCode::STATE_UNAVAILABLE if state == DebuggerAgentFrames::AgentValueState.Unavailable
+            return SnapshotEnumCode::STATE_OPTIMIZED_AWAY if state == DebuggerAgentFrames::AgentValueState.OptimizedAway
+            return SnapshotEnumCode::STATE_UNINITIALIZED if state == DebuggerAgentFrames::AgentValueState.Uninitialized
+            return SnapshotEnumCode::STATE_REDACTED if state == DebuggerAgentFrames::AgentValueState.Redacted
+            return SnapshotEnumCode::STATE_INVALID if state == DebuggerAgentFrames::AgentValueState.Invalid
+            return SnapshotEnumCode::STATE_AVAILABLE if state == DebuggerAgentFrames::AgentValueState.Available
+            return SnapshotEnumInvalid::CODE
+
+        def encode_storage_kind(kind: DebuggerAgentFrames::AgentStorageKind) -> u16:
+            return SnapshotEnumCode::STORAGE_STACK_SLOT if kind == DebuggerAgentFrames::AgentStorageKind.StackSlot
+            return SnapshotEnumCode::STORAGE_CONSTANT if kind == DebuggerAgentFrames::AgentStorageKind.Constant
+            return SnapshotEnumCode::STORAGE_RUNTIME_SLOT if kind == DebuggerAgentFrames::AgentStorageKind.RuntimeSlot
+            return SnapshotEnumCode::STORAGE_UNKNOWN if kind == DebuggerAgentFrames::AgentStorageKind.Unknown
+            return SnapshotEnumCode::STORAGE_REGISTER if kind == DebuggerAgentFrames::AgentStorageKind.Register
+            return SnapshotEnumInvalid::CODE
+
     public:
         enum SnapshotWireStatus:
             Ready
@@ -177,7 +211,7 @@ module DebuggerAgentSnapshotWire:
             InvalidDescriptor
 
         struct SnapshotWireBuffer:
-            bytes: mutable u8[SnapshotCapacity::MESSAGE_CAPACITY]
+            bytes: mutable u8[SnapshotCapacityShape::MESSAGE_CAPACITY]
             length: mutable usize
             status: mutable SnapshotWireStatus
 
@@ -256,11 +290,11 @@ module DebuggerAgentSnapshotWire:
                 cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
                 write_u64(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.type_id.value)
                 cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
-                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.value_kind.u16())
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, encode_value_kind(descriptor.value_kind))
                 cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
-                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.state.u16())
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, encode_value_state(descriptor.state))
                 cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
-                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.storage_kind.u16())
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, encode_storage_kind(descriptor.storage_kind))
                 cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
                 write_u16(output.bytes[SnapshotSequence::FIRST], cursor, SnapshotProtocol::EMPTY_RESERVED_WORD.u16())
                 cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
@@ -275,7 +309,7 @@ module DebuggerAgentSnapshotWire:
                 cursor <- cursor + data_length
 
             total_length: usize = SnapshotHeader::HEADER_LENGTH + payload_length
-            if total_length > SnapshotCapacity::MESSAGE_CAPACITY or cursor != total_length:
+            if total_length > SnapshotCapacityShape::MESSAGE_CAPACITY or cursor != total_length:
                 output.status <- SnapshotWireStatus.ResourceLimit
                 return output.status
             output.bytes[SnapshotHeader::MAGIC_OFFSET] <- SnapshotMagic::FIRST
@@ -302,7 +336,7 @@ module DebuggerAgentSnapshotWire:
             if length < SnapshotHeader::HEADER_LENGTH:
                 page.status <- SnapshotWireStatus.Truncated
                 return page.status
-            if length > SnapshotCapacity::MESSAGE_CAPACITY:
+            if length > SnapshotCapacityShape::MESSAGE_CAPACITY:
                 return page.status
             if bytes[SnapshotHeader::MAGIC_OFFSET] != SnapshotMagic::FIRST or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::SECOND_OFFSET] != SnapshotMagic::SECOND or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::THIRD_OFFSET] != SnapshotMagic::THIRD or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::FOURTH_OFFSET] != SnapshotMagic::FOURTH:
                 page.status <- SnapshotWireStatus.InvalidMagic

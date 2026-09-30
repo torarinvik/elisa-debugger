@@ -160,6 +160,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: agent-async-session-transport-check
 .PHONY: agent-shadow-frames-check
 .PHONY: agent-inspection-rendezvous-check
+.PHONY: agent-snapshot-wire-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -210,6 +211,7 @@ module-check: agent-session-transport-check
 module-check: agent-async-session-transport-check
 module-check: agent-shadow-frames-check
 module-check: agent-inspection-rendezvous-check
+module-check: agent-snapshot-wire-check
 module-check: agent-thread-rendezvous-check
 ifneq ($(filter Darwin Linux,$(shell uname -s)),)
 module-check: native-local-ipc-check
@@ -999,6 +1001,13 @@ $(BUILD)/elisa-debugger-agent-inspection-rendezvous-check: tests/agent_inspectio
 
 agent-inspection-rendezvous-check: $(BUILD)/elisa-debugger-agent-inspection-rendezvous-check
 	"$(BUILD)/elisa-debugger-agent-inspection-rendezvous-check"
+
+$(BUILD)/elisa-debugger-agent-snapshot-wire-check: tests/agent_snapshot_wire_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+agent-snapshot-wire-check: $(BUILD)/elisa-debugger-agent-snapshot-wire-check
+	"$(BUILD)/elisa-debugger-agent-snapshot-wire-check"
 
 $(BUILD)/elisa-debugger-native-breakpoint-lifecycle-check: tests/native_breakpoint_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

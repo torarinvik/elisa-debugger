@@ -1,0 +1,433 @@
+# Versioned, bounded frame-and-local pages for adapter-neutral native inspection.
+
+include "./inspection.elisa"
+
+module DebuggerAgentSnapshotWire:
+    private:
+        const module SnapshotCapacity:
+            MAX_PAYLOAD_BYTES: usize = 4096
+            MAX_BINDINGS_PER_PAGE: usize = 16
+            MESSAGE_CAPACITY: usize = 4128
+
+        const module SnapshotHeader:
+            HEADER_LENGTH: usize = 32
+            MAGIC_OFFSET: usize = 0
+            VERSION_OFFSET: usize = 4
+            KIND_OFFSET: usize = 6
+            GENERATION_OFFSET: usize = 8
+            PAYLOAD_LENGTH_OFFSET: usize = 16
+            RESERVED_OFFSET: usize = 20
+            CHECKSUM_OFFSET: usize = 24
+            PAYLOAD_OFFSET: usize = 32
+
+        const module SnapshotMagic:
+            FIRST: u8 = 69
+            SECOND: u8 = 76
+            THIRD: u8 = 83
+            FOURTH: u8 = 65
+            SECOND_OFFSET: usize = 1
+            THIRD_OFFSET: usize = 2
+            FOURTH_OFFSET: usize = 3
+
+        const module SnapshotProtocol:
+            VERSION: u16 = 1
+            FRAME_PAGE_KIND: u16 = 1
+            NO_GENERATION: u64 = 0
+            ZERO_VALUE: u64 = 0
+            ZERO_LENGTH: usize = 0
+            EMPTY_RESERVED_WORD: u32 = 0
+
+        const module SnapshotSequence:
+            FIRST: usize = 0
+
+        const module SnapshotChecksum:
+            OFFSET_BASIS: u64 = 14695981039346656037
+            PRIME: u64 = 1099511628211
+
+        const module SnapshotByteEncoding:
+            BITS_PER_BYTE: u64 = 8
+            BYTE_MASK: u64 = 255
+            U16_WIDTH: usize = 2
+            U32_WIDTH: usize = 4
+            U64_WIDTH: usize = 8
+
+        const module SnapshotPayloadShape:
+            U64_FIELD_COUNT: usize = 7
+            U32_FIELD_COUNT: usize = 5
+            FRAME_HEADER_LENGTH: usize = U64_FIELD_COUNT * SnapshotByteEncoding::U64_WIDTH + U32_FIELD_COUNT * SnapshotByteEncoding::U32_WIDTH
+
+        const module SnapshotDescriptorShape:
+            ID_FIELD_COUNT: usize = 3
+            TAG_FIELD_COUNT: usize = 4
+            U64_FIELD_COUNT: usize = 2
+            U32_FIELD_COUNT: usize = 1
+            PREFIX_LENGTH: usize = ID_FIELD_COUNT * SnapshotByteEncoding::U64_WIDTH + TAG_FIELD_COUNT * SnapshotByteEncoding::U16_WIDTH + U64_FIELD_COUNT * SnapshotByteEncoding::U64_WIDTH + U32_FIELD_COUNT * SnapshotByteEncoding::U32_WIDTH
+
+        const module SnapshotEnumBounds:
+            MAX_VALUE_KIND: u16 = 8
+            MAX_VALUE_STATE: u16 = 5
+            MAX_STORAGE_KIND: u16 = 4
+
+        const module SnapshotEnumCode:
+            VALUE_VOID: u16 = 0
+            VALUE_SIGNED: u16 = 1
+            VALUE_UNSIGNED: u16 = 2
+            VALUE_FLOATING: u16 = 3
+            VALUE_BOOLEAN: u16 = 4
+            VALUE_TEXT: u16 = 5
+            VALUE_AGGREGATE: u16 = 6
+            VALUE_REFERENCE: u16 = 7
+            VALUE_OPAQUE: u16 = 8
+            STATE_AVAILABLE: u16 = 0
+            STATE_UNAVAILABLE: u16 = 1
+            STATE_OPTIMIZED_AWAY: u16 = 2
+            STATE_UNINITIALIZED: u16 = 3
+            STATE_REDACTED: u16 = 4
+            STATE_INVALID: u16 = 5
+            STORAGE_REGISTER: u16 = 0
+            STORAGE_STACK_SLOT: u16 = 1
+            STORAGE_CONSTANT: u16 = 2
+            STORAGE_RUNTIME_SLOT: u16 = 3
+            STORAGE_UNKNOWN: u16 = 4
+
+        const module SnapshotIdentifier:
+            NO_ID: u64 = 0
+
+        def write_u16(bytes: mutable u8&, offset: usize, value: u16) -> void:
+            for index in SnapshotSequence::FIRST..<SnapshotByteEncoding::U16_WIDTH:
+                bytes[offset + index] <- ((value.u64() >> (SnapshotByteEncoding::BITS_PER_BYTE * index.u64())) & SnapshotByteEncoding::BYTE_MASK).u8()
+
+        def write_u32(bytes: mutable u8&, offset: usize, value: u32) -> void:
+            for index in SnapshotSequence::FIRST..<SnapshotByteEncoding::U32_WIDTH:
+                bytes[offset + index] <- ((value.u64() >> (SnapshotByteEncoding::BITS_PER_BYTE * index.u64())) & SnapshotByteEncoding::BYTE_MASK).u8()
+
+        def write_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+            for index in SnapshotSequence::FIRST..<SnapshotByteEncoding::U64_WIDTH:
+                bytes[offset + index] <- ((value >> (SnapshotByteEncoding::BITS_PER_BYTE * index.u64())) & SnapshotByteEncoding::BYTE_MASK).u8()
+
+        def read_u16(bytes: u8&, offset: usize) -> u16:
+            low: u64 = bytes[offset].u64()
+            high: u64 = bytes[offset + SnapshotMagic::SECOND_OFFSET].u64()
+            return (low | (high << SnapshotByteEncoding::BITS_PER_BYTE)).u16()
+
+        def read_u32(bytes: u8&, offset: usize) -> u32:
+            value: mutable u64 = SnapshotProtocol::ZERO_VALUE
+            for index in SnapshotSequence::FIRST..<SnapshotByteEncoding::U32_WIDTH:
+                value <- value | (bytes[offset + index].u64() << (SnapshotByteEncoding::BITS_PER_BYTE * index.u64()))
+            return value.u32()
+
+        def read_u64(bytes: u8&, offset: usize) -> u64:
+            value: mutable u64 = SnapshotProtocol::ZERO_VALUE
+            for index in SnapshotSequence::FIRST..<SnapshotByteEncoding::U64_WIDTH:
+                value <- value | (bytes[offset + index].u64() << (SnapshotByteEncoding::BITS_PER_BYTE * index.u64()))
+            return value
+
+        def page_checksum(bytes: u8&, message_length: usize) -> u64:
+            checksum: mutable u64 = SnapshotChecksum::OFFSET_BASIS
+            for index in SnapshotSequence::FIRST..<SnapshotHeader::CHECKSUM_OFFSET:
+                checksum <- (checksum ^ bytes[index].u64()) * SnapshotChecksum::PRIME
+            for index in SnapshotHeader::PAYLOAD_OFFSET..<message_length:
+                checksum <- (checksum ^ bytes[index].u64()) * SnapshotChecksum::PRIME
+            return checksum
+
+        def decode_value_kind(code: u16) -> DebuggerAgentFrames::AgentValueKind:
+            kind: mutable DebuggerAgentFrames::AgentValueKind = DebuggerAgentFrames::AgentValueKind.Void
+            kind <- DebuggerAgentFrames::AgentValueKind.Signed if code == SnapshotEnumCode::VALUE_SIGNED
+            kind <- DebuggerAgentFrames::AgentValueKind.Unsigned if code == SnapshotEnumCode::VALUE_UNSIGNED
+            kind <- DebuggerAgentFrames::AgentValueKind.Floating if code == SnapshotEnumCode::VALUE_FLOATING
+            kind <- DebuggerAgentFrames::AgentValueKind.Boolean if code == SnapshotEnumCode::VALUE_BOOLEAN
+            kind <- DebuggerAgentFrames::AgentValueKind.Text if code == SnapshotEnumCode::VALUE_TEXT
+            kind <- DebuggerAgentFrames::AgentValueKind.Aggregate if code == SnapshotEnumCode::VALUE_AGGREGATE
+            kind <- DebuggerAgentFrames::AgentValueKind.Reference if code == SnapshotEnumCode::VALUE_REFERENCE
+            kind <- DebuggerAgentFrames::AgentValueKind.Opaque if code == SnapshotEnumCode::VALUE_OPAQUE
+            return kind
+
+        def decode_value_state(code: u16) -> DebuggerAgentFrames::AgentValueState:
+            state: mutable DebuggerAgentFrames::AgentValueState = DebuggerAgentFrames::AgentValueState.Available
+            state <- DebuggerAgentFrames::AgentValueState.Unavailable if code == SnapshotEnumCode::STATE_UNAVAILABLE
+            state <- DebuggerAgentFrames::AgentValueState.OptimizedAway if code == SnapshotEnumCode::STATE_OPTIMIZED_AWAY
+            state <- DebuggerAgentFrames::AgentValueState.Uninitialized if code == SnapshotEnumCode::STATE_UNINITIALIZED
+            state <- DebuggerAgentFrames::AgentValueState.Redacted if code == SnapshotEnumCode::STATE_REDACTED
+            state <- DebuggerAgentFrames::AgentValueState.Invalid if code == SnapshotEnumCode::STATE_INVALID
+            return state
+
+        def decode_storage_kind(code: u16) -> DebuggerAgentFrames::AgentStorageKind:
+            kind: mutable DebuggerAgentFrames::AgentStorageKind = DebuggerAgentFrames::AgentStorageKind.Register
+            kind <- DebuggerAgentFrames::AgentStorageKind.StackSlot if code == SnapshotEnumCode::STORAGE_STACK_SLOT
+            kind <- DebuggerAgentFrames::AgentStorageKind.Constant if code == SnapshotEnumCode::STORAGE_CONSTANT
+            kind <- DebuggerAgentFrames::AgentStorageKind.RuntimeSlot if code == SnapshotEnumCode::STORAGE_RUNTIME_SLOT
+            kind <- DebuggerAgentFrames::AgentStorageKind.Unknown if code == SnapshotEnumCode::STORAGE_UNKNOWN
+            return kind
+
+    public:
+        enum SnapshotWireStatus:
+            Ready
+            SnapshotUnavailable
+            InvalidPage
+            ResourceLimit
+            Truncated
+            InvalidLength
+            InvalidMagic
+            UnsupportedVersion
+            UnsupportedMessage
+            InvalidGeneration
+            InvalidReservedWord
+            ChecksumMismatch
+            InvalidPayload
+            InvalidDescriptor
+
+        struct SnapshotWireBuffer:
+            bytes: mutable u8[SnapshotCapacity::MESSAGE_CAPACITY]
+            length: mutable usize
+            status: mutable SnapshotWireStatus
+
+        struct DecodedSnapshotPage:
+            status: mutable SnapshotWireStatus
+            generation: mutable u64
+            thread_id: mutable u64
+            frame_index: mutable usize
+            frame: mutable DebuggerAgentFrames::AgentShadowFrameInfo
+            binding_start: mutable usize
+            binding_count: mutable usize
+            bindings: mutable DebuggerAgentFrames::AgentStorageDescriptor[SnapshotCapacity::MAX_BINDINGS_PER_PAGE]
+
+        def snapshot_page_capacity() -> usize:
+            return SnapshotCapacity::MAX_BINDINGS_PER_PAGE
+
+        # Encode one frame header and a caller-selected bounded slice of its
+        # bindings. The buffer is caller-owned and only its live prefix changes.
+        def agent_snapshot_frame_page_encode(shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, frame_index_value: usize, binding_start: usize, binding_limit: usize, generation: u64, output: mutable SnapshotWireBuffer&) -> SnapshotWireStatus:
+            output.length <- SnapshotProtocol::ZERO_LENGTH
+            output.status <- SnapshotWireStatus.InvalidPage
+            if binding_limit == SnapshotProtocol::ZERO_LENGTH or binding_limit > SnapshotCapacity::MAX_BINDINGS_PER_PAGE:
+                return output.status
+            frame_result: DebuggerAgentFrames::FrameReadResult = DebuggerAgentInspection::agent_inspection_read_frame(shadow_stack, registry, frame_index_value, generation)
+            output.status <- SnapshotWireStatus.SnapshotUnavailable
+            return output.status if frame_result.status != DebuggerAgentFrames::ShadowStatus.Ready
+            output.status <- SnapshotWireStatus.InvalidPage
+            return output.status if binding_start > frame_result.frame.binding_count
+            remaining: usize = frame_result.frame.binding_count - binding_start
+            page_binding_count: mutable usize = binding_limit
+            page_binding_count <- remaining if remaining < binding_limit
+            payload_length: mutable usize = SnapshotPayloadShape::FRAME_HEADER_LENGTH
+            cursor: mutable usize = SnapshotHeader::PAYLOAD_OFFSET
+            write_u64(output.bytes[SnapshotSequence::FIRST], SnapshotHeader::GENERATION_OFFSET, generation)
+            write_u32(output.bytes[SnapshotSequence::FIRST], SnapshotHeader::RESERVED_OFFSET, SnapshotProtocol::EMPTY_RESERVED_WORD)
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, shadow_stack.thread.value)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, frame_index_value.u64())
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.invocation.value)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.parent_invocation.value)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.function.value)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.task.value)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u64(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.source_file.value)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u32(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.source_line)
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.source_column)
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(output.bytes[SnapshotSequence::FIRST], cursor, frame_result.frame.binding_count.u32())
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(output.bytes[SnapshotSequence::FIRST], cursor, binding_start.u32())
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(output.bytes[SnapshotSequence::FIRST], cursor, page_binding_count.u32())
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+
+            for page_index in SnapshotSequence::FIRST..<page_binding_count:
+                binding_result: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding_at(shadow_stack, registry, frame_result.frame.invocation, binding_start + page_index, generation)
+                output.status <- SnapshotWireStatus.SnapshotUnavailable
+                return output.status if binding_result.status != DebuggerAgentFrames::ShadowStatus.Ready and binding_result.status != DebuggerAgentFrames::ShadowStatus.ValueNotAvailable
+                descriptor: DebuggerAgentFrames::AgentStorageDescriptor = binding_result.descriptor
+                output.status <- SnapshotWireStatus.InvalidDescriptor
+                return output.status if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(descriptor)
+                data_length: mutable usize = SnapshotProtocol::ZERO_LENGTH
+                data_length <- descriptor.byte_size.usize() if descriptor.state == DebuggerAgentFrames::AgentValueState.Available
+                payload_length <- payload_length + SnapshotDescriptorShape::PREFIX_LENGTH + data_length
+                output.status <- SnapshotWireStatus.ResourceLimit
+                return output.status if payload_length > SnapshotCapacity::MAX_PAYLOAD_BYTES
+                write_u64(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.binding.value)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                write_u64(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.scope.value)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                write_u64(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.type_id.value)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.value_kind.u16())
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.state.u16())
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.storage_kind.u16())
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                write_u16(output.bytes[SnapshotSequence::FIRST], cursor, SnapshotProtocol::EMPTY_RESERVED_WORD.u16())
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                write_u64(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.storage_location.u64())
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                write_u64(output.bytes[SnapshotSequence::FIRST], cursor, descriptor.byte_size)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                write_u32(output.bytes[SnapshotSequence::FIRST], cursor, data_length.u32())
+                cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+                for byte_index in SnapshotSequence::FIRST..<data_length:
+                    output.bytes[cursor + byte_index] <- descriptor.bytes[byte_index]
+                cursor <- cursor + data_length
+
+            total_length: usize = SnapshotHeader::HEADER_LENGTH + payload_length
+            if total_length > SnapshotCapacity::MESSAGE_CAPACITY or cursor != total_length:
+                output.status <- SnapshotWireStatus.ResourceLimit
+                return output.status
+            output.bytes[SnapshotHeader::MAGIC_OFFSET] <- SnapshotMagic::FIRST
+            output.bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::SECOND_OFFSET] <- SnapshotMagic::SECOND
+            output.bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::THIRD_OFFSET] <- SnapshotMagic::THIRD
+            output.bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::FOURTH_OFFSET] <- SnapshotMagic::FOURTH
+            write_u16(output.bytes[SnapshotSequence::FIRST], SnapshotHeader::VERSION_OFFSET, SnapshotProtocol::VERSION)
+            write_u16(output.bytes[SnapshotSequence::FIRST], SnapshotHeader::KIND_OFFSET, SnapshotProtocol::FRAME_PAGE_KIND)
+            write_u32(output.bytes[SnapshotSequence::FIRST], SnapshotHeader::PAYLOAD_LENGTH_OFFSET, payload_length.u32())
+            write_u64(output.bytes[SnapshotSequence::FIRST], SnapshotHeader::CHECKSUM_OFFSET, page_checksum(output.bytes[SnapshotSequence::FIRST], total_length))
+            output.length <- total_length
+            output.status <- SnapshotWireStatus.Ready
+            return output.status
+
+        # Decode into caller-owned storage. On any failure, `status` is not
+        # Ready and consumers must ignore all partially decoded fields.
+        def agent_snapshot_frame_page_decode(bytes: u8&, length: usize, page: mutable DecodedSnapshotPage&) -> SnapshotWireStatus:
+            page.status <- SnapshotWireStatus.InvalidLength
+            page.generation <- SnapshotProtocol::NO_GENERATION
+            page.thread_id <- SnapshotIdentifier::NO_ID
+            page.frame_index <- SnapshotProtocol::ZERO_LENGTH
+            page.binding_start <- SnapshotProtocol::ZERO_LENGTH
+            page.binding_count <- SnapshotProtocol::ZERO_LENGTH
+            if length < SnapshotHeader::HEADER_LENGTH:
+                page.status <- SnapshotWireStatus.Truncated
+                return page.status
+            if length > SnapshotCapacity::MESSAGE_CAPACITY:
+                return page.status
+            if bytes[SnapshotHeader::MAGIC_OFFSET] != SnapshotMagic::FIRST or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::SECOND_OFFSET] != SnapshotMagic::SECOND or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::THIRD_OFFSET] != SnapshotMagic::THIRD or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::FOURTH_OFFSET] != SnapshotMagic::FOURTH:
+                page.status <- SnapshotWireStatus.InvalidMagic
+                return page.status
+            if read_u16(bytes, SnapshotHeader::VERSION_OFFSET) != SnapshotProtocol::VERSION:
+                page.status <- SnapshotWireStatus.UnsupportedVersion
+                return page.status
+            if read_u16(bytes, SnapshotHeader::KIND_OFFSET) != SnapshotProtocol::FRAME_PAGE_KIND:
+                page.status <- SnapshotWireStatus.UnsupportedMessage
+                return page.status
+            generation: u64 = read_u64(bytes, SnapshotHeader::GENERATION_OFFSET)
+            if generation == SnapshotProtocol::NO_GENERATION:
+                page.status <- SnapshotWireStatus.InvalidGeneration
+                return page.status
+            payload_length: usize = read_u32(bytes, SnapshotHeader::PAYLOAD_LENGTH_OFFSET).usize()
+            if payload_length > SnapshotCapacity::MAX_PAYLOAD_BYTES:
+                return page.status
+            available_payload_length: usize = length - SnapshotHeader::HEADER_LENGTH
+            if payload_length > available_payload_length:
+                page.status <- SnapshotWireStatus.Truncated
+                return page.status
+            if payload_length < available_payload_length:
+                return page.status
+            if read_u32(bytes, SnapshotHeader::RESERVED_OFFSET) != SnapshotProtocol::EMPTY_RESERVED_WORD:
+                page.status <- SnapshotWireStatus.InvalidReservedWord
+                return page.status
+            expected_checksum: u64 = read_u64(bytes, SnapshotHeader::CHECKSUM_OFFSET)
+            if expected_checksum != page_checksum(bytes, length):
+                page.status <- SnapshotWireStatus.ChecksumMismatch
+                return page.status
+            if payload_length < SnapshotPayloadShape::FRAME_HEADER_LENGTH:
+                page.status <- SnapshotWireStatus.InvalidPayload
+                return page.status
+
+            cursor: mutable usize = SnapshotHeader::PAYLOAD_OFFSET
+            page.thread_id <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            frame_index_value: u64 = read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            page.frame.invocation.value <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            page.frame.parent_invocation.value <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            page.frame.function.value <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            page.frame.task.value <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            page.frame.source_file.value <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            page.frame.source_line <- read_u32(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            page.frame.source_column <- read_u32(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            frame_binding_count: usize = read_u32(bytes, cursor).usize()
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            page.binding_start <- read_u32(bytes, cursor).usize()
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            page.binding_count <- read_u32(bytes, cursor).usize()
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+
+            page.status <- SnapshotWireStatus.InvalidPayload
+            return page.status if page.thread_id == SnapshotIdentifier::NO_ID or frame_index_value >= DebuggerAgentFrames::agent_shadow_frame_capacity().u64()
+            return page.status if page.frame.invocation.value == SnapshotIdentifier::NO_ID or page.frame.function.value == SnapshotIdentifier::NO_ID or page.frame.task.value == SnapshotIdentifier::NO_ID
+            return page.status if frame_binding_count > DebuggerAgentFrames::agent_shadow_binding_capacity() or page.binding_start > frame_binding_count
+            return page.status if page.binding_count > SnapshotCapacity::MAX_BINDINGS_PER_PAGE or page.binding_count > frame_binding_count - page.binding_start
+            page.frame_index <- frame_index_value.usize()
+            page.frame.binding_count <- frame_binding_count
+            page.generation <- generation
+
+            for binding_index in SnapshotSequence::FIRST..<page.binding_count:
+                if cursor > length or SnapshotDescriptorShape::PREFIX_LENGTH > length - cursor:
+                    page.status <- SnapshotWireStatus.InvalidPayload
+                    return page.status
+                descriptor: mutable DebuggerAgentFrames::AgentStorageDescriptor = zeroed
+                descriptor.binding.value <- read_u64(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                descriptor.scope.value <- read_u64(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                descriptor.type_id.value <- read_u64(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                value_kind_code: u16 = read_u16(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                value_state_code: u16 = read_u16(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                storage_kind_code: u16 = read_u16(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                reserved_code: u16 = read_u16(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U16_WIDTH
+                descriptor.storage_location <- read_u64(bytes, cursor).i64()
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                descriptor.byte_size <- read_u64(bytes, cursor)
+                cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+                data_length: usize = read_u32(bytes, cursor).usize()
+                cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+                if value_kind_code > SnapshotEnumBounds::MAX_VALUE_KIND or value_state_code > SnapshotEnumBounds::MAX_VALUE_STATE or storage_kind_code > SnapshotEnumBounds::MAX_STORAGE_KIND or reserved_code != SnapshotProtocol::EMPTY_RESERVED_WORD.u16():
+                    page.status <- SnapshotWireStatus.InvalidDescriptor
+                    return page.status
+                descriptor.value_kind <- decode_value_kind(value_kind_code)
+                descriptor.state <- decode_value_state(value_state_code)
+                descriptor.storage_kind <- decode_storage_kind(storage_kind_code)
+                if data_length > DebuggerAgentFrames::agent_shadow_inline_value_capacity() or data_length > length - cursor:
+                    page.status <- SnapshotWireStatus.InvalidDescriptor
+                    return page.status
+                if descriptor.state == DebuggerAgentFrames::AgentValueState.Available:
+                    if descriptor.byte_size != data_length.u64():
+                        page.status <- SnapshotWireStatus.InvalidDescriptor
+                        return page.status
+                else:
+                    if data_length != SnapshotProtocol::ZERO_LENGTH:
+                        page.status <- SnapshotWireStatus.InvalidDescriptor
+                        return page.status
+                for byte_index in SnapshotSequence::FIRST..<data_length:
+                    descriptor.bytes[byte_index] <- bytes[cursor + byte_index]
+                cursor <- cursor + data_length
+                if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(descriptor):
+                    page.status <- SnapshotWireStatus.InvalidDescriptor
+                    return page.status
+                for previous in SnapshotSequence::FIRST..<binding_index:
+                    if page.bindings[previous].binding.value == descriptor.binding.value:
+                        page.status <- SnapshotWireStatus.InvalidDescriptor
+                        return page.status
+                page.bindings[binding_index] <- descriptor
+
+            if cursor != length:
+                page.status <- SnapshotWireStatus.InvalidPayload
+                return page.status
+            page.status <- SnapshotWireStatus.Ready
+            return page.status

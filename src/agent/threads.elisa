@@ -1,0 +1,234 @@
+# Coordinates cooperative safe-point stops across the target's registered
+# threads. Each instrumented thread polls this registry at safe points; the
+# controller may acknowledge a stop only after every live thread has parked.
+# Callers must serialize registry mutations with the target agent's rendezvous
+# lock, and a thread's hook must keep it blocked until the matching resume.
+
+module DebuggerAgentThreads:
+    private:
+        const module Capacity:
+            MAX_REGISTERED_THREADS: usize = 64
+
+        const module Identity:
+            INVALID_THREAD_ID: u64 = 0
+
+        const module StopEpoch:
+            NO_GENERATION: u64 = 0
+
+        const module Index:
+            FIRST_SLOT: usize = 0
+            SLOT_INCREMENT: usize = 1
+
+        const module RegistryCount:
+            EMPTY: usize = 0
+
+        const module IndexStep:
+            VALUE: usize = 1
+
+        def find_thread_slot(registry: AgentThreadRegistry&, thread_id: u64) -> usize:
+            for index in Index::FIRST_SLOT..<registry.active_count:
+                return index if registry.threads[index].thread_id == thread_id
+            return Capacity::MAX_REGISTERED_THREADS
+
+        def clear_stop_request(registry: mutable AgentThreadRegistry&) -> void:
+            for index in Index::FIRST_SLOT..<registry.active_count:
+                registry.threads[index].state <- ThreadState.Running
+            registry.stop_pending <- false
+            registry.stop_ready <- false
+            registry.stop_deadline_ns <- StopEpoch::NO_GENERATION
+
+        def stop_is_fully_parked(registry: AgentThreadRegistry&) -> bool:
+            return false if registry.active_count == RegistryCount::EMPTY
+            for index in Index::FIRST_SLOT..<registry.active_count:
+                return false if registry.threads[index].state != ThreadState.Parked
+            return true
+
+    public:
+        enum ThreadState:
+            Unregistered
+            Running
+            StopRequested
+            Parked
+
+        enum ThreadStatus:
+            Applied
+            InvalidRegistry
+            InvalidThreadId
+            DuplicateThread
+            UnknownThread
+            ThreadCapacityReached
+            StopAlreadyPending
+            StopAlreadyReady
+            InvalidGeneration
+            StaleGeneration
+            NoLiveThreads
+            InvalidDeadline
+            StopNotPending
+            StopNotReady
+            GenerationMismatch
+            AlreadyParked
+            StopTimedOut
+            StopTimedOutAndRegistered
+            StopTimedOutAndUnregistered
+
+        struct AgentThreadSlot:
+            thread_id: mutable u64
+            state: mutable ThreadState
+
+        struct AgentThreadRegistry:
+            threads: mutable AgentThreadSlot[Capacity::MAX_REGISTERED_THREADS]
+            active_count: mutable usize
+            stop_generation: mutable u64
+            stop_deadline_ns: mutable u64
+            stop_pending: mutable bool
+            stop_ready: mutable bool
+            last_stop_timed_out: mutable bool
+
+        # Initialize caller-owned storage so the fixed thread table is never
+        # copied through a value-returning constructor.
+        def agent_threads_initialize(registry: mutable AgentThreadRegistry&) -> void:
+            registry <- zeroed
+            registry.active_count <- RegistryCount::EMPTY
+            registry.stop_generation <- StopEpoch::NO_GENERATION
+            registry.stop_deadline_ns <- StopEpoch::NO_GENERATION
+            registry.stop_pending <- false
+            registry.stop_ready <- false
+            registry.last_stop_timed_out <- false
+            for index in Index::FIRST_SLOT..<Capacity::MAX_REGISTERED_THREADS:
+                registry.threads[index].thread_id <- Identity::INVALID_THREAD_ID
+                registry.threads[index].state <- ThreadState.Unregistered
+
+        def agent_thread_registry_capacity() -> usize:
+            return Capacity::MAX_REGISTERED_THREADS
+
+        def agent_thread_registry_is_exact(registry: AgentThreadRegistry&) -> bool:
+            return false if registry.active_count > Capacity::MAX_REGISTERED_THREADS
+            return false if registry.stop_pending and registry.stop_generation == StopEpoch::NO_GENERATION
+            return false if registry.stop_pending and registry.stop_deadline_ns == StopEpoch::NO_GENERATION
+            return false if not registry.stop_pending and registry.stop_deadline_ns != StopEpoch::NO_GENERATION
+            return false if registry.stop_ready and not registry.stop_pending
+            return false if registry.stop_ready and not stop_is_fully_parked(registry)
+            for index in Index::FIRST_SLOT..<registry.active_count:
+                return false if registry.threads[index].thread_id == Identity::INVALID_THREAD_ID
+                return false if registry.threads[index].state == ThreadState.Unregistered
+                if registry.stop_pending:
+                    return false if registry.threads[index].state != ThreadState.StopRequested and registry.threads[index].state != ThreadState.Parked
+                else:
+                    return false if registry.threads[index].state != ThreadState.Running
+                for other_index in (index + IndexStep::VALUE)..<registry.active_count:
+                    return false if registry.threads[index].thread_id == registry.threads[other_index].thread_id
+            return true
+
+        def agent_thread_register(registry: mutable AgentThreadRegistry&, thread_id: u64, now_ns: u64) -> ThreadStatus:
+            return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
+            return ThreadStatus.InvalidThreadId if thread_id == Identity::INVALID_THREAD_ID
+            return ThreadStatus.DuplicateThread if find_thread_slot(registry, thread_id) < Capacity::MAX_REGISTERED_THREADS
+            return ThreadStatus.ThreadCapacityReached if registry.active_count >= Capacity::MAX_REGISTERED_THREADS
+            return ThreadStatus.StopAlreadyReady if registry.stop_ready
+            if registry.stop_pending and now_ns >= registry.stop_deadline_ns:
+                clear_stop_request(registry)
+                registry.last_stop_timed_out <- true
+                slot: usize = registry.active_count
+                registry.threads[slot].thread_id <- thread_id
+                registry.threads[slot].state <- ThreadState.Running
+                registry.active_count <- registry.active_count + IndexStep::VALUE
+                return ThreadStatus.StopTimedOutAndRegistered
+            slot: usize = registry.active_count
+            registry.threads[slot].thread_id <- thread_id
+            registry.threads[slot].state <- ThreadState.Running
+            registry.threads[slot].state <- ThreadState.StopRequested if registry.stop_pending
+            registry.active_count <- registry.active_count + IndexStep::VALUE
+            return ThreadStatus.Applied
+
+        # A thread exit removes it from the rendezvous set. Compacting the
+        # dense prefix keeps every later lookup bounded by active_count.
+        def agent_thread_unregister(registry: mutable AgentThreadRegistry&, thread_id: u64, now_ns: u64) -> ThreadStatus:
+            return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
+            return ThreadStatus.InvalidThreadId if thread_id == Identity::INVALID_THREAD_ID
+            slot: usize = find_thread_slot(registry, thread_id)
+            return ThreadStatus.UnknownThread if slot >= registry.active_count
+            timed_out: mutable bool = false
+            if registry.stop_pending and not registry.stop_ready and now_ns >= registry.stop_deadline_ns:
+                clear_stop_request(registry)
+                registry.last_stop_timed_out <- true
+                timed_out <- true
+            for index in slot..<(registry.active_count - IndexStep::VALUE):
+                registry.threads[index] <- registry.threads[index + IndexStep::VALUE]
+            registry.active_count <- registry.active_count - IndexStep::VALUE
+            registry.threads[registry.active_count] <- zeroed
+            registry.threads[registry.active_count].state <- ThreadState.Unregistered
+            if registry.stop_pending and not registry.stop_ready and stop_is_fully_parked(registry):
+                registry.stop_ready <- true
+            return ThreadStatus.StopTimedOutAndUnregistered if timed_out
+            return ThreadStatus.Applied
+
+        # The caller supplies a monotonic-clock deadline. New threads created
+        # while a stop is pending join the rendezvous in StopRequested state.
+        def agent_threads_request_stop(registry: mutable AgentThreadRegistry&, generation: u64, now_ns: u64, deadline_ns: u64) -> ThreadStatus:
+            return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
+            return ThreadStatus.InvalidGeneration if generation == StopEpoch::NO_GENERATION
+            return ThreadStatus.StopAlreadyPending if registry.stop_pending
+            return ThreadStatus.StaleGeneration if generation <= registry.stop_generation
+            return ThreadStatus.NoLiveThreads if registry.active_count == RegistryCount::EMPTY
+            return ThreadStatus.InvalidDeadline if deadline_ns <= now_ns
+            registry.stop_generation <- generation
+            registry.stop_deadline_ns <- deadline_ns
+            registry.stop_pending <- true
+            registry.stop_ready <- false
+            registry.last_stop_timed_out <- false
+            for index in Index::FIRST_SLOT..<registry.active_count:
+                registry.threads[index].state <- ThreadState.StopRequested
+            return ThreadStatus.Applied
+
+        # Called by each instrumented thread at its safe-point polling hook.
+        # One thread cannot claim a process-wide stop while peers still run.
+        def agent_thread_safe_point(registry: mutable AgentThreadRegistry&, thread_id: u64, now_ns: u64) -> ThreadStatus:
+            return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
+            return ThreadStatus.InvalidThreadId if thread_id == Identity::INVALID_THREAD_ID
+            slot: usize = find_thread_slot(registry, thread_id)
+            return ThreadStatus.UnknownThread if slot >= registry.active_count
+            return ThreadStatus.StopNotPending if not registry.stop_pending
+            if now_ns >= registry.stop_deadline_ns:
+                clear_stop_request(registry)
+                registry.last_stop_timed_out <- true
+                return ThreadStatus.StopTimedOut
+            return ThreadStatus.AlreadyParked if registry.threads[slot].state == ThreadState.Parked
+            return ThreadStatus.InvalidRegistry if registry.threads[slot].state != ThreadState.StopRequested
+            registry.threads[slot].state <- ThreadState.Parked
+            registry.stop_ready <- true if stop_is_fully_parked(registry)
+            return ThreadStatus.Applied
+
+        # A host event loop can expire a stalled stop even when a target thread
+        # has stopped polling. Expiration atomically releases already parked
+        # threads so a partial rendezvous never remains frozen.
+        def agent_threads_expire_stop(registry: mutable AgentThreadRegistry&, now_ns: u64) -> ThreadStatus:
+            return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
+            return ThreadStatus.StopNotPending if not registry.stop_pending
+            return ThreadStatus.StopAlreadyReady if registry.stop_ready
+            return ThreadStatus.StopNotReady if now_ns < registry.stop_deadline_ns
+            clear_stop_request(registry)
+            registry.last_stop_timed_out <- true
+            return ThreadStatus.StopTimedOut
+
+        def agent_threads_stop_is_ready(registry: AgentThreadRegistry&, generation: u64) -> bool:
+            return false if not agent_thread_registry_is_exact(registry)
+            return false if not registry.stop_pending or generation != registry.stop_generation
+            return registry.stop_ready and stop_is_fully_parked(registry)
+
+        def agent_threads_resume(registry: mutable AgentThreadRegistry&, generation: u64) -> ThreadStatus:
+            return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
+            return ThreadStatus.StopNotPending if not registry.stop_pending
+            return ThreadStatus.GenerationMismatch if generation != registry.stop_generation
+            return ThreadStatus.StopNotReady if not stop_is_fully_parked(registry)
+            clear_stop_request(registry)
+            return ThreadStatus.Applied
+
+        def agent_threads_live_count(registry: AgentThreadRegistry&) -> usize:
+            return registry.active_count
+
+        def agent_threads_parked_count(registry: AgentThreadRegistry&) -> usize:
+            count: mutable usize = RegistryCount::EMPTY
+            return count if not registry.stop_pending or not agent_thread_registry_is_exact(registry)
+            for index in Index::FIRST_SLOT..<registry.active_count:
+                count <- count + IndexStep::VALUE if registry.threads[index].state == ThreadState.Parked
+            return count

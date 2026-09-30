@@ -192,7 +192,7 @@ module DebuggerProtocolServer:
             return true if method == DebuggerProtocolRequest::RequestMethod.Launch or method == DebuggerProtocolRequest::RequestMethod.OpenTrace or method == DebuggerProtocolRequest::RequestMethod.Replay or method == DebuggerProtocolRequest::RequestMethod.Attach or method == DebuggerProtocolRequest::RequestMethod.Pause or method == DebuggerProtocolRequest::RequestMethod.Continue or method == DebuggerProtocolRequest::RequestMethod.Step or method == DebuggerProtocolRequest::RequestMethod.ReverseStep or method == DebuggerProtocolRequest::RequestMethod.ReverseStepOver or method == DebuggerProtocolRequest::RequestMethod.ReverseStepOut or method == DebuggerProtocolRequest::RequestMethod.Seek or method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints or method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints or method == DebuggerProtocolRequest::RequestMethod.Checkpoint or method == DebuggerProtocolRequest::RequestMethod.Branch or method == DebuggerProtocolRequest::RequestMethod.Detach or method == DebuggerProtocolRequest::RequestMethod.Terminate or method == DebuggerProtocolRequest::RequestMethod.Close or method == DebuggerProtocolRequest::RequestMethod.Cancel
             return false
 
-        def ownership_validation(request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands, session: DebuggerSession::Session, owner_active: bool, owner_token: u64) -> DebuggerErrors::DebuggerError:
+        def ownership_validation(request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands&, session: DebuggerSession::Session, owner_active: bool, owner_token: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::no_error() if not owner_active or not request_requires_session(request.method)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN) if not operands.has_session_id or operands.session_id != session.id.value
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_OWNER_TOKEN) if request_requires_owner(request.method) and (not operands.has_owner_token or operands.owner_token != owner_token)
@@ -335,7 +335,7 @@ module DebuggerProtocolServer:
             dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
             return TraceVerificationDispatch{dispatch: dispatch, payload: report}
 
-        def dispatch_expression_evaluation(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands) -> ExpressionEvaluationDispatch:
+        def dispatch_expression_evaluation(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands&) -> ExpressionEvaluationDispatch:
             if operands.has_expected_generation and request.expected_generation != service.controller.session.stop_generation:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::EVALUATE_STALE_GENERATION)
                 dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
@@ -348,7 +348,7 @@ module DebuggerProtocolServer:
             dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: true, stop_generation: service.controller.session.stop_generation, failure: DebuggerErrors::no_error()}
             return ExpressionEvaluationDispatch{dispatch: dispatch, payload: evaluation}
 
-        def dispatch_launch(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+        def dispatch_launch(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
             if not operands.valid or not operands.has_program:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_INVALID_LAUNCH_CONFIGURATION)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
@@ -382,7 +382,7 @@ module DebuggerProtocolServer:
             dispatch: DebuggerProtocolDispatcher::DispatchResult = DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
             return SourceBreakpointDispatch{dispatch: dispatch, payload: zeroed}
 
-        def dispatch_source_breakpoints(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands) -> SourceBreakpointDispatch:
+        def dispatch_source_breakpoints(service: mutable DebuggerManagedService::Service&, request: DebuggerProtocolRequest::Request, operands: DebuggerProtocolRequest::RequestOperands&) -> SourceBreakpointDispatch:
             return source_breakpoint_dispatch_error(service, request, DebuggerErrors::ErrorCode.InvalidArgument, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_INVALID_SOURCE_BREAKPOINTS) if not operands.source_breakpoints.valid or not operands.source_breakpoints.has_source_path or not operands.source_breakpoints.has_breakpoints
             if operands.has_expected_generation and request.expected_generation != service.controller.session.stop_generation:
                 return source_breakpoint_dispatch_error(service, request, DebuggerErrors::ErrorCode.StaleGeneration, ErrorDetail::PROTOCOL_SERVER_ERROR_DETAIL_STALE_SOURCE_BREAKPOINT_GENERATION)
@@ -437,9 +437,10 @@ module DebuggerProtocolServer:
                 for index in Index::FIRST..<count.usize():
                     completed: bool = DebuggerProtocolFraming::frame_decoder_accept(decoder, chunk[index])
                     if completed:
-                        request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::request_parse(decoder.payload[Index::FIRST], DebuggerProtocolFraming::frame_decoder_length(decoder))
+                        request: mutable DebuggerProtocolRequest::Request = zeroed
+                        operands: mutable DebuggerProtocolRequest::RequestOperands = zeroed
+                        DebuggerProtocolRequest::request_and_operands_parse(decoder.payload[Index::FIRST], DebuggerProtocolFraming::frame_decoder_length(decoder), request, operands)
                         return ServerProcess::SERVER_INVALID_FRAME_EXIT_CODE if not request.valid and not request.has_id
-                        operands: DebuggerProtocolRequest::RequestOperands = DebuggerProtocolRequest::request_operands_parse(decoder.payload[Index::FIRST], DebuggerProtocolFraming::frame_decoder_length(decoder))
                         result: mutable DebuggerProtocolDispatcher::DispatchResult = zeroed
                         initialization: mutable InitializationResponse = zeroed
                         source_breakpoint_payload: mutable DebuggerManagedService::SourceBreakpointResult = zeroed

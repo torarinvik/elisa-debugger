@@ -1160,6 +1160,29 @@ module DebuggerProtocolRequest:
             operands.has_protocol_minor <- true
             return true
 
+        def request_operands_parse_validated(payload: u8&, length: usize, request: Request&, operands: mutable RequestOperands&) -> void:
+            operands <- zeroed
+            operands.program <- invalid_program_path()
+            return if not request.valid
+            root_start: mutable usize = 0
+            while root_start < length and is_json_whitespace(payload[root_start]):
+                root_start <- root_start + 1
+            expected_generation: usize = request_object_field_value_start(payload, length, root_start, "expectedStopGeneration", 0)
+            operands.has_expected_generation <- expected_generation != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            arguments: usize = request_object_field_value_start(payload, length, root_start, "arguments", 0)
+            return if request_object_field_value_start(payload, length, root_start, "arguments", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
+            if arguments != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
+                return if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
+            return if request.method == RequestMethod.Launch and not operands.has_program
+            return if request.method == RequestMethod.Evaluate and (arguments == JsonParser::REQUEST_JSONPARSER_NO_INDEX or not operands.has_expression)
+            return if request.method == RequestMethod.Variables and not operands.has_variables_reference
+            return if request.method == RequestMethod.Memory and (not operands.has_memory_address or not operands.has_memory_length)
+            return if not request_session_operands_parse(payload, length, root_start, operands)
+            return if not request_initialization_version_parse(payload, length, root_start, request.method, operands)
+            return if not request_pagination_operands_parse(payload, length, root_start, operands)
+            operands.valid <- true
+            return
+
     public:
         def request_has_object_shape(payload: u8&, length: usize) -> bool:
             return false if length < 2
@@ -1463,32 +1486,11 @@ module DebuggerProtocolRequest:
             return invalid_request() if target_field_seen and not target_has_digits
             return request
 
-        # Parse the ordinary protocol envelope's launch and pagination
-        # operands. Launch requires one arguments.program path; other methods
-        # may omit it. Paths are decoded as bounded UTF-8 filesystem paths.
-        def request_operands_parse(payload: u8&, length: usize) -> RequestOperands:
-            operands: mutable RequestOperands = zeroed
-            operands.program <- invalid_program_path()
-            request: Request = request_parse(payload, length)
-            return operands if not request.valid
-            root_start: mutable usize = 0
-            while root_start < length and is_json_whitespace(payload[root_start]):
-                root_start <- root_start + 1
-            expected_generation: usize = request_object_field_value_start(payload, length, root_start, "expectedStopGeneration", 0)
-            operands.has_expected_generation <- expected_generation != JsonParser::REQUEST_JSONPARSER_NO_INDEX
-            arguments: usize = request_object_field_value_start(payload, length, root_start, "arguments", 0)
-            return operands if request_object_field_value_start(payload, length, root_start, "arguments", 1) != JsonParser::REQUEST_JSONPARSER_NO_INDEX
-            if arguments != JsonParser::REQUEST_JSONPARSER_NO_INDEX:
-                return operands if not request_arguments_operands_parse(payload, length, arguments, request.method, operands)
-            return operands if request.method == RequestMethod.Launch and not operands.has_program
-            return operands if request.method == RequestMethod.Evaluate and (arguments == JsonParser::REQUEST_JSONPARSER_NO_INDEX or not operands.has_expression)
-            return operands if request.method == RequestMethod.Variables and not operands.has_variables_reference
-            return operands if request.method == RequestMethod.Memory and (not operands.has_memory_address or not operands.has_memory_length)
-            return operands if not request_session_operands_parse(payload, length, root_start, operands)
-            return operands if not request_initialization_version_parse(payload, length, root_start, request.method, operands)
-            return operands if not request_pagination_operands_parse(payload, length, root_start, operands)
-            operands.valid <- true
-            return operands
+        # Parse the envelope and its operands as one operation so callers can
+        # reuse the validated request without supplying a mismatched payload.
+        def request_and_operands_parse(payload: u8&, length: usize, request: mutable Request&, operands: mutable RequestOperands&) -> void:
+            request <- request_parse(payload, length)
+            request_operands_parse_validated(payload, length, request, operands)
 
         def source_breakpoint_request_capacity() -> usize:
             return RequestLimits::REQUEST_LIMITS_SOURCE_BREAKPOINT_COUNT_MAX

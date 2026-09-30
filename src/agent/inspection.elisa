@@ -10,23 +10,35 @@ module DebuggerAgentInspection:
             NO_GENERATION: u64 = 0
             NO_THREAD_ID: u64 = 0
 
+        def inspection_snapshot_status(shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, generation: u64) -> DebuggerAgentFrames::ShadowStatus:
+            return DebuggerAgentFrames::ShadowStatus.InvalidStack if not DebuggerAgentFrames::agent_shadow_stack_is_exact(shadow_stack)
+            return DebuggerAgentFrames::ShadowStatus.InvalidRegistry if not DebuggerAgentThreads::agent_thread_registry_is_exact(registry)
+            return DebuggerAgentFrames::ShadowStatus.InvalidIdentifier if shadow_stack.thread.value == InspectionSentinel::NO_THREAD_ID
+            return DebuggerAgentFrames::ShadowStatus.SnapshotRequired if generation == InspectionSentinel::NO_GENERATION or not registry.stop_pending
+            return DebuggerAgentFrames::ShadowStatus.GenerationMismatch if generation != registry.stop_generation or generation != shadow_stack.active_stop_generation
+            return DebuggerAgentFrames::ShadowStatus.ThreadNotParked if not DebuggerAgentThreads::agent_thread_is_parked_for_generation(registry, shadow_stack.thread.value, generation)
+            return DebuggerAgentFrames::ShadowStatus.RendezvousIncomplete if not DebuggerAgentThreads::agent_threads_stop_is_ready(registry, generation)
+            return DebuggerAgentFrames::ShadowStatus.Ready
+
     public:
         # Return a local only after its owning thread and every registered
         # target thread are parked for the same active generation.
         def agent_inspection_read_binding(shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, generation: u64) -> DebuggerAgentFrames::BindingReadResult:
             result: mutable DebuggerAgentFrames::BindingReadResult = zeroed
-            result.status <- DebuggerAgentFrames::ShadowStatus.InvalidStack
-            return result if not DebuggerAgentFrames::agent_shadow_stack_is_exact(shadow_stack)
-            result.status <- DebuggerAgentFrames::ShadowStatus.InvalidRegistry
-            return result if not DebuggerAgentThreads::agent_thread_registry_is_exact(registry)
-            result.status <- DebuggerAgentFrames::ShadowStatus.InvalidIdentifier
-            return result if shadow_stack.thread.value == InspectionSentinel::NO_THREAD_ID
-            result.status <- DebuggerAgentFrames::ShadowStatus.SnapshotRequired
-            return result if generation == InspectionSentinel::NO_GENERATION or not registry.stop_pending
-            result.status <- DebuggerAgentFrames::ShadowStatus.GenerationMismatch
-            return result if generation != registry.stop_generation or generation != shadow_stack.active_stop_generation
-            result.status <- DebuggerAgentFrames::ShadowStatus.ThreadNotParked
-            return result if not DebuggerAgentThreads::agent_thread_is_parked_for_generation(registry, shadow_stack.thread.value, generation)
-            result.status <- DebuggerAgentFrames::ShadowStatus.RendezvousIncomplete
-            return result if not DebuggerAgentThreads::agent_threads_stop_is_ready(registry, generation)
+            result.status <- inspection_snapshot_status(shadow_stack, registry, generation)
+            return result if result.status != DebuggerAgentFrames::ShadowStatus.Ready
             return DebuggerAgentFrames::agent_shadow_binding_read(shadow_stack, invocation, binding, generation)
+
+        # Frame headers and locals are read separately so an adapter can page
+        # without copying the entire fixed-size shadow stack.
+        def agent_inspection_read_frame(shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, frame_index_value: usize, generation: u64) -> DebuggerAgentFrames::FrameReadResult:
+            result: mutable DebuggerAgentFrames::FrameReadResult = zeroed
+            result.status <- inspection_snapshot_status(shadow_stack, registry, generation)
+            return result if result.status != DebuggerAgentFrames::ShadowStatus.Ready
+            return DebuggerAgentFrames::agent_shadow_frame_read(shadow_stack, frame_index_value, generation)
+
+        def agent_inspection_read_binding_at(shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, invocation: DebuggerIdentity::DebugId, binding_ordinal: usize, generation: u64) -> DebuggerAgentFrames::BindingReadResult:
+            result: mutable DebuggerAgentFrames::BindingReadResult = zeroed
+            result.status <- inspection_snapshot_status(shadow_stack, registry, generation)
+            return result if result.status != DebuggerAgentFrames::ShadowStatus.Ready
+            return DebuggerAgentFrames::agent_shadow_binding_at(shadow_stack, invocation, binding_ordinal, generation)

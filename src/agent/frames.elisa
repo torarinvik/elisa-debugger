@@ -61,6 +61,12 @@ module DebuggerAgentFrames:
                     return false if frame.bindings[index].binding.value == frame.bindings[other_index].binding.value
             return true
 
+        def snapshot_access_status(shadow_stack: AgentShadowStack&, generation: u64) -> ShadowStatus:
+            return ShadowStatus.InvalidStack if not agent_shadow_stack_is_exact(shadow_stack)
+            return ShadowStatus.SnapshotRequired if generation == StackGeneration::NO_GENERATION or shadow_stack.active_stop_generation == StackGeneration::NO_GENERATION
+            return ShadowStatus.GenerationMismatch if generation != shadow_stack.active_stop_generation
+            return ShadowStatus.Ready
+
     public:
         enum AgentValueKind:
             Void
@@ -109,6 +115,7 @@ module DebuggerAgentFrames:
             GenerationMismatch
             RendezvousIncomplete
             ThreadNotParked
+            FrameIndexOutOfRange
             Frozen
             SnapshotRequired
             ValueNotAvailable
@@ -141,6 +148,20 @@ module DebuggerAgentFrames:
             active_stop_generation: mutable u64
             last_stop_generation: mutable u64
             frames: mutable AgentShadowFrame[FrameCapacity::MAX_ACTIVE_FRAMES]
+
+        struct AgentShadowFrameInfo:
+            invocation: mutable DebuggerIdentity::DebugId
+            parent_invocation: mutable DebuggerIdentity::DebugId
+            function: mutable DebuggerIdentity::DebugId
+            task: mutable DebuggerIdentity::DebugId
+            source_file: mutable DebuggerIdentity::DebugId
+            source_line: mutable u32
+            source_column: mutable u32
+            binding_count: mutable usize
+
+        struct FrameReadResult:
+            status: mutable ShadowStatus
+            frame: mutable AgentShadowFrameInfo
 
         struct BindingReadResult:
             status: mutable ShadowStatus
@@ -302,14 +323,11 @@ module DebuggerAgentFrames:
 
         def agent_shadow_binding_read(shadow_stack: AgentShadowStack&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, generation: u64) -> BindingReadResult:
             unavailable: mutable BindingReadResult = zeroed
-            unavailable.status <- ShadowStatus.InvalidStack
-            return unavailable if not agent_shadow_stack_is_exact(shadow_stack)
+            snapshot_status: ShadowStatus = snapshot_access_status(shadow_stack, generation)
+            unavailable.status <- snapshot_status
+            return unavailable if snapshot_status != ShadowStatus.Ready
             unavailable.status <- ShadowStatus.InvalidIdentifier
             return unavailable if invocation.value == Identifier::NO_ID or binding.value == Identifier::NO_ID
-            unavailable.status <- ShadowStatus.SnapshotRequired
-            return unavailable if generation == StackGeneration::NO_GENERATION or shadow_stack.active_stop_generation == StackGeneration::NO_GENERATION
-            unavailable.status <- ShadowStatus.GenerationMismatch
-            return unavailable if generation != shadow_stack.active_stop_generation
             frame_slot: usize = frame_index(shadow_stack, invocation)
             unavailable.status <- ShadowStatus.UnknownInvocation
             return unavailable if frame_slot >= shadow_stack.frame_count
@@ -318,6 +336,36 @@ module DebuggerAgentFrames:
             return unavailable if binding_slot >= shadow_stack.frames[frame_slot].binding_count
             result: mutable BindingReadResult = zeroed
             result.descriptor <- shadow_stack.frames[frame_slot].bindings[binding_slot]
+            result.status <- ShadowStatus.ValueNotAvailable if result.descriptor.state != AgentValueState.Available
+            result.status <- ShadowStatus.Ready if result.descriptor.state == AgentValueState.Available
+            return result
+
+        # Read one frame header by stable root-to-current index. The caller
+        # can page through without copying the fixed binding table.
+        def agent_shadow_frame_read(shadow_stack: AgentShadowStack&, frame_index_value: usize, generation: u64) -> FrameReadResult:
+            result: mutable FrameReadResult = zeroed
+            result.status <- snapshot_access_status(shadow_stack, generation)
+            return result if result.status != ShadowStatus.Ready
+            result.status <- ShadowStatus.FrameIndexOutOfRange
+            return result if frame_index_value >= shadow_stack.frame_count
+            result.frame <- AgentShadowFrameInfo{invocation: shadow_stack.frames[frame_index_value].invocation, parent_invocation: shadow_stack.frames[frame_index_value].parent_invocation, function: shadow_stack.frames[frame_index_value].function, task: shadow_stack.frames[frame_index_value].task, source_file: shadow_stack.frames[frame_index_value].source_file, source_line: shadow_stack.frames[frame_index_value].source_line, source_column: shadow_stack.frames[frame_index_value].source_column, binding_count: shadow_stack.frames[frame_index_value].binding_count}
+            result.status <- ShadowStatus.Ready
+            return result
+
+        # Read one local by its frame-relative ordinal. This lets adapters
+        # enumerate names through build metadata without copying a whole frame.
+        def agent_shadow_binding_at(shadow_stack: AgentShadowStack&, invocation: DebuggerIdentity::DebugId, binding_ordinal: usize, generation: u64) -> BindingReadResult:
+            result: mutable BindingReadResult = zeroed
+            result.status <- snapshot_access_status(shadow_stack, generation)
+            return result if result.status != ShadowStatus.Ready
+            result.status <- ShadowStatus.InvalidIdentifier
+            return result if invocation.value == Identifier::NO_ID
+            frame_slot: usize = frame_index(shadow_stack, invocation)
+            result.status <- ShadowStatus.UnknownInvocation
+            return result if frame_slot >= shadow_stack.frame_count
+            result.status <- ShadowStatus.UnknownBinding
+            return result if binding_ordinal >= shadow_stack.frames[frame_slot].binding_count
+            result.descriptor <- shadow_stack.frames[frame_slot].bindings[binding_ordinal]
             result.status <- ShadowStatus.ValueNotAvailable if result.descriptor.state != AgentValueState.Available
             result.status <- ShadowStatus.Ready if result.descriptor.state == AgentValueState.Available
             return result

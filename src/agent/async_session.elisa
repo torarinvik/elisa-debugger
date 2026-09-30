@@ -2,12 +2,14 @@
 # nonblocking transport operation and retains partial frame progress.
 
 include "./session.elisa"
+include "./snapshot_wire.elisa"
 
 module DebuggerAgentAsyncSession:
     private:
         const module AsyncFrame:
-            CAPACITY: usize = 32
+            CAPACITY: usize = DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_MESSAGE_BYTES
             BYTE_COUNT: usize = 32
+            TRANSMIT_CAPACITY: usize = DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_REQUEST_BYTES
             FIRST_BYTE: usize = 0
             EMPTY_LENGTH: usize = 0
             OFFSET_INCREMENT: usize = 1
@@ -17,16 +19,25 @@ module DebuggerAgentAsyncSession:
 
         const module AsyncProtocol:
             CONTROL_ACKNOWLEDGEMENT_MINOR: u32 = 4
+            SNAPSHOT_PAGE_MINOR: u32 = 5
 
         def operation_result(status: AsyncStatus, detail: DebuggerAgentSession::SessionStatus, transport_status: DebuggerLocalAgentTransport::TransportStatus, wire_status: DebuggerAgentWire::WireStatus) -> AsyncResult:
-            return AsyncResult{status: status, detail: detail, transport_status: transport_status, wire_status: wire_status}
+            result: mutable AsyncResult = zeroed
+            result.status <- status
+            result.detail <- detail
+            result.transport_status <- transport_status
+            result.wire_status <- wire_status
+            result.snapshot_wire_status <- DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+            return result
 
         def ready_result(status: AsyncStatus) -> AsyncResult:
             return operation_result(status, DebuggerAgentSession::SessionStatus.Ready, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
 
         def prepare_request(session: mutable AsyncSession&, bytes: u8&, length: usize, operation: AsyncOperation, deadline_ns: u64) -> AsyncResult:
-            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.InvalidTransferLength, DebuggerLocalAgentTransport::TransportStatus.InvalidArgument, DebuggerAgentWire::WireStatus.Ready) if length != AsyncFrame::BYTE_COUNT
-            for index in AsyncFrame::FIRST_BYTE..<AsyncFrame::BYTE_COUNT:
+            expected_length: mutable usize = AsyncFrame::BYTE_COUNT
+            expected_length <- DebuggerAgentSnapshotWire::snapshot_page_request_length() if operation == AsyncOperation.SnapshotPage
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.InvalidTransferLength, DebuggerLocalAgentTransport::TransportStatus.InvalidArgument, DebuggerAgentWire::WireStatus.Ready) if length != expected_length
+            for index in AsyncFrame::FIRST_BYTE..<length:
                 session.transmit_bytes[index] <- bytes[index]
             session.transmit_length <- length
             session.transmit_offset <- AsyncFrame::EMPTY_LENGTH
@@ -40,6 +51,7 @@ module DebuggerAgentAsyncSession:
             session.transmit_length <- AsyncFrame::EMPTY_LENGTH
             session.transmit_offset <- AsyncFrame::EMPTY_LENGTH
             session.receive_length <- AsyncFrame::EMPTY_LENGTH
+            session.snapshot_message_length <- AsyncFrame::EMPTY_LENGTH
             session.deadline_ns <- Deadline::NONE
             session.operation <- AsyncOperation.None
             session.state <- AsyncState.Idle
@@ -57,9 +69,15 @@ module DebuggerAgentAsyncSession:
         def pending_operation(transport_status: DebuggerLocalAgentTransport::TransportStatus) -> AsyncResult:
             return operation_result(AsyncStatus.Pending, DebuggerAgentSession::SessionStatus.Ready, transport_status, DebuggerAgentWire::WireStatus.Ready)
 
-        def decode_received_frame(session: mutable AsyncSession&, controller: mutable DebuggerNative::NativeController&) -> AsyncResult:
+        def fail_snapshot_operation(session: mutable AsyncSession&, status: AsyncStatus, wire_status: DebuggerAgentSnapshotWire::SnapshotWireStatus) -> AsyncResult:
+            session.state <- AsyncState.Failed
+            result: mutable AsyncResult = operation_result(status, DebuggerAgentSession::SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
+            result.snapshot_wire_status <- wire_status
+            return result
+
+        def decode_received_frame(session: mutable AsyncSession&, controller: mutable DebuggerNative::NativeController&, read_storage: mutable AsyncReadStorage&) -> AsyncResult:
             if session.operation == AsyncOperation.Handshake:
-                response: DebuggerAgentWire::DecodedAgentHello = DebuggerAgentWire::agent_hello_response_decode(session.receive_bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
+                response: DebuggerAgentWire::DecodedAgentHello = DebuggerAgentWire::agent_hello_response_decode(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
                 return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, response.status) if response.status != DebuggerAgentWire::WireStatus.Ready
                 negotiated: DebuggerAgentHandshake::NegotiatedProtocol = DebuggerAgentHandshake::agent_handshake_negotiate(session.local_hello, response.hello, session.required_capabilities)
                 return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.NegotiationRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
@@ -68,13 +86,19 @@ module DebuggerAgentAsyncSession:
                 return complete_operation(session)
 
             if session.state == AsyncState.ReadingStopAcknowledgement:
-                acknowledgement: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(session.receive_bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
+                acknowledgement: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
                 return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, acknowledgement.status) if acknowledgement.status != DebuggerAgentWire::WireStatus.Ready
                 controller <- DebuggerNative::native_acknowledge_pause(controller, acknowledgement.acknowledgement)
                 return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Stopped
                 return complete_operation(session)
 
-            acknowledgement: DebuggerAgentWire::DecodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_decode(session.receive_bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
+            if session.operation == AsyncOperation.SnapshotPage:
+                snapshot_status: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_frame_page_decode(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length, read_storage.snapshot_page)
+                return fail_snapshot_operation(session, AsyncStatus.Failed, snapshot_status) if snapshot_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+                return fail_snapshot_operation(session, AsyncStatus.Failed, DebuggerAgentSnapshotWire::SnapshotWireStatus.GenerationMismatch) if read_storage.snapshot_page.generation != session.request_generation
+                return complete_operation(session)
+
+            acknowledgement: DebuggerAgentWire::DecodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_decode(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length)
             return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, acknowledgement.status) if acknowledgement.status != DebuggerAgentWire::WireStatus.Ready
             expected_kind: mutable DebuggerAgentWire::AgentControlKind = DebuggerAgentWire::AgentControlKind.StopRequest
             expected_kind <- DebuggerAgentWire::AgentControlKind.ResumeRequest if session.operation == AsyncOperation.Resume
@@ -89,9 +113,43 @@ module DebuggerAgentAsyncSession:
             return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Attached
             return complete_operation(session)
 
+        def async_snapshot_page_receive_step(session: mutable AsyncSession&, transport: mutable DebuggerLocalAgentTransport::LocalAgentSession&, controller: mutable DebuggerNative::NativeController&, read_storage: mutable AsyncReadStorage&) -> AsyncResult can[Unsafe.PointerCast]:
+            if session.snapshot_message_length == AsyncFrame::EMPTY_LENGTH and session.receive_length >= AsyncFrame::BYTE_COUNT:
+                expected_length: mutable usize = AsyncFrame::EMPTY_LENGTH
+                expected_status: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_page_expected_length(read_storage.bytes[AsyncFrame::FIRST_BYTE], AsyncFrame::BYTE_COUNT, session.request_generation, expected_length)
+                return fail_snapshot_operation(session, AsyncStatus.Failed, expected_status) if expected_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+                session.snapshot_message_length <- expected_length
+                return decode_received_frame(session, controller, read_storage) if session.receive_length == expected_length
+
+            receive_limit: mutable usize = AsyncFrame::BYTE_COUNT
+            receive_limit <- session.snapshot_message_length if session.snapshot_message_length != AsyncFrame::EMPTY_LENGTH
+            return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.InvalidTransferLength, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if session.receive_length >= receive_limit
+            receive_capacity: usize = receive_limit - session.receive_length
+            received: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_try_receive(transport, read_storage.bytes[session.receive_length], receive_capacity) can Unsafe.PointerCast
+            if received.status == DebuggerLocalAgentTransport::TransportStatus.WouldBlock or received.status == DebuggerLocalAgentTransport::TransportStatus.Interrupted:
+                return pending_operation(received.status)
+            return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.TransportRejected, received.status, DebuggerAgentWire::WireStatus.Ready) if received.status != DebuggerLocalAgentTransport::TransportStatus.Ready or received.bytes_transferred == AsyncFrame::EMPTY_LENGTH
+            session.receive_length <- session.receive_length + received.bytes_transferred
+            return pending_operation(DebuggerLocalAgentTransport::TransportStatus.Ready) if session.receive_length < receive_limit
+
+            if session.snapshot_message_length == AsyncFrame::EMPTY_LENGTH:
+                expected_length: mutable usize = AsyncFrame::EMPTY_LENGTH
+                expected_status: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_page_expected_length(read_storage.bytes[AsyncFrame::FIRST_BYTE], session.receive_length, session.request_generation, expected_length)
+                return fail_snapshot_operation(session, AsyncStatus.Failed, expected_status) if expected_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+                session.snapshot_message_length <- expected_length
+                return pending_operation(DebuggerLocalAgentTransport::TransportStatus.Ready) if session.receive_length < session.snapshot_message_length
+            if session.receive_length == session.snapshot_message_length:
+                return decode_received_frame(session, controller, read_storage)
+            return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.InvalidTransferLength, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
+
         def control_capability_is_ready(negotiated: DebuggerAgentHandshake::NegotiatedProtocol&) -> bool:
             return false if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
             required: u64 = DebuggerAgentHandshake::Capability::STOP_CONTROL
+            return (negotiated.capabilities & required) == required
+
+        def snapshot_page_capability_is_ready(negotiated: DebuggerAgentHandshake::NegotiatedProtocol&) -> bool:
+            return false if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
+            required: u64 = DebuggerAgentHandshake::Capability::SNAPSHOT_PAGE_READ
             return (negotiated.capabilities & required) == required
 
     public:
@@ -100,6 +158,7 @@ module DebuggerAgentAsyncSession:
             WritingRequest
             ReadingResponse
             ReadingStopAcknowledgement
+            ReadingSnapshotPage
             Failed
 
         enum AsyncOperation:
@@ -107,6 +166,7 @@ module DebuggerAgentAsyncSession:
             Handshake
             Pause
             Resume
+            SnapshotPage
 
         enum AsyncInterest:
             NoInterest
@@ -127,21 +187,26 @@ module DebuggerAgentAsyncSession:
             detail: mutable DebuggerAgentSession::SessionStatus
             transport_status: mutable DebuggerLocalAgentTransport::TransportStatus
             wire_status: mutable DebuggerAgentWire::WireStatus
+            snapshot_wire_status: mutable DebuggerAgentSnapshotWire::SnapshotWireStatus
 
         struct AsyncSession:
             state: mutable AsyncState
             operation: mutable AsyncOperation
-            transmit_bytes: mutable u8[AsyncFrame::CAPACITY]
+            transmit_bytes: mutable u8[AsyncFrame::TRANSMIT_CAPACITY]
             transmit_length: mutable usize
             transmit_offset: mutable usize
-            receive_bytes: mutable u8[AsyncFrame::CAPACITY]
             receive_length: mutable usize
+            snapshot_message_length: mutable usize
             deadline_ns: mutable u64
             local_hello: mutable DebuggerAgentWire::AgentHello
             required_capabilities: mutable u64
             negotiated: mutable DebuggerAgentHandshake::NegotiatedProtocol
             handshake_complete: mutable bool
             request_generation: mutable u64
+
+        struct AsyncReadStorage:
+            snapshot_page: mutable DebuggerAgentSnapshotWire::DecodedSnapshotPage
+            bytes: mutable u8[AsyncFrame::CAPACITY]
 
         def async_session_initialize(session: mutable AsyncSession&) -> void:
             session <- zeroed
@@ -150,19 +215,29 @@ module DebuggerAgentAsyncSession:
             session.transmit_length <- AsyncFrame::EMPTY_LENGTH
             session.transmit_offset <- AsyncFrame::EMPTY_LENGTH
             session.receive_length <- AsyncFrame::EMPTY_LENGTH
+            session.snapshot_message_length <- AsyncFrame::EMPTY_LENGTH
             session.deadline_ns <- Deadline::NONE
             session.negotiated.status <- DebuggerAgentHandshake::HandshakeStatus.InvalidProtocolMajor
 
+        def async_read_storage_initialize(storage: mutable AsyncReadStorage&) -> void:
+            storage <- zeroed
+            storage.snapshot_page.status <- DebuggerAgentSnapshotWire::SnapshotWireStatus.InvalidLength
+
         def async_session_is_exact(session: AsyncSession&) -> bool:
-            return false if session.transmit_length > AsyncFrame::BYTE_COUNT or session.transmit_offset > session.transmit_length or session.receive_length > AsyncFrame::BYTE_COUNT
+            return false if session.transmit_length > AsyncFrame::TRANSMIT_CAPACITY or session.transmit_offset > session.transmit_length or session.receive_length > AsyncFrame::CAPACITY or session.snapshot_message_length > AsyncFrame::CAPACITY
+            return false if session.operation != AsyncOperation.SnapshotPage and session.receive_length > AsyncFrame::BYTE_COUNT
             return false if session.handshake_complete != (session.negotiated.status == DebuggerAgentHandshake::HandshakeStatus.Ready)
             if session.state == AsyncState.Idle:
-                return session.operation == AsyncOperation.None and session.transmit_length == AsyncFrame::EMPTY_LENGTH and session.transmit_offset == AsyncFrame::EMPTY_LENGTH and session.receive_length == AsyncFrame::EMPTY_LENGTH and session.deadline_ns == Deadline::NONE
+                return session.operation == AsyncOperation.None and session.transmit_length == AsyncFrame::EMPTY_LENGTH and session.transmit_offset == AsyncFrame::EMPTY_LENGTH and session.receive_length == AsyncFrame::EMPTY_LENGTH and session.snapshot_message_length == AsyncFrame::EMPTY_LENGTH and session.deadline_ns == Deadline::NONE
             return false if session.state == AsyncState.Failed
             return false if session.operation == AsyncOperation.None or session.deadline_ns == Deadline::NONE
-            return false if session.state == AsyncState.WritingRequest and (session.transmit_length != AsyncFrame::BYTE_COUNT or session.transmit_offset >= session.transmit_length)
+            expected_transmit_length: mutable usize = AsyncFrame::BYTE_COUNT
+            expected_transmit_length <- DebuggerAgentSnapshotWire::snapshot_page_request_length() if session.operation == AsyncOperation.SnapshotPage
+            return false if session.state == AsyncState.WritingRequest and (session.transmit_length != expected_transmit_length or session.transmit_offset >= session.transmit_length)
             return false if session.state != AsyncState.WritingRequest and session.transmit_offset != session.transmit_length
             return false if session.state == AsyncState.ReadingStopAcknowledgement and session.operation != AsyncOperation.Pause
+            return false if session.state == AsyncState.ReadingSnapshotPage and session.operation != AsyncOperation.SnapshotPage
+            return false if session.state == AsyncState.ReadingSnapshotPage and session.snapshot_message_length != AsyncFrame::EMPTY_LENGTH and session.receive_length > session.snapshot_message_length
             return true
 
         # Start negotiation without reading or writing the socket. `deadline_ns`
@@ -206,9 +281,30 @@ module DebuggerAgentAsyncSession:
             session.request_generation <- request.generation
             return prepare_request(session, encoded.bytes[AsyncFrame::FIRST_BYTE], encoded.length, AsyncOperation.Resume, deadline_ns)
 
+        # Start one bounded frame/local page read from a stopped target. The
+        # read is generation-correlated and never changes native controller
+        # state on timeout or cancellation.
+        def async_snapshot_page_begin(session: mutable AsyncSession&, controller: mutable DebuggerNative::NativeController&, request: DebuggerAgentSnapshotWire::SnapshotPageRequest, read_storage: mutable AsyncReadStorage&, now_ns: u64, deadline_ns: u64) -> AsyncResult:
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if not async_session_is_exact(session) or session.state != AsyncState.Idle or not session.handshake_complete
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.UnsupportedSnapshotPageProtocol, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if session.negotiated.protocol_minor < AsyncProtocol::SNAPSHOT_PAGE_MINOR
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.MissingSnapshotReadCapability, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if not snapshot_page_capability_is_ready(session.negotiated)
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.agent.protocol_major != session.negotiated.protocol_major or deadline_ns <= now_ns
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerNative::native_can_inspect(controller)
+            return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.ResponseMismatch, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if request.generation != DebuggerNative::native_pending_stop_generation(controller)
+            encoded: DebuggerAgentSnapshotWire::EncodedSnapshotPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_page_request_encode(request)
+            if encoded.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready:
+                rejected: mutable AsyncResult = operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
+                rejected.snapshot_wire_status <- encoded.status
+                return rejected
+            session.request_generation <- request.generation
+            session.snapshot_message_length <- AsyncFrame::EMPTY_LENGTH
+            read_storage.snapshot_page.status <- DebuggerAgentSnapshotWire::SnapshotWireStatus.InvalidLength
+            prepared: AsyncResult = prepare_request(session, encoded.bytes[AsyncFrame::FIRST_BYTE], encoded.length, AsyncOperation.SnapshotPage, deadline_ns)
+            return prepared
+
         # Call after the host event loop signals channel readiness. This step
         # performs no blocking I/O and preserves partial stream-frame progress.
-        def async_session_poll(session: mutable AsyncSession&, transport: mutable DebuggerLocalAgentTransport::LocalAgentSession&, controller: mutable DebuggerNative::NativeController&, now_ns: u64) -> AsyncResult can[Unsafe.PointerCast]:
+        def async_session_poll(session: mutable AsyncSession&, transport: mutable DebuggerLocalAgentTransport::LocalAgentSession&, controller: mutable DebuggerNative::NativeController&, read_storage: mutable AsyncReadStorage&, now_ns: u64) -> AsyncResult can[Unsafe.PointerCast]:
             return operation_result(AsyncStatus.Rejected, DebuggerAgentSession::SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.InvalidState, DebuggerAgentWire::WireStatus.Ready) if not async_session_is_exact(session) or session.state == AsyncState.Idle or session.state == AsyncState.Failed
             if now_ns >= session.deadline_ns:
                 return fail_operation(session, controller, AsyncStatus.TimedOut, DebuggerAgentSession::SessionStatus.TransportRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
@@ -222,17 +318,21 @@ module DebuggerAgentAsyncSession:
                 session.transmit_offset <- session.transmit_offset + transfer.bytes_transferred
                 return pending_operation(DebuggerLocalAgentTransport::TransportStatus.Ready) if session.transmit_offset < session.transmit_length
                 session.state <- AsyncState.ReadingResponse
+                session.state <- AsyncState.ReadingSnapshotPage if session.operation == AsyncOperation.SnapshotPage
                 return pending_operation(DebuggerLocalAgentTransport::TransportStatus.Ready)
+
+            if session.state == AsyncState.ReadingSnapshotPage:
+                return async_snapshot_page_receive_step(session, transport, controller, read_storage) can Unsafe.PointerCast
 
             return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.InvalidTransferLength, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if session.receive_length >= AsyncFrame::BYTE_COUNT
             receive_capacity: usize = AsyncFrame::BYTE_COUNT - session.receive_length
-            received: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_try_receive(transport, session.receive_bytes[session.receive_length], receive_capacity) can Unsafe.PointerCast
+            received: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_try_receive(transport, read_storage.bytes[session.receive_length], receive_capacity) can Unsafe.PointerCast
             if received.status == DebuggerLocalAgentTransport::TransportStatus.WouldBlock or received.status == DebuggerLocalAgentTransport::TransportStatus.Interrupted:
                 return pending_operation(received.status)
             return fail_operation(session, controller, AsyncStatus.Failed, DebuggerAgentSession::SessionStatus.TransportRejected, received.status, DebuggerAgentWire::WireStatus.Ready) if received.status != DebuggerLocalAgentTransport::TransportStatus.Ready or received.bytes_transferred == AsyncFrame::EMPTY_LENGTH
             session.receive_length <- session.receive_length + received.bytes_transferred
             return pending_operation(DebuggerLocalAgentTransport::TransportStatus.Ready) if session.receive_length < AsyncFrame::BYTE_COUNT
-            return decode_received_frame(session, controller)
+            return decode_received_frame(session, controller, read_storage)
 
         # Cancellation is terminal for an in-flight command because the target
         # may already have received some bytes. Mark command operations failed
@@ -244,9 +344,15 @@ module DebuggerAgentAsyncSession:
         def async_session_is_ready(session: AsyncSession&) -> bool:
             return session.state == AsyncState.Idle and session.handshake_complete and session.negotiated.status == DebuggerAgentHandshake::HandshakeStatus.Ready
 
+        def async_session_snapshot_page_status(session: AsyncSession&, read_storage: AsyncReadStorage&, generation: u64) -> DebuggerAgentSnapshotWire::SnapshotWireStatus:
+            return DebuggerAgentSnapshotWire::SnapshotWireStatus.SnapshotUnavailable if not async_session_is_exact(session) or session.state != AsyncState.Idle
+            return read_storage.snapshot_page.status if read_storage.snapshot_page.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+            return DebuggerAgentSnapshotWire::SnapshotWireStatus.GenerationMismatch if read_storage.snapshot_page.generation != generation
+            return DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+
         # Stable readiness hint for host event loops. The transport descriptor
         # remains owned by LocalAgentSession; this reports which edge to watch.
         def async_session_interest(session: AsyncSession&) -> AsyncInterest:
             return AsyncInterest.Writable if session.state == AsyncState.WritingRequest
-            return AsyncInterest.Readable if session.state == AsyncState.ReadingResponse or session.state == AsyncState.ReadingStopAcknowledgement
+            return AsyncInterest.Readable if session.state == AsyncState.ReadingResponse or session.state == AsyncState.ReadingStopAcknowledgement or session.state == AsyncState.ReadingSnapshotPage
             return AsyncInterest.NoInterest

@@ -33,7 +33,7 @@ module DebuggerAgentSnapshotWire:
 
         const module SnapshotProtocol:
             VERSION: u16 = 1
-            FRAME_PAGE_KIND: u16 = 1
+            FRAME_PAGE_KIND: u16 = SnapshotResponseShape::PAGE_MESSAGE_KIND
             NO_GENERATION: u64 = 0
             ZERO_VALUE: u64 = 0
             ZERO_LENGTH: usize = 0
@@ -52,6 +52,16 @@ module DebuggerAgentSnapshotWire:
             U16_WIDTH: usize = 2
             U32_WIDTH: usize = 4
             U64_WIDTH: usize = 8
+
+        const module SnapshotRequestShape:
+            MESSAGE_KIND: u16 = 2
+            U64_FIELD_COUNT: usize = 1
+            U32_FIELD_COUNT: usize = 4
+            PAYLOAD_LENGTH: usize = U64_FIELD_COUNT * SnapshotByteEncoding::U64_WIDTH + U32_FIELD_COUNT * SnapshotByteEncoding::U32_WIDTH
+            MESSAGE_LENGTH: usize = SnapshotHeader::HEADER_LENGTH + PAYLOAD_LENGTH
+
+        const module SnapshotResponseShape:
+            PAGE_MESSAGE_KIND: u16 = 1
 
         const module SnapshotPayloadShape:
             U64_FIELD_COUNT: usize = 7
@@ -135,6 +145,18 @@ module DebuggerAgentSnapshotWire:
                 checksum <- (checksum ^ bytes[index].u64()) * SnapshotChecksum::PRIME
             return checksum
 
+        def request_header_status(bytes: u8&, length: usize) -> SnapshotWireStatus:
+            return SnapshotWireStatus.Truncated if length < SnapshotRequestShape::MESSAGE_LENGTH
+            return SnapshotWireStatus.InvalidLength if length > SnapshotRequestShape::MESSAGE_LENGTH
+            return SnapshotWireStatus.InvalidMagic if bytes[SnapshotHeader::MAGIC_OFFSET] != SnapshotMagic::FIRST or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::SECOND_OFFSET] != SnapshotMagic::SECOND or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::THIRD_OFFSET] != SnapshotMagic::THIRD or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::FOURTH_OFFSET] != SnapshotMagic::FOURTH
+            return SnapshotWireStatus.UnsupportedVersion if read_u16(bytes, SnapshotHeader::VERSION_OFFSET) != SnapshotProtocol::VERSION
+            return SnapshotWireStatus.UnsupportedMessage if read_u16(bytes, SnapshotHeader::KIND_OFFSET) != SnapshotRequestShape::MESSAGE_KIND
+            return SnapshotWireStatus.InvalidGeneration if read_u64(bytes, SnapshotHeader::GENERATION_OFFSET) == SnapshotProtocol::NO_GENERATION
+            return SnapshotWireStatus.InvalidLength if read_u32(bytes, SnapshotHeader::PAYLOAD_LENGTH_OFFSET).usize() != SnapshotRequestShape::PAYLOAD_LENGTH
+            return SnapshotWireStatus.InvalidReservedWord if read_u32(bytes, SnapshotHeader::RESERVED_OFFSET) != SnapshotProtocol::EMPTY_RESERVED_WORD
+            return SnapshotWireStatus.ChecksumMismatch if read_u64(bytes, SnapshotHeader::CHECKSUM_OFFSET) != page_checksum(bytes, length)
+            return SnapshotWireStatus.Ready
+
         def decode_value_kind(code: u16) -> DebuggerAgentFrames::AgentValueKind:
             kind: mutable DebuggerAgentFrames::AgentValueKind = DebuggerAgentFrames::AgentValueKind.Void
             kind <- DebuggerAgentFrames::AgentValueKind.Signed if code == SnapshotEnumCode::VALUE_SIGNED
@@ -194,6 +216,11 @@ module DebuggerAgentSnapshotWire:
             return SnapshotEnumInvalid::CODE
 
     public:
+        const module SnapshotBuffer:
+            MAX_MESSAGE_BYTES: usize = SnapshotCapacityShape::MESSAGE_CAPACITY
+            MAX_REQUEST_BYTES: usize = SnapshotRequestShape::MESSAGE_LENGTH
+            MAX_BINDINGS_PER_PAGE: usize = SnapshotCapacity::MAX_BINDINGS_PER_PAGE
+
         enum SnapshotWireStatus:
             Ready
             SnapshotUnavailable
@@ -205,6 +232,8 @@ module DebuggerAgentSnapshotWire:
             UnsupportedVersion
             UnsupportedMessage
             InvalidGeneration
+            GenerationMismatch
+            ThreadMismatch
             InvalidReservedWord
             ChecksumMismatch
             InvalidPayload
@@ -225,8 +254,120 @@ module DebuggerAgentSnapshotWire:
             binding_count: mutable usize
             bindings: mutable DebuggerAgentFrames::AgentStorageDescriptor[SnapshotCapacity::MAX_BINDINGS_PER_PAGE]
 
+        struct SnapshotPageRequest:
+            generation: mutable u64
+            thread_id: mutable u64
+            frame_index: mutable usize
+            binding_start: mutable usize
+            binding_limit: mutable usize
+
+        struct EncodedSnapshotPageRequest:
+            bytes: mutable u8[SnapshotRequestShape::MESSAGE_LENGTH]
+            length: mutable usize
+            status: mutable SnapshotWireStatus
+
+        struct DecodedSnapshotPageRequest:
+            request: mutable SnapshotPageRequest
+            status: mutable SnapshotWireStatus
+
         def snapshot_page_capacity() -> usize:
             return SnapshotCapacity::MAX_BINDINGS_PER_PAGE
+
+        def snapshot_page_request_length() -> usize:
+            return SnapshotRequestShape::MESSAGE_LENGTH
+
+        def snapshot_page_message_capacity() -> usize:
+            return SnapshotCapacityShape::MESSAGE_CAPACITY
+
+        def snapshot_page_request_capacity() -> usize:
+            return SnapshotRequestShape::MESSAGE_LENGTH
+
+        # Validate the fixed response header before allocating or reading its
+        # declared payload. The checksum and descriptor body are verified once
+        # the remaining bytes arrive.
+        def agent_snapshot_page_expected_length(bytes: u8&, header_length: usize, expected_generation: u64, message_length: mutable usize&) -> SnapshotWireStatus:
+            message_length <- SnapshotProtocol::ZERO_LENGTH
+            return SnapshotWireStatus.Truncated if header_length < SnapshotHeader::HEADER_LENGTH
+            return SnapshotWireStatus.InvalidLength if header_length != SnapshotHeader::HEADER_LENGTH
+            return SnapshotWireStatus.InvalidMagic if bytes[SnapshotHeader::MAGIC_OFFSET] != SnapshotMagic::FIRST or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::SECOND_OFFSET] != SnapshotMagic::SECOND or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::THIRD_OFFSET] != SnapshotMagic::THIRD or bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::FOURTH_OFFSET] != SnapshotMagic::FOURTH
+            return SnapshotWireStatus.UnsupportedVersion if read_u16(bytes, SnapshotHeader::VERSION_OFFSET) != SnapshotProtocol::VERSION
+            return SnapshotWireStatus.UnsupportedMessage if read_u16(bytes, SnapshotHeader::KIND_OFFSET) != SnapshotResponseShape::PAGE_MESSAGE_KIND
+            generation: u64 = read_u64(bytes, SnapshotHeader::GENERATION_OFFSET)
+            return SnapshotWireStatus.InvalidGeneration if generation == SnapshotProtocol::NO_GENERATION or expected_generation == SnapshotProtocol::NO_GENERATION
+            return SnapshotWireStatus.GenerationMismatch if generation != expected_generation
+            return SnapshotWireStatus.InvalidReservedWord if read_u32(bytes, SnapshotHeader::RESERVED_OFFSET) != SnapshotProtocol::EMPTY_RESERVED_WORD
+            payload_length: usize = read_u32(bytes, SnapshotHeader::PAYLOAD_LENGTH_OFFSET).usize()
+            return SnapshotWireStatus.InvalidLength if payload_length > SnapshotCapacity::MAX_PAYLOAD_BYTES or payload_length < SnapshotPayloadShape::FRAME_HEADER_LENGTH
+            message_length <- SnapshotHeader::HEADER_LENGTH + payload_length
+            return SnapshotWireStatus.Ready
+
+        # Encode a fixed-size page request with the same envelope and checksum
+        # rules as the page response. The target still validates live frame and
+        # stop state before exposing any descriptor.
+        def agent_snapshot_page_request_encode(request: SnapshotPageRequest) -> EncodedSnapshotPageRequest:
+            frame: mutable EncodedSnapshotPageRequest = zeroed
+            frame.status <- SnapshotWireStatus.InvalidGeneration if request.generation == SnapshotProtocol::NO_GENERATION
+            return frame if frame.status == SnapshotWireStatus.InvalidGeneration
+            frame.status <- SnapshotWireStatus.InvalidPage if request.thread_id == SnapshotIdentifier::NO_ID or request.frame_index >= DebuggerAgentFrames::agent_shadow_frame_capacity() or request.binding_start > DebuggerAgentFrames::agent_shadow_binding_capacity() or request.binding_limit == SnapshotProtocol::ZERO_LENGTH or request.binding_limit > SnapshotCapacity::MAX_BINDINGS_PER_PAGE
+            return frame if frame.status == SnapshotWireStatus.InvalidPage
+            frame.bytes[SnapshotHeader::MAGIC_OFFSET] <- SnapshotMagic::FIRST
+            frame.bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::SECOND_OFFSET] <- SnapshotMagic::SECOND
+            frame.bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::THIRD_OFFSET] <- SnapshotMagic::THIRD
+            frame.bytes[SnapshotHeader::MAGIC_OFFSET + SnapshotMagic::FOURTH_OFFSET] <- SnapshotMagic::FOURTH
+            write_u16(frame.bytes[SnapshotSequence::FIRST], SnapshotHeader::VERSION_OFFSET, SnapshotProtocol::VERSION)
+            write_u16(frame.bytes[SnapshotSequence::FIRST], SnapshotHeader::KIND_OFFSET, SnapshotRequestShape::MESSAGE_KIND)
+            write_u64(frame.bytes[SnapshotSequence::FIRST], SnapshotHeader::GENERATION_OFFSET, request.generation)
+            write_u32(frame.bytes[SnapshotSequence::FIRST], SnapshotHeader::PAYLOAD_LENGTH_OFFSET, SnapshotRequestShape::PAYLOAD_LENGTH.u32())
+            write_u32(frame.bytes[SnapshotSequence::FIRST], SnapshotHeader::RESERVED_OFFSET, SnapshotProtocol::EMPTY_RESERVED_WORD)
+            cursor: mutable usize = SnapshotHeader::PAYLOAD_OFFSET
+            write_u64(frame.bytes[SnapshotSequence::FIRST], cursor, request.thread_id)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            write_u32(frame.bytes[SnapshotSequence::FIRST], cursor, request.frame_index.u32())
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(frame.bytes[SnapshotSequence::FIRST], cursor, request.binding_start.u32())
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(frame.bytes[SnapshotSequence::FIRST], cursor, request.binding_limit.u32())
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            write_u32(frame.bytes[SnapshotSequence::FIRST], cursor, SnapshotProtocol::EMPTY_RESERVED_WORD)
+            write_u64(frame.bytes[SnapshotSequence::FIRST], SnapshotHeader::CHECKSUM_OFFSET, page_checksum(frame.bytes[SnapshotSequence::FIRST], SnapshotRequestShape::MESSAGE_LENGTH))
+            frame.length <- SnapshotRequestShape::MESSAGE_LENGTH
+            frame.status <- SnapshotWireStatus.Ready
+            return frame
+
+        def agent_snapshot_page_request_decode(bytes: u8&, length: usize) -> DecodedSnapshotPageRequest:
+            result: mutable DecodedSnapshotPageRequest = zeroed
+            result.status <- request_header_status(bytes, length)
+            return result if result.status != SnapshotWireStatus.Ready
+            request: mutable SnapshotPageRequest = zeroed
+            request.generation <- read_u64(bytes, SnapshotHeader::GENERATION_OFFSET)
+            cursor: mutable usize = SnapshotHeader::PAYLOAD_OFFSET
+            request.thread_id <- read_u64(bytes, cursor)
+            cursor <- cursor + SnapshotByteEncoding::U64_WIDTH
+            frame_index_value: u64 = read_u32(bytes, cursor).u64()
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            binding_start: usize = read_u32(bytes, cursor).usize()
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            binding_limit: usize = read_u32(bytes, cursor).usize()
+            cursor <- cursor + SnapshotByteEncoding::U32_WIDTH
+            reserved_payload: u32 = read_u32(bytes, cursor)
+            result.status <- SnapshotWireStatus.InvalidPage if request.thread_id == SnapshotIdentifier::NO_ID or frame_index_value >= DebuggerAgentFrames::agent_shadow_frame_capacity().u64() or binding_start > DebuggerAgentFrames::agent_shadow_binding_capacity() or binding_limit == SnapshotProtocol::ZERO_LENGTH or binding_limit > SnapshotCapacity::MAX_BINDINGS_PER_PAGE or reserved_payload != SnapshotProtocol::EMPTY_RESERVED_WORD
+            return result if result.status != SnapshotWireStatus.Ready
+            request.frame_index <- frame_index_value.usize()
+            request.binding_start <- binding_start
+            request.binding_limit <- binding_limit
+            result.request <- request
+            return result
+
+        # Adapter and target loops can use this one request boundary: decode
+        # first, then produce only the rendezvous-authorized response page.
+        def agent_snapshot_page_dispatch(bytes: u8&, length: usize, shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, output: mutable SnapshotWireBuffer&) -> SnapshotWireStatus:
+            output.length <- SnapshotProtocol::ZERO_LENGTH
+            request: DecodedSnapshotPageRequest = agent_snapshot_page_request_decode(bytes, length)
+            output.status <- request.status
+            return output.status if request.status != SnapshotWireStatus.Ready
+            output.status <- SnapshotWireStatus.ThreadMismatch
+            return output.status if request.request.thread_id != shadow_stack.thread.value
+            return agent_snapshot_frame_page_encode(shadow_stack, registry, request.request.frame_index, request.request.binding_start, request.request.binding_limit, request.request.generation, output)
 
         # Encode one frame header and a caller-selected bounded slice of its
         # bindings. The buffer is caller-owned and only its live prefix changes.

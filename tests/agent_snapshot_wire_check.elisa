@@ -62,7 +62,6 @@ const module ResultCode:
     DECLARE_FIRST: i64 = 4
     DECLARE_SECOND: i64 = 5
     STOP: i64 = 6
-    SNAPSHOT: i64 = 7
     FIRST_DECODE: i64 = 8
     FIRST_PAGE_CONTENT: i64 = 9
     SECOND_SNAPSHOT: i64 = 10
@@ -73,6 +72,12 @@ const module ResultCode:
     CHECKSUM: i64 = 15
     TRUNCATED: i64 = 16
     VERSION: i64 = 17
+    REQUEST_ENCODE: i64 = 18
+    REQUEST_DECODE: i64 = 19
+    REQUEST_FIELDS: i64 = 20
+    REQUEST_DISPATCH: i64 = 21
+    REQUEST_CHECKSUM: i64 = 22
+    REQUEST_LIMIT: i64 = 23
 
 def debug_id(value: u64) -> DebuggerIdentity::DebugId:
     return DebuggerIdentity::DebugId{value: value}
@@ -98,21 +103,35 @@ def main() -> i64:
     return ResultCode::DECLARE_SECOND if second_declaration != DebuggerAgentFrames::ShadowStatus.Ready
 
     return ResultCode::STOP if DebuggerAgentThreads::agent_threads_request_stop(registry, Epoch::GENERATION, Clock::NOW, Clock::DEADLINE) != DebuggerAgentThreads::ThreadStatus.Applied or DebuggerAgentFrames::agent_shadow_stack_begin_stop(shadow_stack, Epoch::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready or DebuggerAgentThreads::agent_thread_safe_point(registry, Identity::THREAD, Clock::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+    page_request: DebuggerAgentSnapshotWire::SnapshotPageRequest = DebuggerAgentSnapshotWire::SnapshotPageRequest{generation: Epoch::GENERATION, thread_id: Identity::THREAD, frame_index: Page::FIRST_FRAME, binding_start: Page::FIRST_BINDING, binding_limit: Page::ONE_BINDING}
+    encoded_request: DebuggerAgentSnapshotWire::EncodedSnapshotPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_page_request_encode(page_request)
+    return ResultCode::REQUEST_ENCODE if encoded_request.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or encoded_request.length != DebuggerAgentSnapshotWire::snapshot_page_request_length()
+    decoded_request: DebuggerAgentSnapshotWire::DecodedSnapshotPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_page_request_decode(encoded_request.bytes[Page::FIRST_BYTE], encoded_request.length)
+    return ResultCode::REQUEST_DECODE if decoded_request.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    return ResultCode::REQUEST_FIELDS if decoded_request.request.generation != page_request.generation or decoded_request.request.thread_id != page_request.thread_id or decoded_request.request.frame_index != page_request.frame_index or decoded_request.request.binding_start != page_request.binding_start or decoded_request.request.binding_limit != page_request.binding_limit
     buffer: mutable DebuggerAgentSnapshotWire::SnapshotWireBuffer = zeroed
-    first_encode: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_frame_page_encode(shadow_stack, registry, Page::FIRST_FRAME, Page::FIRST_BINDING, Page::ONE_BINDING, Epoch::GENERATION, buffer)
-    return ResultCode::SNAPSHOT if first_encode != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    first_encode: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_page_dispatch(encoded_request.bytes[Page::FIRST_BYTE], encoded_request.length, shadow_stack, registry, buffer)
+    return ResultCode::REQUEST_DISPATCH if first_encode != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
     decoded: mutable DebuggerAgentSnapshotWire::DecodedSnapshotPage = zeroed
     first_decode: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_frame_page_decode(buffer.bytes[Page::FIRST_BYTE], buffer.length, decoded)
     return ResultCode::FIRST_DECODE if first_decode != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
     return ResultCode::FIRST_PAGE_CONTENT if decoded.generation != Epoch::GENERATION or decoded.thread_id != Identity::THREAD or decoded.frame_index != Page::FIRST_FRAME or decoded.frame.invocation.value != Identity::INVOCATION or decoded.frame.source_file.value != Identity::SOURCE or decoded.frame.source_line != SourcePosition::LINE or decoded.frame.source_column != SourcePosition::COLUMN or decoded.frame.binding_count != Page::TWO_BINDINGS or decoded.binding_start != Page::FIRST_BINDING or decoded.binding_count != Page::ONE_BINDING or decoded.bindings[Page::FIRST_BINDING].binding.value != Identity::FIRST_BINDING or decoded.bindings[Page::FIRST_BINDING].storage_location != Location::STACK_OFFSET or decoded.bindings[Page::FIRST_BINDING].bytes[Value::FIRST_BYTE] != Value::FIRST_VALUE_BYTE or decoded.bindings[Page::FIRST_BINDING].bytes[Value::SECOND_BYTE] != Value::SECOND_VALUE_BYTE
+    encoded_request.bytes[Page::CHECKSUM_OFFSET] <- encoded_request.bytes[Page::CHECKSUM_OFFSET] ^ Page::CORRUPT_BYTE
+    return ResultCode::REQUEST_CHECKSUM if DebuggerAgentSnapshotWire::agent_snapshot_page_request_decode(encoded_request.bytes[Page::FIRST_BYTE], encoded_request.length).status != DebuggerAgentSnapshotWire::SnapshotWireStatus.ChecksumMismatch
 
     second_encode: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_frame_page_encode(shadow_stack, registry, Page::FIRST_FRAME, Page::SECOND_BINDING, Page::ONE_BINDING, Epoch::GENERATION, buffer)
     return ResultCode::SECOND_SNAPSHOT if second_encode != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
     second_decode: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_frame_page_decode(buffer.bytes[Page::FIRST_BYTE], buffer.length, decoded)
     return ResultCode::SECOND_DECODE if second_decode != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
     return ResultCode::SECOND_PAGE_CONTENT if decoded.binding_start != Page::SECOND_BINDING or decoded.binding_count != Page::ONE_BINDING or decoded.bindings[Page::FIRST_BINDING].binding.value != Identity::SECOND_BINDING or decoded.bindings[Page::FIRST_BINDING].state != DebuggerAgentFrames::AgentValueState.OptimizedAway
-    return ResultCode::INVALID_PAGE if DebuggerAgentSnapshotWire::agent_snapshot_frame_page_encode(shadow_stack, registry, Page::FIRST_FRAME, Page::PAST_END, Page::ONE_BINDING, Epoch::GENERATION, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.InvalidPage
-    return ResultCode::STALE_SNAPSHOT if DebuggerAgentSnapshotWire::agent_snapshot_frame_page_encode(shadow_stack, registry, Page::FIRST_FRAME, Page::FIRST_BINDING, Page::ONE_BINDING, Epoch::GENERATION + Epoch::GENERATION, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.SnapshotUnavailable
+    invalid_page_request: DebuggerAgentSnapshotWire::SnapshotPageRequest = DebuggerAgentSnapshotWire::SnapshotPageRequest{generation: Epoch::GENERATION, thread_id: Identity::THREAD, frame_index: Page::FIRST_FRAME, binding_start: Page::PAST_END, binding_limit: Page::ONE_BINDING}
+    encoded_invalid_page: DebuggerAgentSnapshotWire::EncodedSnapshotPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_page_request_encode(invalid_page_request)
+    return ResultCode::INVALID_PAGE if encoded_invalid_page.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or DebuggerAgentSnapshotWire::agent_snapshot_page_dispatch(encoded_invalid_page.bytes[Page::FIRST_BYTE], encoded_invalid_page.length, shadow_stack, registry, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.InvalidPage or buffer.length != Page::FIRST_BYTE
+    invalid_limit_request: DebuggerAgentSnapshotWire::SnapshotPageRequest = DebuggerAgentSnapshotWire::SnapshotPageRequest{generation: Epoch::GENERATION, thread_id: Identity::THREAD, frame_index: Page::FIRST_FRAME, binding_start: Page::FIRST_BINDING, binding_limit: Page::FIRST_BYTE}
+    return ResultCode::REQUEST_LIMIT if DebuggerAgentSnapshotWire::agent_snapshot_page_request_encode(invalid_limit_request).status != DebuggerAgentSnapshotWire::SnapshotWireStatus.InvalidPage
+    stale_page_request: DebuggerAgentSnapshotWire::SnapshotPageRequest = DebuggerAgentSnapshotWire::SnapshotPageRequest{generation: Epoch::GENERATION + Epoch::GENERATION, thread_id: Identity::THREAD, frame_index: Page::FIRST_FRAME, binding_start: Page::FIRST_BINDING, binding_limit: Page::ONE_BINDING}
+    encoded_stale_request: DebuggerAgentSnapshotWire::EncodedSnapshotPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_page_request_encode(stale_page_request)
+    return ResultCode::STALE_SNAPSHOT if encoded_stale_request.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or DebuggerAgentSnapshotWire::agent_snapshot_page_dispatch(encoded_stale_request.bytes[Page::FIRST_BYTE], encoded_stale_request.length, shadow_stack, registry, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.SnapshotUnavailable
 
     checksum_encode: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_frame_page_encode(shadow_stack, registry, Page::FIRST_FRAME, Page::FIRST_BINDING, Page::ONE_BINDING, Epoch::GENERATION, buffer)
     return ResultCode::CHECKSUM if checksum_encode != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready

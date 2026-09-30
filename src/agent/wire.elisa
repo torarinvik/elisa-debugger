@@ -1,0 +1,136 @@
+# Fixed-width target-agent wire messages. This module stays independent of DAP
+# so editor adapters and the in-process agent transport share one byte format.
+
+include "./hooks.elisa"
+include "../trace/binary.elisa"
+
+module DebuggerAgentWire:
+    private:
+        const module Frame:
+            FRAME_CAPACITY: usize = 32
+            FRAME_LENGTH: usize = 32
+            PAYLOAD_LENGTH: usize = 24
+
+        const module Offset:
+            MAGIC: usize = 0
+            VERSION: usize = 4
+            MESSAGE_KIND: usize = 6
+            GENERATION: usize = 8
+            EVENT_COUNT: usize = 16
+            CHECKSUM: usize = 24
+
+        const module Magic:
+            BYTE_FIRST: u8 = 69
+            BYTE_SECOND: u8 = 76
+            BYTE_THIRD: u8 = 83
+            BYTE_FOURTH: u8 = 65
+
+        const module Index:
+            FIRST_BYTE: usize = 0
+            MAGIC_SECOND_BYTE: usize = 1
+            MAGIC_THIRD_BYTE: usize = 2
+            MAGIC_FOURTH_BYTE: usize = 3
+
+        const module Protocol:
+            MAJOR: u16 = 1
+
+        const module Sentinel:
+            NO_GENERATION: u64 = 0
+
+        const module Message:
+            STOP_ACKNOWLEDGEMENT: u16 = 1
+
+        const module ByteEncoding:
+            BITS_PER_BYTE: u64 = 8
+            BYTE_MASK: u64 = 255
+            ZERO_VALUE: u64 = 0
+            U16_BYTE_COUNT: usize = 2
+            U16_HIGH_BYTE_OFFSET: usize = 1
+            U64_BYTE_COUNT: usize = 8
+
+        def write_u16(bytes: mutable u8&, offset: usize, value: u16) -> void:
+            for index in 0..<ByteEncoding::U16_BYTE_COUNT:
+                bytes[offset + index] <- ((value.u64() >> (ByteEncoding::BITS_PER_BYTE * index.u64())) & ByteEncoding::BYTE_MASK).u8()
+
+        def write_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+            for index in 0..<ByteEncoding::U64_BYTE_COUNT:
+                bytes[offset + index] <- ((value >> (ByteEncoding::BITS_PER_BYTE * index.u64())) & ByteEncoding::BYTE_MASK).u8()
+
+        def read_u16(bytes: u8&, offset: usize) -> u16:
+            low: u64 = bytes[offset].u64()
+            high: u64 = bytes[offset + ByteEncoding::U16_HIGH_BYTE_OFFSET].u64()
+            return (low | (high << ByteEncoding::BITS_PER_BYTE)).u16()
+
+        def read_u64(bytes: u8&, offset: usize) -> u64:
+            value: mutable u64 = ByteEncoding::ZERO_VALUE
+            for index in 0..<ByteEncoding::U64_BYTE_COUNT:
+                value <- value | (bytes[offset + index].u64() << (ByteEncoding::BITS_PER_BYTE * index.u64()))
+            return value
+
+        def decode_failure(status: WireStatus) -> DecodedStopAcknowledgement:
+            result: mutable DecodedStopAcknowledgement = zeroed
+            result.status <- status
+            return result
+
+    public:
+        enum WireStatus:
+            Ready
+            InvalidGeneration
+            EventCountOutOfRange
+            InvalidLength
+            Truncated
+            InvalidMagic
+            UnsupportedVersion
+            UnsupportedMessage
+            ChecksumMismatch
+
+        struct EncodedStopAcknowledgement:
+            bytes: mutable u8[Frame::FRAME_CAPACITY]
+            length: mutable usize
+            status: mutable WireStatus
+
+        struct DecodedStopAcknowledgement:
+            acknowledgement: mutable DebuggerAgent::AgentStopAcknowledgement
+            status: mutable WireStatus
+
+        def stop_acknowledgement_frame_length() -> usize:
+            return Frame::FRAME_LENGTH
+
+        def stop_acknowledgement_encode(acknowledgement: DebuggerAgent::AgentStopAcknowledgement) -> EncodedStopAcknowledgement:
+            frame: mutable EncodedStopAcknowledgement = zeroed
+            frame.status <- WireStatus.InvalidGeneration if acknowledgement.generation == Sentinel::NO_GENERATION
+            return frame if frame.status == WireStatus.InvalidGeneration
+            frame.status <- WireStatus.EventCountOutOfRange if acknowledgement.event_count > DebuggerAgent::agent_event_capacity().u64()
+            return frame if frame.status == WireStatus.EventCountOutOfRange
+
+            frame.bytes[Offset::MAGIC] <- Magic::BYTE_FIRST
+            frame.bytes[Offset::MAGIC + Index::MAGIC_SECOND_BYTE] <- Magic::BYTE_SECOND
+            frame.bytes[Offset::MAGIC + Index::MAGIC_THIRD_BYTE] <- Magic::BYTE_THIRD
+            frame.bytes[Offset::MAGIC + Index::MAGIC_FOURTH_BYTE] <- Magic::BYTE_FOURTH
+            write_u16(frame.bytes[Index::FIRST_BYTE], Offset::VERSION, Protocol::MAJOR)
+            write_u16(frame.bytes[Index::FIRST_BYTE], Offset::MESSAGE_KIND, Message::STOP_ACKNOWLEDGEMENT)
+            write_u64(frame.bytes[Index::FIRST_BYTE], Offset::GENERATION, acknowledgement.generation)
+            write_u64(frame.bytes[Index::FIRST_BYTE], Offset::EVENT_COUNT, acknowledgement.event_count)
+            checksum: u64 = DebuggerTraceBinary::bytes_checksum(frame.bytes[Index::FIRST_BYTE], Frame::PAYLOAD_LENGTH)
+            write_u64(frame.bytes[Index::FIRST_BYTE], Offset::CHECKSUM, checksum)
+            frame.length <- Frame::FRAME_LENGTH
+            frame.status <- WireStatus.Ready
+            return frame
+
+        def stop_acknowledgement_decode(bytes: u8&, length: usize) -> DecodedStopAcknowledgement:
+            return decode_failure(WireStatus.Truncated) if length < Frame::FRAME_LENGTH
+            return decode_failure(WireStatus.InvalidLength) if length > Frame::FRAME_LENGTH
+            return decode_failure(WireStatus.InvalidMagic) if bytes[Offset::MAGIC] != Magic::BYTE_FIRST or bytes[Offset::MAGIC + Index::MAGIC_SECOND_BYTE] != Magic::BYTE_SECOND or bytes[Offset::MAGIC + Index::MAGIC_THIRD_BYTE] != Magic::BYTE_THIRD or bytes[Offset::MAGIC + Index::MAGIC_FOURTH_BYTE] != Magic::BYTE_FOURTH
+            return decode_failure(WireStatus.UnsupportedVersion) if read_u16(bytes, Offset::VERSION) != Protocol::MAJOR
+            return decode_failure(WireStatus.UnsupportedMessage) if read_u16(bytes, Offset::MESSAGE_KIND) != Message::STOP_ACKNOWLEDGEMENT
+
+            expected_checksum: u64 = read_u64(bytes, Offset::CHECKSUM)
+            actual_checksum: u64 = DebuggerTraceBinary::bytes_checksum(bytes, Frame::PAYLOAD_LENGTH)
+            return decode_failure(WireStatus.ChecksumMismatch) if expected_checksum != actual_checksum
+
+            acknowledgement: mutable DebuggerAgent::AgentStopAcknowledgement = zeroed
+            acknowledgement.generation <- read_u64(bytes, Offset::GENERATION)
+            acknowledgement.event_count <- read_u64(bytes, Offset::EVENT_COUNT)
+            return decode_failure(WireStatus.InvalidGeneration) if acknowledgement.generation == Sentinel::NO_GENERATION
+            return decode_failure(WireStatus.EventCountOutOfRange) if acknowledgement.event_count > DebuggerAgent::agent_event_capacity().u64()
+            return DecodedStopAcknowledgement{acknowledgement: acknowledgement, status: WireStatus.Ready}

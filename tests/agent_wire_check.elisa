@@ -1,0 +1,129 @@
+include "../src/agent/wire.elisa"
+
+const module TestFrame:
+    FRAME_LENGTH: usize = 32
+    PAYLOAD_LENGTH: usize = 24
+    MAGIC_OFFSET: usize = 0
+    VERSION_OFFSET: usize = 4
+    MESSAGE_KIND_OFFSET: usize = 6
+    GENERATION_OFFSET: usize = 8
+    EVENT_COUNT_OFFSET: usize = 16
+    CHECKSUM_OFFSET: usize = 24
+    LAST_CHECKSUM_BYTE_INDEX: usize = 31
+    TRUNCATED_LENGTH: usize = 31
+    OVERSIZED_LENGTH: usize = 33
+    FIRST_BYTE: usize = 0
+    EMPTY_LENGTH: usize = 0
+    SECOND_BYTE_OFFSET: usize = 1
+    SECOND_MAGIC_INDEX: usize = 1
+    THIRD_MAGIC_INDEX: usize = 2
+    FOURTH_MAGIC_INDEX: usize = 3
+    LAST_GENERATION_BYTE_INDEX: usize = 15
+    LAST_EVENT_COUNT_BYTE_INDEX: usize = 23
+    LAST_CHECKSUM_U64_BYTE_OFFSET: usize = 7
+
+const module TestWire:
+    MAGIC_FIRST: u8 = 69
+    MAGIC_SECOND: u8 = 76
+    MAGIC_THIRD: u8 = 83
+    MAGIC_FOURTH: u8 = 65
+    VERSION_MAJOR: u16 = 1
+    MESSAGE_KIND: u16 = 1
+    GENERATION: u64 = 72623859790382856
+    EVENT_COUNT: u64 = 9
+    GENERATION_FIRST_BYTE: u8 = 8
+    GENERATION_LAST_BYTE: u8 = 1
+    EXPECTED_CHECKSUM: u64 = 16609000795059513013
+    ZERO_BYTE: u8 = 0
+    INVALID_GENERATION: u64 = 0
+    OVER_CAPACITY_COUNT: u64 = 257
+    CAPACITY_EVENT_COUNT: u64 = 256
+    UNKNOWN_VERSION: u16 = 2
+    UNKNOWN_MESSAGE_KIND: u16 = 2
+    MUTATED_BYTE: u8 = 0
+    ALTERNATE_MUTATED_BYTE: u8 = 1
+    U64_BITS_PER_BYTE: u64 = 8
+    U64_BYTE_COUNT: usize = 8
+    SUCCESS_RESULT: i64 = 0
+    U64_BYTE_MASK: u64 = 255
+    U64_ZERO_VALUE: u64 = 0
+
+const module TestResult:
+    ENCODE_FAILURE: i64 = 1
+    GOLDEN_LAYOUT_FAILURE: i64 = 2
+    DECODE_FAILURE: i64 = 3
+    INVALID_GENERATION_FAILURE: i64 = 4
+    EVENT_COUNT_BOUND_FAILURE: i64 = 5
+    TRUNCATED_FRAME_FAILURE: i64 = 6
+    OVERSIZED_FRAME_FAILURE: i64 = 7
+    INVALID_MAGIC_FAILURE: i64 = 8
+    UNSUPPORTED_VERSION_FAILURE: i64 = 9
+    UNSUPPORTED_MESSAGE_FAILURE: i64 = 10
+    CHECKSUM_FAILURE: i64 = 11
+    DECODED_EVENT_COUNT_BOUND_FAILURE: i64 = 12
+
+def test_write_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
+    for index in TestFrame::FIRST_BYTE..<TestWire::U64_BYTE_COUNT:
+        bytes[offset + index] <- ((value >> (TestWire::U64_BITS_PER_BYTE * index.u64())) & TestWire::U64_BYTE_MASK).u8()
+
+def test_read_u64(bytes: u8&, offset: usize) -> u64:
+    value: mutable u64 = TestWire::U64_ZERO_VALUE
+    for index in TestFrame::FIRST_BYTE..<TestWire::U64_BYTE_COUNT:
+        value <- value | (bytes[offset + index].u64() << (TestWire::U64_BITS_PER_BYTE * index.u64()))
+    return value
+
+def main() -> i64:
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestWire::GENERATION, event_count: TestWire::EVENT_COUNT}
+    frame: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(acknowledgement)
+    return TestResult::ENCODE_FAILURE if frame.status != DebuggerAgentWire::WireStatus.Ready or frame.length != TestFrame::FRAME_LENGTH or DebuggerAgentWire::stop_acknowledgement_frame_length() != TestFrame::FRAME_LENGTH
+    return TestResult::GOLDEN_LAYOUT_FAILURE if frame.bytes[TestFrame::MAGIC_OFFSET] != TestWire::MAGIC_FIRST or frame.bytes[TestFrame::MAGIC_OFFSET + TestFrame::SECOND_MAGIC_INDEX] != TestWire::MAGIC_SECOND or frame.bytes[TestFrame::MAGIC_OFFSET + TestFrame::THIRD_MAGIC_INDEX] != TestWire::MAGIC_THIRD or frame.bytes[TestFrame::MAGIC_OFFSET + TestFrame::FOURTH_MAGIC_INDEX] != TestWire::MAGIC_FOURTH
+    return TestResult::GOLDEN_LAYOUT_FAILURE if frame.bytes[TestFrame::VERSION_OFFSET] != TestWire::VERSION_MAJOR.u8() or frame.bytes[TestFrame::MESSAGE_KIND_OFFSET] != TestWire::MESSAGE_KIND.u8()
+    return TestResult::GOLDEN_LAYOUT_FAILURE if frame.bytes[TestFrame::VERSION_OFFSET + TestFrame::SECOND_BYTE_OFFSET] != TestWire::ZERO_BYTE or frame.bytes[TestFrame::MESSAGE_KIND_OFFSET + TestFrame::SECOND_BYTE_OFFSET] != TestWire::ZERO_BYTE or frame.bytes[TestFrame::LAST_EVENT_COUNT_BYTE_INDEX] != TestWire::ZERO_BYTE
+    return TestResult::GOLDEN_LAYOUT_FAILURE if frame.bytes[TestFrame::GENERATION_OFFSET] != TestWire::GENERATION_FIRST_BYTE or frame.bytes[TestFrame::LAST_GENERATION_BYTE_INDEX] != TestWire::GENERATION_LAST_BYTE or frame.bytes[TestFrame::EVENT_COUNT_OFFSET] != TestWire::EVENT_COUNT.u8()
+    return TestResult::GOLDEN_LAYOUT_FAILURE if test_read_u64(frame.bytes[TestFrame::FIRST_BYTE], TestFrame::CHECKSUM_OFFSET) != TestWire::EXPECTED_CHECKSUM or frame.bytes[TestFrame::LAST_CHECKSUM_BYTE_INDEX] != ((TestWire::EXPECTED_CHECKSUM >> (TestWire::U64_BITS_PER_BYTE * TestFrame::LAST_CHECKSUM_U64_BYTE_OFFSET.u64())) & TestWire::U64_BYTE_MASK).u8()
+
+    decoded: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(frame.bytes[TestFrame::FIRST_BYTE], frame.length)
+    return TestResult::DECODE_FAILURE if decoded.status != DebuggerAgentWire::WireStatus.Ready or decoded.acknowledgement.generation != acknowledgement.generation or decoded.acknowledgement.event_count != acknowledgement.event_count
+
+    invalid_generation: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(DebuggerAgent::AgentStopAcknowledgement{generation: TestWire::INVALID_GENERATION, event_count: TestWire::EVENT_COUNT})
+    return TestResult::INVALID_GENERATION_FAILURE if invalid_generation.status != DebuggerAgentWire::WireStatus.InvalidGeneration or invalid_generation.length != TestFrame::EMPTY_LENGTH
+    invalid_count: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(DebuggerAgent::AgentStopAcknowledgement{generation: TestWire::GENERATION, event_count: TestWire::OVER_CAPACITY_COUNT})
+    return TestResult::EVENT_COUNT_BOUND_FAILURE if invalid_count.status != DebuggerAgentWire::WireStatus.EventCountOutOfRange or invalid_count.length != TestFrame::EMPTY_LENGTH
+    capacity_count: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(DebuggerAgent::AgentStopAcknowledgement{generation: TestWire::GENERATION, event_count: TestWire::CAPACITY_EVENT_COUNT})
+    return TestResult::EVENT_COUNT_BOUND_FAILURE if capacity_count.status != DebuggerAgentWire::WireStatus.Ready or capacity_count.length != TestFrame::FRAME_LENGTH
+    capacity_decoded: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(capacity_count.bytes[TestFrame::FIRST_BYTE], capacity_count.length)
+    return TestResult::DECODE_FAILURE if capacity_decoded.status != DebuggerAgentWire::WireStatus.Ready or capacity_decoded.acknowledgement.event_count != TestWire::CAPACITY_EVENT_COUNT
+
+    truncated: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(frame.bytes[TestFrame::FIRST_BYTE], TestFrame::TRUNCATED_LENGTH)
+    return TestResult::TRUNCATED_FRAME_FAILURE if truncated.status != DebuggerAgentWire::WireStatus.Truncated
+    oversized: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(frame.bytes[TestFrame::FIRST_BYTE], TestFrame::OVERSIZED_LENGTH)
+    return TestResult::OVERSIZED_FRAME_FAILURE if oversized.status != DebuggerAgentWire::WireStatus.InvalidLength
+
+    bad_magic_frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement = frame
+    bad_magic_frame.bytes[TestFrame::MAGIC_OFFSET] <- TestWire::MUTATED_BYTE
+    bad_magic: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(bad_magic_frame.bytes[TestFrame::FIRST_BYTE], bad_magic_frame.length)
+    return TestResult::INVALID_MAGIC_FAILURE if bad_magic.status != DebuggerAgentWire::WireStatus.InvalidMagic
+
+    bad_version_frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement = frame
+    bad_version_frame.bytes[TestFrame::VERSION_OFFSET] <- TestWire::UNKNOWN_VERSION.u8()
+    bad_version: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(bad_version_frame.bytes[TestFrame::FIRST_BYTE], bad_version_frame.length)
+    return TestResult::UNSUPPORTED_VERSION_FAILURE if bad_version.status != DebuggerAgentWire::WireStatus.UnsupportedVersion
+
+    bad_message_frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement = frame
+    bad_message_frame.bytes[TestFrame::MESSAGE_KIND_OFFSET] <- TestWire::UNKNOWN_MESSAGE_KIND.u8()
+    bad_message: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(bad_message_frame.bytes[TestFrame::FIRST_BYTE], bad_message_frame.length)
+    return TestResult::UNSUPPORTED_MESSAGE_FAILURE if bad_message.status != DebuggerAgentWire::WireStatus.UnsupportedMessage
+
+    bad_checksum_frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement = frame
+    bad_checksum_frame.bytes[TestFrame::LAST_CHECKSUM_BYTE_INDEX] <- TestWire::MUTATED_BYTE if frame.bytes[TestFrame::LAST_CHECKSUM_BYTE_INDEX] != TestWire::MUTATED_BYTE
+    bad_checksum_frame.bytes[TestFrame::LAST_CHECKSUM_BYTE_INDEX] <- TestWire::ALTERNATE_MUTATED_BYTE if frame.bytes[TestFrame::LAST_CHECKSUM_BYTE_INDEX] == TestWire::MUTATED_BYTE
+    bad_checksum: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(bad_checksum_frame.bytes[TestFrame::FIRST_BYTE], bad_checksum_frame.length)
+    return TestResult::CHECKSUM_FAILURE if bad_checksum.status != DebuggerAgentWire::WireStatus.ChecksumMismatch
+
+    bad_count_frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement = frame
+    test_write_u64(bad_count_frame.bytes[TestFrame::FIRST_BYTE], TestFrame::EVENT_COUNT_OFFSET, TestWire::OVER_CAPACITY_COUNT)
+    checksum: u64 = DebuggerTraceBinary::bytes_checksum(bad_count_frame.bytes[TestFrame::FIRST_BYTE], TestFrame::PAYLOAD_LENGTH)
+    test_write_u64(bad_count_frame.bytes[TestFrame::FIRST_BYTE], TestFrame::CHECKSUM_OFFSET, checksum)
+    bad_count: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(bad_count_frame.bytes[TestFrame::FIRST_BYTE], bad_count_frame.length)
+    return TestResult::DECODED_EVENT_COUNT_BOUND_FAILURE if bad_count.status != DebuggerAgentWire::WireStatus.EventCountOutOfRange
+    return TestWire::SUCCESS_RESULT

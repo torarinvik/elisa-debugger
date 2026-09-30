@@ -153,7 +153,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: native-macos-memory-check native-macos-memory-tool native-macos-attach-check
 .PHONY: native-dwarf-line-check native-elf-dwarf-line-check
 .PHONY: native-macho-dwarf-line-check
-.PHONY: agent-wire-check
+.PHONY: agent-wire-check agent-wire-stream-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -196,6 +196,7 @@ module-check: $(EXPRESSION_PARSER_CHECK)
 module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
 module-check: agent-wire-check
+module-check: agent-wire-stream-check
 module-check: dap-function-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 module-check: $(MANAGED_ALLOCATIONS_CHECK)
@@ -903,6 +904,13 @@ $(BUILD)/elisa-debugger-agent-wire-check: tests/agent_wire_check.elisa $(ELISA_B
 
 agent-wire-check: $(BUILD)/elisa-debugger-agent-wire-check
 	"$(BUILD)/elisa-debugger-agent-wire-check"
+
+$(BUILD)/elisa-debugger-agent-wire-stream-check: tests/agent_wire_stream_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+agent-wire-stream-check: $(BUILD)/elisa-debugger-agent-wire-stream-check
+	"$(BUILD)/elisa-debugger-agent-wire-stream-check"
 
 $(BUILD)/elisa-debugger-native-breakpoint-lifecycle-check: tests/native_breakpoint_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

@@ -1,0 +1,68 @@
+# Incremental stream framing for agent messages. A feed call consumes at most
+# one frame so callers can retain and process any coalesced trailing bytes.
+
+include "./wire.elisa"
+
+module DebuggerAgentWireStream:
+    private:
+        const module Frame:
+            FRAME_CAPACITY: usize = 32
+            FRAME_LENGTH: usize = 32
+
+        const module Count:
+            EMPTY_LENGTH: usize = 0
+
+        const module Index:
+            FIRST_BYTE: usize = 0
+
+    public:
+        enum StreamStatus:
+            NeedsMore
+            Complete
+            Rejected
+            InvalidReceiver
+
+        struct StopAcknowledgementReceiver:
+            bytes: mutable u8[Frame::FRAME_CAPACITY]
+            length: mutable usize
+
+        struct StopAcknowledgementFeedResult:
+            consumed: mutable usize
+            status: mutable StreamStatus
+            decode_status: mutable DebuggerAgentWire::WireStatus
+            acknowledgement: mutable DebuggerAgent::AgentStopAcknowledgement
+
+        def stop_acknowledgement_receiver_initialize(receiver: mutable StopAcknowledgementReceiver&) -> void:
+            receiver.length <- Count::EMPTY_LENGTH
+
+        # Feed arbitrary stream chunks. At most the bytes needed for one frame
+        # are consumed; bytes after that boundary remain owned by the caller.
+        # Malformed complete frames are discarded so a caller can resume at the
+        # next frame boundary without exposing a partial acknowledgement.
+        def stop_acknowledgement_receiver_feed(receiver: mutable StopAcknowledgementReceiver&, incoming: u8&, incoming_length: usize) -> StopAcknowledgementFeedResult:
+            result: mutable StopAcknowledgementFeedResult = zeroed
+            result.status <- StreamStatus.NeedsMore
+            if receiver.length > Frame::FRAME_LENGTH:
+                receiver.length <- Count::EMPTY_LENGTH
+                result.status <- StreamStatus.InvalidReceiver
+                return result
+
+            available: mutable usize = incoming_length
+            remaining: usize = Frame::FRAME_LENGTH - receiver.length
+            if available > remaining:
+                available <- remaining
+            for index in Count::EMPTY_LENGTH..<available:
+                receiver.bytes[receiver.length + index] <- incoming[index]
+            receiver.length <- receiver.length + available
+            result.consumed <- available
+            return result if receiver.length < Frame::FRAME_LENGTH
+
+            decoded: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(receiver.bytes[Index::FIRST_BYTE], Frame::FRAME_LENGTH)
+            receiver.length <- Count::EMPTY_LENGTH
+            result.decode_status <- decoded.status
+            result.acknowledgement <- decoded.acknowledgement
+            if decoded.status == DebuggerAgentWire::WireStatus.Ready:
+                result.status <- StreamStatus.Complete
+            else:
+                result.status <- StreamStatus.Rejected
+            return result

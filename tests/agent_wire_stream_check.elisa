@@ -1,0 +1,79 @@
+include "../src/agent/stream.elisa"
+
+const module TestFrame:
+    FRAME_LENGTH: usize = 32
+    COALESCED_LENGTH: usize = 64
+    FIRST_BYTE: usize = 0
+    EMPTY_LENGTH: usize = 0
+    PREFIX_LENGTH: usize = 13
+    SECOND_FRAME_OFFSET: usize = 32
+    OVERSIZED_RECEIVER_LENGTH: usize = 33
+    ONE_BYTE_LENGTH: usize = 1
+    LAST_BYTE_INDEX: usize = 31
+
+const module TestAck:
+    GENERATION: u64 = 42
+    EVENT_COUNT: u64 = 2
+    INVALID_MAGIC: u8 = 0
+
+const module TestResult:
+    ENCODE_FAILURE: i64 = 1
+    EMPTY_FEED_FAILURE: i64 = 2
+    PARTIAL_FEED_FAILURE: i64 = 3
+    COMPLETED_FEED_FAILURE: i64 = 4
+    COALESCED_FIRST_FRAME_FAILURE: i64 = 5
+    COALESCED_SECOND_FRAME_FAILURE: i64 = 6
+    INVALID_FRAME_FAILURE: i64 = 7
+    INVALID_RECEIVER_FAILURE: i64 = 8
+    BYTEWISE_FEED_FAILURE: i64 = 9
+    SUCCESS: i64 = 0
+
+def main() -> i64:
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestAck::GENERATION, event_count: TestAck::EVENT_COUNT}
+    frame: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(acknowledgement)
+    return TestResult::ENCODE_FAILURE if frame.status != DebuggerAgentWire::WireStatus.Ready or frame.length != TestFrame::FRAME_LENGTH
+
+    receiver: mutable DebuggerAgentWireStream::StopAcknowledgementReceiver = zeroed
+    DebuggerAgentWireStream::stop_acknowledgement_receiver_initialize(receiver)
+    empty_feed: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(receiver, frame.bytes[TestFrame::FIRST_BYTE], TestFrame::EMPTY_LENGTH)
+    return TestResult::EMPTY_FEED_FAILURE if empty_feed.status != DebuggerAgentWireStream::StreamStatus.NeedsMore or empty_feed.consumed != TestFrame::EMPTY_LENGTH or receiver.length != TestFrame::EMPTY_LENGTH
+
+    partial_feed: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(receiver, frame.bytes[TestFrame::FIRST_BYTE], TestFrame::PREFIX_LENGTH)
+    return TestResult::PARTIAL_FEED_FAILURE if partial_feed.status != DebuggerAgentWireStream::StreamStatus.NeedsMore or partial_feed.consumed != TestFrame::PREFIX_LENGTH or receiver.length != TestFrame::PREFIX_LENGTH
+    suffix_length: usize = TestFrame::FRAME_LENGTH - TestFrame::PREFIX_LENGTH
+    completed_feed: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(receiver, frame.bytes[TestFrame::PREFIX_LENGTH], suffix_length)
+    return TestResult::COMPLETED_FEED_FAILURE if completed_feed.status != DebuggerAgentWireStream::StreamStatus.Complete or completed_feed.decode_status != DebuggerAgentWire::WireStatus.Ready or completed_feed.consumed != suffix_length or receiver.length != TestFrame::EMPTY_LENGTH
+    return TestResult::COMPLETED_FEED_FAILURE if completed_feed.acknowledgement.generation != acknowledgement.generation or completed_feed.acknowledgement.event_count != acknowledgement.event_count
+
+    coalesced: mutable u8[TestFrame::COALESCED_LENGTH] = zeroed
+    for index in TestFrame::FIRST_BYTE..<TestFrame::FRAME_LENGTH:
+        coalesced[index] <- frame.bytes[index]
+        coalesced[TestFrame::SECOND_FRAME_OFFSET + index] <- frame.bytes[index]
+    coalesced_receiver: mutable DebuggerAgentWireStream::StopAcknowledgementReceiver = zeroed
+    DebuggerAgentWireStream::stop_acknowledgement_receiver_initialize(coalesced_receiver)
+    first_coalesced: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(coalesced_receiver, coalesced[TestFrame::FIRST_BYTE], TestFrame::COALESCED_LENGTH)
+    return TestResult::COALESCED_FIRST_FRAME_FAILURE if first_coalesced.status != DebuggerAgentWireStream::StreamStatus.Complete or first_coalesced.consumed != TestFrame::FRAME_LENGTH or coalesced_receiver.length != TestFrame::EMPTY_LENGTH
+    second_coalesced: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(coalesced_receiver, coalesced[TestFrame::SECOND_FRAME_OFFSET], TestFrame::FRAME_LENGTH)
+    return TestResult::COALESCED_SECOND_FRAME_FAILURE if second_coalesced.status != DebuggerAgentWireStream::StreamStatus.Complete or second_coalesced.consumed != TestFrame::FRAME_LENGTH or second_coalesced.acknowledgement.generation != acknowledgement.generation
+
+    invalid_frame: mutable DebuggerAgentWire::EncodedStopAcknowledgement = frame
+    invalid_frame.bytes[TestFrame::FIRST_BYTE] <- TestAck::INVALID_MAGIC
+    invalid_receiver: mutable DebuggerAgentWireStream::StopAcknowledgementReceiver = zeroed
+    DebuggerAgentWireStream::stop_acknowledgement_receiver_initialize(invalid_receiver)
+    rejected_feed: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(invalid_receiver, invalid_frame.bytes[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH)
+    return TestResult::INVALID_FRAME_FAILURE if rejected_feed.status != DebuggerAgentWireStream::StreamStatus.Rejected or rejected_feed.decode_status != DebuggerAgentWire::WireStatus.InvalidMagic or invalid_receiver.length != TestFrame::EMPTY_LENGTH
+    recovered_feed: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(invalid_receiver, frame.bytes[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH)
+    return TestResult::INVALID_FRAME_FAILURE if recovered_feed.status != DebuggerAgentWireStream::StreamStatus.Complete
+
+    invalid_receiver.length <- TestFrame::OVERSIZED_RECEIVER_LENGTH
+    corrupt_receiver: DebuggerAgentWireStream::StopAcknowledgementFeedResult = DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(invalid_receiver, frame.bytes[TestFrame::FIRST_BYTE], TestFrame::EMPTY_LENGTH)
+    return TestResult::INVALID_RECEIVER_FAILURE if corrupt_receiver.status != DebuggerAgentWireStream::StreamStatus.InvalidReceiver or invalid_receiver.length != TestFrame::EMPTY_LENGTH
+
+    bytewise_receiver: mutable DebuggerAgentWireStream::StopAcknowledgementReceiver = zeroed
+    DebuggerAgentWireStream::stop_acknowledgement_receiver_initialize(bytewise_receiver)
+    bytewise_result: mutable DebuggerAgentWireStream::StopAcknowledgementFeedResult = zeroed
+    for index in TestFrame::FIRST_BYTE..<TestFrame::FRAME_LENGTH:
+        bytewise_result <- DebuggerAgentWireStream::stop_acknowledgement_receiver_feed(bytewise_receiver, frame.bytes[index], TestFrame::ONE_BYTE_LENGTH)
+        return TestResult::BYTEWISE_FEED_FAILURE if index < TestFrame::LAST_BYTE_INDEX and (bytewise_result.status != DebuggerAgentWireStream::StreamStatus.NeedsMore or bytewise_result.consumed != TestFrame::ONE_BYTE_LENGTH)
+    return TestResult::BYTEWISE_FEED_FAILURE if bytewise_result.status != DebuggerAgentWireStream::StreamStatus.Complete or bytewise_result.acknowledgement.event_count != acknowledgement.event_count
+    return TestResult::SUCCESS

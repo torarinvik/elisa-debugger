@@ -1,0 +1,210 @@
+# macOS task suspension lease for a process-backed attach session. The
+# controller retains the exact task right it suspended and releases precisely
+# its own suspend count before allowing detach or reporting the target running.
+
+include "./attach.elisa"
+include "./macos_memory.elisa"
+include "./macos_resources.elisa"
+
+@link_name("task_suspend")
+extern debugger_macos_control_task_suspend(task: u32) -> i32 can[Unsafe.PointerCast]
+@link_name("task_resume")
+extern debugger_macos_control_task_resume(task: u32) -> i32 can[Unsafe.PointerCast]
+
+module DebuggerNativeMacOSControl:
+    private:
+        const module Identity:
+            NO_PROCESS_ID: u64 = 0
+            MAX_PROCESS_ID: u64 = 2147483647
+            MAX_U64: u64 = 18446744073709551615
+            MICROSECONDS_PER_SECOND: u64 = 1000000
+
+        const module MachPort:
+            NULL_PORT: u32 = 0
+
+        const module KernelStatus:
+            SUCCESS: i32 = 0
+            PROTECTION_FAILURE: i32 = 2
+            FAILURE: i32 = 5
+
+        const module Detail:
+            INVALID_SESSION_STATE: u32 = 1
+            INVALID_PROCESS_IDENTITY: u32 = 2
+            INVALID_TASK_PORT: u32 = 4
+
+        def control_failure(code: DebuggerErrors::ErrorCode, detail: u32, retryable: bool) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(code, retryable, detail)
+
+        def task_access_error_code(status: i32) -> DebuggerErrors::ErrorCode:
+            return DebuggerErrors::ErrorCode.PermissionDenied if status == KernelStatus::PROTECTION_FAILURE or status == KernelStatus::FAILURE
+            return DebuggerErrors::ErrorCode.Unavailable
+
+        def task_access_error_is_retryable(status: i32) -> bool:
+            return status != KernelStatus::PROTECTION_FAILURE and status != KernelStatus::FAILURE
+
+        def process_sample_matches(session: DebuggerNativeAttach::AttachSession&, sample: DebuggerNativeMacOSResources::ProcessSample&) -> bool:
+            return false if not DebuggerNativeMacOSResources::macos_sample_is_valid(sample)
+            return false if sample.process_id != session.process.pid
+            return false if sample.start_microseconds >= Identity::MICROSECONDS_PER_SECOND
+            return false if sample.start_seconds > Identity::MAX_U64 / Identity::MICROSECONDS_PER_SECOND
+            observed_identity: u64 = sample.start_seconds * Identity::MICROSECONDS_PER_SECOND + sample.start_microseconds
+            return observed_identity == session.process.start_identity
+
+        struct AcquiredTaskPort:
+            port: mutable u32
+            failure: mutable DebuggerErrors::DebuggerError
+
+        def acquire_identity_checked_task_port(session: DebuggerNativeAttach::AttachSession&) -> AcquiredTaskPort can[Unsafe.PointerCast]:
+            result: mutable AcquiredTaskPort = zeroed
+            result.port <- MachPort::NULL_PORT
+            result.failure <- DebuggerErrors::no_error()
+            if not DebuggerProcess::process_is_valid(session.process) or session.process.pid == Identity::NO_PROCESS_ID or session.process.pid > Identity::MAX_PROCESS_ID:
+                result.failure <- control_failure(DebuggerErrors::ErrorCode.InvalidState, Detail::INVALID_SESSION_STATE, false)
+                return result
+
+            before: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(session.process.pid) can Unsafe.PointerCast
+            if not process_sample_matches(session, before):
+                result.failure <- control_failure(DebuggerErrors::ErrorCode.StaleGeneration, Detail::INVALID_PROCESS_IDENTITY, true)
+                return result
+
+            task_port: mutable u32 = MachPort::NULL_PORT
+            task_status: i32 = debugger_macos_task_for_pid(debugger_macos_task_self, session.process.pid.i32(), &task_port) can Unsafe.PointerCast
+            if task_status != KernelStatus::SUCCESS:
+                if task_port != MachPort::NULL_PORT:
+                    release_status: i32 = debugger_macos_mach_port_deallocate(debugger_macos_task_self, task_port) can Unsafe.PointerCast
+                    if release_status != KernelStatus::SUCCESS:
+                        result.port <- task_port
+                        result.failure <- control_failure(DebuggerErrors::ErrorCode.Internal, release_status.u32(), false)
+                        return result
+                result.failure <- control_failure(task_access_error_code(task_status), task_status.u32(), task_access_error_is_retryable(task_status))
+                return result
+            if task_port == MachPort::NULL_PORT:
+                result.failure <- control_failure(DebuggerErrors::ErrorCode.Corrupt, Detail::INVALID_TASK_PORT, false)
+                return result
+
+            after_acquire: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(session.process.pid) can Unsafe.PointerCast
+            if not process_sample_matches(session, after_acquire):
+                release_status: i32 = debugger_macos_mach_port_deallocate(debugger_macos_task_self, task_port) can Unsafe.PointerCast
+                if release_status != KernelStatus::SUCCESS:
+                    result.port <- task_port
+                    result.failure <- control_failure(DebuggerErrors::ErrorCode.Internal, release_status.u32(), false)
+                    return result
+                result.failure <- control_failure(DebuggerErrors::ErrorCode.StaleGeneration, Detail::INVALID_PROCESS_IDENTITY, true) if release_status == KernelStatus::SUCCESS
+                return result
+
+            result.port <- task_port
+            return result
+
+        def release_owned_task_port(controller: mutable MacOSAttachControl&) -> i32 can[Unsafe.PointerCast]:
+            return KernelStatus::SUCCESS if not controller.task_port_owned
+            release_status: i32 = debugger_macos_mach_port_deallocate(debugger_macos_task_self, controller.task_port) can Unsafe.PointerCast
+            if release_status == KernelStatus::SUCCESS:
+                controller.task_port <- MachPort::NULL_PORT
+                controller.task_port_owned <- false
+            return release_status
+
+    public:
+        struct MacOSAttachControl:
+            session: mutable DebuggerNativeAttach::AttachSession
+            task_port: mutable u32
+            task_port_owned: mutable bool
+            suspension_owned: mutable bool
+
+        def macos_attach_control_new(session: DebuggerNativeAttach::AttachSession) -> MacOSAttachControl:
+            return MacOSAttachControl{session: session, task_port: MachPort::NULL_PORT, task_port_owned: false, suspension_owned: false}
+
+        def macos_attach_control_is_exact(controller: MacOSAttachControl&) -> bool:
+            return false if not DebuggerNativeAttach::attach_validate(controller.session)
+            return false if controller.task_port_owned != (controller.task_port != MachPort::NULL_PORT)
+            return false if controller.suspension_owned and not controller.task_port_owned
+            return false if controller.suspension_owned and controller.session.process.state != DebuggerProcess::ProcessState.Stopped
+            return true
+
+        def macos_attach_control_can_inspect(controller: MacOSAttachControl&) -> bool:
+            return controller.suspension_owned and DebuggerNativeAttach::attach_is_stopped(controller.session) and macos_attach_control_is_exact(controller)
+
+        # A successful pause owns one Mach suspension count and retains the
+        # exact task port needed to release that count later.
+        def macos_attach_pause(controller: mutable MacOSAttachControl&) -> void can[Unsafe.PointerCast]:
+            if not DebuggerProcess::process_is_valid(controller.session.process) or controller.session.process.state != DebuggerProcess::ProcessState.Running or controller.task_port_owned or controller.suspension_owned:
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.InvalidState, Detail::INVALID_SESSION_STATE, false)
+                return
+
+            acquired: AcquiredTaskPort = acquire_identity_checked_task_port(controller.session) can Unsafe.PointerCast
+            if not DebuggerErrors::error_is_ok(acquired.failure):
+                if acquired.port != MachPort::NULL_PORT:
+                    controller.task_port <- acquired.port
+                    controller.task_port_owned <- true
+                controller.session.last_error <- acquired.failure
+                return
+
+            suspend_status: i32 = debugger_macos_control_task_suspend(acquired.port) can Unsafe.PointerCast
+            if suspend_status != KernelStatus::SUCCESS:
+                controller.task_port <- acquired.port
+                controller.task_port_owned <- true
+                release_status: i32 = release_owned_task_port(controller) can Unsafe.PointerCast
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.Internal, release_status.u32(), false) if release_status != KernelStatus::SUCCESS
+                controller.session.last_error <- control_failure(task_access_error_code(suspend_status), suspend_status.u32(), task_access_error_is_retryable(suspend_status)) if release_status == KernelStatus::SUCCESS
+                return
+
+            controller.task_port <- acquired.port
+            controller.task_port_owned <- true
+            controller.suspension_owned <- true
+            controller.session.process.state <- DebuggerProcess::ProcessState.Stopped
+            after_suspend: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(controller.session.process.pid) can Unsafe.PointerCast
+            if not process_sample_matches(controller.session, after_suspend):
+                macos_attach_resume(controller) can Unsafe.PointerCast
+                if controller.suspension_owned:
+                    return
+                controller.session.process.state <- DebuggerProcess::ProcessState.Exited
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.StaleGeneration, Detail::INVALID_PROCESS_IDENTITY, true)
+                return
+            controller.session.last_error <- DebuggerErrors::no_error()
+
+        # Resume decrements only the suspend count acquired by this controller.
+        # A failed task_resume preserves the port and ownership for retry.
+        def macos_attach_resume(controller: mutable MacOSAttachControl&) -> void can[Unsafe.PointerCast]:
+            if not controller.suspension_owned:
+                if controller.task_port_owned:
+                    release_status: i32 = release_owned_task_port(controller) can Unsafe.PointerCast
+                    controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.Internal, release_status.u32(), false) if release_status != KernelStatus::SUCCESS
+                    controller.session.last_error <- DebuggerErrors::no_error() if release_status == KernelStatus::SUCCESS
+                    return
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.InvalidState, Detail::INVALID_SESSION_STATE, false)
+                return
+            if not controller.task_port_owned or controller.task_port == MachPort::NULL_PORT:
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.Corrupt, Detail::INVALID_TASK_PORT, false)
+                return
+
+            current: DebuggerNativeMacOSResources::ProcessSample = DebuggerNativeMacOSResources::macos_sample_process(controller.session.process.pid) can Unsafe.PointerCast
+            identity_matches: bool = process_sample_matches(controller.session, current)
+            resume_status: i32 = debugger_macos_control_task_resume(controller.task_port) can Unsafe.PointerCast
+            if resume_status != KernelStatus::SUCCESS and identity_matches:
+                controller.session.last_error <- control_failure(task_access_error_code(resume_status), resume_status.u32(), task_access_error_is_retryable(resume_status))
+                return
+
+            controller.suspension_owned <- false
+            controller.session.process.state <- DebuggerProcess::ProcessState.Running if identity_matches
+            controller.session.process.state <- DebuggerProcess::ProcessState.Exited if not identity_matches
+            release_status: i32 = release_owned_task_port(controller) can Unsafe.PointerCast
+            if release_status != KernelStatus::SUCCESS:
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.Internal, release_status.u32(), false)
+                return
+            if not identity_matches or resume_status != KernelStatus::SUCCESS:
+                controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.StaleGeneration, Detail::INVALID_PROCESS_IDENTITY, true)
+                return
+            controller.session.last_error <- DebuggerErrors::no_error()
+
+        # Detach is refused while this controller still owns a suspend count
+        # or a task-port right, preventing silent target freezes and Mach leaks.
+        def macos_attach_detach(controller: mutable MacOSAttachControl&) -> void can[Unsafe.PointerCast]:
+            if controller.suspension_owned:
+                macos_attach_resume(controller) can Unsafe.PointerCast
+                return if controller.suspension_owned or not DebuggerErrors::error_is_ok(controller.session.last_error)
+            if controller.task_port_owned:
+                release_status: i32 = release_owned_task_port(controller) can Unsafe.PointerCast
+                if release_status != KernelStatus::SUCCESS:
+                    controller.session.last_error <- control_failure(DebuggerErrors::ErrorCode.Internal, release_status.u32(), false)
+                    return
+            controller.session.process <- DebuggerProcess::process_detach(controller.session.process)
+            controller.session.last_error <- DebuggerErrors::no_error()

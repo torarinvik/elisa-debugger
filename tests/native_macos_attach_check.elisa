@@ -1,10 +1,32 @@
 include "../src/native/macos_attach.elisa"
+include "../src/native/macos_control.elisa"
 
 @link_name("getpid")
 extern debugger_macos_attach_getpid() -> i32
+@link_name("atoi")
+extern debugger_macos_attach_parse_process_id(text: cstr) -> i32 can[Unsafe.PointerCast]
+
+const module TestProcess:
+    ARGUMENT_COUNT: i64 = 2
+    PROCESS_ID_ARGUMENT_INDEX: usize = 1
+    INVALID_PROCESS_ID: i32 = 0
+    NO_FAILURE: i64 = 0
+    NO_BYTES: usize = 0
+
+const module TestControlResult:
+    CONTROL_ATTACH_FAILURE: i64 = 20
+    CONTROL_PAUSE_FAILURE: i64 = 21
+    CONTROL_PAUSE_REPEAT_FAILURE: i64 = 22
+    CONTROL_RESUME_FAILURE: i64 = 23
+    CONTROL_RESUME_REPEAT_FAILURE: i64 = 24
+    CONTROL_DETACH_FAILURE: i64 = 25
+    CONTROL_CLEANUP_FAILURE: i64 = 26
+    CONTROL_PERMISSION_DENIAL_STATE_FAILURE: i64 = 27
+    CONTROL_STALE_IDENTITY_FAILURE: i64 = 28
 
 const module TestInput:
     PAYLOAD_LENGTH: usize = 3
+    CONTROL_PROBE_LENGTH: usize = 1
     FIRST_INDEX: usize = 0
     MIDDLE_INDEX: usize = 1
     LAST_INDEX: usize = 2
@@ -14,6 +36,7 @@ const module TestInput:
     MAX_ADDRESS: u64 = 18446744073709551615
     ADDRESS_OFFSET: u64 = 1
     PROCESS_IDENTITY_INCREMENT: u64 = 1
+    CONTROL_PROBE_ADDRESS: u64 = 1
 
 const module TestResult:
     PROCESS_ATTACH_FAILURE: i64 = 1
@@ -21,15 +44,76 @@ const module TestResult:
     STALE_IDENTITY_FAILURE: i64 = 3
     ADDRESS_OVERFLOW_FAILURE: i64 = 4
     INVALID_PROCESS_FAILURE: i64 = 5
+    CONTROL_SESSION_FAILURE: i64 = 6
 
-def main() -> i64 can[Unsafe.PointerCast]:
+def attach_test_control_process(process_id: i32) -> i64 can[Unsafe.PointerCast]:
+    return TestControlResult::CONTROL_ATTACH_FAILURE if process_id <= TestProcess::INVALID_PROCESS_ID
+    session: mutable DebuggerNativeAttach::AttachSession = DebuggerNativeMacOSAttach::macos_attach_process(process_id.u64()) can Unsafe.PointerCast
+    controller: mutable DebuggerNativeMacOSControl::MacOSAttachControl = DebuggerNativeMacOSControl::macos_attach_control_new(session)
+    result: mutable i64 = TestProcess::NO_FAILURE
+    if not DebuggerNativeAttach::attach_validate(controller.session):
+        result <- TestControlResult::CONTROL_ATTACH_FAILURE
+    if controller.session.process.state != DebuggerProcess::ProcessState.Running:
+        result <- TestControlResult::CONTROL_ATTACH_FAILURE
+    target_start_identity: u64 = controller.session.process.start_identity
+    controller.session.process.start_identity <- target_start_identity + TestInput::PROCESS_IDENTITY_INCREMENT
+    DebuggerNativeMacOSControl::macos_attach_pause(controller) can Unsafe.PointerCast
+    if controller.session.last_error.code != DebuggerErrors::ErrorCode.StaleGeneration or controller.session.process.state != DebuggerProcess::ProcessState.Running or controller.task_port_owned or controller.suspension_owned:
+        result <- TestControlResult::CONTROL_STALE_IDENTITY_FAILURE
+    controller.session.process.start_identity <- target_start_identity
+    if result == TestProcess::NO_FAILURE:
+        DebuggerNativeMacOSControl::macos_attach_pause(controller) can Unsafe.PointerCast
+        if controller.session.last_error.code == DebuggerErrors::ErrorCode.PermissionDenied:
+            if controller.session.process.state != DebuggerProcess::ProcessState.Running or controller.task_port_owned or controller.suspension_owned or controller.session.last_error.retryable or not DebuggerNativeMacOSControl::macos_attach_control_is_exact(controller) or DebuggerNativeMacOSControl::macos_attach_control_can_inspect(controller):
+                result <- TestControlResult::CONTROL_PERMISSION_DENIAL_STATE_FAILURE
+            else:
+                denied_memory: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(controller.session, TestInput::CONTROL_PROBE_ADDRESS, TestInput::CONTROL_PROBE_LENGTH) can Unsafe.PointerCast
+                if denied_memory.complete or denied_memory.length != TestProcess::NO_BYTES or denied_memory.failure.code != DebuggerErrors::ErrorCode.PermissionDenied or denied_memory.failure.retryable:
+                    result <- TestControlResult::CONTROL_PERMISSION_DENIAL_STATE_FAILURE
+                else:
+                    DebuggerNativeMacOSControl::macos_attach_detach(controller) can Unsafe.PointerCast
+                    return TestControlResult::CONTROL_CLEANUP_FAILURE if controller.session.process.state != DebuggerProcess::ProcessState.Detached or controller.task_port_owned or controller.suspension_owned or not DebuggerErrors::error_is_ok(controller.session.last_error)
+                    return TestProcess::NO_FAILURE
+        elif controller.session.process.state != DebuggerProcess::ProcessState.Stopped or not controller.suspension_owned or not DebuggerNativeMacOSControl::macos_attach_control_can_inspect(controller) or not DebuggerErrors::error_is_ok(controller.session.last_error):
+            result <- TestControlResult::CONTROL_PAUSE_FAILURE
+    if result == TestProcess::NO_FAILURE:
+        DebuggerNativeMacOSControl::macos_attach_pause(controller) can Unsafe.PointerCast
+        if not controller.suspension_owned or controller.session.process.state != DebuggerProcess::ProcessState.Stopped or controller.session.last_error.code != DebuggerErrors::ErrorCode.InvalidState:
+            result <- TestControlResult::CONTROL_PAUSE_REPEAT_FAILURE
+    if result == TestProcess::NO_FAILURE:
+        DebuggerNativeMacOSControl::macos_attach_resume(controller) can Unsafe.PointerCast
+        if controller.suspension_owned or controller.session.process.state != DebuggerProcess::ProcessState.Running or not DebuggerErrors::error_is_ok(controller.session.last_error) or not DebuggerNativeMacOSControl::macos_attach_control_is_exact(controller):
+            result <- TestControlResult::CONTROL_RESUME_FAILURE
+    if result == TestProcess::NO_FAILURE:
+        DebuggerNativeMacOSControl::macos_attach_resume(controller) can Unsafe.PointerCast
+        if controller.suspension_owned or controller.session.process.state != DebuggerProcess::ProcessState.Running or controller.session.last_error.code != DebuggerErrors::ErrorCode.InvalidState:
+            result <- TestControlResult::CONTROL_RESUME_REPEAT_FAILURE
+    if result == TestProcess::NO_FAILURE:
+        DebuggerNativeMacOSControl::macos_attach_pause(controller) can Unsafe.PointerCast
+        if controller.session.process.state != DebuggerProcess::ProcessState.Stopped or not controller.suspension_owned or not DebuggerNativeMacOSControl::macos_attach_control_can_inspect(controller) or not DebuggerErrors::error_is_ok(controller.session.last_error):
+            result <- TestControlResult::CONTROL_DETACH_FAILURE
+    DebuggerNativeMacOSControl::macos_attach_detach(controller) can Unsafe.PointerCast
+    if result == TestProcess::NO_FAILURE and (controller.session.process.state != DebuggerProcess::ProcessState.Detached or controller.task_port_owned or controller.suspension_owned or not DebuggerErrors::error_is_ok(controller.session.last_error)):
+        result <- TestControlResult::CONTROL_DETACH_FAILURE
+    if controller.suspension_owned:
+        DebuggerNativeMacOSControl::macos_attach_resume(controller) can Unsafe.PointerCast
+    if controller.task_port_owned:
+        DebuggerNativeMacOSControl::macos_attach_resume(controller) can Unsafe.PointerCast
+    return TestControlResult::CONTROL_CLEANUP_FAILURE if controller.suspension_owned or controller.task_port_owned
+    return result
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Unsafe.PointerCast]:
+    arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+    return TestResult::PROCESS_ATTACH_FAILURE if argc != TestProcess::ARGUMENT_COUNT
     process_id: i32 = debugger_macos_attach_getpid()
-    return TestResult::PROCESS_ATTACH_FAILURE if process_id <= 0
+    return TestResult::PROCESS_ATTACH_FAILURE if process_id <= TestProcess::INVALID_PROCESS_ID
 
     payload: mutable u8[TestInput::PAYLOAD_LENGTH] = [TestInput::FIRST_BYTE, TestInput::SECOND_BYTE, TestInput::THIRD_BYTE]
     address: u64 = (&payload[TestInput::FIRST_INDEX]).cast[u64] can Unsafe.PointerCast
     session: mutable DebuggerNativeAttach::AttachSession = DebuggerNativeMacOSAttach::macos_attach_process(process_id.u64()) can Unsafe.PointerCast
     return TestResult::PROCESS_ATTACH_FAILURE if not DebuggerNativeAttach::attach_validate(session) or session.process.state != DebuggerProcess::ProcessState.Running or session.process.owned or DebuggerNativeAttach::attach_is_stopped(session)
+    control: mutable DebuggerNativeMacOSControl::MacOSAttachControl = DebuggerNativeMacOSControl::macos_attach_control_new(session)
+    return TestResult::CONTROL_SESSION_FAILURE if not DebuggerNativeMacOSControl::macos_attach_control_is_exact(control) or DebuggerNativeMacOSControl::macos_attach_control_can_inspect(control)
 
     read: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(session, address, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
     return TestResult::PROCESS_READ_FAILURE if not read.complete or read.length != TestInput::PAYLOAD_LENGTH or not DebuggerErrors::error_is_ok(read.failure)
@@ -38,11 +122,12 @@ def main() -> i64 can[Unsafe.PointerCast]:
     stale_session: mutable DebuggerNativeAttach::AttachSession = session
     stale_session.process.start_identity <- session.process.start_identity + TestInput::PROCESS_IDENTITY_INCREMENT
     stale_read: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(stale_session, address, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
-    return TestResult::STALE_IDENTITY_FAILURE if stale_read.complete or stale_read.length != 0 or stale_read.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
+    return TestResult::STALE_IDENTITY_FAILURE if stale_read.complete or stale_read.length != TestProcess::NO_BYTES or stale_read.failure.code != DebuggerErrors::ErrorCode.StaleGeneration
 
     overflow: DebuggerNativeAttach::AttachMemory = DebuggerNativeMacOSAttach::macos_attach_read_memory(session, TestInput::MAX_ADDRESS - TestInput::ADDRESS_OFFSET, TestInput::PAYLOAD_LENGTH) can Unsafe.PointerCast
-    return TestResult::ADDRESS_OVERFLOW_FAILURE if overflow.complete or overflow.length != 0 or overflow.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
+    return TestResult::ADDRESS_OVERFLOW_FAILURE if overflow.complete or overflow.length != TestProcess::NO_BYTES or overflow.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
 
-    invalid_session: DebuggerNativeAttach::AttachSession = DebuggerNativeMacOSAttach::macos_attach_process(0) can Unsafe.PointerCast
+    invalid_session: DebuggerNativeAttach::AttachSession = DebuggerNativeMacOSAttach::macos_attach_process(TestProcess::INVALID_PROCESS_ID.u64()) can Unsafe.PointerCast
     return TestResult::INVALID_PROCESS_FAILURE if DebuggerNativeAttach::attach_validate(invalid_session) or invalid_session.last_error.code != DebuggerErrors::ErrorCode.InvalidArgument
-    return 0
+    target_pid: i32 = debugger_macos_attach_parse_process_id(arguments[TestProcess::PROCESS_ID_ARGUMENT_INDEX].cast[cstr]) can Unsafe.PointerCast
+    return attach_test_control_process(target_pid) can Unsafe.PointerCast

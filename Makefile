@@ -859,7 +859,7 @@ $(BUILD)/elisa-debugger-native-macos-attach-check: tests/native_macos_attach_che
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 native-macos-attach-check: $(BUILD)/elisa-debugger-native-macos-attach-check
-	"$(BUILD)/elisa-debugger-native-macos-attach-check"
+	sh tests/native_macos_attach_check.sh "$(BUILD)/elisa-debugger-native-macos-attach-check"
 
 $(BUILD)/elisa-debugger-memread: src/native/macos_memory_cli.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

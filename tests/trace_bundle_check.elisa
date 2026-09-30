@@ -31,7 +31,7 @@ const module Test:
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD), runtime: DebuggerIdentity::debug_id(Test::BUILD + 1), source: DebuggerIdentity::debug_id(Test::BUILD + 2), target: DebuggerIdentity::debug_id(Test::BUILD + 3), metadata_version: 1}
 
-def check_bundle_round_trip() -> i64:
+def check_bundle_round_trip() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(Test::RECORDING))
     for index in 0..<Test::EVENT_COUNT_USIZE:
         event_ordinal: u64 = index.u64()
@@ -41,7 +41,7 @@ def check_bundle_round_trip() -> i64:
         return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
     pipeline_result: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
     return 2 if not pipeline_result.accepted or not DebuggerErrors::error_is_ok(pipeline_result.failure)
-    bundle: mutable DebuggerTraceBundle::TraceBundle = pipeline_result.bundle
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTracePipeline::bundle_build_result_bundle(pipeline_result) can Abort.Panic
     return 3 if bundle.chunk_count != Test::EXPECTED_EVENT_CHUNK_COUNT or bundle.manifest.compiler.value != Test::BUILD or bundle.manifest.source.value != Test::BUILD + 2 or bundle.manifest.first_event != Test::FIRST_EVENT or bundle.manifest.last_event != Test::LAST_EVENT
     return 4 if bundle.manifest.checkpoint_count != 0
     report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
@@ -51,17 +51,19 @@ def check_bundle_round_trip() -> i64:
     exported_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[0], exported.bytes.length)
     return 7 if exported_report.state != DebuggerTraceVerify::VerificationState.Exact or not exported_report.replayable
     return 8 if recorder.status != DebuggerTraceRecorder::RecorderStatus.Recording or recorder.pending_count != Test::EXPECTED_PENDING_EVENT_COUNT
+    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return 0
 
-def check_corrupt_bundle() -> i64:
-    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+def check_corrupt_bundle() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build_identity()) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     bundle.state <- DebuggerTraceBundle::BundleState.Corrupt
     report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_bundle(bundle)
     return 9 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
+    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return 0
 
-def check_rejects_malformed_exact_bundle() -> i64:
-    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+def check_rejects_malformed_exact_bundle() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build_identity()) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     payload: mutable DebuggerTraceBinary::ByteWriter = zeroed
     DebuggerTraceBinary::writer_initialize(payload)
     DebuggerTraceBinary::writer_put_byte(payload, Test::MALFORMED_PAYLOAD_BYTE)
@@ -74,18 +76,19 @@ def check_rejects_malformed_exact_bundle() -> i64:
     return 10 if DebuggerErrors::error_is_ok(rejected) or bundle.state != DebuggerTraceBundle::BundleState.Corrupt
     sealed: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_seal(bundle, false)
     return 11 if DebuggerErrors::error_is_ok(sealed)
+    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return 0
 
-def check_pipeline_rejects_partial_recording() -> i64:
+def check_pipeline_rejects_partial_recording() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(Test::RECORDING))
     position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::RECORDING))
     event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::SCHEMA, 0, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Partial, Test::HASH)
     _ = DebuggerTraceRecorder::recorder_append(recorder, event)
     result: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
-    return Test::PIPELINE_PARTIAL_RECORDING_RESULT if result.accepted or DebuggerErrors::error_is_ok(result.failure) or result.bundle.chunk_count != 0
+    return Test::PIPELINE_PARTIAL_RECORDING_RESULT if result.accepted or DebuggerErrors::error_is_ok(result.failure) or result.bundle != null
     return 0
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     return check_bundle_round_trip() if check_bundle_round_trip() != 0
     return check_corrupt_bundle() if check_corrupt_bundle() != 0
     return check_rejects_malformed_exact_bundle() if check_rejects_malformed_exact_bundle() != 0

@@ -7,6 +7,9 @@ include "./binary.elisa"
 include "./reader.elisa"
 include "../core/errors.elisa"
 
+extern malloc(size: usize) -> mutable heap void&? can[Memory.Allocate]
+extern free(storage: heap void&) can[Memory.Release]
+
 module DebuggerTraceBundle:
     private:
         const module Bundle:
@@ -35,13 +38,60 @@ module DebuggerTraceBundle:
 
         struct TraceBundle:
             manifest: mutable DebuggerTraceManifest::BundleManifest
-            chunks: mutable DebuggerTraceStorage::StoredChunk[Bundle::TRACE_BUNDLE_CHUNK_CAPACITY]
+            # Live chunks occupy this owned allocation; chunk_count gates reads.
+            chunks: mutable heap DebuggerTraceStorage::StoredChunk&
             chunk_count: mutable usize
             state: mutable BundleState
             last_error: mutable DebuggerErrors::DebuggerError
 
-        def bundle_new(build: DebuggerIdentity::BuildIdentity) -> TraceBundle:
-            return TraceBundle{manifest: DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact), chunks: zeroed, chunk_count: 0, state: BundleState.Open, last_error: DebuggerErrors::no_error()}
+        def bundle_from_raw(storage: mutable heap void&) -> mutable heap TraceBundle& can Unsafe.PointerCast:
+            trusted Unsafe.PointerCast:
+                return storage.cast[mutable heap TraceBundle&]
+
+        def bundle_chunks_from_raw(storage: mutable heap void&) -> mutable heap DebuggerTraceStorage::StoredChunk& can Unsafe.PointerCast:
+            trusted Unsafe.PointerCast:
+                return storage.cast[mutable heap DebuggerTraceStorage::StoredChunk&]
+
+        def bundle_new(build: DebuggerIdentity::BuildIdentity) -> mutable heap TraceBundle& can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            bundle_storage: mutable heap void&? = malloc(size_of(TraceBundle))
+            if bundle_storage == null:
+                panic("trace bundle allocation failed")
+            bundle: mutable heap TraceBundle& = bundle_from_raw(bundle_storage)
+            chunk_storage: mutable heap void&? = malloc(size_of(DebuggerTraceStorage::StoredChunk) * Bundle::TRACE_BUNDLE_CHUNK_CAPACITY)
+            if chunk_storage == null:
+                trusted Unsafe.PointerCast:
+                    free(bundle_storage) can Memory.Release
+                panic("trace bundle chunk allocation failed")
+            trusted Unsafe.PointerCast:
+                bundle.chunks <- bundle_chunks_from_raw(chunk_storage)
+            bundle.manifest <- DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
+            bundle.chunk_count <- 0
+            bundle.state <- BundleState.Open
+            bundle.last_error <- DebuggerErrors::no_error()
+            return bundle
+
+        # Bundle copies share the chunk allocation. Use bundle_clone when an
+        # independent mutation is required, and destroy each owner exactly once.
+        def bundle_clone(bundle: TraceBundle&) -> mutable heap TraceBundle& can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: bundle.manifest.compiler, runtime: bundle.manifest.runtime, source: bundle.manifest.source, target: bundle.manifest.target, metadata_version: bundle.manifest.metadata_version}
+            clone: mutable heap TraceBundle& = bundle_new(build) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            if bundle.chunk_count > Bundle::TRACE_BUNDLE_CHUNK_CAPACITY:
+                clone.state <- BundleState.Corrupt
+                clone.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::TRACE_BUNDLE_DETAIL_CAPACITY)
+                return clone
+            clone.manifest <- bundle.manifest
+            clone.chunk_count <- bundle.chunk_count
+            clone.state <- bundle.state
+            clone.last_error <- bundle.last_error
+            for index in 0..<bundle.chunk_count:
+                clone.chunks[index] <- bundle.chunks[index]
+            return clone
+
+        def bundle_destroy(bundle: mutable heap TraceBundle&) -> void can[Memory.Release, Unsafe.PointerCast]:
+            # Call exactly once after the owning bundle is no longer in use.
+            trusted Unsafe.PointerCast:
+                free(bundle.chunks.cast[heap void&]) can Memory.Release
+                free(bundle.cast[heap void&]) can Memory.Release
 
         def bundle_verify_chunk_at(bundle: TraceBundle&, chunk: DebuggerTraceStorage::StoredChunk&, expected_sequence: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::TRACE_BUNDLE_DETAIL_CAPACITY) if chunk.payload_length > Bundle::TRACE_BUNDLE_PAYLOAD_CAPACITY

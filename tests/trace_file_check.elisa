@@ -101,7 +101,7 @@ def write_truncated_fixture(path: u8&, path_length: usize, bytes: u8&, length: u
     close_status: int = close(descriptor) can Blocking.IO
     return written and close_status != Test::FILE_CLOSE_FAILURE
 
-def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     return TestResult::LIMITS if DebuggerTraceFileLimits::PATH_CAPACITY_BYTES != Test::EXPECTED_MAX_PATH_BYTES or DebuggerTraceFileLimits::MAX_FILE_BYTES != DebuggerTraceStorageLimits::MAX_FILE_BYTES
 
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = DebuggerTraceRecorder::recorder_new(build_identity(), DebuggerIdentity::debug_id(Test::RECORDING_ID))
@@ -110,7 +110,9 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     return TestResult::RECORD if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(recorder, event))
     built: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
     return TestResult::BUNDLE if not built.accepted
-    exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(built.bundle)
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTracePipeline::bundle_build_result_bundle(built) can Abort.Panic
+    exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return TestResult::EXPORT if not DebuggerErrors::error_is_ok(exported.failure) or not DebuggerTraceBinary::writer_is_valid(exported.bytes)
     return TestResult::EXPORT if exported.bytes.length <= Test::MINIMUM_TRACE_BYTES or exported.chunk_count != Test::EVENT_COUNT
 
@@ -152,7 +154,9 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     return TestResult::ALTERNATE_TRACE if not DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_append(alternate_recorder, alternate_event))
     alternate_bundle: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(alternate_recorder)
     return TestResult::ALTERNATE_TRACE if not alternate_bundle.accepted
-    alternate_export: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(alternate_bundle.bundle)
+    alternate_bundle_handle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTracePipeline::bundle_build_result_bundle(alternate_bundle) can Abort.Panic
+    alternate_export: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(alternate_bundle_handle) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    DebuggerTraceBundle::bundle_destroy(alternate_bundle_handle) can Memory.Release, Unsafe.PointerCast
     return TestResult::ALTERNATE_TRACE if not DebuggerErrors::error_is_ok(alternate_export.failure) or not DebuggerTraceBinary::writer_is_valid(alternate_export.bytes)
     return TestResult::ALTERNATE_TRACE if alternate_export.bytes.length != exported.bytes.length
     alternate_differs: mutable bool = false

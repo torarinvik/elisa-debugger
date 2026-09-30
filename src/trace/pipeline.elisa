@@ -14,13 +14,20 @@ module DebuggerTracePipeline:
 
 
     public:
+        # A successful result owns its bundle. Borrow it with
+        # bundle_build_result_bundle, then release it with bundle_destroy.
         struct BundleBuildResult:
             accepted: mutable bool
-            bundle: mutable DebuggerTraceBundle::TraceBundle
+            bundle: mutable heap DebuggerTraceBundle::TraceBundle&?
             failure: mutable DebuggerErrors::DebuggerError
 
         def bundle_build_error(failure: DebuggerErrors::DebuggerError) -> BundleBuildResult:
-            return BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
+            return BundleBuildResult{accepted: false, bundle: null, failure: failure}
+
+        def bundle_build_result_bundle[@r](result: BundleBuildResult& @r) -> mutable heap DebuggerTraceBundle::TraceBundle& @r can[Abort.Panic]:
+            if not result.accepted or result.bundle == null:
+                panic("trace bundle result has no owned bundle")
+            return result.bundle
 
         # Finalize a copy so callers can continue recording after taking a
         # consistent export snapshot. Partial/corrupt recorders never become
@@ -32,13 +39,17 @@ module DebuggerTracePipeline:
             return bundle_build_error(finalized) if not DebuggerErrors::error_is_ok(finalized)
             return bundle_build_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::RECORDER_NOT_EXACT)) if not DebuggerTraceRecorder::recorder_is_exact(working)
             build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: working.manifest.compiler, runtime: working.manifest.runtime, source: working.manifest.source, target: working.manifest.target, metadata_version: working.manifest.metadata_version}
-            bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
+            bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
             bundle.manifest <- working.manifest
             for index in 0..<DebuggerTraceRecorder::recorder_chunk_count(working):
                 chunk: mutable DebuggerTraceStorage::StoredChunk = working.chunks[index]
                 chunk.header.sequence <- index.u64()
                 appended: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_append(bundle, chunk)
-                return bundle_build_error(appended) if not DebuggerErrors::error_is_ok(appended)
+                if not DebuggerErrors::error_is_ok(appended):
+                    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
+                    return bundle_build_error(appended)
             sealed: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_seal(bundle, false) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
-            return bundle_build_error(sealed) if not DebuggerErrors::error_is_ok(sealed)
+            if not DebuggerErrors::error_is_ok(sealed):
+                DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
+                return bundle_build_error(sealed)
             return BundleBuildResult{accepted: true, bundle: bundle, failure: DebuggerErrors::no_error()}

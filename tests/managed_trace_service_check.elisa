@@ -321,7 +321,7 @@ def fresh_checkpoint_reverse_step_has_prefix(service: mutable DebuggerManagedSer
     historical: DebuggerCheckpoint::MachineSnapshot = service.controller.engine.history[service.controller.engine.event_count]
     return DebuggerCheckpoint::snapshot_matches_machine(historical, service.controller.engine.machine)
 
-def build_interior_checkpoint_bundle(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, bundle: mutable DebuggerTraceBundle::TraceBundle&) -> bool:
+def build_interior_checkpoint_bundle(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, bundle: mutable heap DebuggerTraceBundle::TraceBundle&?) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     interior_service: mutable DebuggerManagedService::Service = new_trace_service(TraceServiceTestIdentity::INTERIOR_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
     return false if not seed_recorded_adapter_state(interior_service) or not run_service_to_event(interior_service, TraceServiceTestTrace::INTERIOR_CHECKPOINT_EVENT)
     checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(interior_service.controller)
@@ -339,7 +339,7 @@ def build_interior_checkpoint_bundle(build: DebuggerIdentity::BuildIdentity, ima
     return false if not DebuggerErrors::error_is_ok(failure)
     built: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
     return false if not built.accepted
-    bundle <- built.bundle
+    bundle <- DebuggerTracePipeline::bundle_build_result_bundle(built) can Abort.Panic
     return true
 
 def build_mismatch_is_atomic(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, reader: DebuggerTraceReader::TraceReader&) -> bool:
@@ -398,11 +398,15 @@ def restore_rejects_future_image_mismatch(build: DebuggerIdentity::BuildIdentity
     return false if restored.accepted or restored.failure.code != DebuggerErrors::ErrorCode.InvalidArgument
     return service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, initial_hash)
 
-def interior_checkpoint_restore_preserves_exactness_barrier(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64:
-    bundle: mutable DebuggerTraceBundle::TraceBundle = zeroed
+def interior_checkpoint_restore_preserves_exactness_barrier(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle&? = null
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not build_interior_checkpoint_bundle(build, image, bundle)
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if bundle == null
+    bundle_handle: mutable heap DebuggerTraceBundle::TraceBundle& = bundle
     reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
-    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not reopen_bundle(reader, bundle) or DebuggerTraceReader::reader_full_checkpoint_count(reader) != TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not reopen_bundle(reader, bundle_handle)
+    DebuggerTraceBundle::bundle_destroy(bundle_handle) can Memory.Release, Unsafe.PointerCast
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if DebuggerTraceReader::reader_full_checkpoint_count(reader) != TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
     checkpoint: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reader, TraceServiceTestTrace::EVENT_COUNT.u64())
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not checkpoint.found or checkpoint.checkpoint.event != TraceServiceTestTrace::INTERIOR_CHECKPOINT_EVENT
 
@@ -470,11 +474,14 @@ def trace_service_recording_checks(build: DebuggerIdentity::BuildIdentity, image
     continued: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, continue_request)
     return TraceServiceTestFailure::CONTINUE if not continued.accepted or service.recorded_event_count != TraceServiceTestTrace::EVENT_COUNT
     trace_bundle: DebuggerTracePipeline::BundleBuildResult = DebuggerManagedTraceService::service_trace_bundle(service)
-    return TraceServiceTestFailure::CHECKPOINT_COUNT if not trace_bundle.accepted or trace_bundle.bundle.manifest.checkpoint_count != TraceServiceTestTrace::END_BOUNDARY_OFFSET or trace_bundle.bundle.chunk_count < TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
+    return TraceServiceTestFailure::CHECKPOINT_COUNT if not trace_bundle.accepted
+    trace_bundle_handle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTracePipeline::bundle_build_result_bundle(trace_bundle) can Abort.Panic
+    return TraceServiceTestFailure::CHECKPOINT_COUNT if trace_bundle_handle.manifest.checkpoint_count != TraceServiceTestTrace::END_BOUNDARY_OFFSET or trace_bundle_handle.chunk_count < TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
     reopened: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
-    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not reopen_bundle(reopened, trace_bundle.bundle) or DebuggerTraceReader::reader_full_checkpoint_count(reopened) != TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not reopen_bundle(reopened, trace_bundle_handle) or DebuggerTraceReader::reader_full_checkpoint_count(reopened) != TraceServiceTestTrace::END_BOUNDARY_OFFSET.usize()
     checkpoint: DebuggerTraceReader::FullCheckpointLookup = DebuggerTraceReader::reader_nearest_checkpoint_at_or_before(reopened, TraceServiceTestTrace::EVENT_COUNT.u64())
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not checkpoint.found or checkpoint.checkpoint.event != TraceServiceTestTrace::EVENT_COUNT.u64() or checkpoint.checkpoint.machine.result != TraceServiceTestProgram::RESULT
+    DebuggerTraceBundle::bundle_destroy(trace_bundle_handle) can Memory.Release, Unsafe.PointerCast
 
     return TraceServiceTestFailure::BUILD_MISMATCH_ATOMIC if not build_mismatch_is_atomic(build, image, reopened)
     return TraceServiceTestFailure::RECORDING_MISMATCH_ATOMIC if not recording_mismatch_is_atomic(build, image, reopened)

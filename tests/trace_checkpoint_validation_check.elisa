@@ -179,7 +179,7 @@ def trace_bytes_with_mixed_recordings() -> DebuggerTraceBinary::ByteWriter:
     append_writer_bytes(bytes, footer)
     return bytes
 
-def check_full_checkpoint_round_trip() -> i64:
+def check_full_checkpoint_round_trip() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload()
     return 1 if not DebuggerTraceBinary::writer_is_valid(payload) or payload.length != DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES
     return 2 if payload.length > DebuggerTraceStorageCapacity::TRACE_STORAGE_PAYLOAD_CAPACITY
@@ -191,7 +191,7 @@ def check_full_checkpoint_round_trip() -> i64:
     payload_reader: mutable DebuggerTraceBinary::ByteReader = zeroed
     DebuggerTraceBinary::reader_initialize(payload_reader, decoded.chunk.payload[0], decoded.chunk.payload_length)
     return 5 if not DebuggerCheckpointCodec::checkpoint_bytes_are_valid(payload_reader)
-    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build_identity()) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     bundle_chunk: mutable DebuggerTraceStorage::StoredChunk = chunk
     bundle_chunk.header.sequence <- 0
     return 6 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, bundle_chunk))
@@ -207,7 +207,7 @@ def check_full_checkpoint_round_trip() -> i64:
     boundary_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 27 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(boundary_reader, manifest_chunk(1)))
     return 28 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(boundary_reader, boundary_chunk))
-    boundary_bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    boundary_bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build_identity()) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     boundary_event: mutable DebuggerTraceStorage::StoredChunk = event_chunk()
     boundary_event.header.sequence <- 0
     return 29 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(boundary_bundle, boundary_event))
@@ -217,9 +217,13 @@ def check_full_checkpoint_round_trip() -> i64:
     boundary_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(boundary_wire)
     boundary_scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(boundary_storage.bytes[0], boundary_storage.length)
     return 32 if boundary_scan.status != DebuggerTraceStorage::StorageStatus.Ready or not boundary_scan.footer_verified
+    DebuggerTraceBundle::bundle_destroy(boundary_bundle) can Memory.Release, Unsafe.PointerCast
+    DebuggerTraceReader::reader_destroy(boundary_reader) can Memory.Release, Unsafe.PointerCast
+    DebuggerTraceReader::reader_destroy(reader) can Memory.Release, Unsafe.PointerCast
+    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return 0
 
-def check_invalid_checkpoint_surfaces() -> i64:
+def check_invalid_checkpoint_surfaces() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     valid_payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload()
     for variant in 0..<Test::STORAGE_VARIANT_COUNT:
         payload: DebuggerTraceBinary::ByteWriter = payload_for_variant(variant, valid_payload)
@@ -229,7 +233,7 @@ def check_invalid_checkpoint_surfaces() -> i64:
         invalid: DebuggerTraceStorage::StoredChunk = checkpoint_chunk(payload, Test::CHECKPOINT_SEQUENCE, first_event, last_event)
         encoded_invalid: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(invalid)
         return 11 if DebuggerTraceBinary::writer_is_valid(encoded_invalid)
-        bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+        bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build_identity()) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
         bundle_input: mutable DebuggerTraceStorage::StoredChunk = invalid
         bundle_input.header.sequence <- 0
         return 12 if DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, bundle_input))
@@ -245,9 +249,11 @@ def check_invalid_checkpoint_surfaces() -> i64:
         invalid_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(malformed_wire)
         scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(invalid_storage.bytes[0], invalid_storage.length)
         return 18 if scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+        DebuggerTraceReader::reader_destroy(reader) can Memory.Release, Unsafe.PointerCast
+        DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return 0
 
-def check_checkpoint_outside_manifest() -> i64:
+def check_checkpoint_outside_manifest() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     payload: DebuggerTraceBinary::ByteWriter = checkpoint_payload_for_event(Test::OUTSIDE_MANIFEST_EVENT)
     chunk: DebuggerTraceStorage::StoredChunk = checkpoint_chunk(payload, Test::CHECKPOINT_SEQUENCE, Test::OUTSIDE_MANIFEST_EVENT, Test::OUTSIDE_MANIFEST_EVENT)
     encoded: DebuggerTraceBinary::ByteWriter = DebuggerTraceStorage::storage_encode_chunk(chunk)
@@ -255,7 +261,7 @@ def check_checkpoint_outside_manifest() -> i64:
     reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 20 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk(1)))
     return 21 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
-    bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build_identity())
+    bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTraceBundle::bundle_new(build_identity()) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     event: mutable DebuggerTraceStorage::StoredChunk = event_chunk()
     event.header.sequence <- 0
     return 22 if not DebuggerErrors::error_is_ok(DebuggerTraceBundle::bundle_append(bundle, event))
@@ -267,6 +273,8 @@ def check_checkpoint_outside_manifest() -> i64:
     invalid_storage: DebuggerTraceBinary::ByteWriter = trace_bytes_with_raw_checkpoint(encoded)
     scan: DebuggerTraceStorage::StorageScan = DebuggerTraceStorage::storage_scan_bytes(invalid_storage.bytes[0], invalid_storage.length)
     return 25 if scan.status != DebuggerTraceStorage::StorageStatus.Invalid
+    DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
+    DebuggerTraceReader::reader_destroy(reader) can Memory.Release, Unsafe.PointerCast
     return 0
 
 def check_mixed_recordings_across_chunks() -> i64:
@@ -278,7 +286,7 @@ def check_mixed_recordings_across_chunks() -> i64:
     return 35 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
     return 0
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     return check_full_checkpoint_round_trip() if check_full_checkpoint_round_trip() != 0
     return check_invalid_checkpoint_surfaces() if check_invalid_checkpoint_surfaces() != 0
     return check_checkpoint_outside_manifest() if check_checkpoint_outside_manifest() != 0

@@ -1,6 +1,7 @@
 # Length-prefixed protocol framing shared by DAP and the advanced session API.
 
 extern malloc(size: usize) -> mutable heap void&? can[Memory.Allocate]
+extern free(storage: heap void&) can[Memory.Release]
 
 module DebuggerProtocolFraming:
     private:
@@ -39,9 +40,10 @@ module DebuggerProtocolFraming:
             Failed
 
         struct FrameBuffer:
-            bytes: mutable u8[FrameLimits::FRAME_OUTPUT_CAPACITY]
+            bytes: mutable heap u8&
             length: mutable usize
             failed: mutable bool
+            allocated: mutable bool
 
         struct FrameDecoder:
             state: mutable FrameDecoderState
@@ -70,24 +72,42 @@ module DebuggerProtocolFraming:
             decoder.header_value <- 0
             decoder.header_digits <- 0
 
-        def frame_buffer_new() -> FrameBuffer:
-            return FrameBuffer{bytes: zeroed, length: 0, failed: false}
+        def frame_buffer_new() -> FrameBuffer can Memory.Allocate, Abort.Panic:
+            bytes: mutable heap u8& = frame_storage_allocate(FrameLimits::FRAME_OUTPUT_CAPACITY)
+            return FrameBuffer{bytes: bytes, length: 0, failed: false, allocated: true}
+
+        def frame_buffer_initialize(buffer: mutable FrameBuffer&) -> bool:
+            # Only bytes below length are observable; keep the large payload
+            # storage in place and reset its logical extent instead of
+            # constructing or copying a 65 KiB zero-filled value.
+            buffer.length <- 0
+            return false if not buffer.allocated
+            buffer.failed <- false
+            return true
+
+        def frame_buffer_destroy(buffer: mutable FrameBuffer&) -> void can Memory.Release:
+            return if not buffer.allocated
+            trusted Unsafe.PointerCast:
+                free(buffer.bytes.cast[heap void&]) can Memory.Release
+            buffer.length <- 0
+            buffer.failed <- true
+            buffer.allocated <- false
 
         def frame_buffer_put_byte(buffer: mutable FrameBuffer&, byte: u8) -> void:
-            if buffer.failed or buffer.length >= FrameLimits::FRAME_OUTPUT_CAPACITY:
+            if not buffer.allocated or buffer.failed or buffer.length >= FrameLimits::FRAME_OUTPUT_CAPACITY:
                 buffer.failed <- true
                 return
             buffer.bytes[buffer.length] <- byte
             buffer.length <- buffer.length + 1
 
         # Encode the transport format as `<decimal byte length> <payload>\n`.
-        # The caller owns the payload storage and the result owns its output,
-        # so adapters can write a frame without exposing internal buffers.
-        def frame_encode(payload: u8&, length: usize) -> FrameBuffer:
-            buffer: mutable FrameBuffer = frame_buffer_new()
+        # The caller owns reusable output storage, so adapters can write a
+        # frame without copying a large fixed-capacity buffer by value.
+        def frame_encode(buffer: mutable FrameBuffer&, payload: u8&, length: usize) -> void:
+            return if not frame_buffer_initialize(buffer)
             if length > FrameLimits::FRAME_MAX_PAYLOAD:
                 buffer.failed <- true
-                return buffer
+                return
             digits: mutable u8[FrameLimits::FRAME_MAX_HEADER_DIGITS] = zeroed
             digit_count: mutable usize = 0
             remaining: mutable usize = length
@@ -98,7 +118,7 @@ module DebuggerProtocolFraming:
                 while remaining > 0:
                     if digit_count >= FrameLimits::FRAME_MAX_HEADER_DIGITS:
                         buffer.failed <- true
-                        return buffer
+                        return
                     digits[digit_count] <- (remaining % NumberFormat::PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE).u8() + Character::PROTOCOL_FRAMING_CHARACTER_ASCII_ZERO
                     digit_count <- digit_count + 1
                     remaining <- remaining / NumberFormat::PROTOCOL_FRAMING_NUMBER_FORMAT_DECIMAL_BASE
@@ -108,7 +128,7 @@ module DebuggerProtocolFraming:
             for index in 0..<length:
                 frame_buffer_put_byte(buffer, payload[index])
             frame_buffer_put_byte(buffer, Character::PROTOCOL_FRAMING_CHARACTER_ASCII_NEWLINE)
-            return buffer
+            return
 
         def frame_decoder_accept(decoder: mutable FrameDecoder&, byte: u8) -> bool:
             return false if decoder.state == FrameDecoderState.Failed
@@ -157,5 +177,5 @@ module DebuggerProtocolFraming:
         def frame_decoder_is_complete(decoder: FrameDecoder) -> bool:
             return decoder.state == FrameDecoderState.Complete
 
-        def frame_buffer_is_valid(buffer: FrameBuffer) -> bool:
-            return not buffer.failed and buffer.length <= FrameLimits::FRAME_OUTPUT_CAPACITY
+        def frame_buffer_is_valid(buffer: FrameBuffer&) -> bool:
+            return buffer.allocated and not buffer.failed and buffer.length <= FrameLimits::FRAME_OUTPUT_CAPACITY

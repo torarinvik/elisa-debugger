@@ -3,26 +3,50 @@ include "../src/protocol/framing.elisa"
 const module Test:
     PAYLOAD_LENGTH: usize = 4
     FRAME_LENGTH: usize = 7
-    BUFFER_LENGTH: usize = Test::FRAME_LENGTH * 2
+    FRAME_COUNT: usize = 2
+    BUFFER_LENGTH: usize = Test::FRAME_LENGTH * Test::FRAME_COUNT
     EXPECTED_LAST_BYTE: u8 = 68
 
+    const module WireCharacter:
+        ASCII_A: u8 = 65
+        ASCII_B: u8 = 66
+        ASCII_C: u8 = 67
 
-def main() -> i64 can[Memory.Allocate, Abort.Panic]:
-    payload: mutable u8[Test::PAYLOAD_LENGTH] = [65, 66, 67, Test::EXPECTED_LAST_BYTE]
-    encoded: DebuggerProtocolFraming::FrameBuffer = DebuggerProtocolFraming::frame_encode(payload[0], Test::PAYLOAD_LENGTH)
-    return 1 if not DebuggerProtocolFraming::frame_buffer_is_valid(encoded) or encoded.length != Test::FRAME_LENGTH
+    const module ByteIndex:
+        FIRST: usize = 0
+        LAST_PAYLOAD_BYTE: usize = 3
+        SECOND_FRAME_OFFSET: usize = Test::FRAME_LENGTH
+
+    const module FrameCount:
+        EXPECTED_COMPLETED: usize = Test::FRAME_COUNT
+
+    const module Result:
+        ENCODE: i64 = 1
+        DECODE: i64 = 2
+        TWO_FRAMES: i64 = 3
+        DESTROY_BUFFER: i64 = 4
+        SUCCESS: i64 = 0
+
+
+def main() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic]:
+    payload: mutable u8[Test::PAYLOAD_LENGTH] = [Test::WireCharacter::ASCII_A, Test::WireCharacter::ASCII_B, Test::WireCharacter::ASCII_C, Test::EXPECTED_LAST_BYTE]
+    encoded: mutable DebuggerProtocolFraming::FrameBuffer = DebuggerProtocolFraming::frame_buffer_new() can Memory.Allocate, Abort.Panic
+    DebuggerProtocolFraming::frame_encode(encoded, payload[Test::ByteIndex::FIRST], Test::PAYLOAD_LENGTH)
+    return Test::Result::ENCODE if not DebuggerProtocolFraming::frame_buffer_is_valid(encoded) or encoded.length != Test::FRAME_LENGTH
 
     decoder: mutable DebuggerProtocolFraming::FrameDecoder = DebuggerProtocolFraming::frame_decoder_new()
     combined: mutable u8[Test::BUFFER_LENGTH] = zeroed
-    for index in 0..<Test::FRAME_LENGTH:
+    for index in Test::ByteIndex::FIRST..<Test::FRAME_LENGTH:
         combined[index] <- encoded.bytes[index]
-        combined[Test::FRAME_LENGTH + index] <- encoded.bytes[index]
+        combined[Test::ByteIndex::SECOND_FRAME_OFFSET + index] <- encoded.bytes[index]
     completed_count: mutable usize = 0
-    for index in 0..<Test::BUFFER_LENGTH:
+    for index in Test::ByteIndex::FIRST..<Test::BUFFER_LENGTH:
         completed: bool = DebuggerProtocolFraming::frame_decoder_accept(decoder, combined[index])
         if completed:
             completed_count <- completed_count + 1
-            return 2 if decoder.payload[3] != Test::EXPECTED_LAST_BYTE
+            return Test::Result::DECODE if decoder.payload[Test::ByteIndex::LAST_PAYLOAD_BYTE] != Test::EXPECTED_LAST_BYTE
             DebuggerProtocolFraming::frame_decoder_reset(decoder)
-    return 3 if completed_count != 2 or decoder.state != DebuggerProtocolFraming::FrameDecoderState.Header
-    return 0
+    return Test::Result::TWO_FRAMES if completed_count != Test::FrameCount::EXPECTED_COMPLETED or decoder.state != DebuggerProtocolFraming::FrameDecoderState.Header
+    DebuggerProtocolFraming::frame_buffer_destroy(encoded) can Memory.Release
+    return Test::Result::DESTROY_BUFFER if DebuggerProtocolFraming::frame_buffer_is_valid(encoded)
+    return Test::Result::SUCCESS

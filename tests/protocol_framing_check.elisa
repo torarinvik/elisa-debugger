@@ -5,32 +5,69 @@ const module Test:
     PAYLOAD_FRAME_LENGTH: usize = 7
     PAYLOAD_LENGTH: usize = 4
     OVERSIZED_LENGTH: usize = 65537
+    EMPTY_PAYLOAD_LENGTH: usize = 0
     EXPECTED_PAYLOAD_BYTE: u8 = 68
 
+    const module WireCharacter:
+        ASCII_ZERO: u8 = 48
+        ASCII_FOUR: u8 = 52
+        ASCII_SPACE: u8 = 32
+        ASCII_A: u8 = 65
+        ASCII_B: u8 = 66
+        ASCII_C: u8 = 67
+        ASCII_NEWLINE: u8 = 10
 
-def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    const module ByteIndex:
+        FIRST: usize = 0
+        EMPTY_FRAME_SEPARATOR: usize = 1
+        EMPTY_FRAME_NEWLINE: usize = 2
+        PAYLOAD_FRAME_FIRST_BYTE: usize = 2
+        PAYLOAD_FRAME_LAST_BYTE: usize = 5
+        PAYLOAD_FRAME_NEWLINE: usize = 6
+        LAST_PAYLOAD_BYTE: usize = 3
+
+    const module Result:
+        EMPTY_FRAME: i64 = 1
+        PAYLOAD_FRAME: i64 = 2
+        FIRST_DECODE: i64 = 3
+        RESET_DECODE: i64 = 4
+        OVERSIZED_FRAME: i64 = 5
+        REINITIALIZED_BUFFER: i64 = 6
+        DESTROYED_BUFFER: i64 = 7
+        SUCCESS: i64 = 0
+
+
+def main() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic]:
     empty_payload: mutable u8[1] = zeroed
-    empty: DebuggerProtocolFraming::FrameBuffer = DebuggerProtocolFraming::frame_encode(empty_payload[0], 0)
-    return 1 if not DebuggerProtocolFraming::frame_buffer_is_valid(empty) or empty.length != Test::EMPTY_FRAME_LENGTH or empty.bytes[0] != 48 or empty.bytes[1] != 32 or empty.bytes[2] != 10
+    encoded: mutable DebuggerProtocolFraming::FrameBuffer = DebuggerProtocolFraming::frame_buffer_new() can Memory.Allocate, Abort.Panic
+    DebuggerProtocolFraming::frame_encode(encoded, empty_payload[Test::ByteIndex::FIRST], Test::EMPTY_PAYLOAD_LENGTH)
+    return Test::Result::EMPTY_FRAME if not DebuggerProtocolFraming::frame_buffer_is_valid(encoded) or encoded.length != Test::EMPTY_FRAME_LENGTH or encoded.bytes[Test::ByteIndex::FIRST] != Test::WireCharacter::ASCII_ZERO or encoded.bytes[Test::ByteIndex::EMPTY_FRAME_SEPARATOR] != Test::WireCharacter::ASCII_SPACE or encoded.bytes[Test::ByteIndex::EMPTY_FRAME_NEWLINE] != Test::WireCharacter::ASCII_NEWLINE
 
-    payload: mutable u8[Test::PAYLOAD_LENGTH] = [65, 66, 67, Test::EXPECTED_PAYLOAD_BYTE]
-    encoded: DebuggerProtocolFraming::FrameBuffer = DebuggerProtocolFraming::frame_encode(payload[0], Test::PAYLOAD_LENGTH)
-    return 2 if not DebuggerProtocolFraming::frame_buffer_is_valid(encoded) or encoded.length != Test::PAYLOAD_FRAME_LENGTH or encoded.bytes[0] != 52 or encoded.bytes[1] != 32 or encoded.bytes[2] != 65 or encoded.bytes[5] != Test::EXPECTED_PAYLOAD_BYTE or encoded.bytes[6] != 10
+    payload: mutable u8[Test::PAYLOAD_LENGTH] = [Test::WireCharacter::ASCII_A, Test::WireCharacter::ASCII_B, Test::WireCharacter::ASCII_C, Test::EXPECTED_PAYLOAD_BYTE]
+    DebuggerProtocolFraming::frame_encode(encoded, payload[Test::ByteIndex::FIRST], Test::PAYLOAD_LENGTH)
+    return Test::Result::PAYLOAD_FRAME if not DebuggerProtocolFraming::frame_buffer_is_valid(encoded) or encoded.length != Test::PAYLOAD_FRAME_LENGTH or encoded.bytes[Test::ByteIndex::FIRST] != Test::WireCharacter::ASCII_FOUR or encoded.bytes[Test::ByteIndex::EMPTY_FRAME_SEPARATOR] != Test::WireCharacter::ASCII_SPACE or encoded.bytes[Test::ByteIndex::PAYLOAD_FRAME_FIRST_BYTE] != Test::WireCharacter::ASCII_A or encoded.bytes[Test::ByteIndex::PAYLOAD_FRAME_LAST_BYTE] != Test::EXPECTED_PAYLOAD_BYTE or encoded.bytes[Test::ByteIndex::PAYLOAD_FRAME_NEWLINE] != Test::WireCharacter::ASCII_NEWLINE
 
     decoder: mutable DebuggerProtocolFraming::FrameDecoder = DebuggerProtocolFraming::frame_decoder_new()
     complete: mutable bool = false
-    for index in 0..<encoded.length:
+    for index in Test::ByteIndex::FIRST..<encoded.length:
         complete <- DebuggerProtocolFraming::frame_decoder_accept(decoder, encoded.bytes[index])
-    return 3 if not complete or not DebuggerProtocolFraming::frame_decoder_is_complete(decoder) or DebuggerProtocolFraming::frame_decoder_length(decoder) != Test::PAYLOAD_LENGTH or decoder.payload[3] != Test::EXPECTED_PAYLOAD_BYTE
+    return Test::Result::FIRST_DECODE if not complete or not DebuggerProtocolFraming::frame_decoder_is_complete(decoder) or DebuggerProtocolFraming::frame_decoder_length(decoder) != Test::PAYLOAD_LENGTH or decoder.payload[Test::ByteIndex::LAST_PAYLOAD_BYTE] != Test::EXPECTED_PAYLOAD_BYTE
 
     # A decoder must be reset between frames so a stale completed frame cannot
     # consume bytes from a subsequent message.
     DebuggerProtocolFraming::frame_decoder_reset(decoder)
-    for index in 0..<encoded.length:
+    for index in Test::ByteIndex::FIRST..<encoded.length:
         _ = DebuggerProtocolFraming::frame_decoder_accept(decoder, encoded.bytes[index])
-    return 4 if not DebuggerProtocolFraming::frame_decoder_is_complete(decoder)
+    return Test::Result::RESET_DECODE if not DebuggerProtocolFraming::frame_decoder_is_complete(decoder)
+
+    # Reinitialization resets validity and active length while leaving the
+    # caller-owned payload allocation reusable.
+    DebuggerProtocolFraming::frame_encode(encoded, empty_payload[Test::ByteIndex::FIRST], Test::EMPTY_PAYLOAD_LENGTH)
+    return Test::Result::REINITIALIZED_BUFFER if not DebuggerProtocolFraming::frame_buffer_is_valid(encoded) or encoded.length != Test::EMPTY_FRAME_LENGTH or encoded.bytes[Test::ByteIndex::EMPTY_FRAME_NEWLINE] != Test::WireCharacter::ASCII_NEWLINE
 
     oversized_payload: mutable u8[1] = zeroed
-    oversized: DebuggerProtocolFraming::FrameBuffer = DebuggerProtocolFraming::frame_encode(oversized_payload[0], Test::OVERSIZED_LENGTH)
-    return 5 if DebuggerProtocolFraming::frame_buffer_is_valid(oversized)
-    return 0
+    DebuggerProtocolFraming::frame_encode(encoded, oversized_payload[Test::ByteIndex::FIRST], Test::OVERSIZED_LENGTH)
+    return Test::Result::OVERSIZED_FRAME if DebuggerProtocolFraming::frame_buffer_is_valid(encoded)
+    DebuggerProtocolFraming::frame_buffer_destroy(encoded) can Memory.Release
+    return Test::Result::DESTROYED_BUFFER if DebuggerProtocolFraming::frame_buffer_is_valid(encoded)
+    return Test::Result::SUCCESS

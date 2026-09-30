@@ -234,6 +234,9 @@ module DebuggerDAPServer:
             DAP_REVERSE_CONTINUE_COMMAND_LENGTH: usize = 15
 
         const module FrameParsing:
+            NO_PREFIX_POSITION: u8 = 0
+            PREVIOUS_PREFIX_POSITION_OFFSET: u8 = 1
+            TWO_PREFIX_POSITION_OFFSET: u8 = 2
             DECODER_HEADER_STATE: u8 = 0
             DECODER_PAYLOAD_STATE: u8 = 2
             DECODER_FAILED_STATE: u8 = 3
@@ -241,6 +244,7 @@ module DebuggerDAPServer:
             HEADER_TAIL_CR: u8 = 1
             HEADER_TAIL_CRLF: u8 = 2
             HEADER_TAIL_CRLFCR: u8 = 3
+            CONTENT_LENGTH_HEADER: cstr = "Content-Length:"
             HEADER_PREFIX_LENGTH: u8 = 15
             TYPE_PREFIX: cstr = "\"type\":\""
             TYPE_PREFIX_LENGTH: u8 = 8
@@ -258,6 +262,10 @@ module DebuggerDAPServer:
             DAP_INIT_SUFFIX_LENGTH: usize = 493
 
         const module JsonWire:
+            JSON_FIRST_BYTE_INDEX: usize = 0
+            JSON_BYTE_INCREMENT: usize = 1
+            JSON_EMPTY_LENGTH: usize = 0
+            JSON_ZERO_VALUE: u64 = 0
             JSON_ASCII_MAX: u8 = 127
             JSON_UTF8_CONTINUATION_MIN: u8 = 128
             JSON_UTF8_CONTINUATION_MAX: u8 = 191
@@ -630,23 +638,23 @@ module DebuggerDAPServer:
             while index < end:
                 character: mutable u8 = payload[index]
                 if character == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_BACKSLASH:
-                    index <- index + 1
-                    return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0} if index >= end
+                    index <- index + JsonWire::JSON_BYTE_INCREMENT
+                    return DecodedJSONString{valid: false, ascii_only: false, hash: JsonWire::JSON_ZERO_VALUE, length: JsonWire::JSON_EMPTY_LENGTH} if index >= end
                     escape: u8 = payload[index]
                     if escape == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_U:
-                        return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0} if end - index <= JsonWire::JSON_UNICODE_ESCAPE_DIGITS
-                        codepoint: mutable u64 = 0
-                        hex_index: mutable usize = 0
+                        return DecodedJSONString{valid: false, ascii_only: false, hash: JsonWire::JSON_ZERO_VALUE, length: JsonWire::JSON_EMPTY_LENGTH} if end - index <= JsonWire::JSON_UNICODE_ESCAPE_DIGITS
+                        codepoint: mutable u64 = JsonWire::JSON_ZERO_VALUE
+                        hex_index: mutable usize = JsonWire::JSON_FIRST_BYTE_INDEX
                         while hex_index < JsonWire::JSON_UNICODE_ESCAPE_DIGITS:
-                            digit_byte: u8 = payload[index + 1 + hex_index]
-                            return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0} if not is_json_hex_digit(digit_byte)
+                            digit_byte: u8 = payload[index + JsonWire::JSON_UNICODE_ESCAPE_MARKER_BYTES + hex_index]
+                            return DecodedJSONString{valid: false, ascii_only: false, hash: JsonWire::JSON_ZERO_VALUE, length: JsonWire::JSON_EMPTY_LENGTH} if not is_json_hex_digit(digit_byte)
                             codepoint <- codepoint * JsonWire::JSON_HEX_BASE + json_hex_digit_value(digit_byte)
-                            hex_index <- hex_index + 1
+                            hex_index <- hex_index + JsonWire::JSON_BYTE_INCREMENT
                         if codepoint <= JsonWire::JSON_ASCII_MAX.u64():
                             character <- codepoint.u8()
                         else:
                             decoded.ascii_only <- false
-                        index <- index + JsonWire::JSON_UNICODE_ESCAPE_DIGITS + 1
+                        index <- index + JsonWire::JSON_UNICODE_ESCAPE_DIGITS + JsonWire::JSON_UNICODE_ESCAPE_MARKER_BYTES
                     else:
                         if escape == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_QUOTE:
                             character <- Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_QUOTE
@@ -672,15 +680,15 @@ module DebuggerDAPServer:
                                                     if escape == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_T:
                                                         character <- Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_TAB
                                                     else:
-                                                        return DecodedJSONString{valid: false, ascii_only: false, hash: 0, length: 0}
-                        index <- index + 1
+                                                        return DecodedJSONString{valid: false, ascii_only: false, hash: JsonWire::JSON_ZERO_VALUE, length: JsonWire::JSON_EMPTY_LENGTH}
+                        index <- index + JsonWire::JSON_BYTE_INCREMENT
                 else:
                     decoded.ascii_only <- false if character > JsonWire::JSON_ASCII_MAX
-                    index <- index + 1
+                    index <- index + JsonWire::JSON_BYTE_INCREMENT
                 if decoded.ascii_only and decoded.length < CommandDispatch::MAX_KNOWN_DAP_COMMAND_LENGTH:
                     decoded.hash <- decoded.hash * CommandDispatch::DAP_HASH_MULTIPLIER + character.u64()
-                decoded.length <- decoded.length + 1
-            decoded.hash <- 0 if not decoded.ascii_only or decoded.length > CommandDispatch::MAX_KNOWN_DAP_COMMAND_LENGTH
+                decoded.length <- decoded.length + JsonWire::JSON_BYTE_INCREMENT
+            decoded.hash <- JsonWire::JSON_ZERO_VALUE if not decoded.ascii_only or decoded.length > CommandDispatch::MAX_KNOWN_DAP_COMMAND_LENGTH
             return decoded
 
         # Hashes accelerate dispatch, but exact decoded spelling decides the
@@ -688,11 +696,11 @@ module DebuggerDAPServer:
         # command characters while preventing rolling-hash collisions.
         def dap_json_string_matches_ascii(payload: u8&, start: usize, end: usize, expected: cstr, expected_length: usize) -> bool:
             cursor: mutable usize = start
-            expected_index: mutable usize = 0
+            expected_index: mutable usize = JsonWire::JSON_FIRST_BYTE_INDEX
             while cursor < end:
-                character: mutable u64 = 0
+                character: mutable u64 = JsonWire::JSON_ZERO_VALUE
                 if payload[cursor] == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_BACKSLASH:
-                    cursor <- cursor + 1
+                    cursor <- cursor + JsonWire::JSON_BYTE_INCREMENT
                     return false if cursor >= end or payload[cursor] != Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_U
                     return false if end - cursor < JsonWire::JSON_UNICODE_ESCAPE_DIGITS + JsonWire::JSON_UNICODE_ESCAPE_MARKER_BYTES
                     for offset in JsonWire::JSON_UNICODE_ESCAPE_MARKER_BYTES..<(JsonWire::JSON_UNICODE_ESCAPE_DIGITS + JsonWire::JSON_UNICODE_ESCAPE_MARKER_BYTES):
@@ -702,25 +710,25 @@ module DebuggerDAPServer:
                     cursor <- cursor + JsonWire::JSON_UNICODE_ESCAPE_DIGITS + JsonWire::JSON_UNICODE_ESCAPE_MARKER_BYTES
                 else:
                     character <- payload[cursor].u64()
-                    cursor <- cursor + 1
+                    cursor <- cursor + JsonWire::JSON_BYTE_INCREMENT
                 return false if expected_index >= expected_length
                 return false if character > JsonWire::JSON_ASCII_MAX.u64()
                 return false if character != expected[expected_index].u64()
-                expected_index <- expected_index + 1
+                expected_index <- expected_index + JsonWire::JSON_BYTE_INCREMENT
             return expected_index == expected_length
 
         def decoder_json_prepare_top_level_key(decoder: mutable Decoder&, start: usize, end: usize) -> void:
-            decoder.command_prefix_position <- 0
-            decoder.type_prefix_position <- 0
-            decoder.sequence_prefix_position <- 0
-            if dap_json_string_matches_ascii(decoder.payload[0], start, end, RequestFields::ROOT_SEQ_KEY, RequestFields::ROOT_SEQ_KEY_LENGTH):
-                decoder.sequence_prefix_position <- FrameParsing::SEQUENCE_PREFIX_FINAL_POSITION - 1
+            decoder.command_prefix_position <- FrameParsing::NO_PREFIX_POSITION
+            decoder.type_prefix_position <- FrameParsing::NO_PREFIX_POSITION
+            decoder.sequence_prefix_position <- FrameParsing::NO_PREFIX_POSITION
+            if dap_json_string_matches_ascii(decoder.payload[JsonWire::JSON_FIRST_BYTE_INDEX], start, end, RequestFields::ROOT_SEQ_KEY, RequestFields::ROOT_SEQ_KEY_LENGTH):
+                decoder.sequence_prefix_position <- FrameParsing::SEQUENCE_PREFIX_FINAL_POSITION - FrameParsing::PREVIOUS_PREFIX_POSITION_OFFSET
             else:
-                if dap_json_string_matches_ascii(decoder.payload[0], start, end, RequestFields::ROOT_TYPE_KEY, RequestFields::ROOT_TYPE_KEY_LENGTH):
-                    decoder.type_prefix_position <- FrameParsing::TYPE_PREFIX_FINAL_POSITION - 2
+                if dap_json_string_matches_ascii(decoder.payload[JsonWire::JSON_FIRST_BYTE_INDEX], start, end, RequestFields::ROOT_TYPE_KEY, RequestFields::ROOT_TYPE_KEY_LENGTH):
+                    decoder.type_prefix_position <- FrameParsing::TYPE_PREFIX_FINAL_POSITION - FrameParsing::TWO_PREFIX_POSITION_OFFSET
                 else:
-                    if dap_json_string_matches_ascii(decoder.payload[0], start, end, RequestFields::ROOT_COMMAND_KEY, RequestFields::ROOT_COMMAND_KEY_LENGTH):
-                        decoder.command_prefix_position <- RequestFields::COMMAND_PREFIX_FINAL_POSITION - 2
+                    if dap_json_string_matches_ascii(decoder.payload[JsonWire::JSON_FIRST_BYTE_INDEX], start, end, RequestFields::ROOT_COMMAND_KEY, RequestFields::ROOT_COMMAND_KEY_LENGTH):
+                        decoder.command_prefix_position <- RequestFields::COMMAND_PREFIX_FINAL_POSITION - FrameParsing::TWO_PREFIX_POSITION_OFFSET
 
         def decoder_json_accept_raw_utf8_byte(decoder: mutable Decoder&, byte: u8) -> bool:
             if decoder.json_utf8_continuations_remaining > 0:
@@ -898,22 +906,8 @@ module DebuggerDAPServer:
             return prefix_position == final_position and byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_QUOTE
 
         def header_prefix_matches(position: u8, byte: u8) -> bool:
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_UPPER_C if position == 0
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_O if position == 1
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_N if position == 2
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_T if position == 3
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_E if position == 4
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_N if position == 5
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_T if position == 6
-            return byte == Character::ASCII_HYPHEN if position == 7
-            return byte == Character::ASCII_UPPER_L if position == 8
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_E if position == 9
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_N if position == 10
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_G if position == 11
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_T if position == 12
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_H if position == 13
-            return byte == Character::PROTOCOL_DAP_SERVER_CHARACTER_ASCII_COLON if position == 14
-            return false
+            return false if position >= FrameParsing::HEADER_PREFIX_LENGTH
+            return byte == FrameParsing::CONTENT_LENGTH_HEADER[position.usize()].u8()
 
         def decoder_json_fail(decoder: mutable Decoder&) -> void:
             decoder.json_structural_invalid <- true

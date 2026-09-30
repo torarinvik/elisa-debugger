@@ -302,18 +302,20 @@ module DebuggerFullCheckpointCodec:
                 for byte_index in Codec::FIRST_INDEX..<file.length:
                     writer_put_byte(writer, file.bytes[byte_index])
 
-        def reader_from_bytes(bytes: u8&, length: usize) -> CheckpointReader:
-            reader: mutable CheckpointReader = zeroed
-            if length > Codec::MAX_PAYLOAD_BYTES:
-                reader.failed <- true
-                return reader
-            reader.length <- length
-            reader.offset <- 0
+        def reader_initialize(reader: mutable CheckpointReader&, bytes: u8&, length: usize) -> void:
+            reader.length <- Codec::FIRST_INDEX
+            reader.offset <- Codec::FIRST_INDEX
             reader.failed <- false
             reader.truncated <- false
+            if length > Codec::MAX_PAYLOAD_BYTES:
+                reader.failed <- true
+                return
+            reader.length <- length
+            # Only the declared payload is live; every reader operation is
+            # bounded by length, so the inactive capacity remains untouched.
             for index in Codec::FIRST_INDEX..<length:
                 reader.bytes[index] <- bytes[index]
-            return reader
+            return
 
         def reader_take_byte(reader: mutable CheckpointReader&) -> u8:
             if reader.failed or reader.length > Codec::MAX_PAYLOAD_BYTES or reader.offset >= reader.length:
@@ -727,7 +729,8 @@ module DebuggerFullCheckpointCodec:
             return decode_failure(DecodeStatus.Oversized) if length > Codec::MAX_PAYLOAD_BYTES
             minimum_length: usize = Codec::REPLAY_FULL_CHECKPOINT_CODEC_OUTER_FIXED_BYTES + DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_TASK_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_FIXED_BYTES * 2 + Codec::REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_FIXED_BYTES + Codec::REPLAY_FULL_CHECKPOINT_CODEC_CHECKSUM_BYTES
             return decode_failure(DecodeStatus.Truncated) if length < minimum_length
-            reader: mutable CheckpointReader = reader_from_bytes(bytes, length)
+            reader: mutable CheckpointReader
+            reader_initialize(reader, bytes, length)
             return decode_failure(DecodeStatus.Oversized) if reader.failed
             magic: u32 = reader_take_u32(reader)
             codec_schema: u32 = reader_take_u32(reader)

@@ -311,25 +311,26 @@ module DebuggerTraceStorage:
             return FooterDecode{footer: zeroed, status: StorageStatus.Invalid} if magic != Magic::FOOTER or not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
             return FooterDecode{footer: Footer{next_sequence: next_sequence, verified_event: verified_event}, status: StorageStatus.Ready}
 
-        def storage_encode_chunk(chunk: StoredChunk&) -> DebuggerTraceBinary::ByteWriter:
-            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+        # Caller-owned encoding avoids constructing and returning a full
+        # 128 KiB writer when the durable chunk is only its active prefix.
+        def storage_encode_chunk_into(chunk: StoredChunk&, writer: mutable DebuggerTraceBinary::ByteWriter&) -> void:
             DebuggerTraceBinary::writer_initialize(writer)
             if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum:
                 writer.failed <- true
-                return writer
+                return
             if chunk.payload_length > Capacity::PAYLOAD_CAPACITY_BYTES:
                 writer.failed <- true
-                return writer
+                return
             if chunk.header.schema != Layout::FORMAT_VERSION.u32() or chunk.header.kind.u16() > ChunkKind::STORAGE_CHUNKKIND_MAX_CHUNK_KIND or not DebuggerTrace::trace_chunk_range_valid(chunk.header):
                 writer.failed <- true
-                return writer
+                return
             computed: u64 = storage_payload_checksum(chunk.payload[0], chunk.payload_length)
             if not storage_payload_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum):
                 writer.failed <- true
-                return writer
+                return
             if chunk.header.kind == DebuggerTrace::ChunkKind.Checkpoint and not storage_checkpoint_chunk_is_valid(chunk):
                 writer.failed <- true
-                return writer
+                return
             DebuggerTraceBinary::writer_put_byte(writer, Magic::STORAGE_MAGIC_BYTE_0)
             DebuggerTraceBinary::writer_put_byte(writer, Magic::STORAGE_MAGIC_BYTE_1)
             DebuggerTraceBinary::writer_put_byte(writer, Magic::STORAGE_MAGIC_BYTE_2)
@@ -343,6 +344,10 @@ module DebuggerTraceStorage:
             DebuggerTraceBinary::writer_put_u64(writer, computed)
             for index in 0..<chunk.payload_length:
                 DebuggerTraceBinary::writer_put_byte(writer, chunk.payload[index])
+
+        def storage_encode_chunk(chunk: StoredChunk&) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+            storage_encode_chunk_into(chunk, writer)
             return writer
 
         def storage_event_chunk_is_valid(chunk: StoredChunk&) -> bool:
@@ -351,21 +356,26 @@ module DebuggerTraceStorage:
             return storage_event_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.schema, chunk.header.first_event, chunk.header.last_event)
 
         def storage_write_chunk(fd: int, chunk: StoredChunk&) -> StorageStatus can[Blocking.IO]:
-            writer: DebuggerTraceBinary::ByteWriter = storage_encode_chunk(chunk)
+            writer: mutable DebuggerTraceBinary::ByteWriter
+            storage_encode_chunk_into(chunk, writer)
             return StorageStatus.Oversized if chunk.payload_length > Capacity::PAYLOAD_CAPACITY_BYTES
             return StorageStatus.Invalid if not DebuggerTraceBinary::writer_is_valid(writer)
             return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
 
-        def storage_encode_footer(next_sequence: u64, verified_event: u64) -> DebuggerTraceBinary::ByteWriter:
-            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+        def storage_encode_footer_into(next_sequence: u64, verified_event: u64, writer: mutable DebuggerTraceBinary::ByteWriter&) -> void:
             DebuggerTraceBinary::writer_initialize(writer)
             DebuggerTraceBinary::writer_put_u32(writer, Magic::FOOTER)
             DebuggerTraceBinary::writer_put_u64(writer, next_sequence)
             DebuggerTraceBinary::writer_put_u64(writer, verified_event)
+
+        def storage_encode_footer(next_sequence: u64, verified_event: u64) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+            storage_encode_footer_into(next_sequence, verified_event, writer)
             return writer
 
         def storage_write_footer(fd: int, next_sequence: u64, verified_event: u64) -> StorageStatus can[Blocking.IO]:
-            writer: DebuggerTraceBinary::ByteWriter = storage_encode_footer(next_sequence, verified_event)
+            writer: mutable DebuggerTraceBinary::ByteWriter
+            storage_encode_footer_into(next_sequence, verified_event, writer)
             return StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(writer)
             return storage_write_all(fd, writer.bytes[0], writer.length) can Blocking.IO
 

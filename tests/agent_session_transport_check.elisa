@@ -56,7 +56,6 @@ const module TestResult:
     PARENT_HANDSHAKE_FAILURE: i64 = 16
     PARENT_CONTROLLER_FAILURE: i64 = 17
     MISSING_CAPABILITY_FAILURE: i64 = 18
-    PARENT_PAUSE_FAILURE: i64 = 19
     PARENT_RESUME_FAILURE: i64 = 20
     PARENT_WAIT_FAILURE: i64 = 21
     PARENT_CLOSE_FAILURE: i64 = 22
@@ -65,6 +64,15 @@ const module TestResult:
     CHILD_RESUME_ACK_ENCODE_FAILURE: i64 = 25
     CHILD_RESUME_ACK_SEND_FAILURE: i64 = 26
     LEGACY_CONTROL_PROTOCOL_FAILURE: i64 = 27
+    PARENT_PAUSE_SESSION_STATUS_FAILURE: i64 = 28
+    PARENT_PAUSE_CONTROLLER_STATUS_FAILURE: i64 = 29
+    PARENT_PAUSE_INSPECTION_FAILURE: i64 = 30
+    PARENT_PAUSE_TRANSPORT_FAILURE: i64 = 31
+    PARENT_PAUSE_WIRE_FAILURE: i64 = 32
+    PARENT_PAUSE_RESPONSE_FAILURE: i64 = 33
+    PARENT_PAUSE_AGENT_FAILURE: i64 = 34
+    PARENT_PAUSE_CONTROLLER_FAILURE: i64 = 35
+    CHILD_SAFE_POINT_FAILURE: i64 = 36
     SUCCESS: i64 = 0
 
 def test_cstr_equal(left: cstr, right: cstr) -> bool:
@@ -107,13 +115,15 @@ def child_main(argc: i64) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     stop_request: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(stop_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
     return TestResult::CHILD_STOP_DECODE_FAILURE if stop_request.status != DebuggerAgentWire::WireStatus.Ready or stop_request.request.kind != DebuggerAgentWire::AgentControlKind.StopRequest
     applied_stop: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_apply_request(stop_request.request, agent_buffer)
-    return TestResult::CHILD_STOP_APPLY_FAILURE if applied_stop.status != DebuggerAgentControl::DispatchStatus.Applied or not applied_stop.buffer.stopped
+    return TestResult::CHILD_STOP_APPLY_FAILURE if applied_stop.status != DebuggerAgentControl::DispatchStatus.Applied or applied_stop.buffer.stopped or not applied_stop.buffer.stop_requested
     agent_buffer <- applied_stop.buffer
     stop_control_acknowledgement: DebuggerAgentWire::AgentControlAcknowledgement = DebuggerAgentControl::agent_control_acknowledgement_for(stop_request.request, applied_stop)
     stop_control_ack_frame: DebuggerAgentWire::EncodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_encode(stop_control_acknowledgement)
     return TestResult::CHILD_CONTROL_ACK_ENCODE_FAILURE if stop_control_ack_frame.status != DebuggerAgentWire::WireStatus.Ready
     stop_control_ack_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, stop_control_ack_frame.bytes[Frame::FIRST_BYTE], stop_control_ack_frame.length) can Blocking.IO, Unsafe.PointerCast
     return TestResult::CHILD_CONTROL_ACK_SEND_FAILURE if stop_control_ack_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or stop_control_ack_sent.bytes_transferred != Frame::FRAME_LENGTH
+    agent_buffer <- DebuggerAgent::agent_safe_point_reached(agent_buffer)
+    return TestResult::CHILD_SAFE_POINT_FAILURE if not agent_buffer.stopped or agent_buffer.stop_requested
     acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: agent_buffer.stop_generation, event_count: agent_buffer.count.u64()}
     agent_buffer <- DebuggerAgent::agent_acknowledge_stop(agent_buffer, acknowledgement)
     ack_frame: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(acknowledgement)
@@ -177,7 +187,14 @@ def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerC
     return TestResult::MISSING_CAPABILITY_FAILURE if unavailable.status != DebuggerAgentSession::SessionStatus.MissingStopControlCapability or controller.status != DebuggerNative::NativeStopStatus.Attached
 
     paused: DebuggerAgentSession::OperationResult = DebuggerAgentSession::agent_session_pause(session, handshake.negotiated, controller) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::PARENT_PAUSE_FAILURE if paused.status != DebuggerAgentSession::SessionStatus.Ready or controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerNative::native_can_inspect(controller)
+    return TestResult::PARENT_PAUSE_TRANSPORT_FAILURE if paused.status == DebuggerAgentSession::SessionStatus.TransportRejected
+    return TestResult::PARENT_PAUSE_WIRE_FAILURE if paused.status == DebuggerAgentSession::SessionStatus.WireRejected
+    return TestResult::PARENT_PAUSE_RESPONSE_FAILURE if paused.status == DebuggerAgentSession::SessionStatus.ResponseMismatch
+    return TestResult::PARENT_PAUSE_AGENT_FAILURE if paused.status == DebuggerAgentSession::SessionStatus.AgentRejected
+    return TestResult::PARENT_PAUSE_CONTROLLER_FAILURE if paused.status == DebuggerAgentSession::SessionStatus.ControllerRejected
+    return TestResult::PARENT_PAUSE_SESSION_STATUS_FAILURE if paused.status != DebuggerAgentSession::SessionStatus.Ready
+    return TestResult::PARENT_PAUSE_CONTROLLER_STATUS_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Stopped
+    return TestResult::PARENT_PAUSE_INSPECTION_FAILURE if not DebuggerNative::native_can_inspect(controller)
     resumed: DebuggerAgentSession::OperationResult = DebuggerAgentSession::agent_session_resume(session, handshake.negotiated, controller) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PARENT_RESUME_FAILURE if resumed.status != DebuggerAgentSession::SessionStatus.Ready or controller.status != DebuggerNative::NativeStopStatus.Attached or controller.agent_buffer.stopped
 

@@ -26,7 +26,9 @@ const module TestControl:
     RESERVED_PAYLOAD: u64 = 1
     MUTATED_CHECKSUM_BYTE: u8 = 0
     ALTERNATE_CHECKSUM_BYTE: u8 = 1
-    ZERO_EVENT_COUNT: u64 = 0
+    ONE_EVENT_COUNT: u64 = 1
+    FIRST_EVENT_ORDINAL: u64 = 0
+    EVENT_PAYLOAD_HASH: u64 = 77
     SUCCESS: i64 = 0
 
 const module TestResult:
@@ -45,6 +47,13 @@ const module TestResult:
     TRUNCATED_FRAME_FAILURE: i64 = 13
     CONTROL_ACKNOWLEDGEMENT_FAILURE: i64 = 14
     INVALID_CONTROL_ACKNOWLEDGEMENT_FAILURE: i64 = 15
+    STOP_DISPATCH_STATUS_FAILURE: i64 = 16
+    STOP_REQUEST_STATE_FAILURE: i64 = 17
+    STOP_ACK_STATE_FAILURE: i64 = 18
+    STOP_GENERATION_STATE_FAILURE: i64 = 19
+    STOP_EXACTNESS_FAILURE: i64 = 20
+    PENDING_EVENT_STATE_FAILURE: i64 = 21
+    SAFE_POINT_STATE_FAILURE: i64 = 22
 
 def write_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
     for index in Frame::ZERO_LENGTH..<Frame::U64_BYTE_COUNT:
@@ -64,18 +73,27 @@ def main() -> i64:
     truncated_dispatch: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stop_frame.bytes[Frame::FIRST_BYTE], Frame::TRUNCATED_LENGTH, buffer)
     return TestResult::TRUNCATED_FRAME_FAILURE if truncated_dispatch.status != DebuggerAgentControl::DispatchStatus.MalformedFrame or truncated_dispatch.wire_status != DebuggerAgentWire::WireStatus.Truncated or truncated_dispatch.buffer.stopped or truncated_dispatch.buffer.stop_generation != TestControl::NO_GENERATION
     stopped: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stop_frame.bytes[Frame::FIRST_BYTE], stop_frame.length, buffer)
-    return TestResult::STOP_DISPATCH_FAILURE if stopped.status != DebuggerAgentControl::DispatchStatus.Applied or not stopped.buffer.stopped or stopped.buffer.stop_acknowledged or stopped.buffer.stop_generation != TestControl::FIRST_GENERATION or not DebuggerAgent::agent_is_exact(stopped.buffer)
+    return TestResult::STOP_DISPATCH_STATUS_FAILURE if stopped.status != DebuggerAgentControl::DispatchStatus.Applied
+    return TestResult::STOP_REQUEST_STATE_FAILURE if stopped.buffer.stopped or not stopped.buffer.stop_requested
+    return TestResult::STOP_ACK_STATE_FAILURE if stopped.buffer.stop_acknowledged
+    return TestResult::STOP_GENERATION_STATE_FAILURE if stopped.buffer.stop_generation != TestControl::FIRST_GENERATION
+    return TestResult::STOP_EXACTNESS_FAILURE if not DebuggerAgent::agent_is_exact(stopped.buffer)
+    pending_event_buffer: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_publish(stopped.buffer, DebuggerAgent::AgentEvent{kind: DebuggerAgent::AgentEventKind.Mutation, ordinal: TestControl::FIRST_EVENT_ORDINAL, payload_hash: TestControl::EVENT_PAYLOAD_HASH})
+    return TestResult::PENDING_EVENT_STATE_FAILURE if pending_event_buffer.count != TestControl::ONE_EVENT_COUNT or pending_event_buffer.stopped or not pending_event_buffer.stop_requested or DebuggerAgent::agent_can_resume(pending_event_buffer)
 
     duplicate_stop: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stop_frame.bytes[Frame::FIRST_BYTE], stop_frame.length, stopped.buffer)
-    return TestResult::DUPLICATE_STOP_FAILURE if duplicate_stop.status != DebuggerAgentControl::DispatchStatus.StopAlreadyPending or not duplicate_stop.buffer.stopped or duplicate_stop.buffer.stop_generation != TestControl::FIRST_GENERATION or duplicate_stop.buffer.overflowed
+    return TestResult::DUPLICATE_STOP_FAILURE if duplicate_stop.status != DebuggerAgentControl::DispatchStatus.StopAlreadyPending or duplicate_stop.buffer.stopped or not duplicate_stop.buffer.stop_requested or duplicate_stop.buffer.stop_generation != TestControl::FIRST_GENERATION or duplicate_stop.buffer.overflowed
 
     resume_request: DebuggerAgentWire::AgentControlRequest = DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::FIRST_GENERATION}
     resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(resume_request)
     premature_resume: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(resume_frame.bytes[Frame::FIRST_BYTE], resume_frame.length, stopped.buffer)
-    return TestResult::PREMATURE_RESUME_FAILURE if premature_resume.status != DebuggerAgentControl::DispatchStatus.StopNotAcknowledged or not premature_resume.buffer.stopped or premature_resume.buffer.stop_acknowledged or premature_resume.buffer.stop_generation != TestControl::FIRST_GENERATION
+    return TestResult::PREMATURE_RESUME_FAILURE if premature_resume.status != DebuggerAgentControl::DispatchStatus.StopNotAcknowledged or premature_resume.buffer.stopped or not premature_resume.buffer.stop_requested or premature_resume.buffer.stop_acknowledged or premature_resume.buffer.stop_generation != TestControl::FIRST_GENERATION
 
-    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::FIRST_GENERATION, event_count: TestControl::ZERO_EVENT_COUNT}
-    acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(stopped.buffer, acknowledgement)
+    safe_point: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_safe_point_reached(pending_event_buffer)
+    return TestResult::SAFE_POINT_STATE_FAILURE if not safe_point.stopped or safe_point.stop_requested or safe_point.stop_generation != TestControl::FIRST_GENERATION or not DebuggerAgent::agent_is_exact(safe_point)
+
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::FIRST_GENERATION, event_count: safe_point.count.u64()}
+    acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(safe_point, acknowledgement)
     return TestResult::ACKNOWLEDGEMENT_FAILURE if not DebuggerAgent::agent_stop_is_acknowledged(acknowledged) or not DebuggerAgent::agent_is_exact(acknowledged)
 
     wrong_resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::SECOND_GENERATION})
@@ -101,10 +119,11 @@ def main() -> i64:
 
     second_stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::SECOND_GENERATION})
     second_stopped: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(second_stop_frame.bytes[Frame::FIRST_BYTE], second_stop_frame.length, resumed.buffer)
-    return TestResult::STOP_DISPATCH_FAILURE if second_stopped.status != DebuggerAgentControl::DispatchStatus.Applied or not second_stopped.buffer.stopped or second_stopped.buffer.stop_generation != TestControl::SECOND_GENERATION
+    return TestResult::STOP_DISPATCH_FAILURE if second_stopped.status != DebuggerAgentControl::DispatchStatus.Applied or second_stopped.buffer.stopped or not second_stopped.buffer.stop_requested or second_stopped.buffer.stop_generation != TestControl::SECOND_GENERATION
 
-    second_acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::SECOND_GENERATION, event_count: TestControl::ZERO_EVENT_COUNT}
-    second_acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(second_stopped.buffer, second_acknowledgement)
+    second_safe_point: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_safe_point_reached(second_stopped.buffer)
+    second_acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestControl::SECOND_GENERATION, event_count: TestControl::ONE_EVENT_COUNT}
+    second_acknowledged: DebuggerAgent::AgentBuffer = DebuggerAgent::agent_acknowledge_stop(second_safe_point, second_acknowledgement)
     second_resume_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: TestControl::SECOND_GENERATION})
     second_resumed: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(second_resume_frame.bytes[Frame::FIRST_BYTE], second_resume_frame.length, second_acknowledged)
     return TestResult::RESUME_DISPATCH_FAILURE if second_resumed.status != DebuggerAgentControl::DispatchStatus.Applied or second_resumed.buffer.stopped or second_resumed.buffer.stop_generation != TestControl::SECOND_GENERATION or not DebuggerAgent::agent_is_exact(second_resumed.buffer)

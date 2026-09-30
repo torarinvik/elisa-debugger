@@ -47,6 +47,7 @@ module DebuggerAgent:
             events: mutable AgentEvent[Agent::AGENT_HOOKS_EVENT_CAPACITY]
             count: mutable usize
             stopped: mutable bool
+            stop_requested: mutable bool
             stop_acknowledged: mutable bool
             overflowed: mutable bool
             stop_generation: mutable u64
@@ -56,6 +57,7 @@ module DebuggerAgent:
             buffer: mutable AgentBuffer = zeroed
             buffer.count <- Count::EMPTY_EVENT_COUNT
             buffer.stopped <- false
+            buffer.stop_requested <- false
             buffer.stop_acknowledged <- false
             buffer.overflowed <- false
             buffer.stop_generation <- Sentinel::NO_STOP_GENERATION
@@ -74,6 +76,7 @@ module DebuggerAgent:
         def agent_request_stop(buffer: AgentBuffer) -> AgentBuffer:
             updated: mutable AgentBuffer = buffer
             updated.stopped <- true
+            updated.stop_requested <- false
             updated.stop_acknowledged <- false
             updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
             if buffer.stop_generation == Generation::MAX_STOP_GENERATION:
@@ -90,12 +93,21 @@ module DebuggerAgent:
         # the agent state; the dispatcher can then report the cause precisely.
         def agent_request_stop_generation(buffer: AgentBuffer, generation: u64) -> AgentBuffer:
             return buffer if generation == Sentinel::NO_STOP_GENERATION or generation <= buffer.stop_generation
-            return buffer if buffer.stopped or not agent_is_exact(buffer)
+            return buffer if buffer.stopped or buffer.stop_requested or not agent_is_exact(buffer)
             updated: mutable AgentBuffer = buffer
-            updated.stopped <- true
+            updated.stop_requested <- true
             updated.stop_acknowledged <- false
             updated.acknowledged_generation <- Sentinel::NO_STOP_GENERATION
             updated.stop_generation <- generation
+            return updated
+
+        # Instrumented target code calls this only after reaching a declared
+        # safe point. Receiving a stop command alone does not freeze execution.
+        def agent_safe_point_reached(buffer: AgentBuffer) -> AgentBuffer:
+            return buffer if not buffer.stop_requested or buffer.overflowed or not agent_is_exact(buffer)
+            updated: mutable AgentBuffer = buffer
+            updated.stop_requested <- false
+            updated.stopped <- true
             return updated
 
         # The generation is captured with the stop request and must travel with
@@ -121,6 +133,7 @@ module DebuggerAgent:
 
         def agent_resume(buffer: AgentBuffer) -> AgentBuffer:
             updated: mutable AgentBuffer = buffer
+            return updated if buffer.stop_requested
             return updated if buffer.stopped and not buffer.stop_acknowledged
             return updated if buffer.stop_acknowledged and not buffer.stopped
             return updated if buffer.overflowed
@@ -143,7 +156,10 @@ module DebuggerAgent:
 
         def agent_is_exact(buffer: AgentBuffer&) -> bool:
             return false if buffer.overflowed or buffer.count > Agent::AGENT_HOOKS_EVENT_CAPACITY
+            return false if buffer.stop_requested and buffer.stopped
             return false if buffer.stop_acknowledged and not buffer.stopped
+            return false if buffer.stop_requested and buffer.stop_generation == Sentinel::NO_STOP_GENERATION
+            return false if buffer.stop_requested and buffer.stop_acknowledged
             return false if buffer.stopped and buffer.stop_generation == Sentinel::NO_STOP_GENERATION
             return false if buffer.acknowledged_generation > buffer.stop_generation
             return false if buffer.stop_acknowledged and buffer.acknowledged_generation != buffer.stop_generation
@@ -157,6 +173,7 @@ module DebuggerAgent:
 
         def agent_can_resume(buffer: AgentBuffer&) -> bool:
             return false if buffer.overflowed
+            return false if buffer.stop_requested
             return false if buffer.stopped and not buffer.stop_acknowledged
             return true
 

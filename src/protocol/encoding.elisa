@@ -26,6 +26,12 @@ module DebuggerProtocolEncoding:
             PROTOCOL_ENCODING_CHARACTER_ASCII_TAB: u8 = 9
             PROTOCOL_ENCODING_CHARACTER_ASCII_ZERO: u8 = 48
             PROTOCOL_ENCODING_CHARACTER_ASCII_SPACE: u8 = 32
+            C_STRING_TERMINATOR: u8 = 0
+
+        const module Index:
+            FIRST: usize = 0
+            STEP: usize = 1
+            PREVIOUS: usize = 1
 
         const module InitializationMessages:
             PROTOCOL_ENCODING_INITIALIZATION_MESSAGES_INCOMPATIBLE_VERSION_CODE: cstr = "INCOMPATIBLE_VERSION"
@@ -48,6 +54,10 @@ module DebuggerProtocolEncoding:
         const module NumberFormat:
             DECIMAL_DIGIT_CAPACITY: usize = 20
             PROTOCOL_ENCODING_NUMBER_FORMAT_DECIMAL_BASE: u64 = 10
+            ZERO_UNSIGNED_VALUE: u64 = 0
+            ZERO_SIGNED_VALUE: i64 = 0
+            SIGNED_MAGNITUDE_ADJUSTMENT: i64 = 1
+            UNSIGNED_MAGNITUDE_ADJUSTMENT: u64 = 1
 
         const module ProductMetadata:
             PROTOCOL_ENCODING_PRODUCT_METADATA_MAX_PAGE_SIZE: u64 = 256
@@ -155,36 +165,36 @@ module DebuggerProtocolEncoding:
                 buffer.failed <- true
                 return
             buffer.bytes[buffer.length] <- byte
-            buffer.length <- buffer.length + 1
+            buffer.length <- buffer.length + Index::STEP
 
         def buffer_put_cstr(buffer: mutable JsonBuffer&, text: cstr) -> void:
-            index: mutable usize = 0
-            while text[index] != 0:
+            index: mutable usize = Index::FIRST
+            while text[index] != Character::C_STRING_TERMINATOR:
                 buffer_put_byte(buffer, text[index].u8())
                 return if buffer.failed
-                index <- index + 1
+                index <- index + Index::STEP
 
         def buffer_put_u64(buffer: mutable JsonBuffer&, value: u64) -> void:
             digits: mutable u8[NumberFormat::DECIMAL_DIGIT_CAPACITY] = zeroed
-            count: mutable usize = 0
+            count: mutable usize = Index::FIRST
             remaining: mutable u64 = value
-            if remaining == 0:
+            if remaining == NumberFormat::ZERO_UNSIGNED_VALUE:
                 buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_ZERO)
                 return
-            while remaining > 0:
+            while remaining > NumberFormat::ZERO_UNSIGNED_VALUE:
                 return if count >= NumberFormat::DECIMAL_DIGIT_CAPACITY
                 digits[count] <- (remaining % NumberFormat::PROTOCOL_ENCODING_NUMBER_FORMAT_DECIMAL_BASE).u8() + Character::PROTOCOL_ENCODING_CHARACTER_ASCII_ZERO
-                count <- count + 1
+                count <- count + Index::STEP
                 remaining <- remaining / NumberFormat::PROTOCOL_ENCODING_NUMBER_FORMAT_DECIMAL_BASE
-            for index in 0..<count:
-                buffer_put_byte(buffer, digits[count - index - 1])
+            for index in Index::FIRST..<count:
+                buffer_put_byte(buffer, digits[count - index - Index::PREVIOUS])
 
         def buffer_put_i64_string(buffer: mutable JsonBuffer&, value: i64) -> void:
             magnitude: mutable u64 = value.u64()
             buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
-            if value < 0:
+            if value < NumberFormat::ZERO_SIGNED_VALUE:
                 buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_MINUS)
-                magnitude <- (-(value + 1)).u64() + 1
+                magnitude <- (-(value + NumberFormat::SIGNED_MAGNITUDE_ADJUSTMENT)).u64() + NumberFormat::UNSIGNED_MAGNITUDE_ADJUSTMENT
             buffer_put_u64(buffer, magnitude)
             buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
 
@@ -193,8 +203,8 @@ module DebuggerProtocolEncoding:
 
         def buffer_put_json_string(buffer: mutable JsonBuffer&, text: cstr) -> void:
             buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
-            index: mutable usize = 0
-            while text[index] != 0:
+            index: mutable usize = Index::FIRST
+            while text[index] != Character::C_STRING_TERMINATOR:
                 byte: u8 = text[index].u8()
                 if byte == Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE or byte == Character::PROTOCOL_ENCODING_CHARACTER_ASCII_BACKSLASH:
                     buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_BACKSLASH)
@@ -214,7 +224,7 @@ module DebuggerProtocolEncoding:
                                     return
                                 buffer_put_byte(buffer, byte)
                 return if buffer.failed
-                index <- index + 1
+                index <- index + Index::STEP
             buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
 
         def buffer_put_id_string(buffer: mutable JsonBuffer&, value: u64) -> void:
@@ -348,7 +358,7 @@ module DebuggerProtocolEncoding:
             failed: mutable bool
 
         def json_buffer_new() -> JsonBuffer:
-            return JsonBuffer{bytes: zeroed, length: 0, failed: false}
+            return JsonBuffer{bytes: zeroed, length: Index::FIRST, failed: false}
 
         def json_buffer_is_valid(buffer: JsonBuffer&) -> bool:
             return not buffer.failed and buffer.length <= JsonValues::JSON_BUFFER_CAPACITY
@@ -554,9 +564,9 @@ module DebuggerProtocolEncoding:
                 return buffer
             managed_result_prefix(buffer, request_id, generation)
             buffer_put_cstr(buffer, SourceBreakpointResponse::SOURCE_BREAKPOINT_RESPONSE_ITEMS_PREFIX)
-            for index in 0..<result.count:
+            for index in Index::FIRST..<result.count:
                 point: DebuggerManagedService::SourceBreakpointEntry = result.points[index]
-                if index > 0:
+                if index > Index::FIRST:
                     buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_COMMA)
                 buffer_put_cstr(buffer, SourceBreakpointResponse::SOURCE_BREAKPOINT_RESPONSE_ITEM_PREFIX)
                 buffer_put_id_string(buffer, point.id.value)
@@ -608,9 +618,9 @@ module DebuggerProtocolEncoding:
             buffer_put_cstr(buffer, ",\"position\":{\"event\":")
             buffer_put_id_string(buffer, event)
             buffer_put_cstr(buffer, "},\"values\":[")
-            for index in 0..<page.count:
+            for index in Index::FIRST..<page.count:
                 entry: DebuggerManagedInspection::LocalSnapshot = page.entries[index]
-                if index > 0:
+                if index > Index::FIRST:
                     buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_COMMA)
                 buffer_put_cstr(buffer, "{\"index\":")
                 buffer_put_u64(buffer, entry.index.u64())
@@ -628,8 +638,8 @@ module DebuggerProtocolEncoding:
             buffer_put_cstr(buffer, "],\"complete\":")
             buffer_put_bool(buffer, page.complete)
             buffer_put_cstr(buffer, ",\"next\":")
-            buffer_put_id_string(buffer, page.next.u64()) if page.next > 0
-            buffer_put_cstr(buffer, JsonValues::JSON_NULL) if page.next == 0
+            buffer_put_id_string(buffer, page.next.u64()) if page.next > Sentinels::NO_PAGE
+            buffer_put_cstr(buffer, JsonValues::JSON_NULL) if page.next == Sentinels::NO_PAGE
             buffer_put_cstr(buffer, "}}")
             return buffer
 
@@ -661,7 +671,7 @@ module DebuggerProtocolEncoding:
             buffer_put_cstr(buffer, MemoryEncoding::MEMORY_STATE_PREFIX)
             buffer_put_cstr(buffer, MemoryEncoding::MEMORY_STATE_AVAILABLE)
             buffer_put_cstr(buffer, MemoryEncoding::MEMORY_BYTES_PREFIX)
-            for index in 0..<read.length:
+            for index in Index::FIRST..<read.length:
                 buffer_put_hex_byte(buffer, read.bytes[index])
             buffer_put_cstr(buffer, MemoryEncoding::MEMORY_OBJECT_SUFFIX)
             return buffer
@@ -747,9 +757,9 @@ module DebuggerProtocolEncoding:
                 buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_AVAILABLE_LAST_EVENT_PREFIX)
                 buffer_put_id_string(buffer, timeline.bounds.exact_last)
             buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARKS_PREFIX)
-            for index in 0..<timeline.bookmark_count:
+            for index in Index::FIRST..<timeline.bookmark_count:
                 bookmark: DebuggerTimeline::Bookmark = timeline.bookmarks[index]
-                if index > 0:
+                if index > Index::FIRST:
                     buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_COMMA)
                 buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARK_PREFIX)
                 buffer_put_id_string(buffer, bookmark.id.value)

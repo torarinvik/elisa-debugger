@@ -18,6 +18,10 @@ extern debugger_agent_spawn_actions_destroy(actions: mutable void&&?) -> i32 can
 extern debugger_agent_send(descriptor: i32, bytes: void&, length: usize, flags: i32) -> isize can[Blocking.IO]
 @link_name("recv")
 extern debugger_agent_receive(descriptor: i32, bytes: void&, length: usize, flags: i32) -> isize can[Blocking.IO]
+@link_name("send")
+extern debugger_agent_send_nonblocking(descriptor: i32, bytes: void&, length: usize, flags: i32) -> isize can[Unsafe.PointerCast]
+@link_name("recv")
+extern debugger_agent_receive_nonblocking(descriptor: i32, bytes: void&, length: usize, flags: i32) -> isize can[Unsafe.PointerCast]
 @link_name("close")
 extern debugger_agent_close(descriptor: i32) -> i32 can[Blocking.IO]
 @link_name("waitpid")
@@ -37,17 +41,29 @@ static if ELISA_TARGET_OS_MACOS:
         private:
             const module Flag:
                 MSG_NOSIGNAL: i32 = 524288
+                MSG_DONTWAIT: i32 = 128
+                WOULD_BLOCK_ERROR: i32 = 35
         public:
             def no_signal_send_flag() -> i32:
                 return Flag::MSG_NOSIGNAL
+            def dont_wait_flag() -> i32:
+                return Flag::MSG_DONTWAIT
+            def would_block_error() -> i32:
+                return Flag::WOULD_BLOCK_ERROR
 static elif ELISA_TARGET_OS_LINUX:
     module DebuggerLocalAgentSignal:
         private:
             const module Flag:
                 MSG_NOSIGNAL: i32 = 16384
+                MSG_DONTWAIT: i32 = 64
+                WOULD_BLOCK_ERROR: i32 = 11
         public:
             def no_signal_send_flag() -> i32:
                 return Flag::MSG_NOSIGNAL
+            def dont_wait_flag() -> i32:
+                return Flag::MSG_DONTWAIT
+            def would_block_error() -> i32:
+                return Flag::WOULD_BLOCK_ERROR
 
 module DebuggerLocalAgentTransport:
     private:
@@ -176,6 +192,8 @@ module DebuggerLocalAgentTransport:
             ChildRunning
             ChildReaped
             WaitFailed
+            WouldBlock
+            Interrupted
 
         struct LocalAgentSession:
             process_id: mutable i32
@@ -278,6 +296,70 @@ module DebuggerLocalAgentTransport:
                 session.state <- SessionState.CleanupPending
                 return TransportStatus.CloseFailed
             return TransportStatus.Ready
+
+        # Event-loop adapters can register this descriptor with their native
+        # readiness API and use the try operations below without Blocking.IO.
+        def local_agent_channel_descriptor(session: LocalAgentSession&) -> i32:
+            return Io::SYSCALL_FAILURE if session.state != SessionState.Connected
+            return session.channel_descriptor
+
+        # One nonblocking send attempt. Partial progress is returned to the
+        # caller; WouldBlock and Interrupted are retryable readiness outcomes.
+        def local_agent_channel_try_send(session: LocalAgentSession&, bytes: u8&, length: usize) -> TransferResult can[Unsafe.PointerCast]:
+            result: mutable TransferResult = zeroed
+            result.status <- TransportStatus.Ready
+            if session.state != SessionState.Connected or session.channel_descriptor == Io::SYSCALL_FAILURE or session.process_reaped:
+                result.status <- TransportStatus.InvalidState
+                return result
+            if length > Io::MAX_TRANSFER_BYTES:
+                result.status <- TransportStatus.InvalidArgument
+                return result
+            return result if length == Io::EMPTY_LENGTH
+
+            input_pointer: void& = (&bytes[Io::FIRST_INDEX]).cast[void&] can Unsafe.PointerCast
+            flags: i32 = DebuggerLocalAgentSignal::no_signal_send_flag() | DebuggerLocalAgentSignal::dont_wait_flag()
+            written: isize = debugger_agent_send_nonblocking(session.channel_descriptor, input_pointer, length, flags) can Unsafe.PointerCast
+            if written == Io::SYSCALL_FAILURE.isize():
+                observed_error: i32 = local_agent_last_error() can Unsafe.PointerCast
+                result.system_error <- observed_error
+                result.status <- TransportStatus.Interrupted if observed_error == Io::EINTR_ERROR
+                result.status <- TransportStatus.WouldBlock if observed_error == DebuggerLocalAgentSignal::would_block_error()
+                result.status <- TransportStatus.TransferFailed if observed_error != Io::EINTR_ERROR and observed_error != DebuggerLocalAgentSignal::would_block_error()
+                return result
+            if written == Io::EMPTY_LENGTH.isize():
+                result.status <- TransportStatus.TransferFailed
+                return result
+            result.bytes_transferred <- written.usize()
+            return result
+
+        # One nonblocking receive attempt. It never waits for bytes and changes
+        # the session to PeerClosed only after the peer returns orderly EOF.
+        def local_agent_channel_try_receive(session: mutable LocalAgentSession&, bytes: mutable u8&, capacity: usize) -> TransferResult can[Unsafe.PointerCast]:
+            result: mutable TransferResult = zeroed
+            result.status <- TransportStatus.Ready
+            if session.state != SessionState.Connected or session.channel_descriptor == Io::SYSCALL_FAILURE:
+                result.status <- TransportStatus.InvalidState
+                return result
+            if capacity > Io::MAX_TRANSFER_BYTES:
+                result.status <- TransportStatus.InvalidArgument
+                return result
+            return result if capacity == Io::EMPTY_LENGTH
+
+            output_pointer: void& = (&bytes[Io::FIRST_INDEX]).cast[void&] can Unsafe.PointerCast
+            received: isize = debugger_agent_receive_nonblocking(session.channel_descriptor, output_pointer, capacity, DebuggerLocalAgentSignal::dont_wait_flag()) can Unsafe.PointerCast
+            if received == Io::SYSCALL_FAILURE.isize():
+                observed_error: i32 = local_agent_last_error() can Unsafe.PointerCast
+                result.system_error <- observed_error
+                result.status <- TransportStatus.Interrupted if observed_error == Io::EINTR_ERROR
+                result.status <- TransportStatus.WouldBlock if observed_error == DebuggerLocalAgentSignal::would_block_error()
+                result.status <- TransportStatus.TransferFailed if observed_error != Io::EINTR_ERROR and observed_error != DebuggerLocalAgentSignal::would_block_error()
+                return result
+            if received == Io::EMPTY_LENGTH.isize():
+                session.state <- SessionState.PeerClosed
+                result.status <- TransportStatus.PeerClosed
+                return result
+            result.bytes_transferred <- received.usize()
+            return result
 
         def local_agent_channel_send(session: LocalAgentSession&, bytes: u8&, length: usize) -> TransferResult can[Blocking.IO, Unsafe.PointerCast]:
             result: mutable TransferResult = zeroed

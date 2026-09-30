@@ -64,6 +64,11 @@ const module TestResult:
     PARENT_HELLO_SEND_FAILURE: i64 = 24
     PARENT_HELLO_RECEIVE_FAILURE: i64 = 25
     PARENT_HANDSHAKE_FAILURE: i64 = 26
+    PARENT_DESCRIPTOR_ACCESS_FAILURE: i64 = 27
+    PARENT_NONBLOCKING_READ_FAILURE: i64 = 28
+    PARENT_NONBLOCKING_SEND_FAILURE: i64 = 29
+    PARENT_NONBLOCKING_ACK_READ_FAILURE: i64 = 30
+    CHILD_NONBLOCKING_HELLO_SEND_FAILURE: i64 = 31
     SUCCESS: i64 = 0
 
 def read_agent_frame(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, bytes: mutable u8&, expected_length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
@@ -95,8 +100,8 @@ def child_main(argc: i64) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     return TestResult::CHILD_HANDSHAKE_FAILURE if negotiation.status != DebuggerAgentHandshake::HandshakeStatus.Ready
     hello_response: DebuggerAgentWire::EncodedAgentHello = DebuggerAgentWire::agent_hello_response_encode(local_hello)
     return TestResult::CHILD_HELLO_ENCODE_FAILURE if hello_response.status != DebuggerAgentWire::WireStatus.Ready
-    hello_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, hello_response.bytes[TestFrame::FIRST_BYTE], hello_response.length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::CHILD_HELLO_SEND_FAILURE if hello_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or hello_sent.bytes_transferred != TestFrame::FRAME_LENGTH
+    hello_sent: DebuggerLocalAgentTransport::TransferResult = send_agent_bytes_without_blocking(session, hello_response.bytes[TestFrame::FIRST_BYTE], hello_response.length) can Unsafe.PointerCast
+    return TestResult::CHILD_NONBLOCKING_HELLO_SEND_FAILURE if hello_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or hello_sent.bytes_transferred != TestFrame::FRAME_LENGTH
 
     incoming: mutable DebuggerAgentWire::EncodedStopAcknowledgement = zeroed
     return TestResult::CHILD_READ_FAILURE if not read_agent_frame(session, incoming.bytes[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
@@ -117,14 +122,14 @@ def test_cstr_equal(left: cstr, right: cstr) -> bool:
         index <- index + TestArgument::INDEX_INCREMENT
     return false
 
-def parent_receive_acknowledgement(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, expected: DebuggerAgent::AgentStopAcknowledgement) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+def parent_receive_acknowledgement(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, expected: DebuggerAgent::AgentStopAcknowledgement) -> bool can[Unsafe.PointerCast]:
     receiver: mutable DebuggerAgentWireStream::StopAcknowledgementReceiver = zeroed
     DebuggerAgentWireStream::stop_acknowledgement_receiver_initialize(receiver)
     scratch: mutable u8[TestFrame::FRAME_LENGTH] = zeroed
     acknowledgement_received: mutable bool = false
     failed: mutable bool = false
     while not acknowledgement_received and not failed:
-        transfer: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_receive(session, scratch[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+        transfer: DebuggerLocalAgentTransport::TransferResult = receive_agent_bytes_without_blocking(session, scratch[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Unsafe.PointerCast
         if transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready or transfer.bytes_transferred == TestFrame::EMPTY_LENGTH:
             failed <- true
         else:
@@ -135,6 +140,12 @@ def parent_receive_acknowledgement(session: mutable DebuggerLocalAgentTransport:
             elif feed.status != DebuggerAgentWireStream::StreamStatus.NeedsMore:
                 failed <- true
     return acknowledgement_received and not failed
+
+def send_agent_bytes_without_blocking(session: DebuggerLocalAgentTransport::LocalAgentSession&, bytes: u8&, length: usize) -> DebuggerLocalAgentTransport::TransferResult can[Unsafe.PointerCast]:
+    return DebuggerLocalAgentTransport::local_agent_channel_try_send(session, bytes, length) can Unsafe.PointerCast
+
+def receive_agent_bytes_without_blocking(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, bytes: mutable u8&, capacity: usize) -> DebuggerLocalAgentTransport::TransferResult can[Unsafe.PointerCast]:
+    return DebuggerLocalAgentTransport::local_agent_channel_try_receive(session, bytes, capacity) can Unsafe.PointerCast
 
 def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
@@ -161,12 +172,17 @@ def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerC
     return TestResult::PARENT_LAUNCH_FAILURE if launch != DebuggerLocalAgentTransport::TransportStatus.Ready
     return TestResult::PARENT_PROCESS_ID_FAILURE if session.process_id == TestArgument::NO_PROCESS_ID
     return TestResult::PARENT_CHANNEL_DESCRIPTOR_FAILURE if session.channel_descriptor < TestArgument::MINIMUM_CHANNEL_DESCRIPTOR
+    return TestResult::PARENT_DESCRIPTOR_ACCESS_FAILURE if DebuggerLocalAgentTransport::local_agent_channel_descriptor(session) != session.channel_descriptor
+
+    no_message: mutable u8[TestFrame::FRAME_LENGTH] = zeroed
+    pending_read: DebuggerLocalAgentTransport::TransferResult = receive_agent_bytes_without_blocking(session, no_message[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Unsafe.PointerCast
+    return TestResult::PARENT_NONBLOCKING_READ_FAILURE if pending_read.status != DebuggerLocalAgentTransport::TransportStatus.WouldBlock or pending_read.bytes_transferred != TestFrame::EMPTY_LENGTH or pending_read.system_error != DebuggerLocalAgentSignal::would_block_error()
 
     host_hello: DebuggerAgentWire::AgentHello = DebuggerAgentWire::AgentHello{protocol_major: TestHandshake::PROTOCOL_MAJOR, protocol_minor: TestHandshake::PROTOCOL_MINOR, capabilities: TestHandshake::CAPABILITIES}
     hello_request: DebuggerAgentWire::EncodedAgentHello = DebuggerAgentWire::agent_hello_request_encode(host_hello)
     return TestResult::PARENT_HELLO_ENCODE_FAILURE if hello_request.status != DebuggerAgentWire::WireStatus.Ready
-    hello_request_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, hello_request.bytes[TestFrame::FIRST_BYTE], hello_request.length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::PARENT_HELLO_SEND_FAILURE if hello_request_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or hello_request_sent.bytes_transferred != TestFrame::FRAME_LENGTH
+    hello_request_sent: DebuggerLocalAgentTransport::TransferResult = send_agent_bytes_without_blocking(session, hello_request.bytes[TestFrame::FIRST_BYTE], hello_request.length) can Unsafe.PointerCast
+    return TestResult::PARENT_NONBLOCKING_SEND_FAILURE if hello_request_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or hello_request_sent.bytes_transferred != TestFrame::FRAME_LENGTH
     hello_response_bytes: mutable u8[TestFrame::FRAME_LENGTH] = zeroed
     return TestResult::PARENT_HELLO_RECEIVE_FAILURE if not read_agent_frame(session, hello_response_bytes[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
     hello_response: DebuggerAgentWire::DecodedAgentHello = DebuggerAgentWire::agent_hello_response_decode(hello_response_bytes[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH)
@@ -180,7 +196,7 @@ def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerC
     return TestResult::PARENT_POLL_FAILURE if polled != DebuggerLocalAgentTransport::TransportStatus.ChildRunning and polled != DebuggerLocalAgentTransport::TransportStatus.ChildReaped
     waited: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_process_wait(session) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PARENT_WAIT_FAILURE if waited != DebuggerLocalAgentTransport::TransportStatus.ChildReaped or session.exit_code != TestResult::SUCCESS.i32() or session.terminated_by_signal
-    return TestResult::PARENT_RECEIVE_FAILURE if not parent_receive_acknowledgement(session, expected) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_RECEIVE_FAILURE if not parent_receive_acknowledgement(session, expected) can Unsafe.PointerCast
     closed: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_close(session) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PARENT_CLOSE_FAILURE if closed != DebuggerLocalAgentTransport::TransportStatus.Ready or session.owned_descriptor_count != TestFrame::EMPTY_LENGTH
     return TestResult::SUCCESS

@@ -9,7 +9,7 @@ module DebuggerAgentThreads:
         const module Capacity:
             MAX_REGISTERED_THREADS: usize = 64
 
-        const module Identity:
+        const module ThreadIdentity:
             INVALID_THREAD_ID: u64 = 0
 
         const module StopEpoch:
@@ -95,7 +95,7 @@ module DebuggerAgentThreads:
             registry.stop_ready <- false
             registry.last_stop_timed_out <- false
             for index in Index::FIRST_SLOT..<Capacity::MAX_REGISTERED_THREADS:
-                registry.threads[index].thread_id <- Identity::INVALID_THREAD_ID
+                registry.threads[index].thread_id <- ThreadIdentity::INVALID_THREAD_ID
                 registry.threads[index].state <- ThreadState.Unregistered
 
         def agent_thread_registry_capacity() -> usize:
@@ -109,7 +109,7 @@ module DebuggerAgentThreads:
             return false if registry.stop_ready and not registry.stop_pending
             return false if registry.stop_ready and not stop_is_fully_parked(registry)
             for index in Index::FIRST_SLOT..<registry.active_count:
-                return false if registry.threads[index].thread_id == Identity::INVALID_THREAD_ID
+                return false if registry.threads[index].thread_id == ThreadIdentity::INVALID_THREAD_ID
                 return false if registry.threads[index].state == ThreadState.Unregistered
                 if registry.stop_pending:
                     return false if registry.threads[index].state != ThreadState.StopRequested and registry.threads[index].state != ThreadState.Parked
@@ -121,7 +121,7 @@ module DebuggerAgentThreads:
 
         def agent_thread_register(registry: mutable AgentThreadRegistry&, thread_id: u64, now_ns: u64) -> ThreadStatus:
             return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
-            return ThreadStatus.InvalidThreadId if thread_id == Identity::INVALID_THREAD_ID
+            return ThreadStatus.InvalidThreadId if thread_id == ThreadIdentity::INVALID_THREAD_ID
             return ThreadStatus.DuplicateThread if find_thread_slot(registry, thread_id) < Capacity::MAX_REGISTERED_THREADS
             return ThreadStatus.ThreadCapacityReached if registry.active_count >= Capacity::MAX_REGISTERED_THREADS
             return ThreadStatus.StopAlreadyReady if registry.stop_ready
@@ -144,7 +144,7 @@ module DebuggerAgentThreads:
         # dense prefix keeps every later lookup bounded by active_count.
         def agent_thread_unregister(registry: mutable AgentThreadRegistry&, thread_id: u64, now_ns: u64) -> ThreadStatus:
             return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
-            return ThreadStatus.InvalidThreadId if thread_id == Identity::INVALID_THREAD_ID
+            return ThreadStatus.InvalidThreadId if thread_id == ThreadIdentity::INVALID_THREAD_ID
             slot: usize = find_thread_slot(registry, thread_id)
             return ThreadStatus.UnknownThread if slot >= registry.active_count
             timed_out: mutable bool = false
@@ -184,7 +184,7 @@ module DebuggerAgentThreads:
         # One thread cannot claim a process-wide stop while peers still run.
         def agent_thread_safe_point(registry: mutable AgentThreadRegistry&, thread_id: u64, now_ns: u64) -> ThreadStatus:
             return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)
-            return ThreadStatus.InvalidThreadId if thread_id == Identity::INVALID_THREAD_ID
+            return ThreadStatus.InvalidThreadId if thread_id == ThreadIdentity::INVALID_THREAD_ID
             slot: usize = find_thread_slot(registry, thread_id)
             return ThreadStatus.UnknownThread if slot >= registry.active_count
             return ThreadStatus.StopNotPending if not registry.stop_pending
@@ -214,6 +214,15 @@ module DebuggerAgentThreads:
             return false if not agent_thread_registry_is_exact(registry)
             return false if not registry.stop_pending or generation != registry.stop_generation
             return registry.stop_ready and stop_is_fully_parked(registry)
+
+        # Inspection code uses this query before exposing a thread's shadow
+        # frames. It does not imply that the caller owns the rendezvous lock.
+        def agent_thread_is_parked_for_generation(registry: AgentThreadRegistry&, thread_id: u64, generation: u64) -> bool:
+            return false if not agent_thread_registry_is_exact(registry) or thread_id == ThreadIdentity::INVALID_THREAD_ID or generation == StopEpoch::NO_GENERATION
+            return false if not registry.stop_pending or registry.stop_generation != generation
+            slot: usize = find_thread_slot(registry, thread_id)
+            return false if slot >= registry.active_count
+            return registry.threads[slot].state == ThreadState.Parked
 
         def agent_threads_resume(registry: mutable AgentThreadRegistry&, generation: u64) -> ThreadStatus:
             return ThreadStatus.InvalidRegistry if not agent_thread_registry_is_exact(registry)

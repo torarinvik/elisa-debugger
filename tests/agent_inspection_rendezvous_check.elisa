@@ -1,0 +1,123 @@
+include "../src/agent/inspection.elisa"
+
+const module Identity:
+    THREAD_FIRST: u64 = 501
+    THREAD_SECOND: u64 = 502
+    FUNCTION: u64 = 601
+    TASK: u64 = 701
+    INVOCATION_FIRST: u64 = 801
+    INVOCATION_SECOND: u64 = 802
+    BINDING_FIRST: u64 = 901
+    BINDING_SECOND: u64 = 902
+    SCOPE: u64 = 1001
+    TYPE: u64 = 1101
+
+const module Epoch:
+    GENERATION: u64 = 1
+    INVALID_GENERATION: u64 = 0
+
+const module Deadline:
+    NOW: u64 = 100
+    VALID: u64 = 200
+
+const module Value:
+    CAPACITY: usize = 32
+    FIRST_BYTE: usize = 0
+    BYTE_COUNT: usize = 1
+    FIRST: u8 = 42
+    SECOND: u8 = 84
+
+const module Source:
+    LINE: u32 = 12
+    COLUMN: u32 = 4
+
+const module Location:
+    ZERO: i64 = 0
+
+const module ResultCode:
+    SUCCESS: i64 = 0
+    THREADS_INITIALIZE: i64 = 1
+    STACKS_INITIALIZE: i64 = 2
+    REGISTER_FIRST: i64 = 3
+    REGISTER_SECOND: i64 = 4
+    PUSH_FIRST: i64 = 5
+    PUSH_SECOND: i64 = 6
+    DECLARE_FIRST: i64 = 7
+    DECLARE_SECOND: i64 = 8
+    REQUEST_STOP: i64 = 9
+    BEGIN_FIRST: i64 = 10
+    BEGIN_SECOND: i64 = 11
+    PREMATURE_READ: i64 = 12
+    PARK_FIRST: i64 = 13
+    PARTIAL_RENDEZVOUS: i64 = 14
+    PARK_SECOND: i64 = 15
+    READY: i64 = 16
+    READ_FIRST: i64 = 17
+    READ_SECOND: i64 = 18
+    VALUE_BYTES: i64 = 19
+    GENERATION_MISMATCH: i64 = 20
+    RESUME_THREADS: i64 = 21
+    RESUME_STACKS: i64 = 22
+    READ_AFTER_RESUME: i64 = 23
+
+def debug_id(value: u64) -> DebuggerIdentity::DebugId:
+    return DebuggerIdentity::DebugId{value: value}
+
+def main() -> i64:
+    registry: mutable DebuggerAgentThreads::AgentThreadRegistry = zeroed
+    DebuggerAgentThreads::agent_threads_initialize(registry)
+    return ResultCode::THREADS_INITIALIZE if not DebuggerAgentThreads::agent_thread_registry_is_exact(registry)
+
+    first_stack: mutable DebuggerAgentFrames::AgentShadowStack = zeroed
+    second_stack: mutable DebuggerAgentFrames::AgentShadowStack = zeroed
+    return ResultCode::STACKS_INITIALIZE if DebuggerAgentFrames::agent_shadow_stack_initialize(first_stack, debug_id(Identity::THREAD_FIRST)) != DebuggerAgentFrames::ShadowStatus.Ready or DebuggerAgentFrames::agent_shadow_stack_initialize(second_stack, debug_id(Identity::THREAD_SECOND)) != DebuggerAgentFrames::ShadowStatus.Ready
+    return ResultCode::REGISTER_FIRST if DebuggerAgentThreads::agent_thread_register(registry, Identity::THREAD_FIRST, Deadline::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+    return ResultCode::REGISTER_SECOND if DebuggerAgentThreads::agent_thread_register(registry, Identity::THREAD_SECOND, Deadline::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+
+    no_invocation: DebuggerIdentity::DebugId = debug_id(Epoch::INVALID_GENERATION)
+    function_id: DebuggerIdentity::DebugId = debug_id(Identity::FUNCTION)
+    task_id: DebuggerIdentity::DebugId = debug_id(Identity::TASK)
+    no_source: DebuggerIdentity::DebugId = debug_id(Epoch::INVALID_GENERATION)
+    first_invocation: DebuggerIdentity::DebugId = debug_id(Identity::INVOCATION_FIRST)
+    second_invocation: DebuggerIdentity::DebugId = debug_id(Identity::INVOCATION_SECOND)
+    return ResultCode::PUSH_FIRST if DebuggerAgentFrames::agent_shadow_frame_push(first_stack, first_invocation, no_invocation, function_id, task_id, no_source, Source::LINE, Source::COLUMN) != DebuggerAgentFrames::ShadowStatus.Ready
+    return ResultCode::PUSH_SECOND if DebuggerAgentFrames::agent_shadow_frame_push(second_stack, second_invocation, no_invocation, function_id, task_id, no_source, Source::LINE, Source::COLUMN) != DebuggerAgentFrames::ShadowStatus.Ready
+
+    first_bytes: mutable u8[Value::CAPACITY] = zeroed
+    second_bytes: mutable u8[Value::CAPACITY] = zeroed
+    first_bytes[Value::FIRST_BYTE] <- Value::FIRST
+    second_bytes[Value::FIRST_BYTE] <- Value::SECOND
+    first_binding: DebuggerIdentity::DebugId = debug_id(Identity::BINDING_FIRST)
+    second_binding: DebuggerIdentity::DebugId = debug_id(Identity::BINDING_SECOND)
+    scope_id: DebuggerIdentity::DebugId = debug_id(Identity::SCOPE)
+    type_id: DebuggerIdentity::DebugId = debug_id(Identity::TYPE)
+    declared_first: DebuggerAgentFrames::ShadowStatus = DebuggerAgentFrames::agent_shadow_binding_declare(first_stack, first_invocation, first_binding, scope_id, type_id, DebuggerAgentFrames::AgentValueKind.Unsigned, DebuggerAgentFrames::AgentValueState.Available, DebuggerAgentFrames::AgentStorageKind.Constant, Location::ZERO, Value::BYTE_COUNT.u64(), first_bytes[Value::FIRST_BYTE], Value::BYTE_COUNT)
+    return ResultCode::DECLARE_FIRST if declared_first != DebuggerAgentFrames::ShadowStatus.Ready
+    declared_second: DebuggerAgentFrames::ShadowStatus = DebuggerAgentFrames::agent_shadow_binding_declare(second_stack, second_invocation, second_binding, scope_id, type_id, DebuggerAgentFrames::AgentValueKind.Unsigned, DebuggerAgentFrames::AgentValueState.Available, DebuggerAgentFrames::AgentStorageKind.Constant, Location::ZERO, Value::BYTE_COUNT.u64(), second_bytes[Value::FIRST_BYTE], Value::BYTE_COUNT)
+    return ResultCode::DECLARE_SECOND if declared_second != DebuggerAgentFrames::ShadowStatus.Ready
+
+    return ResultCode::REQUEST_STOP if DebuggerAgentThreads::agent_threads_request_stop(registry, Epoch::GENERATION, Deadline::NOW, Deadline::VALID) != DebuggerAgentThreads::ThreadStatus.Applied
+    return ResultCode::BEGIN_FIRST if DebuggerAgentFrames::agent_shadow_stack_begin_stop(first_stack, Epoch::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready
+    return ResultCode::BEGIN_SECOND if DebuggerAgentFrames::agent_shadow_stack_begin_stop(second_stack, Epoch::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready
+
+    premature: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding(first_stack, registry, first_invocation, first_binding, Epoch::GENERATION)
+    return ResultCode::PREMATURE_READ if premature.status != DebuggerAgentFrames::ShadowStatus.ThreadNotParked
+    return ResultCode::PARK_FIRST if DebuggerAgentThreads::agent_thread_safe_point(registry, Identity::THREAD_FIRST, Deadline::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+    partial: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding(first_stack, registry, first_invocation, first_binding, Epoch::GENERATION)
+    return ResultCode::PARTIAL_RENDEZVOUS if partial.status != DebuggerAgentFrames::ShadowStatus.RendezvousIncomplete
+    return ResultCode::PARK_SECOND if DebuggerAgentThreads::agent_thread_safe_point(registry, Identity::THREAD_SECOND, Deadline::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+    return ResultCode::READY if not DebuggerAgentThreads::agent_threads_stop_is_ready(registry, Epoch::GENERATION)
+
+    first_read: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding(first_stack, registry, first_invocation, first_binding, Epoch::GENERATION)
+    second_read: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding(second_stack, registry, second_invocation, second_binding, Epoch::GENERATION)
+    return ResultCode::READ_FIRST if first_read.status != DebuggerAgentFrames::ShadowStatus.Ready
+    return ResultCode::READ_SECOND if second_read.status != DebuggerAgentFrames::ShadowStatus.Ready
+    return ResultCode::VALUE_BYTES if first_read.descriptor.bytes[Value::FIRST_BYTE] != Value::FIRST or second_read.descriptor.bytes[Value::FIRST_BYTE] != Value::SECOND
+    mismatch: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding(first_stack, registry, first_invocation, first_binding, Epoch::GENERATION + Epoch::GENERATION)
+    return ResultCode::GENERATION_MISMATCH if mismatch.status != DebuggerAgentFrames::ShadowStatus.GenerationMismatch
+
+    return ResultCode::RESUME_THREADS if DebuggerAgentThreads::agent_threads_resume(registry, Epoch::GENERATION) != DebuggerAgentThreads::ThreadStatus.Applied
+    return ResultCode::RESUME_STACKS if DebuggerAgentFrames::agent_shadow_stack_resume(first_stack, Epoch::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready or DebuggerAgentFrames::agent_shadow_stack_resume(second_stack, Epoch::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready
+    resumed_read: DebuggerAgentFrames::BindingReadResult = DebuggerAgentInspection::agent_inspection_read_binding(first_stack, registry, first_invocation, first_binding, Epoch::GENERATION)
+    return ResultCode::READ_AFTER_RESUME if resumed_read.status != DebuggerAgentFrames::ShadowStatus.SnapshotRequired
+    return ResultCode::SUCCESS

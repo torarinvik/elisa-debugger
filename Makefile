@@ -159,6 +159,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: agent-thread-rendezvous-check
 .PHONY: agent-async-session-transport-check
 .PHONY: agent-shadow-frames-check
+.PHONY: agent-inspection-rendezvous-check
 
 build: $(BUILD)/elisa-debugger
 
@@ -208,6 +209,7 @@ module-check: agent-control-stream-check
 module-check: agent-session-transport-check
 module-check: agent-async-session-transport-check
 module-check: agent-shadow-frames-check
+module-check: agent-inspection-rendezvous-check
 module-check: agent-thread-rendezvous-check
 ifneq ($(filter Darwin Linux,$(shell uname -s)),)
 module-check: native-local-ipc-check
@@ -990,6 +992,13 @@ $(BUILD)/elisa-debugger-agent-shadow-frames-check: tests/agent_shadow_frames_che
 
 agent-shadow-frames-check: $(BUILD)/elisa-debugger-agent-shadow-frames-check
 	"$(BUILD)/elisa-debugger-agent-shadow-frames-check"
+
+$(BUILD)/elisa-debugger-agent-inspection-rendezvous-check: tests/agent_inspection_rendezvous_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+agent-inspection-rendezvous-check: $(BUILD)/elisa-debugger-agent-inspection-rendezvous-check
+	"$(BUILD)/elisa-debugger-agent-inspection-rendezvous-check"
 
 $(BUILD)/elisa-debugger-native-breakpoint-lifecycle-check: tests/native_breakpoint_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

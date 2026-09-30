@@ -1,0 +1,32 @@
+# Joins per-thread shadow frames to the process-wide safe-point rendezvous.
+# Callers serialize these reads with the target agent's rendezvous lock.
+
+include "./frames.elisa"
+include "./threads.elisa"
+
+module DebuggerAgentInspection:
+    private:
+        const module InspectionSentinel:
+            NO_GENERATION: u64 = 0
+            NO_THREAD_ID: u64 = 0
+
+    public:
+        # Return a local only after its owning thread and every registered
+        # target thread are parked for the same active generation.
+        def agent_inspection_read_binding(shadow_stack: DebuggerAgentFrames::AgentShadowStack&, registry: DebuggerAgentThreads::AgentThreadRegistry&, invocation: DebuggerIdentity::DebugId, binding: DebuggerIdentity::DebugId, generation: u64) -> DebuggerAgentFrames::BindingReadResult:
+            result: mutable DebuggerAgentFrames::BindingReadResult = zeroed
+            result.status <- DebuggerAgentFrames::ShadowStatus.InvalidStack
+            return result if not DebuggerAgentFrames::agent_shadow_stack_is_exact(shadow_stack)
+            result.status <- DebuggerAgentFrames::ShadowStatus.InvalidRegistry
+            return result if not DebuggerAgentThreads::agent_thread_registry_is_exact(registry)
+            result.status <- DebuggerAgentFrames::ShadowStatus.InvalidIdentifier
+            return result if shadow_stack.thread.value == InspectionSentinel::NO_THREAD_ID
+            result.status <- DebuggerAgentFrames::ShadowStatus.SnapshotRequired
+            return result if generation == InspectionSentinel::NO_GENERATION or not registry.stop_pending
+            result.status <- DebuggerAgentFrames::ShadowStatus.GenerationMismatch
+            return result if generation != registry.stop_generation or generation != shadow_stack.active_stop_generation
+            result.status <- DebuggerAgentFrames::ShadowStatus.ThreadNotParked
+            return result if not DebuggerAgentThreads::agent_thread_is_parked_for_generation(registry, shadow_stack.thread.value, generation)
+            result.status <- DebuggerAgentFrames::ShadowStatus.RendezvousIncomplete
+            return result if not DebuggerAgentThreads::agent_threads_stop_is_ready(registry, generation)
+            return DebuggerAgentFrames::agent_shadow_binding_read(shadow_stack, invocation, binding, generation)

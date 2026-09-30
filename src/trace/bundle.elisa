@@ -117,13 +117,14 @@ module DebuggerTraceBundle:
             bundle.manifest <- updated
             return DebuggerErrors::no_error()
 
-        def bundle_seal(bundle: mutable TraceBundle&, partial: bool) -> DebuggerErrors::DebuggerError:
+        def bundle_seal(bundle: mutable TraceBundle&, partial: bool) -> DebuggerErrors::DebuggerError can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             return bundle.last_error if bundle.state == BundleState.Corrupt
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::TRACE_BUNDLE_DETAIL_STATE) if bundle.state != BundleState.Open
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::TRACE_BUNDLE_DETAIL_RANGE) if bundle.chunk_count == 0
             if not partial:
                 bundle.state <- BundleState.Exact
-                if not bundle_is_replayable(bundle):
+                replayable: bool = bundle_is_replayable(bundle) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+                if not replayable:
                     bundle.state <- BundleState.Partial
                     partial_manifest: mutable DebuggerTraceManifest::BundleManifest = bundle.manifest
                     partial_manifest.status <- DebuggerTraceManifest::ManifestStatus.Partial
@@ -153,7 +154,7 @@ module DebuggerTraceBundle:
         def bundle_manifest_bytes(bundle: TraceBundle&) -> DebuggerTraceBinary::ByteWriter:
             return DebuggerTraceManifest::manifest_encode(bundle.manifest)
 
-        def bundle_is_replayable(bundle: TraceBundle&) -> bool:
+        def bundle_is_replayable(bundle: TraceBundle&) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             return false if bundle.chunk_count == 0 or bundle.chunk_count > Bundle::TRACE_BUNDLE_CHUNK_CAPACITY or bundle.state != BundleState.Exact or not DebuggerTraceManifest::manifest_is_replayable(bundle.manifest) or not DebuggerErrors::error_is_ok(bundle.last_error) or not bundle_manifest_matches_chunks(bundle)
             saw_events: mutable bool = false
             for index in 0..<bundle.chunk_count:
@@ -169,13 +170,16 @@ module DebuggerTraceBundle:
             manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_bytes)
             for byte_index in 0..<manifest_bytes.length:
                 manifest_chunk.payload[byte_index] <- manifest_bytes.bytes[byte_index]
-            reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
-            return false if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk))
+            reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            replayable: mutable bool = DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk))
             for index in 0..<bundle.chunk_count:
+                break if not replayable
                 checked_chunk: mutable DebuggerTraceStorage::StoredChunk = bundle.chunks[index]
                 checked_chunk.header.sequence <- index.u64() + Bundle::TRACE_BUNDLE_EVENT_SEQUENCE_OFFSET
-                return false if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, checked_chunk))
-            return DebuggerTraceReader::reader_is_exact(reader)
+                replayable <- DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, checked_chunk))
+            replayable <- DebuggerTraceReader::reader_is_exact(reader) if replayable
+            DebuggerTraceReader::reader_destroy(reader) can Memory.Release, Unsafe.PointerCast
+            return replayable
 
         def bundle_chunk_count(bundle: TraceBundle&) -> usize:
             return bundle.chunk_count

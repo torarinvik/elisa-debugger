@@ -8,6 +8,9 @@ include "../core/events.elisa"
 include "../core/identity.elisa"
 include "../core/errors.elisa"
 
+extern malloc(size: usize) -> mutable heap void&? can[Memory.Allocate]
+extern free(storage: heap void&) can[Memory.Release]
+
 module DebuggerTraceReader:
     private:
         const module Detail:
@@ -54,8 +57,6 @@ module DebuggerTraceReader:
         const module Identity:
             READER_IDENTITY_ROOT_BRANCH: u64 = 0
 
-        # A bundle stores up to eight non-manifest chunks plus one manifest.
-
     public:
         enum ReaderState:
             Empty
@@ -64,9 +65,11 @@ module DebuggerTraceReader:
             Corrupt
 
         struct TraceReader:
+            # Checkpoints are separately allocated so ordinary construction
+            # does not clear the maximum checkpoint payload.
             manifest: mutable DebuggerTraceManifest::BundleManifest
             events: mutable DebuggerEvents::EventEnvelope[Capacity::READER_CAPACITY_EVENTS]
-            full_checkpoints: mutable DebuggerFullCheckpoint::ManagedCheckpoint[Capacity::CHECKPOINTS]
+            full_checkpoints: mutable heap DebuggerFullCheckpoint::ManagedCheckpoint&
             event_count: mutable usize
             full_checkpoint_count: mutable usize
             next_sequence: mutable u64
@@ -81,12 +84,20 @@ module DebuggerTraceReader:
             state: mutable ReaderState
             last_error: mutable DebuggerErrors::DebuggerError
 
-        def reader_new() -> TraceReader:
-            reader: mutable TraceReader = zeroed
+        def reader_from_raw(storage: mutable heap void&) -> mutable heap TraceReader& can Unsafe.PointerCast:
+            trusted Unsafe.PointerCast:
+                return storage.cast[mutable heap TraceReader&]
+
+        def reader_initialize(reader: mutable heap TraceReader&) -> void:
+            # Events and checkpoints are count-gated. Keep only the small
+            # manifest sentinel initialized because ingestion snapshots it
+            # before validating each chunk.
+            reader.manifest <- zeroed
+            reader.event_count <- 0
+            reader.full_checkpoint_count <- 0
             reader.next_sequence <- Sequence::FIRST
             reader.next_event <- 0
             reader.event_exhausted <- false
-            reader.full_checkpoint_count <- 0
             reader.recording <- DebuggerIdentity::debug_id(0)
             reader.recording_seen <- false
             reader.manifest_seen <- false
@@ -95,7 +106,59 @@ module DebuggerTraceReader:
             reader.chunk_count <- 0
             reader.state <- ReaderState.Empty
             reader.last_error <- DebuggerErrors::no_error()
+
+        def reader_counts_are_within_capacity(reader: TraceReader&) -> bool:
+            return reader.event_count <= Capacity::READER_CAPACITY_EVENTS and reader.full_checkpoint_count <= Capacity::CHECKPOINTS and reader.event_chunk_count <= Capacity::READER_CAPACITY_EVENT_CHUNKS and reader.checkpoint_chunk_count <= Capacity::CHECKPOINTS and reader.chunk_count <= Capacity::READER_CAPACITY_CHUNKS
+
+        def reader_new() -> mutable heap TraceReader& can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            storage: mutable heap void&? = malloc(size_of(TraceReader))
+            if storage == null:
+                panic("trace reader allocation failed")
+            reader: mutable heap TraceReader& = reader_from_raw(storage)
+            checkpoint_storage: mutable heap void&? = malloc(size_of(DebuggerFullCheckpoint::ManagedCheckpoint) * Capacity::CHECKPOINTS)
+            if checkpoint_storage == null:
+                trusted Unsafe.PointerCast:
+                    free(storage) can Memory.Release
+                panic("trace checkpoint storage allocation failed")
+            trusted Unsafe.PointerCast:
+                reader.full_checkpoints <- checkpoint_storage.cast[mutable heap DebuggerFullCheckpoint::ManagedCheckpoint&]
+            reader_initialize(reader)
             return reader
+
+        # Each reader owns its object and checkpoint allocation. Copies must
+        # use this operation so checkpoint storage never aliases unexpectedly.
+        def reader_clone(reader: TraceReader&) -> mutable heap TraceReader& can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            clone: mutable heap TraceReader& = reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            if not reader_counts_are_within_capacity(reader):
+                clone.state <- ReaderState.Corrupt
+                clone.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY)
+                return clone
+            clone.manifest <- reader.manifest
+            clone.event_count <- reader.event_count
+            clone.full_checkpoint_count <- reader.full_checkpoint_count
+            clone.next_sequence <- reader.next_sequence
+            clone.next_event <- reader.next_event
+            clone.event_exhausted <- reader.event_exhausted
+            clone.recording <- reader.recording
+            clone.recording_seen <- reader.recording_seen
+            clone.manifest_seen <- reader.manifest_seen
+            clone.event_chunk_count <- reader.event_chunk_count
+            clone.checkpoint_chunk_count <- reader.checkpoint_chunk_count
+            clone.chunk_count <- reader.chunk_count
+            clone.state <- reader.state
+            clone.last_error <- reader.last_error
+            for index in 0..<reader.event_count:
+                clone.events[index] <- reader.events[index]
+            for index in 0..<reader.full_checkpoint_count:
+                clone.full_checkpoints[index] <- reader.full_checkpoints[index]
+            return clone
+
+        def reader_destroy(reader: mutable heap TraceReader&) -> void can[Memory.Release, Unsafe.PointerCast]:
+            # Call exactly once after the owning handle is no longer in use.
+            reader.state <- ReaderState.Corrupt
+            trusted Unsafe.PointerCast:
+                free(reader.full_checkpoints.cast[heap void&]) can Memory.Release
+                free(reader.cast[heap void&]) can Memory.Release
 
         def event_kind_from_code(code: u16) -> DebuggerEvents::EventKind:
             return DebuggerEvents::EventKind.ExecutionBoundary if code == 0
@@ -244,6 +307,11 @@ module DebuggerTraceReader:
 
         def reader_ingest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk&) -> DebuggerErrors::DebuggerError:
             return reader.last_error if reader.state == ReaderState.Corrupt
+            if not reader_counts_are_within_capacity(reader):
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY)
+                reader.state <- ReaderState.Corrupt
+                reader.last_error <- failure
+                return failure
             if chunk.header.kind.u16() > ChunkKind::READER_CHUNKKIND_MAX_CHUNK_KIND:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::READER_DETAIL_ENUM)
                 reader.state <- ReaderState.Corrupt
@@ -320,7 +388,7 @@ module DebuggerTraceReader:
             return reader_ingest(reader, decoded.chunk)
 
         def reader_is_exact(reader: TraceReader&) -> bool:
-            return false if reader.event_count > Capacity::READER_CAPACITY_EVENTS or reader.chunk_count > Capacity::READER_CAPACITY_CHUNKS or reader.state != ReaderState.Ready or not DebuggerErrors::error_is_ok(reader.last_error) or not DebuggerTraceManifest::manifest_is_replayable(reader.manifest)
+            return false if not reader_counts_are_within_capacity(reader) or reader.state != ReaderState.Ready or not DebuggerErrors::error_is_ok(reader.last_error) or not DebuggerTraceManifest::manifest_is_replayable(reader.manifest)
             return false if reader.event_count == 0 or not reader.recording_seen
             return false if reader.event_count > 0 and reader.manifest.first_event > Sequence::READER_SEQUENCE_MAX_EVENT - (reader.event_count - Sequence::EVENT_INDEX_OFFSET).u64()
             expected_last: mutable u64 = reader.manifest.first_event
@@ -346,7 +414,7 @@ module DebuggerTraceReader:
             return reader.full_checkpoint_count
 
         def reader_full_checkpoint_at(reader: TraceReader&, index: usize) -> FullCheckpointLookup:
-            return FullCheckpointLookup{found: false, checkpoint: zeroed} if index >= reader.full_checkpoint_count
+            return FullCheckpointLookup{found: false, checkpoint: zeroed} if not reader_counts_are_within_capacity(reader) or index >= reader.full_checkpoint_count
             return FullCheckpointLookup{found: true, checkpoint: reader.full_checkpoints[index]}
 
         # Replay starts from the latest validated full checkpoint that does not
@@ -356,7 +424,7 @@ module DebuggerTraceReader:
         # reconstruction.
         def reader_nearest_checkpoint_at_or_before(reader: TraceReader&, event: u64) -> FullCheckpointLookup:
             result: mutable FullCheckpointLookup = zeroed
-            return result if reader.full_checkpoint_count > Capacity::CHECKPOINTS or reader.event_count > Capacity::READER_CAPACITY_EVENTS or reader.chunk_count > Capacity::READER_CAPACITY_CHUNKS
+            return result if not reader_counts_are_within_capacity(reader)
             return result if not reader_is_exact(reader)
             final_boundary: mutable u64 = reader.manifest.last_event
             final_boundary <- final_boundary + Sequence::EVENT_INDEX_OFFSET.u64() if final_boundary != Sequence::READER_SEQUENCE_MAX_EVENT

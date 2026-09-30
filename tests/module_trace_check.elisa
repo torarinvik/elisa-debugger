@@ -69,6 +69,24 @@ const module Test:
     OPAQUE_VERIFIED_EVENT_RESULT: i64 = 99
     INVALID_STORAGE_SCHEMA_RESULT: i64 = 100
 
+def test_encode_event(event: DebuggerEvents::EventEnvelope) -> DebuggerTraceBinary::ByteWriter:
+    writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+    DebuggerTraceBinary::writer_initialize(writer)
+    DebuggerTraceBinary::writer_put_u32(writer, event.schema)
+    DebuggerTraceBinary::writer_put_u64(writer, event.ordinal)
+    DebuggerTraceBinary::writer_put_u64(writer, event.task.value)
+    DebuggerTraceBinary::writer_put_u64(writer, event.position.recording.value)
+    DebuggerTraceBinary::writer_put_u64(writer, event.position.branch.value)
+    DebuggerTraceBinary::writer_put_u64(writer, event.position.event)
+    DebuggerTraceBinary::writer_put_u64(writer, event.position.task.value)
+    DebuggerTraceBinary::writer_put_u64(writer, event.position.invocation.value)
+    DebuggerTraceBinary::writer_put_u64(writer, event.position.statement.value)
+    DebuggerTraceBinary::writer_put_u32(writer, event.position.microstep)
+    DebuggerTraceBinary::writer_put_u16(writer, event.kind.u16())
+    DebuggerTraceBinary::writer_put_u16(writer, event.quality.u16())
+    DebuggerTraceBinary::writer_put_u64(writer, event.payload_hash)
+    return writer
+
 
 def check_checkpoint_validation() -> i64:
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
@@ -104,7 +122,7 @@ def check_checkpoint_validation() -> i64:
     return 3 if short_snapshot.id.value != Test::EMPTY_CHECKPOINT_ID
     return 0
 
-def check_export_rejects_partial() -> i64:
+def check_export_rejects_partial() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(Test::BUILD_RUNTIME), source: DebuggerIdentity::debug_id(Test::BUILD_SOURCE), target: DebuggerIdentity::debug_id(Test::BUILD_TARGET), metadata_version: 1}
     bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
     _ = DebuggerTraceBundle::bundle_seal(bundle, true)
@@ -122,11 +140,11 @@ def check_empty_event_chunk() -> i64:
     return 1 if empty_events_scan.status != DebuggerTraceStorage::StorageStatus.Invalid
     return 0
 
-def check_empty_manifest_chunk() -> i64:
+def check_empty_manifest_chunk() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     empty_manifest: mutable DebuggerTraceStorage::StoredChunk = zeroed
     empty_manifest.header <- DebuggerTrace::ChunkHeader{schema: Test::SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: 0, first_event: 0, last_event: 0, payload_length: 0, checksum: 1469598103934665603}
     empty_manifest.checksum <- 1469598103934665603
-    reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     failure: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(reader, empty_manifest)
     return Test::EMPTY_MANIFEST_ENCODING_RESULT if DebuggerErrors::error_is_ok(failure)
     return 0
@@ -141,7 +159,7 @@ def check_invalid_manifest() -> i64:
     return 2 if DebuggerTraceManifest::manifest_is_replayable(manifest)
     return 0
 
-def check_corrupt_bundle() -> i64:
+def check_corrupt_bundle() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(Test::BUILD_RUNTIME), source: DebuggerIdentity::debug_id(Test::BUILD_SOURCE), target: DebuggerIdentity::debug_id(Test::BUILD_TARGET), metadata_version: 1}
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
     chunk.header <- DebuggerTrace::ChunkHeader{schema: Test::SCHEMA, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: Test::CHUNK_CHECKSUM}
@@ -156,7 +174,7 @@ def check_corrupt_bundle() -> i64:
     return 1 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.verified_chunks != 0
     return 0
 
-def check_corrupt_bundle_state() -> i64:
+def check_corrupt_bundle_state() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(Test::BUILD_RUNTIME), source: DebuggerIdentity::debug_id(Test::BUILD_SOURCE), target: DebuggerIdentity::debug_id(Test::BUILD_TARGET), metadata_version: 1}
     bundle: mutable DebuggerTraceBundle::TraceBundle = DebuggerTraceBundle::bundle_new(build)
     bundle.state <- DebuggerTraceBundle::BundleState.Corrupt
@@ -164,17 +182,17 @@ def check_corrupt_bundle_state() -> i64:
     return 1 if report.state != DebuggerTraceVerify::VerificationState.Corrupt or report.replayable
     return 0
 
-def check_pre_manifest() -> i64:
+def check_pre_manifest() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
     chunk.header <- DebuggerTrace::ChunkHeader{schema: Test::SCHEMA, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 0, first_event: 0, last_event: 0, payload_length: 1, checksum: Test::CHUNK_CHECKSUM}
     chunk.payload[0] <- Test::PAYLOAD_BYTE
     chunk.payload_length <- 1
     chunk.checksum <- Test::CHUNK_CHECKSUM
-    reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 1 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
     return 0
 
-def check_trailing_manifest() -> i64:
+def check_trailing_manifest() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(Test::BUILD_RUNTIME), source: DebuggerIdentity::debug_id(Test::BUILD_SOURCE), target: DebuggerIdentity::debug_id(Test::BUILD_TARGET), metadata_version: 1}
     manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
     manifest_payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
@@ -190,7 +208,7 @@ def check_trailing_manifest() -> i64:
         DebuggerTraceBinary::writer_put_byte(payload, chunk.payload[index])
     chunk.checksum <- DebuggerTraceBinary::writer_checksum(payload)
     chunk.header.checksum <- chunk.checksum
-    reader: DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 1 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, chunk))
     return 0
 
@@ -203,7 +221,7 @@ def check_schema_recorder() -> i64:
     return 1 if DebuggerErrors::error_is_ok(failure) or failure.detail != 4
     return 0
 
-def check_opaque_validation() -> i64:
+def check_opaque_validation() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::BUILD_COMPILER), runtime: DebuggerIdentity::debug_id(Test::BUILD_RUNTIME), source: DebuggerIdentity::debug_id(Test::BUILD_SOURCE), target: DebuggerIdentity::debug_id(Test::BUILD_TARGET), metadata_version: 1}
     manifest: DebuggerTraceManifest::BundleManifest = DebuggerTraceManifest::manifest_new(build, DebuggerTraceManifest::ManifestStatus.Exact)
     manifest_payload: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(manifest)
@@ -213,7 +231,7 @@ def check_opaque_validation() -> i64:
     manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_payload)
     for index in 0..<manifest_payload.length:
         manifest_chunk.payload[index] <- manifest_payload.bytes[index]
-    reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 1 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk))
     opaque: mutable DebuggerTraceStorage::StoredChunk = zeroed
     opaque.header <- DebuggerTrace::ChunkHeader{schema: Test::SCHEMA + 1, kind: DebuggerTrace::ChunkKind.Metadata, sequence: 1, first_event: 0, last_event: 0, payload_length: 1, checksum: Test::CHUNK_CHECKSUM}
@@ -223,7 +241,7 @@ def check_opaque_validation() -> i64:
     return 2 if DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, opaque))
     return 0
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     return 78 if check_checkpoint_validation() != 0
     return 79 if check_export_rejects_partial() != 0
     corrupt_writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
@@ -247,7 +265,7 @@ def main() -> i64:
     return 5 if not DebuggerTraceBinary::reader_is_valid(reader)
     storage_position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::RECORDING_ID))
     storage_event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::EVENT_ORDINAL, storage_position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
-    storage_event_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceRecorder::encode_event(storage_event)
+    storage_event_bytes: DebuggerTraceBinary::ByteWriter = test_encode_event(storage_event)
     return 54 if not DebuggerTraceBinary::writer_is_valid(storage_event_bytes) or storage_event_bytes.length != Test::EVENT_ENCODED_BYTES
     chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
     chunk.header <- DebuggerTrace::ChunkHeader{schema: Test::SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: 0, first_event: Test::EVENT_ORDINAL, last_event: Test::EVENT_ORDINAL, payload_length: storage_event_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(storage_event_bytes)}
@@ -404,10 +422,10 @@ def main() -> i64:
     manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_payload)
     for manifest_index in 0..<manifest_payload.length:
         manifest_chunk.payload[manifest_index] <- manifest_payload.bytes[manifest_index]
-    trace_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    trace_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 41 if check_pre_manifest() != 0
     return 20 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(trace_reader, manifest_chunk))
-    invalid_manifest_range_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    invalid_manifest_range_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     invalid_manifest_range: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
     invalid_manifest_range.header.first_event <- 1
     invalid_manifest_range_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(invalid_manifest_range_reader, invalid_manifest_range)
@@ -417,22 +435,22 @@ def main() -> i64:
     return 21 if not DebuggerErrors::error_is_ok(event_read_error)
     return 22 if DebuggerTraceReader::reader_event_count(trace_reader) != 1
     return 23 if not DebuggerTraceReader::reader_is_exact(trace_reader)
-    tampered_reader: mutable DebuggerTraceReader::TraceReader = trace_reader
+    tampered_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_clone(trace_reader) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     tampered_reader.events[0].position.recording <- DebuggerIdentity::debug_id(Test::RECORDING_ID + 1)
     return Test::TAMPERED_READER_POSITION_RESULT if DebuggerTraceReader::reader_is_exact(tampered_reader)
-    tampered_reader_count: mutable DebuggerTraceReader::TraceReader = trace_reader
+    tampered_reader_count: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_clone(trace_reader) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     tampered_reader_count.manifest.checkpoint_count <- 1
     return Test::TAMPERED_READER_CHECKPOINT_COUNT_RESULT if DebuggerTraceReader::reader_is_exact(tampered_reader_count)
-    malformed_reader: mutable DebuggerTraceReader::TraceReader = trace_reader
+    malformed_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_clone(trace_reader) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     malformed_reader.event_count <- Test::INVALID_READER_EVENT_COUNT
     return 47 if DebuggerTraceReader::reader_is_exact(malformed_reader)
-    bad_range_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    bad_range_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 33 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(bad_range_reader, manifest_chunk))
     bad_range_chunk: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
     bad_range_chunk.header.first_event <- 1
     bad_range_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(bad_range_reader, bad_range_chunk)
     return 34 if DebuggerErrors::error_is_ok(bad_range_error)
-    duplicate_manifest_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    duplicate_manifest_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return 37 if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(duplicate_manifest_reader, manifest_chunk))
     duplicate_manifest_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(duplicate_manifest_reader, manifest_chunk)
     return 38 if DebuggerErrors::error_is_ok(duplicate_manifest_error)
@@ -520,7 +538,7 @@ def main() -> i64:
     return Test::INVALID_STORAGE_CHECKPOINT_RESULT if bad_checkpoint_report.state != DebuggerTraceVerify::VerificationState.Corrupt or bad_checkpoint_report.replayable
     corrupt_manifest: mutable DebuggerTraceStorage::StoredChunk = manifest_chunk
     corrupt_manifest.checksum <- manifest_chunk.checksum + 1
-    fresh_reader: mutable DebuggerTraceReader::TraceReader = DebuggerTraceReader::reader_new()
+    fresh_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     corrupt_manifest_error: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(fresh_reader, corrupt_manifest)
     return 30 if DebuggerErrors::error_is_ok(corrupt_manifest_error) or fresh_reader.next_sequence != 0
     sealed_append: DebuggerErrors::DebuggerError = DebuggerTraceBundle::bundle_append(bundle, chunk)

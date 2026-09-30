@@ -88,9 +88,7 @@ module DebuggerTraceRecorder:
             return
 
     private:
-        def encode_event(event: DebuggerEvents::EventEnvelope) -> DebuggerTraceBinary::ByteWriter:
-            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
-            DebuggerTraceBinary::writer_initialize(writer)
+        def encode_event(event: DebuggerEvents::EventEnvelope, writer: mutable DebuggerTraceBinary::ByteWriter&) -> void:
             DebuggerTraceBinary::writer_put_u32(writer, event.schema)
             DebuggerTraceBinary::writer_put_u64(writer, event.ordinal)
             DebuggerTraceBinary::writer_put_u64(writer, event.task.value)
@@ -104,7 +102,7 @@ module DebuggerTraceRecorder:
             DebuggerTraceBinary::writer_put_u16(writer, event.kind.u16())
             DebuggerTraceBinary::writer_put_u16(writer, event.quality.u16())
             DebuggerTraceBinary::writer_put_u64(writer, event.payload_hash)
-            return writer
+            return
 
         def recorder_event_is_valid(recorder: TraceRecorder&, event: DebuggerEvents::EventEnvelope) -> bool:
             return event.schema == Version::EVENT_SCHEMA and recorder.recording.value != Identity::RECORDER_IDENTITY_NO_RECORDING and event.position.recording.value == recorder.recording.value and event.position.branch.value == Identity::RECORDER_IDENTITY_ROOT_BRANCH and event.task.value == event.position.task.value and event.position.event == event.ordinal and DebuggerEvents::event_kind_is_valid(event.kind) and DebuggerEvents::event_quality_is_valid(event.quality) and event.quality != DebuggerEvents::EventQuality.Corrupt
@@ -119,13 +117,14 @@ module DebuggerTraceRecorder:
                 event: DebuggerEvents::EventEnvelope = recorder.pending[index]
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::NON_MONOTONIC) if pending_first > Sequence::MAX_ORDINAL - index.u64() or event.ordinal != pending_first + index.u64()
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::RECORDING) if not recorder_event_is_valid(recorder, event)
-            encoded: mutable DebuggerTraceBinary::ByteWriter = zeroed
+            # Writer length bounds every read, so inactive buffer bytes need no
+            # clear when a recorder flushes a new event chunk.
+            encoded: mutable DebuggerTraceBinary::ByteWriter
             DebuggerTraceBinary::writer_initialize(encoded)
             for index in 0..<recorder.pending_count:
-                event_bytes: DebuggerTraceBinary::ByteWriter = encode_event(recorder.pending[index])
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::RECORDER_DETAIL_ENCODING) if not DebuggerTraceBinary::writer_is_valid(event_bytes) or encoded.length + event_bytes.length > Capacity::RECORDER_CAPACITY_MAX_PAYLOAD_BYTES
-                for byte_index in 0..<event_bytes.length:
-                    DebuggerTraceBinary::writer_put_byte(encoded, event_bytes.bytes[byte_index])
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::RECORDER_DETAIL_ENCODING) if encoded.length > Capacity::RECORDER_CAPACITY_MAX_PAYLOAD_BYTES - EventEncoding::RECORDER_EVENTENCODING_ENCODED_BYTES
+                encode_event(recorder.pending[index], encoded)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::RECORDER_DETAIL_ENCODING) if not DebuggerTraceBinary::writer_is_valid(encoded)
             chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
             chunk.header <- DebuggerTrace::ChunkHeader{schema: Version::EVENT_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: recorder.chunk_count.u64() + Sequence::EVENT_OFFSET, first_event: recorder.pending[0].ordinal, last_event: recorder.pending[recorder.pending_count - 1].ordinal, payload_length: encoded.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(encoded)}
             chunk.payload_length <- encoded.length

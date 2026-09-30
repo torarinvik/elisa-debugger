@@ -29,6 +29,9 @@ module DebuggerCheckpointCodec:
             BYTE_2: usize = 2
             BYTE_3: usize = 3
 
+        const module Index:
+            FIRST_INDEX: usize = 0
+
         const module CheckpointCodecLayout:
             REPLAY_CHECKPOINT_CODEC_LAYOUT_SCHEMA: u32 = 3
             REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY: usize = DebuggerCheckpointWireLayout::CHECKPOINT_LOCAL_CAPACITY
@@ -58,33 +61,32 @@ module DebuggerCheckpointCodec:
         # The durable trace container uses this canonical size to reserve a
         # complete machine snapshot in one checkpoint chunk.
 
-        def checkpoint_encode(snapshot: DebuggerCheckpoint::MachineSnapshot&) -> DebuggerTraceBinary::ByteWriter:
-            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+        def checkpoint_encode_into(snapshot: DebuggerCheckpoint::MachineSnapshot&, writer: mutable DebuggerTraceBinary::ByteWriter&) -> void:
             DebuggerTraceBinary::writer_initialize(writer)
             if snapshot.id.value == CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_INVALID_ID or not DebuggerCheckpoint::snapshot_shape_is_valid(snapshot) or snapshot.state_hash != DebuggerCheckpoint::snapshot_state_hash(snapshot):
                 writer.failed <- true
-                return writer
+                return
             DebuggerTraceBinary::writer_put_u32(writer, CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_SCHEMA)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.id.value)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.event)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.state_hash)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.program_counter)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.accumulator.u64())
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
                 DebuggerTraceBinary::writer_put_u64(writer, snapshot.locals[index].u64())
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
                 DebuggerTraceBinary::writer_put_u64(writer, snapshot.globals[index].u64())
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
                 initialized: mutable u8 = Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_FALSE
                 initialized <- Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE if snapshot.globals_initialized[index]
                 DebuggerTraceBinary::writer_put_byte(writer, initialized)
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_MEMORY_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_MEMORY_CAPACITY:
                 DebuggerTraceBinary::writer_put_u64(writer, snapshot.memory[index].u64())
                 initialized: mutable u8 = Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_FALSE
                 initialized <- Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE if snapshot.memory_initialized[index]
                 DebuggerTraceBinary::writer_put_byte(writer, initialized)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.heap_next.u64())
-            for index in 0..<CheckpointCodecLayout::STACK_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::STACK_CAPACITY:
                 DebuggerTraceBinary::writer_put_u64(writer, snapshot.return_stack[index])
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.return_stack_pointer.u64())
             halted: mutable u8 = Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_FALSE
@@ -95,16 +97,21 @@ module DebuggerCheckpointCodec:
             DebuggerTraceBinary::writer_put_byte(writer, faulted)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.steps)
             DebuggerTraceBinary::writer_put_u64(writer, snapshot.result.u64())
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
                 initialized: mutable u8 = Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_FALSE
                 initialized <- Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE if snapshot.locals_initialized[index]
                 DebuggerTraceBinary::writer_put_byte(writer, initialized)
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
                 DebuggerTraceBinary::writer_put_u64(writer, snapshot.frame_locals[index].u64())
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
                 initialized: mutable u8 = Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_FALSE
                 initialized <- Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE if snapshot.frame_locals_initialized[index]
                 DebuggerTraceBinary::writer_put_byte(writer, initialized)
+            return
+
+        def checkpoint_encode(snapshot: DebuggerCheckpoint::MachineSnapshot&) -> DebuggerTraceBinary::ByteWriter:
+            writer: mutable DebuggerTraceBinary::ByteWriter = zeroed
+            checkpoint_encode_into(snapshot, writer)
             return writer
 
         def checkpoint_decode(reader: mutable DebuggerTraceBinary::ByteReader&) -> DebuggerCheckpoint::MachineSnapshot:
@@ -116,22 +123,22 @@ module DebuggerCheckpointCodec:
             snapshot.state_hash <- DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.program_counter <- DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.accumulator <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
                 snapshot.locals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
                 snapshot.globals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_GLOBAL_CAPACITY:
                 initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 decode_valid <- false if initialized > Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
                 snapshot.globals_initialized[index] <- initialized == Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_MEMORY_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_MEMORY_CAPACITY:
                 snapshot.memory[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
                 initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 decode_valid <- false if initialized > Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
                 snapshot.memory_initialized[index] <- initialized == Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
             heap_next: u64 = DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.heap_next <- heap_next.usize()
-            for index in 0..<CheckpointCodecLayout::STACK_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::STACK_CAPACITY:
                 snapshot.return_stack[index] <- DebuggerTraceBinary::reader_take_u64(reader)
             stack_pointer: u64 = DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.return_stack_pointer <- stack_pointer.usize()
@@ -143,13 +150,13 @@ module DebuggerCheckpointCodec:
             decode_valid <- false if snapshot.faulted and not snapshot.halted
             snapshot.steps <- DebuggerTraceBinary::reader_take_u64(reader)
             snapshot.result <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_LOCAL_CAPACITY:
                 initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 decode_valid <- false if initialized > Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
                 snapshot.locals_initialized[index] <- initialized == Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
                 snapshot.frame_locals[index] <- DebuggerTraceBinary::reader_take_u64(reader).i64()
-            for index in 0..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
+            for index in Index::FIRST_INDEX..<CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_FRAME_LOCAL_CAPACITY:
                 initialized: u8 = DebuggerTraceBinary::reader_take_byte(reader)
                 decode_valid <- false if initialized > Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
                 snapshot.frame_locals_initialized[index] <- initialized == Boolean::REPLAY_CHECKPOINT_CODEC_BOOLEAN_TRUE
@@ -162,7 +169,7 @@ module DebuggerCheckpointCodec:
             return snapshot
 
         def checkpoint_bytes_are_valid(reader: mutable DebuggerTraceBinary::ByteReader&) -> bool:
-            return false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != 0 or reader.length != CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_ENCODED_BYTES
+            return false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != Index::FIRST_INDEX or reader.length != CheckpointCodecLayout::REPLAY_CHECKPOINT_CODEC_LAYOUT_ENCODED_BYTES
             return false if reader.bytes[SchemaByteOffset::BYTE_0] != CheckpointCodecLayout::SCHEMA_BYTE_0 or reader.bytes[SchemaByteOffset::BYTE_1] != CheckpointCodecLayout::SCHEMA_BYTE_1 or reader.bytes[SchemaByteOffset::BYTE_2] != CheckpointCodecLayout::SCHEMA_BYTE_2 or reader.bytes[SchemaByteOffset::BYTE_3] != CheckpointCodecLayout::SCHEMA_BYTE_3
             initial_offset: usize = reader.offset
             initial_failure_state: bool = reader.failed

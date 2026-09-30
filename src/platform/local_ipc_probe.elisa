@@ -1,0 +1,165 @@
+# Bounded Unix-domain socketpair probe for the local agent transport. The
+# exchange owns both descriptors for one operation and closes them on every
+# return path; it does not claim to be the persistent production channel.
+
+@link_name("socketpair")
+extern debugger_local_socketpair(domain: i32, socket_type: i32, protocol: i32, descriptors: mutable i32&) -> i32 can[Blocking.IO]
+@link_name("fcntl")
+extern debugger_local_fcntl(descriptor: i32, command: i32, argument: i32) -> i32 can[Unsafe.PointerCast]
+@link_name("write")
+extern debugger_local_write(descriptor: i32, bytes: void&, length: usize) -> isize can[Blocking.IO]
+@link_name("read")
+extern debugger_local_read(descriptor: i32, bytes: void&, length: usize) -> isize can[Blocking.IO]
+@link_name("close")
+extern debugger_local_close(descriptor: i32) -> i32 can[Blocking.IO]
+
+static if ELISA_TARGET_OS_MACOS:
+    @link_name("__error")
+    extern debugger_local_errno_location() -> mutable i32&
+static elif ELISA_TARGET_OS_LINUX:
+    @link_name("__errno_location")
+    extern debugger_local_errno_location() -> mutable i32&
+
+module DebuggerLocalIpcProbe:
+    private:
+        const module Socket:
+            UNIX_DOMAIN: i32 = 1
+            STREAM_TYPE: i32 = 1
+            DEFAULT_PROTOCOL: i32 = 0
+
+        const module Descriptor:
+            DESCRIPTOR_COUNT: usize = 2
+            FIRST_ENDPOINT_INDEX: usize = 0
+            SECOND_ENDPOINT_INDEX: usize = 1
+            F_GETFD_COMMAND: i32 = 1
+            F_SETFD_COMMAND: i32 = 2
+            FD_CLOEXEC_FLAG: i32 = 1
+            F_GETFD_UNUSED_ARGUMENT: i32 = 0
+
+        const module Io:
+            MAX_TRANSFER_BYTES: usize = 1024
+            EMPTY_LENGTH: usize = 0
+            FIRST_BYTE: usize = 0
+            EINTR_ERROR: i32 = 4
+            SYSCALL_FAILURE: i32 = -1
+            SUCCESS: i32 = 0
+
+        def local_last_error() -> i32 can[Unsafe.PointerCast]:
+            return debugger_local_errno_location()[Io::FIRST_BYTE]
+
+        def descriptor_set_close_on_exec(descriptor: i32, result: mutable LocalIpcResult&) -> bool can[Unsafe.PointerCast]:
+            flags: i32 = debugger_local_fcntl(descriptor, Descriptor::F_GETFD_COMMAND, Descriptor::F_GETFD_UNUSED_ARGUMENT) can Unsafe.PointerCast
+            if flags == Io::SYSCALL_FAILURE:
+                result.system_error <- local_last_error() can Unsafe.PointerCast
+                return false
+            set_status: i32 = debugger_local_fcntl(descriptor, Descriptor::F_SETFD_COMMAND, flags | Descriptor::FD_CLOEXEC_FLAG) can Unsafe.PointerCast
+            if set_status == Io::SYSCALL_FAILURE:
+                result.system_error <- local_last_error() can Unsafe.PointerCast
+                return false
+            return true
+
+        def socket_write_all(descriptor: i32, bytes: u8&, length: usize, result: mutable LocalIpcResult&) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+            offset: mutable usize = Io::EMPTY_LENGTH
+            failed: mutable bool = false
+            no_progress: mutable bool = false
+            system_error: mutable i32 = Io::SUCCESS
+            observed_error: mutable i32 = Io::SUCCESS
+            while offset < length and not failed:
+                input_pointer: void& = (&bytes[offset]).cast[void&] can Unsafe.PointerCast
+                written: isize = debugger_local_write(descriptor, input_pointer, length - offset) can Blocking.IO
+                if written == Io::SYSCALL_FAILURE.isize():
+                    observed_error <- local_last_error() can Unsafe.PointerCast
+                    system_error <- observed_error if observed_error != Io::EINTR_ERROR
+                    failed <- observed_error != Io::EINTR_ERROR
+                elif written == Io::EMPTY_LENGTH.isize():
+                    no_progress <- true
+                    failed <- true
+                else:
+                    offset <- offset + written.usize()
+            result.bytes_written <- offset
+            if failed:
+                result.system_error <- system_error
+                result.status <- LocalIpcStatus.NoProgress if no_progress
+                result.status <- LocalIpcStatus.WriteFailed if not no_progress
+                return false
+            result.system_error <- Io::SUCCESS
+            return true
+
+        def socket_read_all(descriptor: i32, bytes: mutable u8&, length: usize, result: mutable LocalIpcResult&) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+            offset: mutable usize = Io::EMPTY_LENGTH
+            failed: mutable bool = false
+            no_progress: mutable bool = false
+            system_error: mutable i32 = Io::SUCCESS
+            observed_error: mutable i32 = Io::SUCCESS
+            while offset < length and not failed:
+                output_pointer: void& = (&bytes[offset]).cast[void&] can Unsafe.PointerCast
+                received: isize = debugger_local_read(descriptor, output_pointer, length - offset) can Blocking.IO
+                if received == Io::SYSCALL_FAILURE.isize():
+                    observed_error <- local_last_error() can Unsafe.PointerCast
+                    system_error <- observed_error if observed_error != Io::EINTR_ERROR
+                    failed <- observed_error != Io::EINTR_ERROR
+                elif received == Io::EMPTY_LENGTH.isize():
+                    no_progress <- true
+                    failed <- true
+                else:
+                    offset <- offset + received.usize()
+            result.bytes_read <- offset
+            if failed:
+                result.system_error <- system_error
+                result.status <- LocalIpcStatus.NoProgress if no_progress
+                result.status <- LocalIpcStatus.ReadFailed if not no_progress
+                return false
+            result.system_error <- Io::SUCCESS
+            return true
+
+    public:
+        enum LocalIpcStatus:
+            Complete
+            InvalidArgument
+            SocketPairFailed
+            DescriptorSetupFailed
+            WriteFailed
+            ReadFailed
+            NoProgress
+            CloseFailed
+
+        struct LocalIpcResult:
+            status: mutable LocalIpcStatus
+            bytes_written: mutable usize
+            bytes_read: mutable usize
+            system_error: mutable i32
+
+        def local_socketpair_roundtrip(input: u8&, input_length: usize, output: mutable u8&, output_capacity: usize) -> LocalIpcResult can[Blocking.IO, Unsafe.PointerCast]:
+            result: mutable LocalIpcResult = zeroed
+            result.status <- LocalIpcStatus.Complete
+            if input_length > Io::MAX_TRANSFER_BYTES or output_capacity < input_length:
+                result.status <- LocalIpcStatus.InvalidArgument
+                return result
+
+            descriptors: mutable i32[Descriptor::DESCRIPTOR_COUNT] = zeroed
+            pair_status: i32 = debugger_local_socketpair(Socket::UNIX_DOMAIN, Socket::STREAM_TYPE, Socket::DEFAULT_PROTOCOL, descriptors[Descriptor::FIRST_ENDPOINT_INDEX]) can Blocking.IO
+            if pair_status == Io::SYSCALL_FAILURE:
+                result.status <- LocalIpcStatus.SocketPairFailed
+                result.system_error <- local_last_error() can Unsafe.PointerCast
+                return result
+
+            first_descriptor: i32 = descriptors[Descriptor::FIRST_ENDPOINT_INDEX]
+            second_descriptor: i32 = descriptors[Descriptor::SECOND_ENDPOINT_INDEX]
+            if not descriptor_set_close_on_exec(first_descriptor, result) or not descriptor_set_close_on_exec(second_descriptor, result):
+                result.status <- LocalIpcStatus.DescriptorSetupFailed
+            elif socket_write_all(first_descriptor, input, input_length, result):
+                _ = socket_read_all(second_descriptor, output, input_length, result)
+
+            first_close_status: i32 = debugger_local_close(first_descriptor) can Blocking.IO
+            first_close_error: mutable i32 = Io::SUCCESS
+            first_close_error <- local_last_error() can Unsafe.PointerCast if first_close_status != Io::SUCCESS
+            second_close_status: i32 = debugger_local_close(second_descriptor) can Blocking.IO
+            second_close_error: mutable i32 = Io::SUCCESS
+            second_close_error <- local_last_error() can Unsafe.PointerCast if second_close_status != Io::SUCCESS
+            if result.status == LocalIpcStatus.Complete and first_close_status != Io::SUCCESS:
+                result.status <- LocalIpcStatus.CloseFailed
+                result.system_error <- first_close_error
+            if result.status == LocalIpcStatus.Complete and second_close_status != Io::SUCCESS:
+                result.status <- LocalIpcStatus.CloseFailed
+                result.system_error <- second_close_error
+            return result

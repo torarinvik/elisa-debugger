@@ -1,0 +1,51 @@
+include "../src/agent/wire.elisa"
+include "../src/platform/local_ipc_probe.elisa"
+
+const module TestFrame:
+    FRAME_LENGTH: usize = 32
+    FIRST_BYTE: usize = 0
+    EMPTY_LENGTH: usize = 0
+    INSUFFICIENT_CAPACITY: usize = 31
+    OVERSIZED_LENGTH: usize = 1025
+    EXCHANGE_REPETITIONS: usize = 16
+
+const module TestAcknowledgement:
+    GENERATION: u64 = 117
+    EVENT_COUNT: u64 = 3
+
+const module TestResult:
+    ENCODE_FAILURE: i64 = 1
+    ROUNDTRIP_FAILURE: i64 = 2
+    PAYLOAD_MISMATCH: i64 = 3
+    DECODE_FAILURE: i64 = 4
+    OUTPUT_CAPACITY_FAILURE: i64 = 5
+    INPUT_LIMIT_FAILURE: i64 = 6
+    EMPTY_TRANSFER_FAILURE: i64 = 7
+    REPEATED_EXCHANGE_FAILURE: i64 = 8
+    SUCCESS: i64 = 0
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: TestAcknowledgement::GENERATION, event_count: TestAcknowledgement::EVENT_COUNT}
+    frame: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(acknowledgement)
+    return TestResult::ENCODE_FAILURE if frame.status != DebuggerAgentWire::WireStatus.Ready or frame.length != TestFrame::FRAME_LENGTH
+
+    output: mutable u8[TestFrame::FRAME_LENGTH] = zeroed
+    transfer: DebuggerLocalIpcProbe::LocalIpcResult = DebuggerLocalIpcProbe::local_socketpair_roundtrip(frame.bytes[TestFrame::FIRST_BYTE], frame.length, output[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::ROUNDTRIP_FAILURE if transfer.status != DebuggerLocalIpcProbe::LocalIpcStatus.Complete or transfer.bytes_written != TestFrame::FRAME_LENGTH or transfer.bytes_read != TestFrame::FRAME_LENGTH
+    for index in TestFrame::FIRST_BYTE..<TestFrame::FRAME_LENGTH:
+        return TestResult::PAYLOAD_MISMATCH if output[index] != frame.bytes[index]
+    decoded: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(output[TestFrame::FIRST_BYTE], transfer.bytes_read)
+    return TestResult::DECODE_FAILURE if decoded.status != DebuggerAgentWire::WireStatus.Ready or decoded.acknowledgement.generation != acknowledgement.generation or decoded.acknowledgement.event_count != acknowledgement.event_count
+
+    too_small: DebuggerLocalIpcProbe::LocalIpcResult = DebuggerLocalIpcProbe::local_socketpair_roundtrip(frame.bytes[TestFrame::FIRST_BYTE], frame.length, output[TestFrame::FIRST_BYTE], TestFrame::INSUFFICIENT_CAPACITY) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::OUTPUT_CAPACITY_FAILURE if too_small.status != DebuggerLocalIpcProbe::LocalIpcStatus.InvalidArgument or too_small.bytes_written != TestFrame::EMPTY_LENGTH or too_small.bytes_read != TestFrame::EMPTY_LENGTH
+    too_large: DebuggerLocalIpcProbe::LocalIpcResult = DebuggerLocalIpcProbe::local_socketpair_roundtrip(frame.bytes[TestFrame::FIRST_BYTE], TestFrame::OVERSIZED_LENGTH, output[TestFrame::FIRST_BYTE], TestFrame::OVERSIZED_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::INPUT_LIMIT_FAILURE if too_large.status != DebuggerLocalIpcProbe::LocalIpcStatus.InvalidArgument
+
+    empty_transfer: DebuggerLocalIpcProbe::LocalIpcResult = DebuggerLocalIpcProbe::local_socketpair_roundtrip(frame.bytes[TestFrame::FIRST_BYTE], TestFrame::EMPTY_LENGTH, output[TestFrame::FIRST_BYTE], TestFrame::EMPTY_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::EMPTY_TRANSFER_FAILURE if empty_transfer.status != DebuggerLocalIpcProbe::LocalIpcStatus.Complete or empty_transfer.bytes_written != TestFrame::EMPTY_LENGTH or empty_transfer.bytes_read != TestFrame::EMPTY_LENGTH
+
+    for repetition in TestFrame::FIRST_BYTE..<TestFrame::EXCHANGE_REPETITIONS:
+        repeated: DebuggerLocalIpcProbe::LocalIpcResult = DebuggerLocalIpcProbe::local_socketpair_roundtrip(frame.bytes[TestFrame::FIRST_BYTE], frame.length, output[TestFrame::FIRST_BYTE], TestFrame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+        return TestResult::REPEATED_EXCHANGE_FAILURE if repeated.status != DebuggerLocalIpcProbe::LocalIpcStatus.Complete or repeated.bytes_read != TestFrame::FRAME_LENGTH
+    return TestResult::SUCCESS

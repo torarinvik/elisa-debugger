@@ -151,6 +151,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool native-macos-attach-check
+.PHONY: native-local-ipc-check
 .PHONY: native-dwarf-line-check native-elf-dwarf-line-check
 .PHONY: native-macho-dwarf-line-check
 .PHONY: agent-wire-check agent-wire-stream-check
@@ -197,6 +198,9 @@ module-check: native-breakpoint-lifecycle-check
 module-check: native-agent-controller-check
 module-check: agent-wire-check
 module-check: agent-wire-stream-check
+ifneq ($(filter Darwin Linux,$(shell uname -s)),)
+module-check: native-local-ipc-check
+endif
 module-check: dap-function-breakpoints-check
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 module-check: $(MANAGED_ALLOCATIONS_CHECK)
@@ -897,6 +901,13 @@ $(BUILD)/elisa-debugger-native-agent-controller-check: tests/native_agent_contro
 
 native-agent-controller-check: $(BUILD)/elisa-debugger-native-agent-controller-check
 	"$(BUILD)/elisa-debugger-native-agent-controller-check"
+
+$(BUILD)/elisa-debugger-native-local-ipc-check: tests/native_local_ipc_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+native-local-ipc-check: $(BUILD)/elisa-debugger-native-local-ipc-check
+	"$(BUILD)/elisa-debugger-native-local-ipc-check"
 
 $(BUILD)/elisa-debugger-agent-wire-check: tests/agent_wire_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

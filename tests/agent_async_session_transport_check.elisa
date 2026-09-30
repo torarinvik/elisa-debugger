@@ -59,6 +59,7 @@ const module SnapshotFixture:
     VALUE_LENGTH: usize = 1
     FIRST_BYTE: usize = 0
     FIRST_INDEX: usize = 0
+    SECOND_FRAME: usize = 1
     ONE_VALUE: usize = 1
     GENERATION_INCREMENT: u64 = 1
     NO_ID: u64 = 0
@@ -126,6 +127,10 @@ const module TestResult:
     PARENT_SNAPSHOT_CONTENT_FAILURE: i64 = 60
     PARENT_SNAPSHOT_CAPABILITY_FAILURE: i64 = 61
     PARENT_SNAPSHOT_GENERATION_FAILURE: i64 = 62
+    PARENT_SNAPSHOT_ERROR_FAILURE: i64 = 63
+    CHILD_SNAPSHOT_ERROR_REQUEST_FAILURE: i64 = 64
+    CHILD_SNAPSHOT_ERROR_DISPATCH_FAILURE: i64 = 65
+    CHILD_SNAPSHOT_ERROR_SEND_FAILURE: i64 = 66
     SUCCESS: i64 = 0
 
 def test_cstr_equal(left: cstr, right: cstr) -> bool:
@@ -223,6 +228,14 @@ def child_main(argc: i64) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
     snapshot_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, snapshot_response.bytes[Frame::FIRST_BYTE], snapshot_response.length) can Blocking.IO, Unsafe.PointerCast
     return TestResult::CHILD_SNAPSHOT_SEND_FAILURE if snapshot_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or snapshot_sent.bytes_transferred != snapshot_response.length
 
+    unavailable_request_bytes: mutable u8[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_REQUEST_BYTES] = zeroed
+    return TestResult::CHILD_SNAPSHOT_ERROR_REQUEST_FAILURE if not read_frame(session, unavailable_request_bytes[Frame::FIRST_BYTE], request_length) can Blocking.IO, Unsafe.PointerCast
+    unavailable_response: mutable DebuggerAgentSnapshotWire::SnapshotWireBuffer = zeroed
+    unavailable_dispatch: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentSnapshotWire::agent_snapshot_page_dispatch(unavailable_request_bytes[Frame::FIRST_BYTE], request_length, shadow_stack, registry, unavailable_response)
+    return TestResult::CHILD_SNAPSHOT_ERROR_DISPATCH_FAILURE if unavailable_dispatch != DebuggerAgentSnapshotWire::SnapshotWireStatus.SnapshotUnavailable or unavailable_response.length != DebuggerAgentSnapshotWire::snapshot_error_response_length()
+    unavailable_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, unavailable_response.bytes[Frame::FIRST_BYTE], unavailable_response.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_SNAPSHOT_ERROR_SEND_FAILURE if unavailable_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or unavailable_sent.bytes_transferred != unavailable_response.length
+
     resume_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
     return TestResult::CHILD_READ_FAILURE if not read_frame(session, resume_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
     resume_request: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(resume_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
@@ -304,6 +317,12 @@ def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerC
     return TestResult::PARENT_SNAPSHOT_COMPLETION_FAILURE if snapshot_read.status != DebuggerAgentAsyncSession::AsyncStatus.Completed or controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerNative::native_can_inspect(controller)
     snapshot_status: DebuggerAgentSnapshotWire::SnapshotWireStatus = DebuggerAgentAsyncSession::async_session_snapshot_page_status(async_session, read_storage, stop_generation)
     return TestResult::PARENT_SNAPSHOT_CONTENT_FAILURE if snapshot_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or read_storage.snapshot_page.thread_id != SnapshotFixture::THREAD_ID or read_storage.snapshot_page.frame_index != SnapshotFixture::FIRST_INDEX or read_storage.snapshot_page.frame.invocation.value != SnapshotFixture::INVOCATION or read_storage.snapshot_page.frame.source_line != SnapshotFixture::SOURCE_LINE or read_storage.snapshot_page.frame.source_column != SnapshotFixture::SOURCE_COLUMN or read_storage.snapshot_page.frame.binding_count != SnapshotFixture::ONE_VALUE or read_storage.snapshot_page.binding_count != SnapshotFixture::ONE_VALUE or read_storage.snapshot_page.bindings[SnapshotFixture::FIRST_INDEX].binding.value != SnapshotFixture::BINDING or read_storage.snapshot_page.bindings[SnapshotFixture::FIRST_INDEX].bytes[SnapshotFixture::FIRST_BYTE] != SnapshotFixture::VALUE_BYTE or read_storage.snapshot_page.bindings[SnapshotFixture::FIRST_INDEX].storage_location != SnapshotFixture::STACK_OFFSET
+
+    unavailable_request: DebuggerAgentSnapshotWire::SnapshotPageRequest = DebuggerAgentSnapshotWire::SnapshotPageRequest{generation: stop_generation, thread_id: SnapshotFixture::THREAD_ID, frame_index: SnapshotFixture::SECOND_FRAME, binding_start: SnapshotFixture::FIRST_INDEX, binding_limit: SnapshotFixture::ONE_VALUE}
+    unavailable_begin: DebuggerAgentAsyncSession::AsyncResult = DebuggerAgentAsyncSession::async_snapshot_page_begin(async_session, controller, unavailable_request, read_storage, TestAsync::NOW_NS, TestAsync::DEADLINE_NS)
+    return TestResult::PARENT_SNAPSHOT_ERROR_FAILURE if unavailable_begin.status != DebuggerAgentAsyncSession::AsyncStatus.Accepted
+    unavailable_read: DebuggerAgentAsyncSession::AsyncResult = drive_async_operation(async_session, session, controller, read_storage) can Unsafe.PointerCast
+    return TestResult::PARENT_SNAPSHOT_ERROR_FAILURE if unavailable_read.status != DebuggerAgentAsyncSession::AsyncStatus.Failed or unavailable_read.snapshot_wire_status != DebuggerAgentSnapshotWire::SnapshotWireStatus.SnapshotUnavailable or DebuggerAgentAsyncSession::async_session_snapshot_page_status(async_session, read_storage, stop_generation) != DebuggerAgentSnapshotWire::SnapshotWireStatus.SnapshotUnavailable or not DebuggerAgentAsyncSession::async_session_is_ready(async_session) or controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerNative::native_can_inspect(controller)
 
     resume_begin: DebuggerAgentAsyncSession::AsyncResult = DebuggerAgentAsyncSession::async_resume_begin(async_session, controller, TestAsync::NOW_NS, TestAsync::DEADLINE_NS)
     return TestResult::PARENT_ASYNC_RESUME_BEGIN_FAILURE if resume_begin.status != DebuggerAgentAsyncSession::AsyncStatus.Accepted or DebuggerAgentAsyncSession::async_session_interest(async_session) != DebuggerAgentAsyncSession::AsyncInterest.Writable

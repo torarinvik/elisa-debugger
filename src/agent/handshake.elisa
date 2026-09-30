@@ -1,0 +1,69 @@
+# Pure compatibility negotiation for the agent hello exchange. Transport code
+# sends and receives the wire hello; this module owns version and capability policy.
+
+include "./wire.elisa"
+
+module DebuggerAgentHandshake:
+    private:
+        const module Protocol:
+            CURRENT_MAJOR: u32 = 1
+            CURRENT_MINOR: u32 = 3
+
+        const module Sentinel:
+            NO_PROTOCOL_MAJOR: u32 = 0
+
+        def failed_negotiation(status: HandshakeStatus) -> NegotiatedProtocol:
+            result: mutable NegotiatedProtocol = zeroed
+            result.status <- status
+            return result
+
+        def contains_required_capabilities(advertised: u64, required: u64) -> bool:
+            return (advertised & required) == required
+
+    public:
+        const module Capability:
+            STOP_CONTROL: u64 = 1
+            AGENT_EVENTS: u64 = 2
+            TYPED_LOCALS: u64 = 4
+            CHECKPOINT_TRANSFER: u64 = 8
+            REVERSE_EVENT_STREAM: u64 = 16
+
+        enum HandshakeStatus:
+            Ready
+            InvalidProtocolMajor
+            UnsupportedLocalMajor
+            UnsupportedLocalMinor
+            MajorVersionMismatch
+            LocalMissingRequiredCapabilities
+            PeerMissingRequiredCapabilities
+
+        struct NegotiatedProtocol:
+            protocol_major: mutable u32
+            protocol_minor: mutable u32
+            capabilities: mutable u64
+            status: mutable HandshakeStatus
+
+        def current_protocol_major() -> u32:
+            return Protocol::CURRENT_MAJOR
+
+        def current_protocol_minor() -> u32:
+            return Protocol::CURRENT_MINOR
+
+        # Minor versions are backward compatible within one major. The result
+        # advertises only capabilities implemented by both peers; callers must
+        # provide the features needed for the operation before accepting Ready.
+        def agent_handshake_negotiate(local: DebuggerAgentWire::AgentHello, peer: DebuggerAgentWire::AgentHello, required_capabilities: u64) -> NegotiatedProtocol:
+            return failed_negotiation(HandshakeStatus.InvalidProtocolMajor) if local.protocol_major == Sentinel::NO_PROTOCOL_MAJOR or peer.protocol_major == Sentinel::NO_PROTOCOL_MAJOR
+            return failed_negotiation(HandshakeStatus.UnsupportedLocalMajor) if local.protocol_major != Protocol::CURRENT_MAJOR
+            return failed_negotiation(HandshakeStatus.UnsupportedLocalMinor) if local.protocol_minor > Protocol::CURRENT_MINOR
+            return failed_negotiation(HandshakeStatus.MajorVersionMismatch) if local.protocol_major != peer.protocol_major
+            return failed_negotiation(HandshakeStatus.LocalMissingRequiredCapabilities) if not contains_required_capabilities(local.capabilities, required_capabilities)
+            return failed_negotiation(HandshakeStatus.PeerMissingRequiredCapabilities) if not contains_required_capabilities(peer.capabilities, required_capabilities)
+
+            result: mutable NegotiatedProtocol = zeroed
+            result.status <- HandshakeStatus.Ready
+            result.protocol_major <- local.protocol_major
+            result.protocol_minor <- local.protocol_minor if local.protocol_minor <= peer.protocol_minor
+            result.protocol_minor <- peer.protocol_minor if peer.protocol_minor < local.protocol_minor
+            result.capabilities <- local.capabilities & peer.capabilities
+            return result

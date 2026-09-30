@@ -1,0 +1,171 @@
+# Synchronous transaction layer joining the local channel, negotiated agent
+# capabilities, wire codecs, and native stop lifecycle.
+
+include "./wire.elisa"
+include "./handshake.elisa"
+include "./control.elisa"
+include "../platform/local_agent_transport.elisa"
+include "../native/controller.elisa"
+
+module DebuggerAgentSession:
+    private:
+        const module Frame:
+            FRAME_CAPACITY: usize = 32
+            FRAME_LENGTH: usize = 32
+            FIRST_BYTE: usize = 0
+            EMPTY_LENGTH: usize = 0
+
+        const module Protocol:
+            CONTROL_ACKNOWLEDGEMENT_MINIMUM_MINOR: u32 = 4
+
+        def receive_exact_frame(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, bytes: mutable u8&, length: usize) -> DebuggerLocalAgentTransport::TransferResult can[Blocking.IO, Unsafe.PointerCast]:
+            result: mutable DebuggerLocalAgentTransport::TransferResult = zeroed
+            result.status <- DebuggerLocalAgentTransport::TransportStatus.Ready
+            received: mutable usize = Frame::EMPTY_LENGTH
+            while received < length:
+                transfer: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_receive(session, bytes[received], length - received) can Blocking.IO, Unsafe.PointerCast
+                if transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready:
+                    return transfer
+                if transfer.bytes_transferred == Frame::EMPTY_LENGTH:
+                    result.status <- DebuggerLocalAgentTransport::TransportStatus.PeerClosed
+                    return result
+                received <- received + transfer.bytes_transferred
+            result.bytes_transferred <- received
+            return result
+
+        def send_frame(session: DebuggerLocalAgentTransport::LocalAgentSession&, bytes: u8&, length: usize) -> DebuggerLocalAgentTransport::TransferResult can[Blocking.IO, Unsafe.PointerCast]:
+            return DebuggerLocalAgentTransport::local_agent_channel_send(session, bytes, length) can Blocking.IO, Unsafe.PointerCast
+
+        def handshake_failure(status: SessionStatus, transport_status: DebuggerLocalAgentTransport::TransportStatus, wire_status: DebuggerAgentWire::WireStatus, negotiated: DebuggerAgentHandshake::NegotiatedProtocol) -> HandshakeResult:
+            return HandshakeResult{negotiated: negotiated, status: status, transport_status: transport_status, wire_status: wire_status}
+
+        def operation_result(status: SessionStatus, transport_status: DebuggerLocalAgentTransport::TransportStatus, wire_status: DebuggerAgentWire::WireStatus) -> OperationResult:
+            return OperationResult{status: status, transport_status: transport_status, wire_status: wire_status}
+
+        def fail_controller_operation(controller: mutable DebuggerNative::NativeController&, status: SessionStatus, transport_status: DebuggerLocalAgentTransport::TransportStatus, wire_status: DebuggerAgentWire::WireStatus) -> OperationResult:
+            controller <- DebuggerNative::native_agent_transport_failed(controller)
+            return operation_result(status, transport_status, wire_status)
+
+        def control_capability_is_ready(negotiated: DebuggerAgentHandshake::NegotiatedProtocol&) -> bool:
+            return false if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
+            required: u64 = DebuggerAgentHandshake::Capability::STOP_CONTROL
+            return (negotiated.capabilities & required) == required
+
+        def control_protocol_is_ready(negotiated: DebuggerAgentHandshake::NegotiatedProtocol&) -> bool:
+            return negotiated.protocol_minor >= Protocol::CONTROL_ACKNOWLEDGEMENT_MINIMUM_MINOR
+
+    public:
+        enum SessionStatus:
+            Ready
+            NegotiationRejected
+            UnsupportedControlProtocol
+            MissingStopControlCapability
+            TransportRejected
+            InvalidTransferLength
+            WireRejected
+            ResponseMismatch
+            AgentRejected
+            ControllerRejected
+
+        struct HandshakeResult:
+            negotiated: mutable DebuggerAgentHandshake::NegotiatedProtocol
+            status: mutable SessionStatus
+            transport_status: mutable DebuggerLocalAgentTransport::TransportStatus
+            wire_status: mutable DebuggerAgentWire::WireStatus
+
+        struct OperationResult:
+            status: mutable SessionStatus
+            transport_status: mutable DebuggerLocalAgentTransport::TransportStatus
+            wire_status: mutable DebuggerAgentWire::WireStatus
+
+        # Exchange hello frames over an already-connected local channel. The
+        # caller decides which negotiated capability subset is mandatory.
+        def agent_session_handshake(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, local_hello: DebuggerAgentWire::AgentHello, required_capabilities: u64) -> HandshakeResult can[Blocking.IO, Unsafe.PointerCast]:
+            encoded_request: DebuggerAgentWire::EncodedAgentHello = DebuggerAgentWire::agent_hello_request_encode(local_hello)
+            empty_negotiation: mutable DebuggerAgentHandshake::NegotiatedProtocol = zeroed
+            empty_negotiation.status <- DebuggerAgentHandshake::HandshakeStatus.InvalidProtocolMajor
+            return handshake_failure(SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, encoded_request.status, empty_negotiation) if encoded_request.status != DebuggerAgentWire::WireStatus.Ready
+
+            sent: DebuggerLocalAgentTransport::TransferResult = send_frame(session, encoded_request.bytes[Frame::FIRST_BYTE], encoded_request.length) can Blocking.IO, Unsafe.PointerCast
+            return handshake_failure(SessionStatus.TransportRejected, sent.status, DebuggerAgentWire::WireStatus.Ready, empty_negotiation) if sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return handshake_failure(SessionStatus.InvalidTransferLength, sent.status, DebuggerAgentWire::WireStatus.Ready, empty_negotiation) if sent.bytes_transferred != encoded_request.length
+
+            response_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+            received: DebuggerLocalAgentTransport::TransferResult = receive_exact_frame(session, response_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+            return handshake_failure(SessionStatus.TransportRejected, received.status, DebuggerAgentWire::WireStatus.Ready, empty_negotiation) if received.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return handshake_failure(SessionStatus.InvalidTransferLength, received.status, DebuggerAgentWire::WireStatus.Ready, empty_negotiation) if received.bytes_transferred != Frame::FRAME_LENGTH
+
+            decoded_response: DebuggerAgentWire::DecodedAgentHello = DebuggerAgentWire::agent_hello_response_decode(response_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+            return handshake_failure(SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, decoded_response.status, empty_negotiation) if decoded_response.status != DebuggerAgentWire::WireStatus.Ready
+            negotiated: DebuggerAgentHandshake::NegotiatedProtocol = DebuggerAgentHandshake::agent_handshake_negotiate(local_hello, decoded_response.hello, required_capabilities)
+            status: mutable SessionStatus = SessionStatus.Ready
+            status <- SessionStatus.NegotiationRejected if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
+            return handshake_failure(status, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready, negotiated)
+
+        # Pause synchronously sends the current controller generation and
+        # waits for the matching target acknowledgement before exposing Stopped.
+        def agent_session_pause(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, negotiated: DebuggerAgentHandshake::NegotiatedProtocol, controller: mutable DebuggerNative::NativeController&) -> OperationResult can[Blocking.IO, Unsafe.PointerCast]:
+            return operation_result(SessionStatus.NegotiationRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
+            return operation_result(SessionStatus.UnsupportedControlProtocol, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if not control_protocol_is_ready(negotiated)
+            return operation_result(SessionStatus.MissingStopControlCapability, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if not control_capability_is_ready(negotiated)
+            return operation_result(SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.agent.protocol_major != negotiated.protocol_major
+
+            controller <- DebuggerNative::native_pause(controller)
+            return operation_result(SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Pausing
+            request: DebuggerAgentWire::AgentControlRequest = DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: DebuggerNative::native_pending_stop_generation(controller)}
+            encoded_request: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(request)
+            return fail_controller_operation(controller, SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, encoded_request.status) if encoded_request.status != DebuggerAgentWire::WireStatus.Ready
+
+            sent: DebuggerLocalAgentTransport::TransferResult = send_frame(session, encoded_request.bytes[Frame::FIRST_BYTE], encoded_request.length) can Blocking.IO, Unsafe.PointerCast
+            return fail_controller_operation(controller, SessionStatus.TransportRejected, sent.status, DebuggerAgentWire::WireStatus.Ready) if sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.InvalidTransferLength, sent.status, DebuggerAgentWire::WireStatus.Ready) if sent.bytes_transferred != encoded_request.length
+
+            control_acknowledgement_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+            control_acknowledgement_transfer: DebuggerLocalAgentTransport::TransferResult = receive_exact_frame(session, control_acknowledgement_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+            return fail_controller_operation(controller, SessionStatus.TransportRejected, control_acknowledgement_transfer.status, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement_transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.InvalidTransferLength, control_acknowledgement_transfer.status, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement_transfer.bytes_transferred != Frame::FRAME_LENGTH
+            control_acknowledgement: DebuggerAgentWire::DecodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_decode(control_acknowledgement_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+            return fail_controller_operation(controller, SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, control_acknowledgement.status) if control_acknowledgement.status != DebuggerAgentWire::WireStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.ResponseMismatch, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement.acknowledgement.request_kind != DebuggerAgentWire::AgentControlKind.StopRequest or control_acknowledgement.acknowledgement.generation != request.generation
+            return fail_controller_operation(controller, SessionStatus.AgentRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement.acknowledgement.result != DebuggerAgentWire::AgentControlResult.Applied
+
+            acknowledgement_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+            received: DebuggerLocalAgentTransport::TransferResult = receive_exact_frame(session, acknowledgement_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+            return fail_controller_operation(controller, SessionStatus.TransportRejected, received.status, DebuggerAgentWire::WireStatus.Ready) if received.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.InvalidTransferLength, received.status, DebuggerAgentWire::WireStatus.Ready) if received.bytes_transferred != Frame::FRAME_LENGTH
+
+            decoded_acknowledgement: DebuggerAgentWire::DecodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_decode(acknowledgement_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+            return fail_controller_operation(controller, SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, decoded_acknowledgement.status) if decoded_acknowledgement.status != DebuggerAgentWire::WireStatus.Ready
+            controller <- DebuggerNative::native_acknowledge_pause(controller, decoded_acknowledgement.acknowledgement)
+            return operation_result(SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Stopped
+            return operation_result(SessionStatus.Ready, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)
+
+        # The target command is sent before the local controller becomes live.
+        # A failed write leaves the controller in AgentFailed, never falsely
+        # reported as attached while the remote state is uncertain.
+        def agent_session_resume(session: DebuggerLocalAgentTransport::LocalAgentSession&, negotiated: DebuggerAgentHandshake::NegotiatedProtocol, controller: mutable DebuggerNative::NativeController&) -> OperationResult can[Blocking.IO, Unsafe.PointerCast]:
+            return operation_result(SessionStatus.NegotiationRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
+            return operation_result(SessionStatus.UnsupportedControlProtocol, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if not control_protocol_is_ready(negotiated)
+            return operation_result(SessionStatus.MissingStopControlCapability, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if not control_capability_is_ready(negotiated)
+            return operation_result(SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.agent.protocol_major != negotiated.protocol_major
+            return operation_result(SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerNative::native_can_inspect(controller)
+
+            request: DebuggerAgentWire::AgentControlRequest = DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.ResumeRequest, generation: DebuggerNative::native_pending_stop_generation(controller)}
+            encoded_request: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(request)
+            return fail_controller_operation(controller, SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, encoded_request.status) if encoded_request.status != DebuggerAgentWire::WireStatus.Ready
+            sent: DebuggerLocalAgentTransport::TransferResult = send_frame(session, encoded_request.bytes[Frame::FIRST_BYTE], encoded_request.length) can Blocking.IO, Unsafe.PointerCast
+            return fail_controller_operation(controller, SessionStatus.TransportRejected, sent.status, DebuggerAgentWire::WireStatus.Ready) if sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.InvalidTransferLength, sent.status, DebuggerAgentWire::WireStatus.Ready) if sent.bytes_transferred != encoded_request.length
+
+            control_acknowledgement_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+            control_acknowledgement_transfer: DebuggerLocalAgentTransport::TransferResult = receive_exact_frame(session, control_acknowledgement_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+            return fail_controller_operation(controller, SessionStatus.TransportRejected, control_acknowledgement_transfer.status, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement_transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.InvalidTransferLength, control_acknowledgement_transfer.status, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement_transfer.bytes_transferred != Frame::FRAME_LENGTH
+            control_acknowledgement: DebuggerAgentWire::DecodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_decode(control_acknowledgement_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+            return fail_controller_operation(controller, SessionStatus.WireRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, control_acknowledgement.status) if control_acknowledgement.status != DebuggerAgentWire::WireStatus.Ready
+            return fail_controller_operation(controller, SessionStatus.ResponseMismatch, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement.acknowledgement.request_kind != DebuggerAgentWire::AgentControlKind.ResumeRequest or control_acknowledgement.acknowledgement.generation != request.generation
+            return fail_controller_operation(controller, SessionStatus.AgentRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if control_acknowledgement.acknowledgement.result != DebuggerAgentWire::AgentControlResult.Applied
+
+            controller <- DebuggerNative::native_resume(controller)
+            return operation_result(SessionStatus.ControllerRejected, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready) if controller.status != DebuggerNative::NativeStopStatus.Attached
+            return operation_result(SessionStatus.Ready, DebuggerLocalAgentTransport::TransportStatus.Ready, DebuggerAgentWire::WireStatus.Ready)

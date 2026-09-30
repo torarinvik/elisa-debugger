@@ -10,6 +10,8 @@ const module Frame:
     CHECKSUM_PAYLOAD_LENGTH: usize = 24
     LAST_CHECKSUM_BYTE_OFFSET: usize = 7
     LAST_CHECKSUM_BYTE_INDEX: usize = 31
+    EVENT_COUNT_OFFSET: usize = 16
+    INVALID_CONTROL_ACKNOWLEDGEMENT_METADATA: u64 = 34359738368
     TRUNCATED_LENGTH: usize = 31
     U64_BYTE_COUNT: usize = 8
     U64_BITS_PER_BYTE: u64 = 8
@@ -41,6 +43,8 @@ const module TestResult:
     RESERVED_PAYLOAD_FAILURE: i64 = 11
     INVALID_GENERATION_FAILURE: i64 = 12
     TRUNCATED_FRAME_FAILURE: i64 = 13
+    CONTROL_ACKNOWLEDGEMENT_FAILURE: i64 = 14
+    INVALID_CONTROL_ACKNOWLEDGEMENT_FAILURE: i64 = 15
 
 def write_u64(bytes: mutable u8&, offset: usize, value: u64) -> void:
     for index in Frame::ZERO_LENGTH..<Frame::U64_BYTE_COUNT:
@@ -84,6 +88,16 @@ def main() -> i64:
     stale_stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(stop_request)
     stale_stop: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(stale_stop_frame.bytes[Frame::FIRST_BYTE], stale_stop_frame.length, resumed.buffer)
     return TestResult::STALE_STOP_FAILURE if stale_stop.status != DebuggerAgentControl::DispatchStatus.StaleGeneration or stale_stop.buffer.stopped or stale_stop.buffer.stop_generation != TestControl::FIRST_GENERATION or stale_stop.buffer.overflowed
+    stale_result: DebuggerAgentWire::AgentControlAcknowledgement = DebuggerAgentControl::agent_control_acknowledgement_for(stop_request, stale_stop)
+    stale_result_frame: DebuggerAgentWire::EncodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_encode(stale_result)
+    decoded_stale_result: DebuggerAgentWire::DecodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_decode(stale_result_frame.bytes[Frame::FIRST_BYTE], stale_result_frame.length)
+    return TestResult::CONTROL_ACKNOWLEDGEMENT_FAILURE if stale_result_frame.status != DebuggerAgentWire::WireStatus.Ready or decoded_stale_result.status != DebuggerAgentWire::WireStatus.Ready or decoded_stale_result.acknowledgement.request_kind != DebuggerAgentWire::AgentControlKind.StopRequest or decoded_stale_result.acknowledgement.generation != TestControl::FIRST_GENERATION or decoded_stale_result.acknowledgement.result != DebuggerAgentWire::AgentControlResult.StaleGeneration
+    invalid_control_acknowledgement: mutable DebuggerAgentWire::EncodedAgentControlAcknowledgement = stale_result_frame
+    write_u64(invalid_control_acknowledgement.bytes[Frame::FIRST_BYTE], Frame::EVENT_COUNT_OFFSET, Frame::INVALID_CONTROL_ACKNOWLEDGEMENT_METADATA)
+    invalid_control_ack_checksum: u64 = DebuggerTraceBinary::bytes_checksum(invalid_control_acknowledgement.bytes[Frame::FIRST_BYTE], Frame::CHECKSUM_PAYLOAD_LENGTH)
+    write_u64(invalid_control_acknowledgement.bytes[Frame::FIRST_BYTE], Frame::CHECKSUM_OFFSET, invalid_control_ack_checksum)
+    invalid_control_ack_decoded: DebuggerAgentWire::DecodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_decode(invalid_control_acknowledgement.bytes[Frame::FIRST_BYTE], invalid_control_acknowledgement.length)
+    return TestResult::INVALID_CONTROL_ACKNOWLEDGEMENT_FAILURE if invalid_control_ack_decoded.status != DebuggerAgentWire::WireStatus.InvalidControlAcknowledgement
 
     second_stop_frame: DebuggerAgentWire::EncodedAgentControlRequest = DebuggerAgentWire::agent_control_request_encode(DebuggerAgentWire::AgentControlRequest{kind: DebuggerAgentWire::AgentControlKind.StopRequest, generation: TestControl::SECOND_GENERATION})
     second_stopped: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_dispatch(second_stop_frame.bytes[Frame::FIRST_BYTE], second_stop_frame.length, resumed.buffer)

@@ -1,0 +1,188 @@
+include "../src/agent/session.elisa"
+
+const module Argument:
+    PARENT_COUNT: i64 = 4
+    CHILD_COUNT: i64 = 2
+    FIRST_ARGUMENT: usize = 0
+    CHILD_MODE_INDEX: usize = 1
+    ARGUMENT_TERMINATOR_INDEX: usize = 2
+    PARENT_MODE_INDEX: usize = 1
+    PARENT_RESERVED_FIRST_INDEX: usize = 2
+    PARENT_RESERVED_SECOND_INDEX: usize = 3
+    CHILD_SWITCH: cstr = "--agent-session-child"
+    PARENT_MODE: cstr = "--agent-session-parent"
+    RESERVED_FIRST: cstr = "reserved-first"
+    RESERVED_SECOND: cstr = "reserved-second"
+    CHANNEL_DESCRIPTOR: i32 = 3
+    MINIMUM_CHANNEL_DESCRIPTOR: i32 = 3
+    NULL_TERMINATOR: u8 = 0
+    INDEX_INCREMENT: usize = 1
+    NULL_POINTER_VALUE: usize = 0
+    NO_PROCESS_ID: i32 = 0
+
+const module Frame:
+    FRAME_CAPACITY: usize = 32
+    FRAME_LENGTH: usize = 32
+    FIRST_BYTE: usize = 0
+    EMPTY_LENGTH: usize = 0
+
+const module TestAgent:
+    PROTOCOL_MAJOR: u32 = 1
+    PROTOCOL_MINOR: u32 = 4
+    LEGACY_CONTROL_PROTOCOL_MINOR: u32 = 3
+    BUILD: u64 = 11
+    TARGET: u64 = 22
+    CAPABILITIES: u64 = 31
+    REQUIRED_CAPABILITIES: u64 = 3
+    CAPABILITIES_WITHOUT_STOP_CONTROL: u64 = 30
+    ZERO_EVENT_COUNT: u64 = 0
+
+const module TestResult:
+    CHILD_MODE_FAILURE: i64 = 1
+    CHILD_READ_FAILURE: i64 = 2
+    CHILD_HELLO_DECODE_FAILURE: i64 = 3
+    CHILD_HELLO_ENCODE_FAILURE: i64 = 4
+    CHILD_HELLO_SEND_FAILURE: i64 = 5
+    CHILD_STOP_DECODE_FAILURE: i64 = 6
+    CHILD_STOP_APPLY_FAILURE: i64 = 7
+    CHILD_ACK_ENCODE_FAILURE: i64 = 8
+    CHILD_ACK_SEND_FAILURE: i64 = 9
+    CHILD_RESUME_DECODE_FAILURE: i64 = 10
+    CHILD_RESUME_APPLY_FAILURE: i64 = 11
+    CHILD_CLOSE_FAILURE: i64 = 12
+    PARENT_ARGUMENT_FAILURE: i64 = 13
+    PARENT_LAUNCH_FAILURE: i64 = 14
+    PARENT_CHANNEL_FAILURE: i64 = 15
+    PARENT_HANDSHAKE_FAILURE: i64 = 16
+    PARENT_CONTROLLER_FAILURE: i64 = 17
+    MISSING_CAPABILITY_FAILURE: i64 = 18
+    PARENT_PAUSE_FAILURE: i64 = 19
+    PARENT_RESUME_FAILURE: i64 = 20
+    PARENT_WAIT_FAILURE: i64 = 21
+    PARENT_CLOSE_FAILURE: i64 = 22
+    CHILD_CONTROL_ACK_ENCODE_FAILURE: i64 = 23
+    CHILD_CONTROL_ACK_SEND_FAILURE: i64 = 24
+    CHILD_RESUME_ACK_ENCODE_FAILURE: i64 = 25
+    CHILD_RESUME_ACK_SEND_FAILURE: i64 = 26
+    LEGACY_CONTROL_PROTOCOL_FAILURE: i64 = 27
+    SUCCESS: i64 = 0
+
+def test_cstr_equal(left: cstr, right: cstr) -> bool:
+    index: mutable usize = Frame::EMPTY_LENGTH
+    while left[index].u8() == right[index].u8():
+        return true if left[index].u8() == Argument::NULL_TERMINATOR
+        index <- index + Argument::INDEX_INCREMENT
+    return false
+
+def read_frame(session: mutable DebuggerLocalAgentTransport::LocalAgentSession&, bytes: mutable u8&, expected_length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+    received_total: mutable usize = Frame::EMPTY_LENGTH
+    while received_total < expected_length:
+        transfer: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_receive(session, bytes[received_total], expected_length - received_total) can Blocking.IO, Unsafe.PointerCast
+        return false if transfer.status != DebuggerLocalAgentTransport::TransportStatus.Ready or transfer.bytes_transferred == Frame::EMPTY_LENGTH
+        received_total <- received_total + transfer.bytes_transferred
+    return true
+
+def child_main(argc: i64) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    return TestResult::CHILD_MODE_FAILURE if argc != Argument::CHILD_COUNT
+    session: mutable DebuggerLocalAgentTransport::LocalAgentSession = zeroed
+    DebuggerLocalAgentTransport::local_agent_session_initialize(session)
+    adoption: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_adopt(session, Argument::CHANNEL_DESCRIPTOR) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_MODE_FAILURE if adoption != DebuggerLocalAgentTransport::TransportStatus.Ready
+
+    hello_request_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+    return TestResult::CHILD_READ_FAILURE if not read_frame(session, hello_request_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    hello_request: DebuggerAgentWire::DecodedAgentHello = DebuggerAgentWire::agent_hello_request_decode(hello_request_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+    return TestResult::CHILD_HELLO_DECODE_FAILURE if hello_request.status != DebuggerAgentWire::WireStatus.Ready
+    local_hello: DebuggerAgentWire::AgentHello = DebuggerAgentWire::AgentHello{protocol_major: TestAgent::PROTOCOL_MAJOR, protocol_minor: TestAgent::PROTOCOL_MINOR, capabilities: TestAgent::CAPABILITIES}
+    negotiated: DebuggerAgentHandshake::NegotiatedProtocol = DebuggerAgentHandshake::agent_handshake_negotiate(local_hello, hello_request.hello, TestAgent::REQUIRED_CAPABILITIES)
+    return TestResult::CHILD_HELLO_DECODE_FAILURE if negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready
+    hello_response: DebuggerAgentWire::EncodedAgentHello = DebuggerAgentWire::agent_hello_response_encode(local_hello)
+    return TestResult::CHILD_HELLO_ENCODE_FAILURE if hello_response.status != DebuggerAgentWire::WireStatus.Ready
+    hello_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, hello_response.bytes[Frame::FIRST_BYTE], hello_response.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_HELLO_SEND_FAILURE if hello_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or hello_sent.bytes_transferred != Frame::FRAME_LENGTH
+
+    agent_buffer: mutable DebuggerAgent::AgentBuffer = DebuggerAgent::agent_buffer_new()
+    stop_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+    return TestResult::CHILD_READ_FAILURE if not read_frame(session, stop_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    stop_request: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(stop_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+    return TestResult::CHILD_STOP_DECODE_FAILURE if stop_request.status != DebuggerAgentWire::WireStatus.Ready or stop_request.request.kind != DebuggerAgentWire::AgentControlKind.StopRequest
+    applied_stop: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_apply_request(stop_request.request, agent_buffer)
+    return TestResult::CHILD_STOP_APPLY_FAILURE if applied_stop.status != DebuggerAgentControl::DispatchStatus.Applied or not applied_stop.buffer.stopped
+    agent_buffer <- applied_stop.buffer
+    stop_control_acknowledgement: DebuggerAgentWire::AgentControlAcknowledgement = DebuggerAgentControl::agent_control_acknowledgement_for(stop_request.request, applied_stop)
+    stop_control_ack_frame: DebuggerAgentWire::EncodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_encode(stop_control_acknowledgement)
+    return TestResult::CHILD_CONTROL_ACK_ENCODE_FAILURE if stop_control_ack_frame.status != DebuggerAgentWire::WireStatus.Ready
+    stop_control_ack_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, stop_control_ack_frame.bytes[Frame::FIRST_BYTE], stop_control_ack_frame.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_CONTROL_ACK_SEND_FAILURE if stop_control_ack_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or stop_control_ack_sent.bytes_transferred != Frame::FRAME_LENGTH
+    acknowledgement: DebuggerAgent::AgentStopAcknowledgement = DebuggerAgent::AgentStopAcknowledgement{generation: agent_buffer.stop_generation, event_count: agent_buffer.count.u64()}
+    agent_buffer <- DebuggerAgent::agent_acknowledge_stop(agent_buffer, acknowledgement)
+    ack_frame: DebuggerAgentWire::EncodedStopAcknowledgement = DebuggerAgentWire::stop_acknowledgement_encode(acknowledgement)
+    return TestResult::CHILD_ACK_ENCODE_FAILURE if ack_frame.status != DebuggerAgentWire::WireStatus.Ready
+    ack_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, ack_frame.bytes[Frame::FIRST_BYTE], ack_frame.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_ACK_SEND_FAILURE if ack_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or ack_sent.bytes_transferred != Frame::FRAME_LENGTH
+
+    resume_bytes: mutable u8[Frame::FRAME_CAPACITY] = zeroed
+    return TestResult::CHILD_READ_FAILURE if not read_frame(session, resume_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    resume_request: DebuggerAgentWire::DecodedAgentControlRequest = DebuggerAgentWire::agent_control_request_decode(resume_bytes[Frame::FIRST_BYTE], Frame::FRAME_LENGTH)
+    return TestResult::CHILD_RESUME_DECODE_FAILURE if resume_request.status != DebuggerAgentWire::WireStatus.Ready or resume_request.request.kind != DebuggerAgentWire::AgentControlKind.ResumeRequest
+    applied_resume: DebuggerAgentControl::DispatchResult = DebuggerAgentControl::agent_control_apply_request(resume_request.request, agent_buffer)
+    return TestResult::CHILD_RESUME_APPLY_FAILURE if applied_resume.status != DebuggerAgentControl::DispatchStatus.Applied or applied_resume.buffer.stopped or not DebuggerAgent::agent_is_exact(applied_resume.buffer)
+    resume_control_acknowledgement: DebuggerAgentWire::AgentControlAcknowledgement = DebuggerAgentControl::agent_control_acknowledgement_for(resume_request.request, applied_resume)
+    resume_control_ack_frame: DebuggerAgentWire::EncodedAgentControlAcknowledgement = DebuggerAgentWire::agent_control_acknowledgement_encode(resume_control_acknowledgement)
+    return TestResult::CHILD_RESUME_ACK_ENCODE_FAILURE if resume_control_ack_frame.status != DebuggerAgentWire::WireStatus.Ready
+    resume_control_ack_sent: DebuggerLocalAgentTransport::TransferResult = DebuggerLocalAgentTransport::local_agent_channel_send(session, resume_control_ack_frame.bytes[Frame::FIRST_BYTE], resume_control_ack_frame.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_RESUME_ACK_SEND_FAILURE if resume_control_ack_sent.status != DebuggerLocalAgentTransport::TransportStatus.Ready or resume_control_ack_sent.bytes_transferred != Frame::FRAME_LENGTH
+    closed: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_close(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CHILD_CLOSE_FAILURE if closed != DebuggerLocalAgentTransport::TransportStatus.Ready
+    return TestResult::SUCCESS
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Unsafe.PointerCast]:
+    arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+    if argc == Argument::CHILD_COUNT:
+        return TestResult::CHILD_MODE_FAILURE if not test_cstr_equal(arguments[Argument::CHILD_MODE_INDEX].cast[cstr], Argument::CHILD_SWITCH)
+        return child_main(argc) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_ARGUMENT_FAILURE if argc != Argument::PARENT_COUNT
+    return TestResult::PARENT_ARGUMENT_FAILURE if not test_cstr_equal(arguments[Argument::PARENT_MODE_INDEX].cast[cstr], Argument::PARENT_MODE) or not test_cstr_equal(arguments[Argument::PARENT_RESERVED_FIRST_INDEX].cast[cstr], Argument::RESERVED_FIRST) or not test_cstr_equal(arguments[Argument::PARENT_RESERVED_SECOND_INDEX].cast[cstr], Argument::RESERVED_SECOND)
+
+    executable: cstr = arguments[Argument::FIRST_ARGUMENT].cast[cstr]
+    mutable_arguments: mutable void&& = argv.cast[mutable void&&] can Unsafe.PointerCast
+    mutable_arguments[Argument::CHILD_MODE_INDEX] <- Argument::CHILD_SWITCH.cast[mutable void&] can Unsafe.PointerCast
+    null_argument: mutable void& = Argument::NULL_POINTER_VALUE.cast[mutable void&] can Unsafe.PointerCast
+    mutable_arguments[Argument::ARGUMENT_TERMINATOR_INDEX] <- null_argument
+    child_arguments: mutable cstr&& = mutable_arguments.cast[mutable cstr&&] can Unsafe.PointerCast
+
+    session: mutable DebuggerLocalAgentTransport::LocalAgentSession = zeroed
+    DebuggerLocalAgentTransport::local_agent_session_initialize(session)
+    launch: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_session_launch(session, executable, child_arguments, Argument::CHANNEL_DESCRIPTOR) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_LAUNCH_FAILURE if launch != DebuggerLocalAgentTransport::TransportStatus.Ready
+    return TestResult::PARENT_CHANNEL_FAILURE if session.process_id == Argument::NO_PROCESS_ID or session.channel_descriptor < Argument::MINIMUM_CHANNEL_DESCRIPTOR
+
+    local_hello: DebuggerAgentWire::AgentHello = DebuggerAgentWire::AgentHello{protocol_major: TestAgent::PROTOCOL_MAJOR, protocol_minor: TestAgent::PROTOCOL_MINOR, capabilities: TestAgent::CAPABILITIES}
+    handshake: DebuggerAgentSession::HandshakeResult = DebuggerAgentSession::agent_session_handshake(session, local_hello, TestAgent::REQUIRED_CAPABILITIES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_HANDSHAKE_FAILURE if handshake.status != DebuggerAgentSession::SessionStatus.Ready or handshake.negotiated.status != DebuggerAgentHandshake::HandshakeStatus.Ready or handshake.negotiated.capabilities != TestAgent::CAPABILITIES
+
+    provider: DebuggerEngine::Provider = DebuggerEngine::provider_new(DebuggerCapabilities::EngineKind.InstrumentedNative, DebuggerCapabilities::native_live_capabilities())
+    controller: mutable DebuggerNative::NativeController = DebuggerNative::native_controller_new(provider)
+    controller <- DebuggerNative::native_attach(controller, DebuggerNative::AgentIdentity{protocol_major: TestAgent::PROTOCOL_MAJOR, build: TestAgent::BUILD, target: TestAgent::TARGET})
+    return TestResult::PARENT_CONTROLLER_FAILURE if controller.status != DebuggerNative::NativeStopStatus.Attached
+
+    legacy_control_protocol: mutable DebuggerAgentHandshake::NegotiatedProtocol = handshake.negotiated
+    legacy_control_protocol.protocol_minor <- TestAgent::LEGACY_CONTROL_PROTOCOL_MINOR
+    legacy_control: DebuggerAgentSession::OperationResult = DebuggerAgentSession::agent_session_pause(session, legacy_control_protocol, controller) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::LEGACY_CONTROL_PROTOCOL_FAILURE if legacy_control.status != DebuggerAgentSession::SessionStatus.UnsupportedControlProtocol or controller.status != DebuggerNative::NativeStopStatus.Attached
+
+    without_control: mutable DebuggerAgentHandshake::NegotiatedProtocol = handshake.negotiated
+    without_control.capabilities <- TestAgent::CAPABILITIES_WITHOUT_STOP_CONTROL
+    unavailable: DebuggerAgentSession::OperationResult = DebuggerAgentSession::agent_session_pause(session, without_control, controller) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::MISSING_CAPABILITY_FAILURE if unavailable.status != DebuggerAgentSession::SessionStatus.MissingStopControlCapability or controller.status != DebuggerNative::NativeStopStatus.Attached
+
+    paused: DebuggerAgentSession::OperationResult = DebuggerAgentSession::agent_session_pause(session, handshake.negotiated, controller) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_PAUSE_FAILURE if paused.status != DebuggerAgentSession::SessionStatus.Ready or controller.status != DebuggerNative::NativeStopStatus.Stopped or not DebuggerNative::native_can_inspect(controller)
+    resumed: DebuggerAgentSession::OperationResult = DebuggerAgentSession::agent_session_resume(session, handshake.negotiated, controller) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_RESUME_FAILURE if resumed.status != DebuggerAgentSession::SessionStatus.Ready or controller.status != DebuggerNative::NativeStopStatus.Attached or controller.agent_buffer.stopped
+
+    waited: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_process_wait(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_WAIT_FAILURE if waited != DebuggerLocalAgentTransport::TransportStatus.ChildReaped or session.exit_code != TestResult::SUCCESS.i32() or session.terminated_by_signal
+    closed: DebuggerLocalAgentTransport::TransportStatus = DebuggerLocalAgentTransport::local_agent_channel_close(session) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PARENT_CLOSE_FAILURE if closed != DebuggerLocalAgentTransport::TransportStatus.Ready or session.owned_descriptor_count != Frame::EMPTY_LENGTH
+    return TestResult::SUCCESS

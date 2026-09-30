@@ -46,9 +46,26 @@ module DebuggerAgentWire:
             HELLO_RESPONSE: u16 = 3
             STOP_REQUEST: u16 = 4
             RESUME_REQUEST: u16 = 5
+            CONTROL_ACKNOWLEDGEMENT: u16 = 6
 
         const module ControlPayload:
             EMPTY_RESERVED_WORD: u64 = 0
+
+        const module ControlAcknowledgementCode:
+            REQUEST_KIND_STOP: u64 = 0
+            REQUEST_KIND_RESUME: u64 = 1
+            RESULT_APPLIED: u64 = 0
+            RESULT_INVALID_REQUEST_GENERATION: u64 = 1
+            RESULT_INVALID_AGENT_STATE: u64 = 2
+            RESULT_STOP_ALREADY_PENDING: u64 = 3
+            RESULT_STALE_GENERATION: u64 = 4
+            RESULT_GENERATION_MISMATCH: u64 = 5
+            RESULT_STOP_NOT_ACKNOWLEDGED: u64 = 6
+            RESULT_AGENT_STATE_REJECTED: u64 = 7
+            LAST_REQUEST_KIND: u64 = 1
+            LAST_RESULT: u64 = 7
+            RESULT_SHIFT: u64 = 32
+            U32_MASK: u64 = 4294967295
 
         const module ByteEncoding:
             BITS_PER_BYTE: u64 = 8
@@ -115,6 +132,25 @@ module DebuggerAgentWire:
             result.status <- status
             return result
 
+        def control_acknowledgement_decode_failure(status: WireStatus) -> DecodedAgentControlAcknowledgement:
+            result: mutable DecodedAgentControlAcknowledgement = zeroed
+            result.status <- status
+            return result
+
+        def control_request_kind_code(kind: AgentControlKind) -> u64:
+            return ControlAcknowledgementCode::REQUEST_KIND_RESUME if kind == AgentControlKind.ResumeRequest
+            return ControlAcknowledgementCode::REQUEST_KIND_STOP
+
+        def control_result_code(result: AgentControlResult) -> u64:
+            return ControlAcknowledgementCode::RESULT_INVALID_REQUEST_GENERATION if result == AgentControlResult.InvalidRequestGeneration
+            return ControlAcknowledgementCode::RESULT_INVALID_AGENT_STATE if result == AgentControlResult.InvalidAgentState
+            return ControlAcknowledgementCode::RESULT_STOP_ALREADY_PENDING if result == AgentControlResult.StopAlreadyPending
+            return ControlAcknowledgementCode::RESULT_STALE_GENERATION if result == AgentControlResult.StaleGeneration
+            return ControlAcknowledgementCode::RESULT_GENERATION_MISMATCH if result == AgentControlResult.GenerationMismatch
+            return ControlAcknowledgementCode::RESULT_STOP_NOT_ACKNOWLEDGED if result == AgentControlResult.StopNotAcknowledged
+            return ControlAcknowledgementCode::RESULT_AGENT_STATE_REJECTED if result == AgentControlResult.AgentStateRejected
+            return ControlAcknowledgementCode::RESULT_APPLIED
+
         def hello_encode(hello: AgentHello, message_kind: u16) -> EncodedAgentHello:
             frame: mutable EncodedAgentHello = zeroed
             frame.status <- WireStatus.InvalidProtocolMajor if hello.protocol_major == Protocol::NO_AGENT_MAJOR
@@ -159,6 +195,41 @@ module DebuggerAgentWire:
             request_kind <- AgentControlKind.ResumeRequest if message_kind == Message::RESUME_REQUEST
             return DecodedAgentControlRequest{request: AgentControlRequest{kind: request_kind, generation: generation}, status: WireStatus.Ready}
 
+        def control_acknowledgement_encode(acknowledgement: AgentControlAcknowledgement) -> EncodedAgentControlAcknowledgement:
+            frame: mutable EncodedAgentControlAcknowledgement = zeroed
+            frame.status <- WireStatus.InvalidGeneration if acknowledgement.generation == Sentinel::NO_GENERATION
+            return frame if frame.status == WireStatus.InvalidGeneration
+            request_kind: u64 = control_request_kind_code(acknowledgement.request_kind)
+            result: u64 = control_result_code(acknowledgement.result)
+            packed_result: u64 = (result << ControlAcknowledgementCode::RESULT_SHIFT) | request_kind
+            write_frame(frame.bytes[Index::FIRST_BYTE], Message::CONTROL_ACKNOWLEDGEMENT, acknowledgement.generation, packed_result)
+            frame.length <- WireEnvelope::FRAME_LENGTH
+            frame.status <- WireStatus.Ready
+            return frame
+
+        def control_acknowledgement_decode(bytes: u8&, length: usize) -> DecodedAgentControlAcknowledgement:
+            frame_status: WireStatus = frame_decode_status(bytes, length, Message::CONTROL_ACKNOWLEDGEMENT)
+            return control_acknowledgement_decode_failure(frame_status) if frame_status != WireStatus.Ready
+            generation: u64 = read_u64(bytes, Offset::GENERATION)
+            return control_acknowledgement_decode_failure(WireStatus.InvalidGeneration) if generation == Sentinel::NO_GENERATION
+            packed_result: u64 = read_u64(bytes, Offset::EVENT_COUNT)
+            request_kind_code: u64 = packed_result & ControlAcknowledgementCode::U32_MASK
+            result_code: u64 = packed_result >> ControlAcknowledgementCode::RESULT_SHIFT
+            return control_acknowledgement_decode_failure(WireStatus.InvalidControlAcknowledgement) if request_kind_code > ControlAcknowledgementCode::LAST_REQUEST_KIND or result_code > ControlAcknowledgementCode::LAST_RESULT
+
+            request_kind: mutable AgentControlKind = AgentControlKind.StopRequest
+            request_kind <- AgentControlKind.ResumeRequest if request_kind_code == ControlAcknowledgementCode::REQUEST_KIND_RESUME
+            result: mutable AgentControlResult = AgentControlResult.Applied
+            result <- AgentControlResult.InvalidRequestGeneration if result_code == ControlAcknowledgementCode::RESULT_INVALID_REQUEST_GENERATION
+            result <- AgentControlResult.InvalidAgentState if result_code == ControlAcknowledgementCode::RESULT_INVALID_AGENT_STATE
+            result <- AgentControlResult.StopAlreadyPending if result_code == ControlAcknowledgementCode::RESULT_STOP_ALREADY_PENDING
+            result <- AgentControlResult.StaleGeneration if result_code == ControlAcknowledgementCode::RESULT_STALE_GENERATION
+            result <- AgentControlResult.GenerationMismatch if result_code == ControlAcknowledgementCode::RESULT_GENERATION_MISMATCH
+            result <- AgentControlResult.StopNotAcknowledged if result_code == ControlAcknowledgementCode::RESULT_STOP_NOT_ACKNOWLEDGED
+            result <- AgentControlResult.AgentStateRejected if result_code == ControlAcknowledgementCode::RESULT_AGENT_STATE_REJECTED
+            acknowledgement: AgentControlAcknowledgement = AgentControlAcknowledgement{request_kind: request_kind, generation: generation, result: result}
+            return DecodedAgentControlAcknowledgement{acknowledgement: acknowledgement, status: WireStatus.Ready}
+
     public:
         enum WireStatus:
             Ready
@@ -172,10 +243,21 @@ module DebuggerAgentWire:
             ChecksumMismatch
             InvalidProtocolMajor
             InvalidControlPayload
+            InvalidControlAcknowledgement
 
         enum AgentControlKind:
             StopRequest
             ResumeRequest
+
+        enum AgentControlResult:
+            Applied
+            InvalidRequestGeneration
+            InvalidAgentState
+            StopAlreadyPending
+            StaleGeneration
+            GenerationMismatch
+            StopNotAcknowledged
+            AgentStateRejected
 
         struct EncodedStopAcknowledgement:
             bytes: mutable u8[WireEnvelope::FRAME_CAPACITY]
@@ -211,6 +293,20 @@ module DebuggerAgentWire:
 
         struct DecodedAgentControlRequest:
             request: mutable AgentControlRequest
+            status: mutable WireStatus
+
+        struct AgentControlAcknowledgement:
+            request_kind: mutable AgentControlKind
+            generation: mutable u64
+            result: mutable AgentControlResult
+
+        struct EncodedAgentControlAcknowledgement:
+            bytes: mutable u8[WireEnvelope::FRAME_CAPACITY]
+            length: mutable usize
+            status: mutable WireStatus
+
+        struct DecodedAgentControlAcknowledgement:
+            acknowledgement: mutable AgentControlAcknowledgement
             status: mutable WireStatus
 
         def stop_acknowledgement_frame_length() -> usize:
@@ -261,3 +357,12 @@ module DebuggerAgentWire:
 
         def agent_control_request_decode(bytes: u8&, length: usize) -> DecodedAgentControlRequest:
             return control_request_decode(bytes, length)
+
+        def agent_control_acknowledgement_frame_length() -> usize:
+            return WireEnvelope::FRAME_LENGTH
+
+        def agent_control_acknowledgement_encode(acknowledgement: AgentControlAcknowledgement) -> EncodedAgentControlAcknowledgement:
+            return control_acknowledgement_encode(acknowledgement)
+
+        def agent_control_acknowledgement_decode(bytes: u8&, length: usize) -> DecodedAgentControlAcknowledgement:
+            return control_acknowledgement_decode(bytes, length)

@@ -1,0 +1,224 @@
+# Encodes validated native locals as a standard DAP VariablesResponse body.
+# Adapters own the outer DAP response envelope and transport framing.
+
+include "./dap_native_variables.elisa"
+include "../metadata/source.elisa"
+
+module DebuggerDAPNativeVariablesJson:
+    private:
+        const module BufferCapacity:
+            MAX_BODY_BYTES: usize = 16384
+
+        const module Index:
+            FIRST: usize = 0
+            INCREMENT: usize = 1
+
+        const module Identity:
+            NO_ID: u64 = 0
+
+        const module JsonCharacter:
+            NULL: u8 = 0
+            QUOTE: u8 = 34
+            BACKSLASH: u8 = 92
+            CONTROL_MAX: u8 = 31
+            ESCAPE_U: u8 = 117
+            ASCII_ZERO: u8 = 48
+
+        const module Decimal:
+            BASE: u64 = 10
+            MAX_DIGITS: usize = 20
+
+        const module Hexadecimal:
+            NIBBLE_BITS: u64 = 4
+            NIBBLE_MASK: u64 = 15
+            DIGITS: cstr = "0123456789abcdef"
+
+        const module DAP:
+            NO_CHILD_REFERENCE: u64 = 0
+
+        const module Literal:
+            BODY_PREFIX: cstr = "{\"variables\":["
+            ITEM_PREFIX: cstr = "{\"name\":"
+            VALUE_PREFIX: cstr = ",\"value\":"
+            TYPE_PREFIX: cstr = ",\"type\":"
+            REFERENCE_PREFIX: cstr = ",\"variablesReference\":"
+            ITEM_SUFFIX: cstr = "}"
+            ITEM_SEPARATOR: cstr = ","
+            BODY_SUFFIX: cstr = "]}"
+
+    public:
+        enum EncodeStatus:
+            Ready
+            InvalidPage
+            ResourceLimit
+
+        struct JsonBody:
+            bytes: mutable u8[BufferCapacity::MAX_BODY_BYTES]
+            length: mutable usize
+            status: mutable EncodeStatus
+
+    private:
+        def cstr_length(value: cstr) -> usize:
+            length: mutable usize = Index::FIRST
+            while value[length] != JsonCharacter::NULL:
+                length <- length + Index::INCREMENT
+            return length
+
+        def append_byte(output: mutable JsonBody&, value: u8) -> bool:
+            if output.length >= BufferCapacity::MAX_BODY_BYTES:
+                output.status <- EncodeStatus.ResourceLimit
+                return false
+            output.bytes[output.length] <- value
+            output.length <- output.length + Index::INCREMENT
+            return true
+
+        def append_cstr(output: mutable JsonBody&, value: cstr) -> bool:
+            length: usize = cstr_length(value)
+            for index in Index::FIRST..<length:
+                return false if not append_byte(output, value[index].u8())
+            return true
+
+        def append_u64(output: mutable JsonBody&, value: u64) -> bool:
+            reversed: mutable u8[Decimal::MAX_DIGITS] = zeroed
+            digit_count: mutable usize = Index::FIRST
+            remaining: mutable u64 = value
+            if remaining == Identity::NO_ID:
+                return append_byte(output, JsonCharacter::ASCII_ZERO)
+            while remaining > Identity::NO_ID:
+                return false if digit_count >= Decimal::MAX_DIGITS
+                reversed[digit_count] <- JsonCharacter::ASCII_ZERO + (remaining % Decimal::BASE).u8()
+                digit_count <- digit_count + Index::INCREMENT
+                remaining <- remaining / Decimal::BASE
+            while digit_count > Index::FIRST:
+                digit_count <- digit_count - Index::INCREMENT
+                return false if not append_byte(output, reversed[digit_count])
+            return true
+
+        def append_hex_digit(output: mutable JsonBody&, value: u64) -> bool:
+            digit: usize = (value & Hexadecimal::NIBBLE_MASK).usize()
+            return append_byte(output, Hexadecimal::DIGITS[digit].u8())
+
+        def append_json_string(output: mutable JsonBody&, bytes: u8&, length: usize) -> bool:
+            return false if not append_byte(output, JsonCharacter::QUOTE)
+            for index in Index::FIRST..<length:
+                byte: u8 = bytes[index]
+                if byte == JsonCharacter::QUOTE or byte == JsonCharacter::BACKSLASH:
+                    return false if not append_byte(output, JsonCharacter::BACKSLASH)
+                    return false if not append_byte(output, byte)
+                else:
+                    if byte <= JsonCharacter::CONTROL_MAX:
+                        return false if not append_byte(output, JsonCharacter::BACKSLASH)
+                        return false if not append_byte(output, JsonCharacter::ESCAPE_U)
+                        return false if not append_byte(output, JsonCharacter::ASCII_ZERO)
+                        return false if not append_byte(output, JsonCharacter::ASCII_ZERO)
+                        return false if not append_hex_digit(output, (byte.u64() >> Hexadecimal::NIBBLE_BITS))
+                        return false if not append_hex_digit(output, byte.u64())
+                    else:
+                        return false if not append_byte(output, byte)
+            return append_byte(output, JsonCharacter::QUOTE)
+
+        def variable_state_is_consistent(variable: DebuggerDAPNativeVariables::NativeVariableView) -> bool:
+            return false if variable.value_state == DebuggerAgentFrames::AgentValueState.Invalid
+            return false if variable.raw_length > DebuggerAgentFrames::Capacity::MAX_INLINE_VALUE_BYTES
+            descriptor: mutable DebuggerAgentFrames::AgentStorageDescriptor = zeroed
+            descriptor.binding <- variable.binding_id
+            descriptor.scope <- variable.scope_id
+            descriptor.type_id <- variable.type_id
+            descriptor.value_kind <- variable.value_kind
+            descriptor.state <- variable.value_state
+            descriptor.storage_kind <- variable.storage_kind
+            descriptor.storage_location <- variable.storage_location
+            descriptor.byte_size <- variable.byte_size
+            for byte_index in Index::FIRST..<variable.raw_length:
+                descriptor.bytes[byte_index] <- variable.raw_bytes[byte_index]
+            return false if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(descriptor)
+            if variable.value_state == DebuggerAgentFrames::AgentValueState.Available:
+                return false if variable.byte_size != variable.raw_length.u64()
+                if variable.display_state == DebuggerDAPNativeVariables::DisplayState.Scalar:
+                    return false if variable.value_kind != DebuggerAgentFrames::AgentValueKind.Signed and variable.value_kind != DebuggerAgentFrames::AgentValueKind.Unsigned and variable.value_kind != DebuggerAgentFrames::AgentValueKind.Boolean
+                    decoded: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(descriptor)
+                    return false if decoded.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready
+                    formatted: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded)
+                    return false if formatted.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or formatted.length != variable.display_length
+                    for display_index in Index::FIRST..<formatted.length:
+                        return false if formatted.bytes[display_index] != variable.display_bytes[display_index]
+                    return true
+                if variable.display_state == DebuggerDAPNativeVariables::DisplayState.Void:
+                    return variable.value_kind == DebuggerAgentFrames::AgentValueKind.Void and variable.raw_length == Index::FIRST
+                if variable.display_state == DebuggerDAPNativeVariables::DisplayState.Unsupported:
+                    return variable.value_kind != DebuggerAgentFrames::AgentValueKind.Signed and variable.value_kind != DebuggerAgentFrames::AgentValueKind.Unsigned and variable.value_kind != DebuggerAgentFrames::AgentValueKind.Boolean and variable.value_kind != DebuggerAgentFrames::AgentValueKind.Void
+                return false
+            return false if variable.raw_length != Index::FIRST
+            if variable.value_state == DebuggerAgentFrames::AgentValueState.Unavailable:
+                return variable.display_state == DebuggerDAPNativeVariables::DisplayState.Unavailable
+            if variable.value_state == DebuggerAgentFrames::AgentValueState.OptimizedAway:
+                return variable.display_state == DebuggerDAPNativeVariables::DisplayState.OptimizedAway
+            if variable.value_state == DebuggerAgentFrames::AgentValueState.Uninitialized:
+                return variable.display_state == DebuggerDAPNativeVariables::DisplayState.Uninitialized
+            if variable.value_state == DebuggerAgentFrames::AgentValueState.Redacted:
+                return variable.display_state == DebuggerDAPNativeVariables::DisplayState.Redacted
+            return false
+
+        def variables_page_is_valid(page: DebuggerDAPNativeVariables::VariablesPage&) -> bool:
+            return false if not page.valid or page.generation == Identity::NO_ID or page.thread_id == Identity::NO_ID or page.invocation.value == Identity::NO_ID
+            return false if page.total > DebuggerAgentFrames::agent_shadow_binding_capacity() or page.frame_index >= DebuggerAgentFrames::agent_shadow_frame_capacity()
+            return false if page.start > page.total or page.count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_BINDINGS_PER_PAGE or page.count > page.total - page.start
+            return false if page.count == Index::FIRST and page.start < page.total
+            expected_frame_id: u64 = DebuggerDAPFrames::frame_reference_encode(page.generation, page.frame_index)
+            expected_reference: u64 = DebuggerDAPFrames::variables_reference_encode(page.generation, page.frame_index)
+            return false if expected_frame_id == Identity::NO_ID or page.frame_id != expected_frame_id
+            return false if expected_reference == Identity::NO_ID or page.variables_reference != expected_reference
+            return false if page.has_more != (page.start + page.count < page.total)
+            for index in Index::FIRST..<page.count:
+                variable: DebuggerDAPNativeVariables::NativeVariableView = page.entries[index]
+                return false if variable.binding_id.value == Identity::NO_ID or variable.scope_id.value == Identity::NO_ID or variable.type_id.value == Identity::NO_ID
+                return false if variable.name_length == Index::FIRST or variable.name_length > DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+                return false if not DebuggerMetadata::metadata_text_utf8_is_valid(variable.name_bytes[Index::FIRST], variable.name_length, DebuggerMetadataNames::Bounds::MAX_NAME_BYTES)
+                return false if variable.display_length == Index::FIRST or variable.display_length > DebuggerDAPNativeVariables::Bounds::MAX_DISPLAY_BYTES
+                return false if not DebuggerMetadata::metadata_text_utf8_is_valid(variable.display_bytes[Index::FIRST], variable.display_length, DebuggerDAPNativeVariables::Bounds::MAX_DISPLAY_BYTES)
+                return false if variable.raw_length > DebuggerAgentFrames::Capacity::MAX_INLINE_VALUE_BYTES or not variable_state_is_consistent(variable)
+                if variable.has_type_name:
+                    return false if variable.type_name_length == Index::FIRST or variable.type_name_length > DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+                    return false if not DebuggerMetadata::metadata_text_utf8_is_valid(variable.type_name_bytes[Index::FIRST], variable.type_name_length, DebuggerMetadataNames::Bounds::MAX_NAME_BYTES)
+                else:
+                    return false if variable.type_name_length != Index::FIRST
+                for previous_index in Index::FIRST..<index:
+                    return false if page.entries[previous_index].binding_id.value == variable.binding_id.value
+            return true
+
+        def append_variable(output: mutable JsonBody&, variable: DebuggerDAPNativeVariables::NativeVariableView, include_type: bool) -> bool:
+            return false if not append_cstr(output, Literal::ITEM_PREFIX)
+            return false if not append_json_string(output, variable.name_bytes[Index::FIRST], variable.name_length)
+            return false if not append_cstr(output, Literal::VALUE_PREFIX)
+            return false if not append_json_string(output, variable.display_bytes[Index::FIRST], variable.display_length)
+            if include_type and variable.has_type_name:
+                return false if not append_cstr(output, Literal::TYPE_PREFIX)
+                return false if not append_json_string(output, variable.type_name_bytes[Index::FIRST], variable.type_name_length)
+            return false if not append_cstr(output, Literal::REFERENCE_PREFIX)
+            return false if not append_u64(output, DAP::NO_CHILD_REFERENCE)
+            return append_cstr(output, Literal::ITEM_SUFFIX)
+
+    public:
+        def native_variables_dap_json_encode(page: DebuggerDAPNativeVariables::VariablesPage&, supports_variable_type: bool, output: mutable JsonBody&) -> bool:
+            output.length <- Index::FIRST
+            output.status <- EncodeStatus.InvalidPage
+            return false if not variables_page_is_valid(page)
+            output.status <- EncodeStatus.Ready
+            if not append_cstr(output, Literal::BODY_PREFIX):
+                output.length <- Index::FIRST
+                return false
+            for index in Index::FIRST..<page.count:
+                if index > Index::FIRST:
+                    if not append_cstr(output, Literal::ITEM_SEPARATOR):
+                        output.length <- Index::FIRST
+                        return false
+                if not append_variable(output, page.entries[index], supports_variable_type):
+                    output.length <- Index::FIRST
+                    return false
+            if not append_cstr(output, Literal::BODY_SUFFIX):
+                output.length <- Index::FIRST
+                return false
+            return true
+
+        def native_variables_dap_json_capacity() -> usize:
+            return BufferCapacity::MAX_BODY_BYTES

@@ -83,6 +83,9 @@ const module Test:
     INCOMPATIBLE_PROTOCOL_MAJOR: u64 = 2
     FAILURE_INITIALIZE_ENCODING: i64 = 29
     FAILURE_TIMELINE_ENCODING: i64 = 34
+    FAILURE_AGENT_STACK_ENCODING: i64 = 41
+    FAILURE_AGENT_LOCAL_ENCODING: i64 = 42
+    FAILURE_AGENT_REJECT_INVALID: i64 = 43
     INITIALIZE_PROTOCOL_MAJOR: cstr = "\"protocolMajor\":1"
     INITIALIZE_PROTOCOL_MINOR: cstr = "\"protocolMinor\":0"
     INITIALIZE_SERVER_NAME: cstr = "\"server\":\"elisa-debugger\""
@@ -107,6 +110,40 @@ const module Test:
         CONSUMED: usize = 8
         FIELD: cstr = "\"evaluation\":{\"type\":\"i64\",\"value\":\"-9223372036854775808\",\"consumed\":8}"
         FAILURE: i64 = 35
+
+    const module NativeAgent:
+        THREAD_ID: u64 = 1301
+        ROOT_INVOCATION: u64 = 1401
+        CHILD_INVOCATION: u64 = 1402
+        ROOT_FUNCTION: u64 = 1501
+        CHILD_FUNCTION: u64 = 1502
+        TASK_ID: u64 = 1601
+        SOURCE_ID: u64 = 1701
+        FIRST_BINDING: u64 = 1801
+        SECOND_BINDING: u64 = 1802
+        SCOPE_ID: u64 = 1901
+        TYPE_ID: u64 = 2001
+        NO_PARENT: u64 = 0
+        LINE: u32 = 29
+        COLUMN: u32 = 6
+        FIRST_INDEX: usize = 0
+        CHILD_INDEX: usize = 1
+        TWO_FRAMES: usize = 2
+        TWO_BINDINGS: usize = 2
+        MAX_PAGE_BINDINGS: usize = DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_BINDINGS_PER_PAGE
+        FIRST_BYTE: usize = 0
+        SIGNED_WIDTH: usize = 1
+        SIGNED_VALUE: i64 = -42
+        STORAGE_LOCATION: i64 = -8
+        OPTIMIZED_BYTE_SIZE: u64 = 4
+        WRONG_PARENT: u64 = 9999
+        STACK_NEXT_FRAGMENT: cstr = "\"nextFrame\":null,\"complete\":true"
+        ROOT_FRAME_FRAGMENT: cstr = "\"invocationId\":\"1401\",\"parentInvocationId\":null"
+        CHILD_FRAME_FRAGMENT: cstr = "\"invocationId\":\"1402\",\"parentInvocationId\":\"1401\""
+        SIGNED_BYTES_FRAGMENT: cstr = "\"bytes\":\"d6\",\"display\":\"-42\",\"displayStatus\":\"available\""
+        OPTIMIZED_FRAGMENT: cstr = "\"state\":\"optimizedAway\",\"storageKind\":\"unknown\""
+        NULL_VALUE_FRAGMENT: cstr = "\"bytes\":null,\"display\":null,\"displayStatus\":\"unavailable\""
+        MAX_BINDING_FRAGMENT: cstr = "\"bindingId\":\"1816\""
 
 
 def discovery_flag_matches(buffer: DebuggerProtocolEncoding::JsonBuffer, key: cstr, expected: bool) -> bool:
@@ -210,6 +247,71 @@ def main() -> i64:
     locals_page.entries[Test::SECOND_LOCAL_INDEX] <- DebuggerManagedInspection::LocalSnapshot{index: Test::SECOND_LOCAL_INDEX, value: 0, available: false}
     locals_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::managed_locals_response_encode(Test::SUCCESS_ID, Test::SUCCESS_GENERATION, Test::TARGET_EVENT, locals_page)
     return 26 if not DebuggerProtocolEncoding::json_buffer_is_valid(locals_response) or not encoded_response_contains(locals_response, Test::LOCAL_UNAVAILABLE_VALUE)
+
+    native_stack: mutable DebuggerAgentSnapshotWire::DecodedSnapshotStackPage = zeroed
+    native_stack.status <- DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    native_stack.generation <- Test::SUCCESS_GENERATION
+    native_stack.thread_id <- Test::NativeAgent::THREAD_ID
+    native_stack.total_frame_count <- Test::NativeAgent::TWO_FRAMES
+    native_stack.frame_start <- Test::NativeAgent::FIRST_INDEX
+    native_stack.frame_count <- Test::NativeAgent::TWO_FRAMES
+    native_stack.frames[Test::NativeAgent::FIRST_INDEX] <- DebuggerAgentFrames::AgentShadowFrameInfo{invocation: DebuggerIdentity::debug_id(Test::NativeAgent::ROOT_INVOCATION), parent_invocation: DebuggerIdentity::debug_id(Test::NativeAgent::NO_PARENT), function: DebuggerIdentity::debug_id(Test::NativeAgent::ROOT_FUNCTION), task: DebuggerIdentity::debug_id(Test::NativeAgent::TASK_ID), source_file: DebuggerIdentity::debug_id(Test::NativeAgent::SOURCE_ID), source_line: Test::NativeAgent::LINE, source_column: Test::NativeAgent::COLUMN, binding_count: Test::NativeAgent::TWO_BINDINGS}
+    native_stack.frames[Test::NativeAgent::CHILD_INDEX] <- DebuggerAgentFrames::AgentShadowFrameInfo{invocation: DebuggerIdentity::debug_id(Test::NativeAgent::CHILD_INVOCATION), parent_invocation: DebuggerIdentity::debug_id(Test::NativeAgent::ROOT_INVOCATION), function: DebuggerIdentity::debug_id(Test::NativeAgent::CHILD_FUNCTION), task: DebuggerIdentity::debug_id(Test::NativeAgent::TASK_ID), source_file: DebuggerIdentity::debug_id(Test::NativeAgent::SOURCE_ID), source_line: Test::NativeAgent::LINE, source_column: Test::NativeAgent::COLUMN, binding_count: Test::NativeAgent::FIRST_INDEX}
+    native_stack_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::agent_stack_response_encode(Test::SUCCESS_ID, Test::SUCCESS_GENERATION, native_stack)
+    return Test::FAILURE_AGENT_STACK_ENCODING if not DebuggerProtocolEncoding::json_buffer_is_valid(native_stack_response) or not encoded_response_contains(native_stack_response, Test::NativeAgent::ROOT_FRAME_FRAGMENT) or not encoded_response_contains(native_stack_response, Test::NativeAgent::CHILD_FRAME_FRAGMENT) or not encoded_response_contains(native_stack_response, Test::NativeAgent::STACK_NEXT_FRAGMENT)
+    invalid_native_stack: mutable DebuggerAgentSnapshotWire::DecodedSnapshotStackPage = native_stack
+    invalid_native_stack.frames[Test::NativeAgent::CHILD_INDEX].parent_invocation.value <- Test::NativeAgent::WRONG_PARENT
+    return Test::FAILURE_AGENT_REJECT_INVALID if DebuggerProtocolEncoding::json_buffer_is_valid(DebuggerProtocolEncoding::agent_stack_response_encode(Test::SUCCESS_ID, Test::SUCCESS_GENERATION, invalid_native_stack))
+
+    native_locals: mutable DebuggerAgentSnapshotWire::DecodedSnapshotPage = zeroed
+    native_locals.status <- DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    native_locals.generation <- Test::SUCCESS_GENERATION
+    native_locals.thread_id <- Test::NativeAgent::THREAD_ID
+    native_locals.frame_index <- Test::NativeAgent::FIRST_INDEX
+    native_locals.frame <- native_stack.frames[Test::NativeAgent::FIRST_INDEX]
+    native_locals.binding_start <- Test::NativeAgent::FIRST_INDEX
+    native_locals.binding_count <- Test::NativeAgent::TWO_BINDINGS
+    encoded_native_scalar: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_signed(Test::NativeAgent::SIGNED_VALUE, Test::NativeAgent::SIGNED_WIDTH)
+    native_descriptor: DebuggerAgentValueCodec::EncodedDescriptor = DebuggerAgentValueCodec::agent_scalar_descriptor(DebuggerIdentity::debug_id(Test::NativeAgent::FIRST_BINDING), DebuggerIdentity::debug_id(Test::NativeAgent::SCOPE_ID), DebuggerIdentity::debug_id(Test::NativeAgent::TYPE_ID), DebuggerAgentFrames::AgentStorageKind.StackSlot, Test::NativeAgent::STORAGE_LOCATION, encoded_native_scalar)
+    return Test::FAILURE_AGENT_LOCAL_ENCODING if native_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready
+    native_locals.bindings[Test::NativeAgent::FIRST_INDEX] <- native_descriptor.descriptor
+    optimized_descriptor: mutable DebuggerAgentFrames::AgentStorageDescriptor = zeroed
+    optimized_descriptor.binding <- DebuggerIdentity::debug_id(Test::NativeAgent::SECOND_BINDING)
+    optimized_descriptor.scope <- DebuggerIdentity::debug_id(Test::NativeAgent::SCOPE_ID)
+    optimized_descriptor.type_id <- DebuggerIdentity::debug_id(Test::NativeAgent::TYPE_ID)
+    optimized_descriptor.value_kind <- DebuggerAgentFrames::AgentValueKind.Signed
+    optimized_descriptor.state <- DebuggerAgentFrames::AgentValueState.OptimizedAway
+    optimized_descriptor.storage_kind <- DebuggerAgentFrames::AgentStorageKind.Unknown
+    optimized_descriptor.byte_size <- Test::NativeAgent::OPTIMIZED_BYTE_SIZE
+    native_locals.bindings[Test::NativeAgent::CHILD_INDEX] <- optimized_descriptor
+    native_locals_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::agent_values_response_encode(Test::SUCCESS_ID, Test::SUCCESS_GENERATION, native_locals)
+    return Test::FAILURE_AGENT_LOCAL_ENCODING if not DebuggerProtocolEncoding::json_buffer_is_valid(native_locals_response) or not encoded_response_contains(native_locals_response, Test::NativeAgent::SIGNED_BYTES_FRAGMENT) or not encoded_response_contains(native_locals_response, Test::NativeAgent::OPTIMIZED_FRAGMENT) or not encoded_response_contains(native_locals_response, Test::NativeAgent::NULL_VALUE_FRAGMENT)
+    invalid_native_locals: mutable DebuggerAgentSnapshotWire::DecodedSnapshotPage = native_locals
+    invalid_native_locals.generation <- Test::SUCCESS_GENERATION + Test::SUCCESS_GENERATION
+    return Test::FAILURE_AGENT_REJECT_INVALID if DebuggerProtocolEncoding::json_buffer_is_valid(DebuggerProtocolEncoding::agent_values_response_encode(Test::SUCCESS_ID, Test::SUCCESS_GENERATION, invalid_native_locals))
+
+    maximum_native_locals: mutable DebuggerAgentSnapshotWire::DecodedSnapshotPage = zeroed
+    maximum_native_locals.status <- DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    maximum_native_locals.generation <- Test::SUCCESS_GENERATION
+    maximum_native_locals.thread_id <- Test::NativeAgent::THREAD_ID
+    maximum_native_locals.frame_index <- Test::NativeAgent::FIRST_INDEX
+    maximum_native_locals.frame <- native_stack.frames[Test::NativeAgent::FIRST_INDEX]
+    maximum_native_locals.frame.binding_count <- DebuggerAgentFrames::agent_shadow_binding_capacity()
+    maximum_native_locals.binding_start <- Test::NativeAgent::FIRST_INDEX
+    maximum_native_locals.binding_count <- Test::NativeAgent::MAX_PAGE_BINDINGS
+    for binding_index in Test::NativeAgent::FIRST_INDEX..<Test::NativeAgent::MAX_PAGE_BINDINGS:
+        maximum_native_locals.bindings[binding_index].binding <- DebuggerIdentity::debug_id(Test::NativeAgent::FIRST_BINDING + binding_index.u64())
+        maximum_native_locals.bindings[binding_index].scope <- DebuggerIdentity::debug_id(Test::NativeAgent::SCOPE_ID)
+        maximum_native_locals.bindings[binding_index].type_id <- DebuggerIdentity::debug_id(Test::NativeAgent::TYPE_ID)
+        maximum_native_locals.bindings[binding_index].value_kind <- DebuggerAgentFrames::AgentValueKind.Aggregate
+        maximum_native_locals.bindings[binding_index].state <- DebuggerAgentFrames::AgentValueState.Available
+        maximum_native_locals.bindings[binding_index].storage_kind <- DebuggerAgentFrames::AgentStorageKind.RuntimeSlot
+        maximum_native_locals.bindings[binding_index].byte_size <- DebuggerAgentFrames::agent_shadow_inline_value_capacity().u64()
+        for value_byte_index in Test::NativeAgent::FIRST_INDEX..<DebuggerAgentFrames::agent_shadow_inline_value_capacity():
+            maximum_native_locals.bindings[binding_index].bytes[value_byte_index] <- value_byte_index.u8()
+    maximum_native_locals_response: DebuggerProtocolEncoding::JsonBuffer = DebuggerProtocolEncoding::agent_values_response_encode(Test::SUCCESS_ID, Test::SUCCESS_GENERATION, maximum_native_locals)
+    return Test::FAILURE_AGENT_LOCAL_ENCODING if not DebuggerProtocolEncoding::json_buffer_is_valid(maximum_native_locals_response) or not encoded_response_contains(maximum_native_locals_response, Test::NativeAgent::MAX_BINDING_FRAGMENT)
+
     memory_read: mutable DebuggerMemory::MemoryRead = zeroed
     memory_read.address <- 8
     memory_read.length <- 4

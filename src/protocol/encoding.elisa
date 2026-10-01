@@ -11,6 +11,8 @@ include "../core/errors.elisa"
 include "../inspect/managed.elisa"
 include "../inspect/memory.elisa"
 include "../trace/verify.elisa"
+include "../agent/snapshot_wire.elisa"
+include "../agent/value_codec.elisa"
 
 module DebuggerProtocolEncoding:
     private:
@@ -40,7 +42,7 @@ module DebuggerProtocolEncoding:
             INITIALIZE_REQUIRED_MESSAGE: cstr = "initialize a compatible protocol version before using session methods"
 
         const module JsonValues:
-            JSON_BUFFER_CAPACITY: usize = 4096
+            JSON_BUFFER_CAPACITY: usize = 8192
             JSON_TRUE: cstr = "true"
             JSON_FALSE: cstr = "false"
             INVALID_INITIALIZE_MESSAGE: cstr = "initialize requires unsigned integer protocolMajor and protocolMinor"
@@ -83,6 +85,70 @@ module DebuggerProtocolEncoding:
             JSON_LOCAL_PREFIX: cstr = "local"
             JSON_MAIN_THREAD_ID: u64 = 1
             JSON_MAIN_THREAD_NAME: cstr = "main"
+
+        const module AgentResponse:
+            STACK_FIELD: cstr = ",\"stack\":{\"threadId\":"
+            STACK_TOTAL_PREFIX: cstr = ",\"totalFrames\":"
+            STACK_START_PREFIX: cstr = ",\"startFrame\":"
+            STACK_FRAMES_PREFIX: cstr = ",\"frames\":["
+            STACK_FRAME_INDEX_PREFIX: cstr = "{\"index\":"
+            STACK_INVOCATION_PREFIX: cstr = ",\"invocationId\":"
+            STACK_PARENT_PREFIX: cstr = ",\"parentInvocationId\":"
+            STACK_FUNCTION_PREFIX: cstr = ",\"functionId\":"
+            STACK_TASK_PREFIX: cstr = ",\"taskId\":"
+            STACK_SOURCE_PREFIX: cstr = ",\"sourceId\":"
+            STACK_LINE_PREFIX: cstr = ",\"line\":"
+            STACK_COLUMN_PREFIX: cstr = ",\"column\":"
+            STACK_LOCAL_COUNT_PREFIX: cstr = ",\"localCount\":"
+            STACK_NEXT_PREFIX: cstr = "],\"nextFrame\":"
+            VALUES_FIELD: cstr = ",\"values\":["
+            VALUES_FRAME_PREFIX: cstr = ",\"frame\":{\"index\":"
+            VALUES_INVOCATION_PREFIX: cstr = ",\"invocationId\":"
+            VALUES_TOTAL_PREFIX: cstr = ",\"totalBindings\":"
+            VALUES_START_PREFIX: cstr = ",\"startBinding\":"
+            VALUES_ENTRY_PREFIX: cstr = "{\"bindingId\":"
+            VALUES_SCOPE_PREFIX: cstr = ",\"scopeId\":"
+            VALUES_TYPE_PREFIX: cstr = ",\"typeId\":"
+            VALUES_NAME_PREFIX: cstr = ",\"name\":\"binding-"
+            VALUES_KIND_PREFIX: cstr = ",\"kind\":\""
+            VALUES_STATE_PREFIX: cstr = ",\"state\":\""
+            VALUES_STORAGE_KIND_PREFIX: cstr = ",\"storageKind\":\""
+            VALUES_STORAGE_LOCATION_PREFIX: cstr = ",\"storageLocation\":"
+            VALUES_BYTE_SIZE_PREFIX: cstr = ",\"byteSize\":"
+            VALUES_BYTES_PREFIX: cstr = ",\"bytes\":"
+            VALUES_DISPLAY_PREFIX: cstr = ",\"display\":"
+            VALUES_DISPLAY_STATUS_PREFIX: cstr = ",\"displayStatus\":\""
+            VALUES_NEXT_PREFIX: cstr = "],\"nextBinding\":"
+            PAGE_COMPLETE_PREFIX: cstr = ",\"complete\":"
+            JSON_NULL: cstr = "null"
+            JSON_AVAILABLE: cstr = "available"
+            JSON_UNAVAILABLE: cstr = "unavailable"
+            JSON_OPTIMIZED_AWAY: cstr = "optimizedAway"
+            JSON_UNINITIALIZED: cstr = "uninitialized"
+            JSON_REDACTED: cstr = "redacted"
+            JSON_INVALID: cstr = "invalid"
+            JSON_VOID: cstr = "void"
+            JSON_SIGNED: cstr = "signed"
+            JSON_UNSIGNED: cstr = "unsigned"
+            JSON_FLOATING: cstr = "floating"
+            JSON_BOOLEAN: cstr = "boolean"
+            JSON_TEXT: cstr = "text"
+            JSON_AGGREGATE: cstr = "aggregate"
+            JSON_REFERENCE: cstr = "reference"
+            JSON_OPAQUE: cstr = "opaque"
+            JSON_REGISTER: cstr = "register"
+            JSON_STACK_SLOT: cstr = "stackSlot"
+            JSON_CONSTANT: cstr = "constant"
+            JSON_RUNTIME_SLOT: cstr = "runtimeSlot"
+            JSON_UNKNOWN: cstr = "unknown"
+            JSON_DISPLAY_UNAVAILABLE: cstr = "unavailable"
+            JSON_DISPLAY_UNSUPPORTED: cstr = "unsupported"
+            JSON_DISPLAY_INVALID: cstr = "invalid"
+            EMPTY_COUNT: usize = 0
+            FIRST_ENTRY: usize = 0
+            ONE_ENTRY: usize = 1
+            ZERO_ID: u64 = 0
+            NO_NEXT_PAGE: usize = 0
 
         const module SourceBreakpointResponse:
             SOURCE_BREAKPOINT_RESPONSE_ITEMS_PREFIX: cstr = ",\"breakpoints\":["
@@ -350,6 +416,81 @@ module DebuggerProtocolEncoding:
             return false if response.request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or not DebuggerErrors::error_is_well_formed(response.failure)
             return false if response.next_page > ProductMetadata::PROTOCOL_ENCODING_PRODUCT_METADATA_MAX_TRACE_EVENTS
             return response.ok and DebuggerErrors::error_is_ok(response.failure) or not response.ok and not DebuggerErrors::error_is_ok(response.failure)
+
+        def native_stack_page_is_encodable(page: DebuggerAgentSnapshotWire::DecodedSnapshotStackPage, generation: u64) -> bool:
+            return false if page.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or generation == AgentResponse::ZERO_ID or page.generation != generation or page.thread_id == AgentResponse::ZERO_ID
+            return false if page.total_frame_count > DebuggerAgentFrames::agent_shadow_frame_capacity() or page.frame_start > page.total_frame_count
+            return false if page.frame_count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE or page.frame_count > page.total_frame_count - page.frame_start
+            return false if page.frame_count == AgentResponse::EMPTY_COUNT and page.frame_start < page.total_frame_count
+            for index in AgentResponse::FIRST_ENTRY..<page.frame_count:
+                frame: DebuggerAgentFrames::AgentShadowFrameInfo = page.frames[index]
+                ordinal: usize = page.frame_start + index
+                return false if frame.invocation.value == AgentResponse::ZERO_ID or frame.function.value == AgentResponse::ZERO_ID or frame.task.value == AgentResponse::ZERO_ID
+                return false if frame.binding_count > DebuggerAgentFrames::agent_shadow_binding_capacity()
+                return false if ordinal == AgentResponse::EMPTY_COUNT and frame.parent_invocation.value != AgentResponse::ZERO_ID
+                return false if ordinal > AgentResponse::EMPTY_COUNT and frame.parent_invocation.value == AgentResponse::ZERO_ID
+                if index > AgentResponse::FIRST_ENTRY:
+                    return false if frame.parent_invocation.value != page.frames[index - AgentResponse::ONE_ENTRY].invocation.value
+                for previous in AgentResponse::FIRST_ENTRY..<index:
+                    return false if frame.invocation.value == page.frames[previous].invocation.value
+            return true
+
+        def native_local_page_is_encodable(page: DebuggerAgentSnapshotWire::DecodedSnapshotPage, generation: u64) -> bool:
+            return false if page.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or generation == AgentResponse::ZERO_ID or page.generation != generation or page.thread_id == AgentResponse::ZERO_ID
+            return false if page.frame_index >= DebuggerAgentFrames::agent_shadow_frame_capacity() or page.frame.invocation.value == AgentResponse::ZERO_ID or page.frame.function.value == AgentResponse::ZERO_ID or page.frame.task.value == AgentResponse::ZERO_ID
+            return false if page.frame.binding_count > DebuggerAgentFrames::agent_shadow_binding_capacity() or page.binding_start > page.frame.binding_count
+            return false if page.binding_count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_BINDINGS_PER_PAGE or page.binding_count > page.frame.binding_count - page.binding_start
+            return false if page.binding_count == AgentResponse::EMPTY_COUNT and page.binding_start < page.frame.binding_count
+            for index in AgentResponse::FIRST_ENTRY..<page.binding_count:
+                descriptor: DebuggerAgentFrames::AgentStorageDescriptor = page.bindings[index]
+                return false if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(descriptor)
+                for previous in AgentResponse::FIRST_ENTRY..<index:
+                    return false if descriptor.binding.value == page.bindings[previous].binding.value
+            return true
+
+        def agent_value_kind_name(kind: DebuggerAgentFrames::AgentValueKind) -> cstr:
+            return AgentResponse::JSON_VOID if kind == DebuggerAgentFrames::AgentValueKind.Void
+            return AgentResponse::JSON_SIGNED if kind == DebuggerAgentFrames::AgentValueKind.Signed
+            return AgentResponse::JSON_UNSIGNED if kind == DebuggerAgentFrames::AgentValueKind.Unsigned
+            return AgentResponse::JSON_FLOATING if kind == DebuggerAgentFrames::AgentValueKind.Floating
+            return AgentResponse::JSON_BOOLEAN if kind == DebuggerAgentFrames::AgentValueKind.Boolean
+            return AgentResponse::JSON_TEXT if kind == DebuggerAgentFrames::AgentValueKind.Text
+            return AgentResponse::JSON_AGGREGATE if kind == DebuggerAgentFrames::AgentValueKind.Aggregate
+            return AgentResponse::JSON_REFERENCE if kind == DebuggerAgentFrames::AgentValueKind.Reference
+            return AgentResponse::JSON_OPAQUE
+
+        def agent_value_state_name(state: DebuggerAgentFrames::AgentValueState) -> cstr:
+            return AgentResponse::JSON_AVAILABLE if state == DebuggerAgentFrames::AgentValueState.Available
+            return AgentResponse::JSON_UNAVAILABLE if state == DebuggerAgentFrames::AgentValueState.Unavailable
+            return AgentResponse::JSON_OPTIMIZED_AWAY if state == DebuggerAgentFrames::AgentValueState.OptimizedAway
+            return AgentResponse::JSON_UNINITIALIZED if state == DebuggerAgentFrames::AgentValueState.Uninitialized
+            return AgentResponse::JSON_REDACTED if state == DebuggerAgentFrames::AgentValueState.Redacted
+            return AgentResponse::JSON_INVALID
+
+        def agent_storage_kind_name(kind: DebuggerAgentFrames::AgentStorageKind) -> cstr:
+            return AgentResponse::JSON_REGISTER if kind == DebuggerAgentFrames::AgentStorageKind.Register
+            return AgentResponse::JSON_STACK_SLOT if kind == DebuggerAgentFrames::AgentStorageKind.StackSlot
+            return AgentResponse::JSON_CONSTANT if kind == DebuggerAgentFrames::AgentStorageKind.Constant
+            return AgentResponse::JSON_RUNTIME_SLOT if kind == DebuggerAgentFrames::AgentStorageKind.RuntimeSlot
+            return AgentResponse::JSON_UNKNOWN
+
+        def agent_scalar_status_name(status: DebuggerAgentValueCodec::ValueCodecStatus) -> cstr:
+            return AgentResponse::JSON_AVAILABLE if status == DebuggerAgentValueCodec::ValueCodecStatus.Ready
+            return AgentResponse::JSON_DISPLAY_UNAVAILABLE if status == DebuggerAgentValueCodec::ValueCodecStatus.Unavailable
+            return AgentResponse::JSON_DISPLAY_INVALID if status == DebuggerAgentValueCodec::ValueCodecStatus.InvalidWidth or status == DebuggerAgentValueCodec::ValueCodecStatus.ValueOutOfRange or status == DebuggerAgentValueCodec::ValueCodecStatus.InvalidDescriptor or status == DebuggerAgentValueCodec::ValueCodecStatus.InvalidBoolean
+            return AgentResponse::JSON_DISPLAY_UNSUPPORTED
+
+        def buffer_put_scalar_display(buffer: mutable JsonBuffer&, descriptor: DebuggerAgentFrames::AgentStorageDescriptor&) -> DebuggerAgentValueCodec::ValueCodecStatus:
+            decoded: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(descriptor)
+            formatted: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded)
+            if formatted.status == DebuggerAgentValueCodec::ValueCodecStatus.Ready:
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                for index in AgentResponse::FIRST_ENTRY..<formatted.length:
+                    buffer_put_byte(buffer, formatted.bytes[index])
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+            else:
+                buffer_put_cstr(buffer, AgentResponse::JSON_NULL)
+            return formatted.status
 
     public:
         struct JsonBuffer:
@@ -640,6 +781,128 @@ module DebuggerProtocolEncoding:
             buffer_put_cstr(buffer, ",\"next\":")
             buffer_put_id_string(buffer, page.next.u64()) if page.next > Sentinels::NO_PAGE
             buffer_put_cstr(buffer, JsonValues::JSON_NULL) if page.next == Sentinels::NO_PAGE
+            buffer_put_cstr(buffer, "}}")
+            return buffer
+
+        # Serialize native stack metadata as the same bounded JSON contract
+        # used by editor-neutral clients. Opaque identities remain strings so
+        # JavaScript hosts preserve the full 64-bit value.
+        def agent_stack_response_encode(request_id: u64, generation: u64, page: DebuggerAgentSnapshotWire::DecodedSnapshotStackPage) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or not native_stack_page_is_encodable(page, generation):
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, AgentResponse::STACK_FIELD)
+            buffer_put_id_string(buffer, page.thread_id)
+            buffer_put_cstr(buffer, AgentResponse::STACK_TOTAL_PREFIX)
+            buffer_put_u64(buffer, page.total_frame_count.u64())
+            buffer_put_cstr(buffer, AgentResponse::STACK_START_PREFIX)
+            buffer_put_u64(buffer, page.frame_start.u64())
+            buffer_put_cstr(buffer, AgentResponse::STACK_FRAMES_PREFIX)
+            for index in AgentResponse::FIRST_ENTRY..<page.frame_count:
+                frame: DebuggerAgentFrames::AgentShadowFrameInfo = page.frames[index]
+                frame_index: usize = page.frame_start + index
+                if index > AgentResponse::FIRST_ENTRY:
+                    buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_COMMA)
+                buffer_put_cstr(buffer, AgentResponse::STACK_FRAME_INDEX_PREFIX)
+                buffer_put_u64(buffer, frame_index.u64())
+                buffer_put_cstr(buffer, AgentResponse::STACK_INVOCATION_PREFIX)
+                buffer_put_id_string(buffer, frame.invocation.value)
+                buffer_put_cstr(buffer, AgentResponse::STACK_PARENT_PREFIX)
+                if frame.parent_invocation.value == AgentResponse::ZERO_ID:
+                    buffer_put_cstr(buffer, AgentResponse::JSON_NULL)
+                else:
+                    buffer_put_id_string(buffer, frame.parent_invocation.value)
+                buffer_put_cstr(buffer, AgentResponse::STACK_FUNCTION_PREFIX)
+                buffer_put_id_string(buffer, frame.function.value)
+                buffer_put_cstr(buffer, AgentResponse::STACK_TASK_PREFIX)
+                buffer_put_id_string(buffer, frame.task.value)
+                buffer_put_cstr(buffer, AgentResponse::STACK_SOURCE_PREFIX)
+                buffer_put_id_string(buffer, frame.source_file.value)
+                buffer_put_cstr(buffer, AgentResponse::STACK_LINE_PREFIX)
+                buffer_put_u64(buffer, frame.source_line.u64())
+                buffer_put_cstr(buffer, AgentResponse::STACK_COLUMN_PREFIX)
+                buffer_put_u64(buffer, frame.source_column.u64())
+                buffer_put_cstr(buffer, AgentResponse::STACK_LOCAL_COUNT_PREFIX)
+                buffer_put_u64(buffer, frame.binding_count.u64())
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_BRACE_CLOSE)
+            next_frame: usize = page.frame_start + page.frame_count
+            buffer_put_cstr(buffer, AgentResponse::STACK_NEXT_PREFIX)
+            if next_frame < page.total_frame_count:
+                buffer_put_u64(buffer, next_frame.u64())
+            else:
+                buffer_put_cstr(buffer, AgentResponse::JSON_NULL)
+            buffer_put_cstr(buffer, AgentResponse::PAGE_COMPLETE_PREFIX)
+            buffer_put_bool(buffer, next_frame >= page.total_frame_count)
+            buffer_put_cstr(buffer, "}}}")
+            return buffer
+
+        # Native local pages preserve raw canonical bytes and storage metadata.
+        # Primitive display values use the scalar codec; unsupported composite
+        # representations are explicitly marked instead of guessed.
+        def agent_values_response_encode(request_id: u64, generation: u64, page: DebuggerAgentSnapshotWire::DecodedSnapshotPage) -> JsonBuffer:
+            buffer: mutable JsonBuffer = json_buffer_new()
+            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or not native_local_page_is_encodable(page, generation):
+                buffer.failed <- true
+                return buffer
+            managed_result_prefix(buffer, request_id, generation)
+            buffer_put_cstr(buffer, AgentResponse::VALUES_FRAME_PREFIX)
+            buffer_put_u64(buffer, page.frame_index.u64())
+            buffer_put_cstr(buffer, AgentResponse::VALUES_INVOCATION_PREFIX)
+            buffer_put_id_string(buffer, page.frame.invocation.value)
+            buffer_put_cstr(buffer, "},\"totalBindings\":")
+            buffer_put_u64(buffer, page.frame.binding_count.u64())
+            buffer_put_cstr(buffer, AgentResponse::VALUES_START_PREFIX)
+            buffer_put_u64(buffer, page.binding_start.u64())
+            buffer_put_cstr(buffer, AgentResponse::VALUES_FIELD)
+            for index in AgentResponse::FIRST_ENTRY..<page.binding_count:
+                descriptor: DebuggerAgentFrames::AgentStorageDescriptor = page.bindings[index]
+                if index > AgentResponse::FIRST_ENTRY:
+                    buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_COMMA)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_ENTRY_PREFIX)
+                buffer_put_id_string(buffer, descriptor.binding.value)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_SCOPE_PREFIX)
+                buffer_put_id_string(buffer, descriptor.scope.value)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_TYPE_PREFIX)
+                buffer_put_id_string(buffer, descriptor.type_id.value)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_NAME_PREFIX)
+                buffer_put_u64(buffer, descriptor.binding.value)
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_KIND_PREFIX)
+                buffer_put_cstr(buffer, agent_value_kind_name(descriptor.value_kind))
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_STATE_PREFIX)
+                buffer_put_cstr(buffer, agent_value_state_name(descriptor.state))
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_STORAGE_KIND_PREFIX)
+                buffer_put_cstr(buffer, agent_storage_kind_name(descriptor.storage_kind))
+                buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_STORAGE_LOCATION_PREFIX)
+                buffer_put_i64_string(buffer, descriptor.storage_location)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_BYTE_SIZE_PREFIX)
+                buffer_put_id_string(buffer, descriptor.byte_size)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_BYTES_PREFIX)
+                if descriptor.state == DebuggerAgentFrames::AgentValueState.Available:
+                    buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                    for byte_index in AgentResponse::FIRST_ENTRY..<descriptor.byte_size.usize():
+                        buffer_put_hex_byte(buffer, descriptor.bytes[byte_index])
+                    buffer_put_byte(buffer, Character::PROTOCOL_ENCODING_CHARACTER_ASCII_QUOTE)
+                else:
+                    buffer_put_cstr(buffer, AgentResponse::JSON_NULL)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_DISPLAY_PREFIX)
+                display_status: DebuggerAgentValueCodec::ValueCodecStatus = buffer_put_scalar_display(buffer, descriptor)
+                buffer_put_cstr(buffer, AgentResponse::VALUES_DISPLAY_STATUS_PREFIX)
+                buffer_put_cstr(buffer, agent_scalar_status_name(display_status))
+                buffer_put_cstr(buffer, "\"}")
+            next_binding: usize = page.binding_start + page.binding_count
+            buffer_put_cstr(buffer, AgentResponse::PAGE_COMPLETE_PREFIX)
+            buffer_put_bool(buffer, next_binding >= page.frame.binding_count)
+            buffer_put_cstr(buffer, AgentResponse::VALUES_NEXT_PREFIX)
+            if next_binding < page.frame.binding_count:
+                buffer_put_u64(buffer, next_binding.u64())
+            else:
+                buffer_put_cstr(buffer, AgentResponse::JSON_NULL)
             buffer_put_cstr(buffer, "}}")
             return buffer
 

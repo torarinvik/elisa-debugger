@@ -33,6 +33,18 @@ const module EncodedByte:
     FIRST: usize = 0
     LAST: usize = 7
 
+const module FormatExpected:
+    NEGATIVE_EIGHT: cstr = "-8"
+    NEGATIVE_EIGHT_LENGTH: usize = 2
+    SIGNED_MINIMUM: cstr = "-9223372036854775808"
+    SIGNED_MINIMUM_LENGTH: usize = 20
+    UNSIGNED_MAXIMUM: cstr = "18446744073709551615"
+    UNSIGNED_MAXIMUM_LENGTH: usize = 20
+    TRUE_TEXT: cstr = "true"
+    TRUE_LENGTH: usize = 4
+    FALSE_TEXT: cstr = "false"
+    FALSE_LENGTH: usize = 5
+
 const module Storage:
     STACK_OFFSET: i64 = -8
     ZERO: i64 = 0
@@ -54,12 +66,21 @@ const module TestResult:
     UNAVAILABLE: i64 = 13
     UNSUPPORTED_KIND: i64 = 14
     MALFORMED_ENCODED_DESCRIPTOR: i64 = 15
+    SIGNED_FORMAT: i64 = 16
+    UNSIGNED_FORMAT: i64 = 17
+    BOOLEAN_FORMAT: i64 = 18
 
 def debug_id(value: u64) -> DebuggerIdentity::DebugId:
     return DebuggerIdentity::DebugId{value: value}
 
 def descriptor_for(encoded: DebuggerAgentValueCodec::EncodedScalar) -> DebuggerAgentValueCodec::EncodedDescriptor:
     return DebuggerAgentValueCodec::agent_scalar_descriptor(debug_id(Identity::BINDING), debug_id(Identity::SCOPE), debug_id(Identity::TYPE), DebuggerAgentFrames::AgentStorageKind.StackSlot, Storage::STACK_OFFSET, encoded)
+
+def formatted_text_matches(bytes: u8&, length: usize, expected: cstr, expected_length: usize) -> bool:
+    return false if length != expected_length
+    for index in EncodedByte::FIRST..<expected_length:
+        return false if bytes[index] != expected[index].u8()
+    return true
 
 def main() -> i64:
     encoded_negative: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::NEGATIVE_EIGHT, Width::ONE_BYTE)
@@ -68,6 +89,8 @@ def main() -> i64:
     return TestResult::SIGNED_DESCRIPTOR if negative_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not DebuggerAgentFrames::agent_storage_descriptor_is_exact(negative_descriptor.descriptor)
     decoded_negative: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(negative_descriptor.descriptor)
     return TestResult::SIGNED_DECODE if decoded_negative.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_negative.signed_value != SignedValue::NEGATIVE_EIGHT
+    formatted_negative: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded_negative)
+    return TestResult::SIGNED_FORMAT if formatted_negative.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not formatted_text_matches(formatted_negative.bytes[EncodedByte::FIRST], formatted_negative.length, FormatExpected::NEGATIVE_EIGHT, FormatExpected::NEGATIVE_EIGHT_LENGTH)
     return TestResult::SIGNED_RANGE if DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::POSITIVE_ONE_TWENTY_EIGHT, Width::ONE_BYTE).status != DebuggerAgentValueCodec::ValueCodecStatus.ValueOutOfRange or DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::NEGATIVE_ONE_TWENTY_NINE, Width::ONE_BYTE).status != DebuggerAgentValueCodec::ValueCodecStatus.ValueOutOfRange
 
     encoded_minimum: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_signed(SignedValue::MINIMUM, Width::EIGHT_BYTES)
@@ -75,6 +98,8 @@ def main() -> i64:
     minimum_descriptor: DebuggerAgentValueCodec::EncodedDescriptor = descriptor_for(encoded_minimum)
     decoded_minimum: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(minimum_descriptor.descriptor)
     return TestResult::MINIMUM_DECODE if minimum_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_minimum.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_minimum.signed_value != SignedValue::MINIMUM
+    formatted_minimum: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded_minimum)
+    return TestResult::SIGNED_FORMAT if formatted_minimum.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not formatted_text_matches(formatted_minimum.bytes[EncodedByte::FIRST], formatted_minimum.length, FormatExpected::SIGNED_MINIMUM, FormatExpected::SIGNED_MINIMUM_LENGTH)
 
     encoded_unsigned: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_unsigned(UnsignedValue::MAXIMUM_FOUR_BYTE, Width::FOUR_BYTES)
     return TestResult::UNSIGNED_ENCODE if encoded_unsigned.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or encoded_unsigned.byte_count != Width::FOUR_BYTES or encoded_unsigned.bytes[EncodedByte::FIRST] != EncodedByte::UNSIGNED_MAXIMUM
@@ -85,16 +110,22 @@ def main() -> i64:
     maximum_descriptor: DebuggerAgentValueCodec::EncodedDescriptor = descriptor_for(DebuggerAgentValueCodec::agent_scalar_encode_unsigned(UnsignedValue::MAXIMUM, Width::EIGHT_BYTES))
     decoded_maximum: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(maximum_descriptor.descriptor)
     return TestResult::UNSIGNED_DECODE if decoded_maximum.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_maximum.unsigned_value != UnsignedValue::MAXIMUM
+    formatted_maximum: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded_maximum)
+    return TestResult::UNSIGNED_FORMAT if formatted_maximum.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not formatted_text_matches(formatted_maximum.bytes[EncodedByte::FIRST], formatted_maximum.length, FormatExpected::UNSIGNED_MAXIMUM, FormatExpected::UNSIGNED_MAXIMUM_LENGTH)
 
     encoded_boolean: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_boolean(true)
     boolean_descriptor: DebuggerAgentValueCodec::EncodedDescriptor = descriptor_for(encoded_boolean)
     decoded_boolean: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(boolean_descriptor.descriptor)
     return TestResult::BOOLEAN_ENCODE if encoded_boolean.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or encoded_boolean.byte_count != Width::ONE_BYTE or encoded_boolean.bytes[EncodedByte::FIRST] != EncodedByte::TRUE
     return TestResult::BOOLEAN_DECODE if boolean_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_boolean.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not decoded_boolean.boolean_value
+    formatted_true: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded_boolean)
+    return TestResult::BOOLEAN_FORMAT if formatted_true.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not formatted_text_matches(formatted_true.bytes[EncodedByte::FIRST], formatted_true.length, FormatExpected::TRUE_TEXT, FormatExpected::TRUE_LENGTH)
     encoded_false: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_boolean(false)
     false_descriptor: DebuggerAgentValueCodec::EncodedDescriptor = descriptor_for(encoded_false)
     decoded_false: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(false_descriptor.descriptor)
     return TestResult::BOOLEAN_DECODE if encoded_false.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or encoded_false.bytes[EncodedByte::FIRST] != EncodedByte::ZERO or false_descriptor.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_false.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or decoded_false.boolean_value
+    formatted_false: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded_false)
+    return TestResult::BOOLEAN_FORMAT if formatted_false.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or not formatted_text_matches(formatted_false.bytes[EncodedByte::FIRST], formatted_false.length, FormatExpected::FALSE_TEXT, FormatExpected::FALSE_LENGTH)
     boolean_descriptor.descriptor.bytes[EncodedByte::FIRST] <- EncodedByte::INVALID_BOOLEAN
     return TestResult::INVALID_BOOLEAN if DebuggerAgentValueCodec::agent_scalar_decode(boolean_descriptor.descriptor).status != DebuggerAgentValueCodec::ValueCodecStatus.InvalidBoolean
 

@@ -23,6 +23,16 @@ module DebuggerAgentValueCodec:
             ZERO_BITS: u64 = 0
             ZERO_LENGTH: usize = 0
 
+        const module Formatting:
+            DECIMAL_BASE: u64 = 10
+            ASCII_ZERO: u8 = 48
+            ASCII_MINUS: u8 = 45
+            MAX_DECIMAL_BYTES: usize = 20
+            TRUE_TEXT: cstr = "true"
+            TRUE_LENGTH: usize = 4
+            FALSE_TEXT: cstr = "false"
+            FALSE_LENGTH: usize = 5
+
         def scalar_width_is_valid(width: usize) -> bool:
             return width > Sentinel::ZERO_LENGTH and width <= ScalarWidth::MAX_INTEGER_BYTES
 
@@ -53,6 +63,32 @@ module DebuggerAgentValueCodec:
                 shift: u64 = ScalarWidth::BITS_PER_BYTE * index.u64()
                 bytes[index] <- ((value >> shift) & ByteValue::MASK).u8()
 
+        def format_unsigned_at(result: mutable FormattedScalar&, value: u64, start: usize) -> void:
+            remaining: mutable u64 = value
+            if remaining == Sentinel::ZERO_BITS:
+                result.bytes[start] <- Formatting::ASCII_ZERO
+                result.length <- start + Index::INCREMENT
+                return
+            while remaining > Sentinel::ZERO_BITS:
+                result.bytes[result.length] <- Formatting::ASCII_ZERO + (remaining % Formatting::DECIMAL_BASE).u8()
+                result.length <- result.length + Index::INCREMENT
+                remaining <- remaining / Formatting::DECIMAL_BASE
+            digit_count: usize = result.length - start
+            for index in Index::FIRST..<(digit_count / (Index::INCREMENT + Index::INCREMENT)):
+                reverse_index: usize = result.length - Index::INCREMENT - index
+                saved: u8 = result.bytes[start + index]
+                result.bytes[start + index] <- result.bytes[reverse_index]
+                result.bytes[reverse_index] <- saved
+
+        def format_signed_at(result: mutable FormattedScalar&, value: i64) -> void:
+            if value < Sentinel::ZERO_LENGTH.i64():
+                result.bytes[Index::FIRST] <- Formatting::ASCII_MINUS
+                result.length <- Index::INCREMENT
+                magnitude: u64 = (-(value + Index::INCREMENT.i64())).u64() + Index::INCREMENT.u64()
+                format_unsigned_at(result, magnitude, Index::INCREMENT)
+                return
+            format_unsigned_at(result, value.u64(), Index::FIRST)
+
     public:
         enum ValueCodecStatus:
             Ready
@@ -78,6 +114,11 @@ module DebuggerAgentValueCodec:
 
         struct EncodedDescriptor:
             descriptor: mutable DebuggerAgentFrames::AgentStorageDescriptor
+            status: mutable ValueCodecStatus
+
+        struct FormattedScalar:
+            bytes: mutable u8[Formatting::MAX_DECIMAL_BYTES]
+            length: mutable usize
             status: mutable ValueCodecStatus
 
         def agent_scalar_encode_signed(value: i64, width: usize) -> EncodedScalar:
@@ -167,6 +208,32 @@ module DebuggerAgentValueCodec:
             for index in Index::FIRST..<encoded.byte_count:
                 result.descriptor.bytes[index] <- encoded.bytes[index]
             result.status <- ValueCodecStatus.InvalidDescriptor if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(result.descriptor)
+            return result
+
+        # Return locale-independent display text for primitive scalar values.
+        # Bytes remain raw and explicitly unavailable composites are not
+        # flattened into an incorrect decimal representation.
+        def agent_scalar_format(value: DecodedScalar) -> FormattedScalar:
+            result: mutable FormattedScalar = zeroed
+            result.status <- value.status
+            return result if value.status != ValueCodecStatus.Ready
+            if value.value_kind == DebuggerAgentFrames::AgentValueKind.Signed:
+                format_signed_at(result, value.signed_value)
+                return result
+            if value.value_kind == DebuggerAgentFrames::AgentValueKind.Unsigned:
+                format_unsigned_at(result, value.unsigned_value, Index::FIRST)
+                return result
+            if value.value_kind == DebuggerAgentFrames::AgentValueKind.Boolean:
+                if value.boolean_value:
+                    result.length <- Formatting::TRUE_LENGTH
+                    for index in Index::FIRST..<Formatting::TRUE_LENGTH:
+                        result.bytes[index] <- Formatting::TRUE_TEXT[index].u8()
+                else:
+                    result.length <- Formatting::FALSE_LENGTH
+                    for index in Index::FIRST..<Formatting::FALSE_LENGTH:
+                        result.bytes[index] <- Formatting::FALSE_TEXT[index].u8()
+                return result
+            result.status <- ValueCodecStatus.UnsupportedKind
             return result
 
         def agent_scalar_codec_integer_capacity() -> usize:

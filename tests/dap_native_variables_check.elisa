@@ -4,6 +4,8 @@ const module DAPNativeVariablesFixture:
     THREAD: u64 = 700
     INVOCATION: u64 = 701
     FUNCTION: u64 = 702
+    CHILD_INVOCATION: u64 = 709
+    CHILD_FUNCTION: u64 = 710
     TASK: u64 = 703
     GENERATION: u64 = 9
     SCOPE: u64 = 800
@@ -48,6 +50,7 @@ const module DAPNativeVariablesFixture:
     NEXT_GENERATION: u64 = GENERATION + GENERATION_STEP
     OTHER_FUNCTION: u64 = 1702
     BOOLEAN_FALSE: bool = false
+    STACK_PAGE_FRAME_LIMIT: usize = 1
 
 const module DAPNativeVariablesWidth:
     ONE_BYTE: usize = 1
@@ -89,6 +92,9 @@ const module DAPNativeVariablesFailure:
     CORRUPT_BOOLEAN_ACCEPTED: i64 = 20
     INVALID_STATE_ACCEPTED: i64 = 21
     CORRUPT_DESCRIPTOR_ACCEPTED: i64 = 22
+    REFERENCE_RESOLUTION: i64 = 23
+    STALE_REFERENCE_ACCEPTED: i64 = 24
+    OUT_OF_PAGE_REFERENCE_ACCEPTED: i64 = 25
 
 const module DAPNativeVariablesPage:
     FIRST: usize = 0
@@ -104,6 +110,7 @@ const module DAPNativeVariablesPage:
     THIRD_PAGE_LIMIT: usize = 3
     THIRD_PAGE_COUNT: usize = 3
     TOTAL_BINDINGS: usize = 8
+    TOTAL_STACK_FRAMES: usize = 2
     EMPTY: usize = 0
     NO_EVENT: u64 = 0
     GENERATION_INCREMENT: u64 = 1
@@ -182,6 +189,7 @@ def main() -> i64:
     shadow_stack: mutable DebuggerAgentFrames::AgentShadowStack = zeroed
     return DAPNativeVariablesFailure::STACK_SETUP if DebuggerAgentFrames::agent_shadow_stack_initialize(shadow_stack, debug_id(DAPNativeVariablesFixture::THREAD)) != DebuggerAgentFrames::ShadowStatus.Ready
     return DAPNativeVariablesFailure::STACK_SETUP if DebuggerAgentFrames::agent_shadow_frame_push(shadow_stack, debug_id(DAPNativeVariablesFixture::INVOCATION), debug_id(DAPNativeVariablesFixture::ZERO_ID), debug_id(DAPNativeVariablesFixture::FUNCTION), debug_id(DAPNativeVariablesFixture::TASK), debug_id(DAPNativeVariablesFixture::ZERO_ID), DAPNativeVariablesPage::EMPTY.u32(), DAPNativeVariablesPage::EMPTY.u32()) != DebuggerAgentFrames::ShadowStatus.Ready
+    return DAPNativeVariablesFailure::STACK_SETUP if DebuggerAgentFrames::agent_shadow_frame_push(shadow_stack, debug_id(DAPNativeVariablesFixture::CHILD_INVOCATION), debug_id(DAPNativeVariablesFixture::INVOCATION), debug_id(DAPNativeVariablesFixture::CHILD_FUNCTION), debug_id(DAPNativeVariablesFixture::TASK), debug_id(DAPNativeVariablesFixture::ZERO_ID), DAPNativeVariablesPage::EMPTY.u32(), DAPNativeVariablesPage::EMPTY.u32()) != DebuggerAgentFrames::ShadowStatus.Ready
 
     encoded_counter: DebuggerAgentValueCodec::EncodedScalar = DebuggerAgentValueCodec::agent_scalar_encode_signed(DAPNativeVariablesFixture::NEGATIVE_VALUE, DAPNativeVariablesWidth::ONE_BYTE)
     return DAPNativeVariablesFailure::LOCAL_SETUP if DebuggerAgentValueCodec::agent_shadow_binding_declare_scalar(shadow_stack, debug_id(DAPNativeVariablesFixture::INVOCATION), debug_id(DAPNativeVariablesFixture::COUNTER_BINDING), debug_id(DAPNativeVariablesFixture::SCOPE), debug_id(DAPNativeVariablesFixture::INTEGER_TYPE), DebuggerAgentFrames::AgentStorageKind.StackSlot, DAPNativeVariablesStorage::STACK_OFFSET, encoded_counter) != DebuggerAgentFrames::ShadowStatus.Ready
@@ -209,7 +217,7 @@ def main() -> i64:
     stack_request: mutable DebuggerAgentSnapshotWire::SnapshotStackPageRequest = zeroed
     stack_request.generation <- DAPNativeVariablesFixture::GENERATION
     stack_request.thread_id <- DAPNativeVariablesFixture::THREAD
-    stack_request.frame_limit <- DebuggerAgentSnapshotWire::snapshot_stack_page_capacity()
+    stack_request.frame_limit <- DAPNativeVariablesFixture::STACK_PAGE_FRAME_LIMIT
     stack_encoded: DebuggerAgentSnapshotWire::EncodedSnapshotStackPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_stack_page_request_encode(stack_request)
     wire_buffer: mutable DebuggerAgentSnapshotWire::SnapshotWireBuffer = zeroed
     return DAPNativeVariablesFailure::SNAPSHOT_SETUP if stack_encoded.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or DebuggerAgentSnapshotWire::agent_snapshot_stack_page_dispatch(stack_encoded.bytes[DAPNativeVariablesPage::FIRST], stack_encoded.length, shadow_stack, registry, wire_buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
@@ -217,9 +225,17 @@ def main() -> i64:
     return DAPNativeVariablesFailure::SNAPSHOT_SETUP if DebuggerAgentSnapshotWire::agent_snapshot_stack_page_decode(wire_buffer.bytes[DAPNativeVariablesPage::FIRST], wire_buffer.length, raw_stack) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
     projected_stack: mutable DebuggerDAPNativeFrames::StackPage = zeroed
     return DAPNativeVariablesFailure::STACK_PROJECTION if not DebuggerDAPNativeFrames::native_stack_page_to_dap(raw_stack, source_store, projected_stack)
+    return DAPNativeVariablesFailure::STACK_PROJECTION if projected_stack.total_frames != DAPNativeVariablesPage::TOTAL_STACK_FRAMES or projected_stack.start_frame != DAPNativeVariablesPage::SECOND or projected_stack.count != DAPNativeVariablesFixture::STACK_PAGE_FRAME_LIMIT
     frame: mutable DebuggerDAPNativeFrames::NativeFrameView = zeroed
     return DAPNativeVariablesFailure::STACK_PROJECTION if not DebuggerDAPNativeFrames::native_stack_page_frame(projected_stack, DAPNativeVariablesPage::FIRST, source_store, names, frame)
-    return DAPNativeVariablesFailure::STACK_PROJECTION if frame.native_frame_index != DAPNativeVariablesPage::EMPTY or frame.generation != DAPNativeVariablesFixture::GENERATION or frame.thread_id != DAPNativeVariablesFixture::THREAD
+    return DAPNativeVariablesFailure::STACK_PROJECTION if frame.native_frame_index != DAPNativeVariablesPage::EMPTY or frame.stack_index != DAPNativeVariablesPage::SECOND or frame.generation != DAPNativeVariablesFixture::GENERATION or frame.thread_id != DAPNativeVariablesFixture::THREAD
+    frame_reference: u64 = DebuggerDAPFrames::variables_reference_encode(DAPNativeVariablesFixture::GENERATION, frame.stack_index)
+    resolved_frame: mutable DebuggerDAPNativeFrames::NativeFrameView = zeroed
+    return DAPNativeVariablesFailure::REFERENCE_RESOLUTION if not DebuggerDAPNativeVariables::native_variables_reference_resolve(projected_stack, source_store, names, DAPNativeVariablesFixture::GENERATION, frame_reference, resolved_frame)
+    return DAPNativeVariablesFailure::REFERENCE_RESOLUTION if resolved_frame.id != frame.id or resolved_frame.native_frame_index != frame.native_frame_index or resolved_frame.invocation.value != frame.invocation.value
+    return DAPNativeVariablesFailure::STALE_REFERENCE_ACCEPTED if DebuggerDAPNativeVariables::native_variables_reference_resolve(projected_stack, source_store, names, DAPNativeVariablesFixture::NEXT_GENERATION, frame_reference, resolved_frame)
+    outside_page_reference: u64 = DebuggerDAPFrames::variables_reference_encode(DAPNativeVariablesFixture::GENERATION, DAPNativeVariablesPage::FIRST)
+    return DAPNativeVariablesFailure::OUT_OF_PAGE_REFERENCE_ACCEPTED if DebuggerDAPNativeVariables::native_variables_reference_resolve(projected_stack, source_store, names, DAPNativeVariablesFixture::GENERATION, outside_page_reference, resolved_frame)
 
     page_request: mutable DebuggerAgentSnapshotWire::SnapshotPageRequest = zeroed
     page_request.generation <- DAPNativeVariablesFixture::GENERATION

@@ -230,3 +230,16 @@ module DebuggerDAPNativeVariables:
             result.has_more <- raw.binding_start + raw.binding_count < raw.frame.binding_count
             result.valid <- true
             return true
+
+        # Resolve a DAP locals handle only within the captured stack page and
+        # current stop generation before issuing a native snapshot request.
+        def native_variables_reference_resolve(stack_page: DebuggerDAPNativeFrames::StackPage&, source_store: mutable DebuggerSourceStore::SourceStore&, names: mutable DebuggerMetadataNames::NameStore&, generation: u64, reference: u64, output: mutable DebuggerDAPNativeFrames::NativeFrameView&) -> bool:
+            output <- zeroed
+            return false if not stack_page.valid or generation == Identity::NO_ID or stack_page.generation != generation or stack_page.thread_id == Identity::NO_ID
+            return false if stack_page.total_frames == Sentinel::EMPTY_COUNT or stack_page.total_frames > DebuggerAgentFrames::agent_shadow_frame_capacity()
+            return false if stack_page.start_frame > stack_page.total_frames or stack_page.count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE or stack_page.count > stack_page.total_frames - stack_page.start_frame
+            last_frame_index: usize = stack_page.total_frames - Index::INCREMENT
+            frame_index: usize = DebuggerDAPFrames::variables_reference_decode(generation, last_frame_index, reference)
+            return false if frame_index >= DebuggerAgentFrames::agent_shadow_frame_capacity()
+            return false if frame_index < stack_page.start_frame or frame_index - stack_page.start_frame >= stack_page.count
+            return DebuggerDAPNativeFrames::native_stack_page_frame(stack_page, frame_index - stack_page.start_frame, source_store, names, output)

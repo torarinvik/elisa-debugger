@@ -31,9 +31,10 @@ carry their operands and results.
 ## Exactness rules
 
 An exact claim requires a valid build/trace identity, a supported provider,
-validated state, and no diverged or incomplete effect, scheduler, or trace
-segment. A partial or observational result remains useful for inspection but
-must not be advertised as resumable replay.
+validated state, a non-overflowed virtual-resource journal, and no diverged or
+incomplete effect, scheduler, or trace segment. A partial or observational
+result remains useful for inspection but must not be advertised as resumable
+replay.
 
 ## Platform qualification
 

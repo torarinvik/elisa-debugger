@@ -151,7 +151,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
 .PHONY: metadata-names-check
-.PHONY: managed-allocations-check concurrency-races-check expression-parser-check timeline-capability-check type-metadata-check
+.PHONY: managed-allocations-check managed-exactness-check concurrency-races-check expression-parser-check timeline-capability-check type-metadata-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
 .PHONY: native-macos-memory-check native-macos-memory-tool native-macos-attach-check
@@ -258,6 +258,7 @@ module-check: $(BUILD)/elisa-debugger-replay-seek-atomicity-check
 module-check: $(BUILD)/elisa-debugger-state-integrity-check
 module-check: $(BUILD)/elisa-debugger-trace-checkpoint-validation-check
 module-check: $(BUILD)/elisa-debugger-full-checkpoint-codec-check
+module-check: $(BUILD)/elisa-debugger-managed-exactness-check
 module-check: $(BUILD)/elisa-debugger-managed-memory-write-history-check
 module-check: $(BUILD)/elisa-debugger-dap-events-check $(BUILD)/elisa-debugger-dap-continue-partial-check
 module-check: $(DAP_STACK_FRAMES_CHECK)
@@ -283,6 +284,7 @@ module-check: $(BUILD)/elisa-debugger-type-metadata-check
 	"$(EXPRESSION_PARSER_CHECK)"
 	"$(DAP_STACK_FRAMES_CHECK)"
 	"$(BUILD)/elisa-debugger-managed-service-check"
+	"$(BUILD)/elisa-debugger-managed-exactness-check"
 	"$(BUILD)/elisa-debugger-managed-trace-service-check"
 	"$(BUILD)/elisa-debugger-managed-memory-write-history-check"
 	"$(BUILD)/elisa-debugger-protocol-events-check"
@@ -350,6 +352,9 @@ managed-inspection-check: $(BUILD)/elisa-debugger-managed-inspection-check
 
 managed-service-check: $(BUILD)/elisa-debugger-managed-service-check
 	"$(BUILD)/elisa-debugger-managed-service-check"
+
+managed-exactness-check: $(BUILD)/elisa-debugger-managed-exactness-check
+	"$(BUILD)/elisa-debugger-managed-exactness-check"
 
 managed-trace-service-check: $(BUILD)/elisa-debugger-managed-trace-service-check
 	"$(BUILD)/elisa-debugger-managed-trace-service-check"
@@ -654,6 +659,10 @@ $(BUILD)/elisa-debugger-module-core-check: tests/module_core_check.elisa $(ELISA
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 $(BUILD)/elisa-debugger-module-data-check: tests/module_data_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-managed-exactness-check: tests/managed_exactness_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 

@@ -220,6 +220,7 @@ module-check: native-local-ipc-check
 module-check: native-local-agent-transport-check
 endif
 module-check: dap-function-breakpoints-check
+module-check: dap-native-frames-check
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 module-check: $(MANAGED_ALLOCATIONS_CHECK)
 
@@ -467,6 +468,16 @@ $(DAP_STACK_FRAMES_CHECK): tests/dap_stack_frames_check.elisa $(ELISA_BUILD_INPU
 
 dap-stack-frames-check: $(DAP_STACK_FRAMES_CHECK)
 	"$(DAP_STACK_FRAMES_CHECK)"
+
+# Native snapshot pages are root-to-current; verify the adapter projection's
+# DAP ordering, source lookup, stable handles, and corruption guards.
+.PHONY: dap-native-frames-check
+$(BUILD)/elisa-debugger-dap-native-frames-check: tests/dap_native_frames_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+dap-native-frames-check: $(BUILD)/elisa-debugger-dap-native-frames-check
+	"$(BUILD)/elisa-debugger-dap-native-frames-check"
 
 # Exercise the real DAP transport first at the root frame and then inside the
 # EDIR fixture's call, where stackTrace must not mislabel the callee as main.

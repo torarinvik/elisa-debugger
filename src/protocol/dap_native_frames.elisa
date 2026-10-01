@@ -1,0 +1,154 @@
+# Converts native snapshot stack pages into DAP-ordered frame projections.
+# The agent speaks root-to-current order; editor stacks present current first.
+
+include "../agent/snapshot_wire.elisa"
+include "../metadata/source_store.elisa"
+include "./dap_frames.elisa"
+
+module DebuggerDAPNativeFrames:
+    private:
+        const module NativePage:
+            FIRST_INDEX: usize = 0
+            EMPTY_COUNT: usize = 0
+            INDEX_INCREMENT: usize = 1
+
+        const module Identity:
+            NO_ID: u64 = 0
+
+        const module Name:
+            LABEL: cstr = "native frame"
+            LABEL_LENGTH: usize = 12
+            FIRST_BYTE_INDEX: usize = 0
+
+        const module FrameReference:
+            NO_REFERENCE: u64 = 0
+
+    public:
+        struct NativeFrameView:
+            id: mutable u64
+            stack_index: mutable usize
+            invocation: mutable DebuggerIdentity::DebugId
+            parent_invocation: mutable DebuggerIdentity::DebugId
+            function: mutable DebuggerIdentity::DebugId
+            task: mutable DebuggerIdentity::DebugId
+            source_file: mutable DebuggerIdentity::DebugId
+            source_line: mutable u32
+            source_column: mutable u32
+            name_bytes: mutable u8[DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY]
+            name_length: mutable usize
+            has_source: mutable bool
+
+        struct StackPage:
+            valid: mutable bool
+            start_frame: mutable usize
+            generation: mutable u64
+            thread_id: mutable u64
+            ids: mutable u64[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            stack_indexes: mutable usize[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            invocations: mutable DebuggerIdentity::DebugId[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            parent_invocations: mutable DebuggerIdentity::DebugId[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            functions: mutable DebuggerIdentity::DebugId[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            tasks: mutable DebuggerIdentity::DebugId[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            source_files: mutable DebuggerIdentity::DebugId[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            source_lines: mutable u32[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            source_columns: mutable u32[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            has_sources: mutable bool[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE]
+            count: mutable usize
+            total_frames: mutable usize
+
+        def native_stack_page_is_valid(raw: DebuggerAgentSnapshotWire::DecodedSnapshotStackPage&, source_store: mutable DebuggerSourceStore::SourceStore&) -> bool:
+            return false if raw.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+            return false if raw.generation == Identity::NO_ID or raw.thread_id == Identity::NO_ID
+            return false if not DebuggerSourceStore::source_store_is_valid(source_store)
+            capacity: usize = DebuggerAgentFrames::agent_shadow_frame_capacity()
+            return false if raw.total_frame_count > capacity or raw.frame_start > raw.total_frame_count
+            return false if raw.frame_count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE
+            return false if raw.frame_count > raw.total_frame_count - raw.frame_start
+            return false if raw.frame_count == NativePage::EMPTY_COUNT and raw.frame_start < raw.total_frame_count
+            for index in NativePage::FIRST_INDEX..<raw.frame_count:
+                absolute_index: usize = raw.frame_start + index
+                return false if raw.frames[index].invocation.value == Identity::NO_ID or raw.frames[index].function.value == Identity::NO_ID or raw.frames[index].task.value == Identity::NO_ID
+                if absolute_index == NativePage::FIRST_INDEX:
+                    return false if raw.frames[index].parent_invocation.value != Identity::NO_ID
+                else:
+                    return false if raw.frames[index].parent_invocation.value == Identity::NO_ID
+                if index > NativePage::FIRST_INDEX:
+                    previous_index: usize = index - NativePage::INDEX_INCREMENT
+                    return false if raw.frames[index].parent_invocation.value != raw.frames[previous_index].invocation.value
+                for previous_index in NativePage::FIRST_INDEX..<index:
+                    return false if raw.frames[index].invocation.value == raw.frames[previous_index].invocation.value
+            return true
+
+        # The output is caller-owned so adapters do not copy a full stack page.
+        # Source identities can be resolved to path metadata through SourceStore.
+        def native_stack_page_to_dap(raw: DebuggerAgentSnapshotWire::DecodedSnapshotStackPage&, source_store: mutable DebuggerSourceStore::SourceStore&, result: mutable StackPage&) -> bool:
+            result.valid <- false
+            result.start_frame <- NativePage::EMPTY_COUNT
+            result.generation <- Identity::NO_ID
+            result.thread_id <- Identity::NO_ID
+            result.count <- NativePage::EMPTY_COUNT
+            result.total_frames <- NativePage::EMPTY_COUNT
+            return false if not native_stack_page_is_valid(raw, source_store)
+            page_end: usize = raw.frame_start + raw.frame_count
+            result.start_frame <- raw.total_frame_count - page_end
+            result.generation <- raw.generation
+            result.thread_id <- raw.thread_id
+            result.total_frames <- raw.total_frame_count
+            for output_index in NativePage::FIRST_INDEX..<raw.frame_count:
+                raw_index: usize = raw.frame_count - (output_index + NativePage::INDEX_INCREMENT)
+                absolute_raw_index: usize = raw.frame_start + raw_index
+                dap_index: usize = raw.total_frame_count - (absolute_raw_index + NativePage::INDEX_INCREMENT)
+                frame_id: u64 = DebuggerDAPFrames::frame_reference_encode(raw.generation, dap_index)
+                return false if frame_id == FrameReference::NO_REFERENCE
+                result.ids[output_index] <- frame_id
+                result.stack_indexes[output_index] <- dap_index
+                result.invocations[output_index] <- raw.frames[raw_index].invocation
+                result.parent_invocations[output_index] <- raw.frames[raw_index].parent_invocation
+                result.functions[output_index] <- raw.frames[raw_index].function
+                result.tasks[output_index] <- raw.frames[raw_index].task
+                result.source_files[output_index] <- raw.frames[raw_index].source_file
+                result.source_lines[output_index] <- raw.frames[raw_index].source_line
+                result.source_columns[output_index] <- raw.frames[raw_index].source_column
+                source_file_index: usize = DebuggerSourceStore::source_store_find_index(source_store, raw.frames[raw_index].source_file)
+                result.has_sources[output_index] <- raw.frames[raw_index].source_file.value != Identity::NO_ID and source_file_index < source_store.file_count
+            result.count <- raw.frame_count
+            result.valid <- true
+            return true
+
+        def native_stack_page_frame(page: StackPage&, index: usize, source_store: mutable DebuggerSourceStore::SourceStore&, output: mutable NativeFrameView&) -> bool:
+            return false if not page.valid or page.generation == Identity::NO_ID or page.thread_id == Identity::NO_ID
+            return false if not DebuggerSourceStore::source_store_is_valid(source_store)
+            return false if page.total_frames > DebuggerAgentFrames::agent_shadow_frame_capacity() or page.start_frame > page.total_frames
+            return false if page.count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE or page.count > page.total_frames - page.start_frame or index >= page.count
+            expected_stack_index: usize = page.start_frame + index
+            return false if page.stack_indexes[index] != expected_stack_index
+            expected_id: u64 = DebuggerDAPFrames::frame_reference_encode(page.generation, expected_stack_index)
+            return false if expected_id == FrameReference::NO_REFERENCE or page.ids[index] != expected_id
+            return false if page.invocations[index].value == Identity::NO_ID or page.functions[index].value == Identity::NO_ID or page.tasks[index].value == Identity::NO_ID
+            source_file_index: usize = DebuggerSourceStore::source_store_find_index(source_store, page.source_files[index])
+            expected_has_source: bool = page.source_files[index].value != Identity::NO_ID and source_file_index < source_store.file_count
+            return false if page.has_sources[index] != expected_has_source
+            root_index: usize = page.total_frames - NativePage::INDEX_INCREMENT
+            if expected_stack_index == root_index:
+                return false if page.parent_invocations[index].value != Identity::NO_ID
+            else:
+                return false if page.parent_invocations[index].value == Identity::NO_ID
+            if index + NativePage::INDEX_INCREMENT < page.count:
+                child_index: usize = index + NativePage::INDEX_INCREMENT
+                return false if page.parent_invocations[index].value != page.invocations[child_index].value
+            for previous_index in NativePage::FIRST_INDEX..<index:
+                return false if page.invocations[index].value == page.invocations[previous_index].value
+            output.id <- page.ids[index]
+            output.stack_index <- page.stack_indexes[index]
+            output.invocation <- page.invocations[index]
+            output.parent_invocation <- page.parent_invocations[index]
+            output.function <- page.functions[index]
+            output.task <- page.tasks[index]
+            output.source_file <- page.source_files[index]
+            output.source_line <- page.source_lines[index]
+            output.source_column <- page.source_columns[index]
+            output.name_length <- Name::LABEL_LENGTH
+            output.has_source <- page.has_sources[index]
+            for name_index in Name::FIRST_BYTE_INDEX..<Name::LABEL_LENGTH:
+                output.name_bytes[name_index] <- Name::LABEL[name_index].u8()
+            return true

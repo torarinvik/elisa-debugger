@@ -1,0 +1,166 @@
+include "../src/protocol/dap_native_frames.elisa"
+
+const module Identity:
+    NO_ID: u64 = 0
+    NO_GENERATION: u64 = 0
+    GENERATION: u64 = 17
+    THREAD: u64 = 71
+    ROOT_INVOCATION: u64 = 101
+    MIDDLE_INVOCATION: u64 = 102
+    CURRENT_INVOCATION: u64 = 103
+    ROOT_FUNCTION: u64 = 201
+    MIDDLE_FUNCTION: u64 = 202
+    CURRENT_FUNCTION: u64 = 203
+    TASK: u64 = 301
+    SOURCE: u64 = 401
+    LOGICAL_PATH: u64 = 402
+    CONTENT: u64 = 403
+
+const module Clock:
+    NOW: u64 = 10
+    DEADLINE: u64 = 20
+
+const module SourceFixture:
+    PATH: cstr = "src/main.elisa"
+    PATH_LENGTH: usize = 14
+    LINE_COUNT: u64 = 40
+    ROOT_LINE: u32 = 11
+    MIDDLE_LINE: u32 = 22
+    CURRENT_LINE: u32 = 33
+    ROOT_COLUMN: u32 = 2
+    MIDDLE_COLUMN: u32 = 4
+    CURRENT_COLUMN: u32 = 6
+    FIRST_BYTE: usize = 0
+
+const module Page:
+    FIRST: usize = 0
+    ROOT_ONLY_COUNT: usize = 1
+    TWO_FRAME_COUNT: usize = 2
+    THREE_FRAME_COUNT: usize = 3
+    CONTINUATION_START: usize = 1
+    LAST_PAGE_START: usize = 2
+
+const module NativeName:
+    LABEL_LENGTH: usize = 12
+
+const module Failure:
+    SUCCESS: i64 = 0
+    INITIALIZE: i64 = 1
+    REGISTER: i64 = 2
+    ROOT_FRAME: i64 = 3
+    MIDDLE_FRAME: i64 = 4
+    CURRENT_FRAME: i64 = 5
+    STOP: i64 = 6
+    ADD_SOURCE: i64 = 7
+    INVALID_STORE: i64 = 8
+    FIRST_DISPATCH: i64 = 9
+    FIRST_DECODE: i64 = 10
+    INVALID_FULL_PAGE: i64 = 11
+    WRONG_FULL_PAGE: i64 = 12
+    CURRENT_FRAME_READ: i64 = 13
+    WRONG_CURRENT_FRAME: i64 = 14
+    WRONG_SOURCE_PATH: i64 = 15
+    WRONG_HANDLE: i64 = 16
+    CONTINUATION_DISPATCH: i64 = 17
+    CONTINUATION_DECODE: i64 = 18
+    WRONG_CONTINUATION: i64 = 19
+    FINAL_DISPATCH: i64 = 20
+    FINAL_DECODE: i64 = 21
+    WRONG_FINAL_PAGE: i64 = 22
+    INVALID_PARENT_ACCEPTED: i64 = 23
+    INVALID_GENERATION_ACCEPTED: i64 = 24
+    INVALID_STORE_ACCEPTED: i64 = 25
+    MUTATED_HANDLE_ACCEPTED: i64 = 26
+
+def main() -> i64:
+    store: mutable DebuggerSourceStore::SourceStore = DebuggerSourceStore::source_store_new()
+    source: mutable DebuggerMetadata::SourceFile = zeroed
+    source.id <- DebuggerIdentity::debug_id(Identity::SOURCE)
+    source.logical_path <- DebuggerIdentity::debug_id(Identity::LOGICAL_PATH)
+    source.content <- DebuggerIdentity::debug_id(Identity::CONTENT)
+    source.line_count <- SourceFixture::LINE_COUNT
+    source.path_length <- SourceFixture::PATH_LENGTH
+    for index in SourceFixture::FIRST_BYTE..<SourceFixture::PATH_LENGTH:
+        source.path_bytes[index] <- SourceFixture::PATH[index].u8()
+    added: DebuggerErrors::DebuggerError = DebuggerSourceStore::source_store_add_file(store, source)
+    return Failure::ADD_SOURCE if not DebuggerErrors::error_is_ok(added)
+    return Failure::INVALID_STORE if not DebuggerSourceStore::source_store_is_valid(store)
+
+    registry: mutable DebuggerAgentThreads::AgentThreadRegistry = zeroed
+    DebuggerAgentThreads::agent_threads_initialize(registry)
+    shadow_stack: mutable DebuggerAgentFrames::AgentShadowStack = zeroed
+    return Failure::INITIALIZE if DebuggerAgentFrames::agent_shadow_stack_initialize(shadow_stack, DebuggerIdentity::debug_id(Identity::THREAD)) != DebuggerAgentFrames::ShadowStatus.Ready
+    return Failure::REGISTER if DebuggerAgentThreads::agent_thread_register(registry, Identity::THREAD, Clock::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+    return Failure::ROOT_FRAME if DebuggerAgentFrames::agent_shadow_frame_push(shadow_stack, DebuggerIdentity::debug_id(Identity::ROOT_INVOCATION), DebuggerIdentity::debug_id(Identity::NO_ID), DebuggerIdentity::debug_id(Identity::ROOT_FUNCTION), DebuggerIdentity::debug_id(Identity::TASK), DebuggerIdentity::debug_id(Identity::SOURCE), SourceFixture::ROOT_LINE, SourceFixture::ROOT_COLUMN) != DebuggerAgentFrames::ShadowStatus.Ready
+    return Failure::MIDDLE_FRAME if DebuggerAgentFrames::agent_shadow_frame_push(shadow_stack, DebuggerIdentity::debug_id(Identity::MIDDLE_INVOCATION), DebuggerIdentity::debug_id(Identity::ROOT_INVOCATION), DebuggerIdentity::debug_id(Identity::MIDDLE_FUNCTION), DebuggerIdentity::debug_id(Identity::TASK), DebuggerIdentity::debug_id(Identity::SOURCE), SourceFixture::MIDDLE_LINE, SourceFixture::MIDDLE_COLUMN) != DebuggerAgentFrames::ShadowStatus.Ready
+    return Failure::CURRENT_FRAME if DebuggerAgentFrames::agent_shadow_frame_push(shadow_stack, DebuggerIdentity::debug_id(Identity::CURRENT_INVOCATION), DebuggerIdentity::debug_id(Identity::MIDDLE_INVOCATION), DebuggerIdentity::debug_id(Identity::CURRENT_FUNCTION), DebuggerIdentity::debug_id(Identity::TASK), DebuggerIdentity::debug_id(Identity::SOURCE), SourceFixture::CURRENT_LINE, SourceFixture::CURRENT_COLUMN) != DebuggerAgentFrames::ShadowStatus.Ready
+    return Failure::STOP if DebuggerAgentThreads::agent_threads_request_stop(registry, Identity::GENERATION, Clock::NOW, Clock::DEADLINE) != DebuggerAgentThreads::ThreadStatus.Applied or DebuggerAgentFrames::agent_shadow_stack_begin_stop(shadow_stack, Identity::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready or DebuggerAgentThreads::agent_thread_safe_point(registry, Identity::THREAD, Clock::NOW) != DebuggerAgentThreads::ThreadStatus.Applied
+
+    request: mutable DebuggerAgentSnapshotWire::SnapshotStackPageRequest = zeroed
+    request.generation <- Identity::GENERATION
+    request.thread_id <- Identity::THREAD
+    request.frame_limit <- DebuggerAgentSnapshotWire::snapshot_stack_page_capacity()
+    encoded: mutable DebuggerAgentSnapshotWire::EncodedSnapshotStackPageRequest = DebuggerAgentSnapshotWire::agent_snapshot_stack_page_request_encode(request)
+    buffer: mutable DebuggerAgentSnapshotWire::SnapshotWireBuffer = zeroed
+    return Failure::FIRST_DISPATCH if encoded.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or DebuggerAgentSnapshotWire::agent_snapshot_stack_page_dispatch(encoded.bytes[Page::FIRST], encoded.length, shadow_stack, registry, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    raw: mutable DebuggerAgentSnapshotWire::DecodedSnapshotStackPage = zeroed
+    return Failure::FIRST_DECODE if DebuggerAgentSnapshotWire::agent_snapshot_stack_page_decode(buffer.bytes[Page::FIRST], buffer.length, raw) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+
+    projected: mutable DebuggerDAPNativeFrames::StackPage = zeroed
+    return Failure::INVALID_FULL_PAGE if not DebuggerDAPNativeFrames::native_stack_page_to_dap(raw, store, projected)
+    return Failure::INVALID_FULL_PAGE if not projected.valid
+    return Failure::WRONG_FULL_PAGE if projected.count != Page::THREE_FRAME_COUNT or projected.total_frames != Page::THREE_FRAME_COUNT or projected.start_frame != Page::FIRST
+    current: mutable DebuggerDAPNativeFrames::NativeFrameView = zeroed
+    return Failure::CURRENT_FRAME_READ if not DebuggerDAPNativeFrames::native_stack_page_frame(projected, Page::FIRST, store, current)
+    return Failure::WRONG_CURRENT_FRAME if current.stack_index != Page::FIRST or current.function.value != Identity::CURRENT_FUNCTION or current.invocation.value != Identity::CURRENT_INVOCATION
+    return Failure::WRONG_CURRENT_FRAME if current.source_line != SourceFixture::CURRENT_LINE or current.source_column != SourceFixture::CURRENT_COLUMN or not current.has_source
+    return Failure::WRONG_SOURCE_PATH if current.source_file.value != Identity::SOURCE or store.files[Page::FIRST].path_length != SourceFixture::PATH_LENGTH
+    for index in SourceFixture::FIRST_BYTE..<SourceFixture::PATH_LENGTH:
+        return Failure::WRONG_SOURCE_PATH if store.files[Page::FIRST].path_bytes[index] != SourceFixture::PATH[index].u8()
+    expected_current_handle: u64 = DebuggerDAPFrames::frame_reference_encode(Identity::GENERATION, Page::FIRST)
+    return Failure::WRONG_HANDLE if current.id != expected_current_handle
+    return Failure::WRONG_HANDLE if current.parent_invocation.value != Identity::MIDDLE_INVOCATION or current.name_length != NativeName::LABEL_LENGTH
+
+    request.frame_start <- Page::CONTINUATION_START
+    request.frame_limit <- Page::TWO_FRAME_COUNT
+    encoded <- DebuggerAgentSnapshotWire::agent_snapshot_stack_page_request_encode(request)
+    return Failure::CONTINUATION_DISPATCH if encoded.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or DebuggerAgentSnapshotWire::agent_snapshot_stack_page_dispatch(encoded.bytes[Page::FIRST], encoded.length, shadow_stack, registry, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    return Failure::CONTINUATION_DECODE if DebuggerAgentSnapshotWire::agent_snapshot_stack_page_decode(buffer.bytes[Page::FIRST], buffer.length, raw) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    continued: mutable DebuggerDAPNativeFrames::StackPage = zeroed
+    return Failure::WRONG_CONTINUATION if not DebuggerDAPNativeFrames::native_stack_page_to_dap(raw, store, continued)
+    return Failure::WRONG_CONTINUATION if not continued.valid or continued.start_frame != Page::FIRST or continued.count != Page::TWO_FRAME_COUNT
+    current <- zeroed
+    middle: mutable DebuggerDAPNativeFrames::NativeFrameView = zeroed
+    return Failure::WRONG_CONTINUATION if not DebuggerDAPNativeFrames::native_stack_page_frame(continued, Page::FIRST, store, current) or not DebuggerDAPNativeFrames::native_stack_page_frame(continued, Page::FIRST + Page::ROOT_ONLY_COUNT, store, middle)
+    return Failure::WRONG_CONTINUATION if current.function.value != Identity::CURRENT_FUNCTION or middle.function.value != Identity::MIDDLE_FUNCTION
+
+    request.frame_start <- Page::FIRST
+    request.frame_limit <- Page::ROOT_ONLY_COUNT
+    encoded <- DebuggerAgentSnapshotWire::agent_snapshot_stack_page_request_encode(request)
+    return Failure::FINAL_DISPATCH if encoded.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready or DebuggerAgentSnapshotWire::agent_snapshot_stack_page_dispatch(encoded.bytes[Page::FIRST], encoded.length, shadow_stack, registry, buffer) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    return Failure::FINAL_DECODE if DebuggerAgentSnapshotWire::agent_snapshot_stack_page_decode(buffer.bytes[Page::FIRST], buffer.length, raw) != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+    final_page: mutable DebuggerDAPNativeFrames::StackPage = zeroed
+    return Failure::WRONG_FINAL_PAGE if not DebuggerDAPNativeFrames::native_stack_page_to_dap(raw, store, final_page)
+    return Failure::WRONG_FINAL_PAGE if not final_page.valid or final_page.start_frame != Page::LAST_PAGE_START or final_page.count != Page::ROOT_ONLY_COUNT
+    root: mutable DebuggerDAPNativeFrames::NativeFrameView = zeroed
+    return Failure::WRONG_FINAL_PAGE if not DebuggerDAPNativeFrames::native_stack_page_frame(final_page, Page::FIRST, store, root)
+    return Failure::WRONG_FINAL_PAGE if root.function.value != Identity::ROOT_FUNCTION
+
+    projected.ids[Page::FIRST] <- Identity::NO_ID
+    return Failure::MUTATED_HANDLE_ACCEPTED if DebuggerDAPNativeFrames::native_stack_page_frame(projected, Page::FIRST, store, current)
+
+    raw.frame_start <- Page::CONTINUATION_START
+    rejected_parent: mutable DebuggerDAPNativeFrames::StackPage = zeroed
+    _ = DebuggerDAPNativeFrames::native_stack_page_to_dap(raw, store, rejected_parent)
+    return Failure::INVALID_PARENT_ACCEPTED if rejected_parent.valid
+    raw.frame_start <- Page::FIRST
+    raw.generation <- Identity::NO_GENERATION
+    rejected_generation: mutable DebuggerDAPNativeFrames::StackPage = zeroed
+    _ = DebuggerDAPNativeFrames::native_stack_page_to_dap(raw, store, rejected_generation)
+    return Failure::INVALID_GENERATION_ACCEPTED if rejected_generation.valid
+    raw.generation <- Identity::GENERATION
+    store.file_count <- DebuggerMetadata::source_path_capacity()
+    rejected_store: mutable DebuggerDAPNativeFrames::StackPage = zeroed
+    _ = DebuggerDAPNativeFrames::native_stack_page_to_dap(raw, store, rejected_store)
+    return Failure::INVALID_STORE_ACCEPTED if rejected_store.valid
+    return Failure::SUCCESS

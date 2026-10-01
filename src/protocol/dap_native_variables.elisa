@@ -1,0 +1,232 @@
+# Projects native snapshot binding pages into generation-scoped DAP locals.
+# Unsupported representations keep their exact bytes and are never guessed.
+
+include "../agent/snapshot_wire.elisa"
+include "../agent/value_codec.elisa"
+include "../metadata/names.elisa"
+include "../metadata/types.elisa"
+include "./dap_native_frames.elisa"
+
+module DebuggerDAPNativeVariables:
+    private:
+        const module Index:
+            FIRST: usize = 0
+            INCREMENT: usize = 1
+
+        const module Identity:
+            NO_ID: u64 = 0
+
+        const module NameFallback:
+            PREFIX: cstr = "binding#"
+            PREFIX_LENGTH: usize = 8
+            ASCII_ZERO: u8 = 48
+
+        const module Decimal:
+            BASE: u64 = 10
+
+        const module ValueDisplay:
+            MAX_SCALAR_BYTES: usize = 20
+            UNAVAILABLE: cstr = "<unavailable>"
+            UNAVAILABLE_LENGTH: usize = 13
+            OPTIMIZED_AWAY: cstr = "<optimized away>"
+            OPTIMIZED_AWAY_LENGTH: usize = 16
+            UNINITIALIZED: cstr = "<uninitialized>"
+            UNINITIALIZED_LENGTH: usize = 15
+            REDACTED: cstr = "<redacted>"
+            REDACTED_LENGTH: usize = 10
+            UNSUPPORTED: cstr = "<unsupported>"
+            UNSUPPORTED_LENGTH: usize = 13
+            VOID: cstr = "void"
+            VOID_LENGTH: usize = 4
+
+        const module Sentinel:
+            EMPTY_COUNT: usize = 0
+            NO_LENGTH: usize = 0
+            NO_REFERENCE: u64 = 0
+            NO_FRAME_INDEX: usize = 0
+
+    public:
+        enum DisplayState:
+            Scalar
+            Unavailable
+            OptimizedAway
+            Uninitialized
+            Redacted
+            Unsupported
+            Void
+
+        struct NativeVariableView:
+            binding_id: mutable DebuggerIdentity::DebugId
+            scope_id: mutable DebuggerIdentity::DebugId
+            type_id: mutable DebuggerIdentity::DebugId
+            name_bytes: mutable u8[DebuggerMetadataNames::Bounds::MAX_NAME_BYTES]
+            name_length: mutable usize
+            name_resolved: mutable bool
+            type_name_bytes: mutable u8[DebuggerMetadataNames::Bounds::MAX_NAME_BYTES]
+            type_name_length: mutable usize
+            has_type_name: mutable bool
+            display_bytes: mutable u8[ValueDisplay::MAX_SCALAR_BYTES]
+            display_length: mutable usize
+            display_state: mutable DisplayState
+            value_kind: mutable DebuggerAgentFrames::AgentValueKind
+            value_state: mutable DebuggerAgentFrames::AgentValueState
+            storage_kind: mutable DebuggerAgentFrames::AgentStorageKind
+            storage_location: mutable i64
+            byte_size: mutable u64
+            raw_bytes: mutable u8[DebuggerAgentFrames::Capacity::MAX_INLINE_VALUE_BYTES]
+            raw_length: mutable usize
+
+        struct VariablesPage:
+            valid: mutable bool
+            frame_id: mutable u64
+            variables_reference: mutable u64
+            generation: mutable u64
+            thread_id: mutable u64
+            invocation: mutable DebuggerIdentity::DebugId
+            frame_index: mutable usize
+            start: mutable usize
+            count: mutable usize
+            total: mutable usize
+            has_more: mutable bool
+            entries: mutable NativeVariableView[DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_BINDINGS_PER_PAGE]
+
+        def copy_display_literal(output: mutable u8&, literal: cstr, length: usize) -> void:
+            for index in Index::FIRST..<length:
+                output[index] <- literal[index].u8()
+
+        def format_identifier(output: mutable u8&, value: u64, output_length: mutable usize&) -> bool:
+            reversed: mutable u8[DebuggerMetadataNames::Bounds::MAX_NAME_BYTES] = zeroed
+            digit_count: mutable usize = Sentinel::EMPTY_COUNT
+            remaining: mutable u64 = value
+            if remaining == Identity::NO_ID:
+                reversed[digit_count] <- NameFallback::ASCII_ZERO
+                digit_count <- digit_count + Index::INCREMENT
+            while remaining > Identity::NO_ID:
+                return false if digit_count >= DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+                reversed[digit_count] <- NameFallback::ASCII_ZERO + (remaining % Decimal::BASE).u8()
+                digit_count <- digit_count + Index::INCREMENT
+                remaining <- remaining / Decimal::BASE
+            output_length <- digit_count
+            for index in Index::FIRST..<digit_count:
+                output[NameFallback::PREFIX_LENGTH + index] <- reversed[digit_count - Index::INCREMENT - index]
+            return NameFallback::PREFIX_LENGTH + digit_count <= DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+
+        def resolve_binding_name(names: mutable DebuggerMetadataNames::NameStore&, descriptor: DebuggerAgentFrames::AgentStorageDescriptor, output: mutable NativeVariableView&) -> bool:
+            resolved_length: mutable usize = Sentinel::NO_LENGTH
+            if DebuggerMetadataNames::name_store_copy_by_id(names, descriptor.binding, output.name_bytes[Index::FIRST], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, resolved_length):
+                output.name_length <- resolved_length
+                output.name_resolved <- true
+                return true
+            for index in Index::FIRST..<NameFallback::PREFIX_LENGTH:
+                output.name_bytes[index] <- NameFallback::PREFIX[index].u8()
+            identifier_length: mutable usize = Sentinel::NO_LENGTH
+            return false if not format_identifier(output.name_bytes[Index::FIRST], descriptor.binding.value, identifier_length)
+            output.name_length <- NameFallback::PREFIX_LENGTH + identifier_length
+            output.name_resolved <- false
+            return true
+
+        def resolve_type_name(names: mutable DebuggerMetadataNames::NameStore&, type_store: DebuggerTypeMetadata::MetadataStore&, type_id: DebuggerIdentity::DebugId, output: mutable NativeVariableView&) -> bool:
+            info: DebuggerTypeMetadata::TypeInfo = DebuggerTypeMetadata::metadata_find_type(type_store, type_id)
+            return true if info.id.value == Identity::NO_ID
+            resolved_length: mutable usize = Sentinel::NO_LENGTH
+            if DebuggerMetadataNames::name_store_copy_by_id(names, info.name, output.type_name_bytes[Index::FIRST], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, resolved_length):
+                output.type_name_length <- resolved_length
+                output.has_type_name <- true
+            return true
+
+        def set_display_literal(output: mutable NativeVariableView&, text: cstr, length: usize, state: DisplayState) -> void:
+            copy_display_literal(output.display_bytes[Index::FIRST], text, length)
+            output.display_length <- length
+            output.display_state <- state
+
+        def project_descriptor(descriptor: DebuggerAgentFrames::AgentStorageDescriptor, names: mutable DebuggerMetadataNames::NameStore&, type_store: DebuggerTypeMetadata::MetadataStore&, output: mutable NativeVariableView&) -> bool:
+            return false if not DebuggerAgentFrames::agent_storage_descriptor_is_exact(descriptor)
+            return false if descriptor.state == DebuggerAgentFrames::AgentValueState.Invalid
+            output.binding_id <- descriptor.binding
+            output.scope_id <- descriptor.scope
+            output.type_id <- descriptor.type_id
+            output.value_kind <- descriptor.value_kind
+            output.value_state <- descriptor.state
+            output.storage_kind <- descriptor.storage_kind
+            output.storage_location <- descriptor.storage_location
+            output.byte_size <- descriptor.byte_size
+            output.raw_length <- Sentinel::NO_LENGTH
+            return false if not resolve_binding_name(names, descriptor, output)
+            return false if not resolve_type_name(names, type_store, descriptor.type_id, output)
+            if descriptor.state != DebuggerAgentFrames::AgentValueState.Available:
+                if descriptor.state == DebuggerAgentFrames::AgentValueState.Unavailable:
+                    set_display_literal(output, ValueDisplay::UNAVAILABLE, ValueDisplay::UNAVAILABLE_LENGTH, DisplayState.Unavailable)
+                    return true
+                if descriptor.state == DebuggerAgentFrames::AgentValueState.OptimizedAway:
+                    set_display_literal(output, ValueDisplay::OPTIMIZED_AWAY, ValueDisplay::OPTIMIZED_AWAY_LENGTH, DisplayState.OptimizedAway)
+                    return true
+                if descriptor.state == DebuggerAgentFrames::AgentValueState.Uninitialized:
+                    set_display_literal(output, ValueDisplay::UNINITIALIZED, ValueDisplay::UNINITIALIZED_LENGTH, DisplayState.Uninitialized)
+                    return true
+                if descriptor.state == DebuggerAgentFrames::AgentValueState.Redacted:
+                    set_display_literal(output, ValueDisplay::REDACTED, ValueDisplay::REDACTED_LENGTH, DisplayState.Redacted)
+                    return true
+                return false
+            return false if descriptor.value_kind == DebuggerAgentFrames::AgentValueKind.Void and descriptor.byte_size != Sentinel::NO_LENGTH.u64()
+            output.raw_length <- descriptor.byte_size.usize()
+            for byte_index in Index::FIRST..<output.raw_length:
+                output.raw_bytes[byte_index] <- descriptor.bytes[byte_index]
+            if descriptor.value_kind == DebuggerAgentFrames::AgentValueKind.Void:
+                set_display_literal(output, ValueDisplay::VOID, ValueDisplay::VOID_LENGTH, DisplayState.Void)
+                return true
+            decoded: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(descriptor)
+            if decoded.status == DebuggerAgentValueCodec::ValueCodecStatus.UnsupportedKind:
+                set_display_literal(output, ValueDisplay::UNSUPPORTED, ValueDisplay::UNSUPPORTED_LENGTH, DisplayState.Unsupported)
+                return true
+            return false if decoded.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready
+            formatted: DebuggerAgentValueCodec::FormattedScalar = DebuggerAgentValueCodec::agent_scalar_format(decoded)
+            return false if formatted.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or formatted.length > ValueDisplay::MAX_SCALAR_BYTES
+            output.display_length <- formatted.length
+            output.display_state <- DisplayState.Scalar
+            for display_index in Index::FIRST..<formatted.length:
+                output.display_bytes[display_index] <- formatted.bytes[display_index]
+            return true
+
+        def native_variables_page_project(raw: DebuggerAgentSnapshotWire::DecodedSnapshotPage&, frame: DebuggerDAPNativeFrames::NativeFrameView&, names: mutable DebuggerMetadataNames::NameStore&, type_store: DebuggerTypeMetadata::MetadataStore&, result: mutable VariablesPage&) -> bool:
+            result.valid <- false
+            result.count <- Sentinel::EMPTY_COUNT
+            result.total <- Sentinel::EMPTY_COUNT
+            result.has_more <- false
+            result.frame_id <- Sentinel::NO_REFERENCE
+            result.variables_reference <- Sentinel::NO_REFERENCE
+            return false if raw.status != DebuggerAgentSnapshotWire::SnapshotWireStatus.Ready
+            return false if not DebuggerMetadataNames::name_store_is_valid(names) or not DebuggerTypeMetadata::metadata_type_catalog_is_valid(type_store)
+            return false if raw.generation == Identity::NO_ID or raw.thread_id == Identity::NO_ID
+            return false if frame.generation != raw.generation or frame.thread_id != raw.thread_id
+            return false if frame.invocation.value == Identity::NO_ID or frame.function.value == Identity::NO_ID or frame.task.value == Identity::NO_ID
+            return false if frame.native_frame_index >= DebuggerAgentFrames::agent_shadow_frame_capacity()
+            return false if frame.stack_index >= DebuggerAgentFrames::agent_shadow_frame_capacity()
+            expected_frame_id: u64 = DebuggerDAPFrames::frame_reference_encode(frame.generation, frame.stack_index)
+            return false if expected_frame_id == Sentinel::NO_REFERENCE or expected_frame_id != frame.id
+            return false if raw.frame_index != frame.native_frame_index
+            return false if raw.frame.invocation.value != frame.invocation.value or raw.frame.function.value != frame.function.value or raw.frame.task.value != frame.task.value
+            return false if raw.frame.source_file.value != frame.source_file.value or raw.frame.source_line != frame.source_line or raw.frame.source_column != frame.source_column
+            return false if raw.frame.binding_count > DebuggerAgentFrames::agent_shadow_binding_capacity()
+            return false if raw.binding_start > raw.frame.binding_count
+            return false if raw.binding_count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_BINDINGS_PER_PAGE
+            return false if raw.binding_count > raw.frame.binding_count - raw.binding_start
+            if raw.binding_count == Sentinel::EMPTY_COUNT:
+                return false if raw.binding_start < raw.frame.binding_count
+            result.variables_reference <- DebuggerDAPFrames::variables_reference_encode(frame.generation, frame.stack_index)
+            return false if result.variables_reference == Sentinel::NO_REFERENCE
+            result.frame_id <- frame.id
+            result.generation <- raw.generation
+            result.thread_id <- raw.thread_id
+            result.invocation <- raw.frame.invocation
+            result.frame_index <- frame.stack_index
+            result.start <- raw.binding_start
+            result.total <- raw.frame.binding_count
+            for page_index in Index::FIRST..<raw.binding_count:
+                descriptor: DebuggerAgentFrames::AgentStorageDescriptor = raw.bindings[page_index]
+                return false if not project_descriptor(descriptor, names, type_store, result.entries[page_index])
+                for previous_index in Index::FIRST..<page_index:
+                    return false if raw.bindings[previous_index].binding.value == descriptor.binding.value
+            result.count <- raw.binding_count
+            result.has_more <- raw.binding_start + raw.binding_count < raw.frame.binding_count
+            result.valid <- true
+            return true

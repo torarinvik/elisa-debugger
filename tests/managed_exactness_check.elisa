@@ -39,6 +39,10 @@ const module Test:
         RESOURCE_OVERFLOW_SETUP: i64 = 4
         RESOURCE_OVERFLOW_NOT_DETECTED: i64 = 5
         RESOURCE_RESET_NOT_EXACT: i64 = 6
+        MIXED_REPLAY_MODE_ACCEPTED: i64 = 7
+        REPLAY_MODE_NOT_EXACT: i64 = 8
+        BRANCH_MODE_NOT_EXACT: i64 = 9
+        RECORDING_MODE_RESET_NOT_EXACT: i64 = 10
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -56,6 +60,25 @@ def main() -> i64:
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return Test::Failure::INITIAL_STATE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
+
+    DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Replaying)
+    return Test::Failure::MIXED_REPLAY_MODE_ACCEPTED if DebuggerManagedEngine::managed_is_exact(controller)
+    DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Recording)
+    return Test::Failure::RECORDING_MODE_RESET_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
+
+    DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Replaying)
+    replay_resources_failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(controller.state.resources)
+    return Test::Failure::REPLAY_MODE_NOT_EXACT if not DebuggerErrors::error_is_ok(replay_resources_failure)
+    DebuggerReplayAdapters::adapter_snapshot_initialize(controller.state.adapters, DebuggerReplayAdapters::AdapterMode.Replaying)
+    return Test::Failure::REPLAY_MODE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
+
+    DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Virtualized)
+    DebuggerVirtualResources::resources_initialize(controller.state.resources, DebuggerVirtualResources::ResourceMode.Branch)
+    DebuggerReplayAdapters::adapter_snapshot_initialize(controller.state.adapters, DebuggerReplayAdapters::AdapterMode.Branch)
+    return Test::Failure::BRANCH_MODE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
+
+    DebuggerManagedState::state_initialize(controller.state)
+    return Test::Failure::RECORDING_MODE_RESET_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
 
     DebuggerEffects::effect_oracle_record(controller.state.effects, DebuggerEffects::EffectKind.FileRead, Test::Effect::REQUEST_HASH, Test::Effect::RESULT_HASH, Test::Effect::RESULT_VALUE)
     return Test::Failure::BARRIER_NOT_DETECTED if DebuggerManagedEngine::managed_is_exact(controller)

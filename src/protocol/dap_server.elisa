@@ -378,7 +378,6 @@ module DebuggerDAPServer:
         const module ResponseMetadata:
             DAP_MAX_SOURCE_BREAKPOINT_LINE: u64 = 4294967295
             DAP_MAX_SOURCE_BREAKPOINTS: usize = 256
-            DAP_LOCALS_REFERENCE_FALLBACK: u64 = 1
             DAP_UNKNOWN_SOURCE_LINE: u64 = 0
             DAP_MAIN_CALL_DEPTH: usize = 0
 
@@ -480,16 +479,6 @@ module DebuggerDAPServer:
             FIRST_PATH_BYTE_INDEX: usize = 0
             PATH_INDEX_INCREMENT: usize = 1
             FIRST_FRAME_PAGE_INDEX: usize = 0
-
-        const module StackTraceFrameHandle:
-            INVALID_FRAME_ID: u64 = 0
-            FRAME_ID_RESERVED_SLOT_COUNT: usize = 1
-            MAX_FRAME_ID_REFERENCE: u64 = 18446744073709551615
-            FRAME_ID_REFERENCE_STRIDE: usize = DebuggerEDIRCapacity::EDIR_CALL_FRAME_CAPACITY + StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT
-
-        const module StackTraceLocalsReference:
-            MAX_LOCALS_REFERENCE: u64 = 18446744073709551615
-            LOCALS_REFERENCE_STRIDE: usize = DebuggerEDIRCapacity::EDIR_CALL_FRAME_CAPACITY
 
         const module Threads:
             DAP_THREADS_COMMAND: cstr = "threads"
@@ -1603,51 +1592,19 @@ module DebuggerDAPServer:
             _ = printf("%llu", page.total_frames.u64()) can Console
             _ = printf(StackTraceFrameWire::RESPONSE_SUFFIX) can Console
 
-        def locals_reference_for_generation(generation: u64) -> u64:
-            return ResponseMetadata::DAP_LOCALS_REFERENCE_FALLBACK if generation == RuntimeIdentifiers::DAP_NO_EXPECTED_GENERATION
-            return generation
-
         def locals_reference_for_frame(generation: u64, frame_index: usize) -> u64:
-            normalized_generation: u64 = locals_reference_for_generation(generation)
-            frame_offset: u64 = frame_index.u64()
-            stride: u64 = StackTraceLocalsReference::LOCALS_REFERENCE_STRIDE.u64()
-            return RuntimeIdentifiers::DAP_NO_VARIABLE_REFERENCE if normalized_generation > (StackTraceLocalsReference::MAX_LOCALS_REFERENCE - frame_offset) / stride
-            return normalized_generation * stride + frame_offset
+            return DebuggerDAPFrames::variables_reference_encode(generation, frame_index)
 
         def locals_frame_index_for_reference(generation: u64, return_stack_depth: usize, reference: u64) -> usize:
-            frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
-            normalized_generation: u64 = locals_reference_for_generation(generation)
-            stride: u64 = StackTraceLocalsReference::LOCALS_REFERENCE_STRIDE.u64()
-            return frame_capacity if return_stack_depth > DebuggerEDIR::call_depth_capacity()
-            return frame_capacity if normalized_generation > StackTraceLocalsReference::MAX_LOCALS_REFERENCE / stride
-            generation_base: u64 = normalized_generation * stride
-            return frame_capacity if reference < generation_base
-            frame_offset: u64 = reference - generation_base
-            return frame_capacity if frame_offset >= frame_capacity.u64()
-            frame_index: usize = frame_offset.usize()
-            return frame_capacity if frame_index > return_stack_depth
-            return frame_index
+            return DebuggerDAPFrames::frame_capacity() if return_stack_depth > DebuggerEDIR::call_depth_capacity()
+            return DebuggerDAPFrames::variables_reference_decode(generation, return_stack_depth, reference)
 
         def dap_frame_id_for_generation(generation: u64, frame_index: usize) -> u64:
-            frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
-            return StackTraceFrameHandle::INVALID_FRAME_ID if frame_index >= frame_capacity
-            frame_offset: u64 = frame_index.u64() + StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT.u64()
-            stride: u64 = StackTraceFrameHandle::FRAME_ID_REFERENCE_STRIDE.u64()
-            return StackTraceFrameHandle::INVALID_FRAME_ID if generation > (StackTraceFrameHandle::MAX_FRAME_ID_REFERENCE - frame_offset) / stride
-            return generation * stride + frame_offset
+            return DebuggerDAPFrames::frame_reference_encode(generation, frame_index)
 
         def dap_frame_index_for_id(generation: u64, return_stack_depth: usize, reference: u64) -> usize:
-            frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
-            stride: u64 = StackTraceFrameHandle::FRAME_ID_REFERENCE_STRIDE.u64()
-            return frame_capacity if return_stack_depth > DebuggerEDIR::call_depth_capacity()
-            return frame_capacity if generation > StackTraceFrameHandle::MAX_FRAME_ID_REFERENCE / stride
-            generation_base: u64 = generation * stride
-            return frame_capacity if reference <= generation_base
-            frame_offset: u64 = reference - generation_base
-            return frame_capacity if frame_offset < StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT.u64() or frame_offset > frame_capacity.u64()
-            frame_index: usize = (frame_offset - StackTraceFrameHandle::FRAME_ID_RESERVED_SLOT_COUNT.u64()).usize()
-            return frame_capacity if frame_index > return_stack_depth
-            return frame_index
+            return DebuggerDAPFrames::frame_capacity() if return_stack_depth > DebuggerEDIR::call_depth_capacity()
+            return DebuggerDAPFrames::frame_reference_decode(generation, return_stack_depth, reference)
 
         def write_scopes_response(service: DebuggerManagedService::Service&, frame_index: usize, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
             reference: u64 = locals_reference_for_frame(service.controller.session.stop_generation, frame_index)

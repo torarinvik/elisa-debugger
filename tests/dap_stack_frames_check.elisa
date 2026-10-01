@@ -108,6 +108,14 @@ const module DAPStackFailure:
     EXPLICIT_ZERO_PARSE_WRONG: i64 = 17
     DUPLICATE_LEVELS_ACCEPTED: i64 = 18
     NEGATIVE_START_ACCEPTED: i64 = 19
+    FRAME_HANDLE_ENCODE_WRONG: i64 = 21
+    FRAME_HANDLE_DECODE_WRONG: i64 = 22
+    FRAME_HANDLE_STALE_ACCEPTED: i64 = 23
+    FRAME_HANDLE_OVERFLOW_ACCEPTED: i64 = 24
+    LOCALS_HANDLE_ENCODE_WRONG: i64 = 25
+    LOCALS_HANDLE_DECODE_WRONG: i64 = 26
+    LOCALS_HANDLE_STALE_ACCEPTED: i64 = 27
+    LOCALS_HANDLE_INITIAL_GENERATION_WRONG: i64 = 28
 
 const module DAPStackExpected:
     SUCCESS: i64 = 0
@@ -118,6 +126,16 @@ const module DAPStackExpected:
     HAS_FRAME_LIMIT: bool = true
     LOCAL_OFFSET: usize = 0
     LOCAL_REQUEST_COUNT: usize = 1
+
+const module DAPStackHandle:
+    GENERATION: u64 = 9
+    NEXT_GENERATION: u64 = 10
+    NO_GENERATION: u64 = 0
+    FIRST_FRAME: usize = 0
+    LAST_FRAME: usize = 2
+    FRAME_RESERVED_SLOTS: usize = 1
+    MAX_U64: u64 = 18446744073709551615
+    INVALID_REFERENCE: u64 = 0
 
 
 def test_cstr_length(value: cstr) -> usize:
@@ -248,9 +266,31 @@ def test_stack_trace_payload() -> i64:
     return DAPStackExpected::SUCCESS
 
 
+def test_generation_scoped_references() -> i64:
+    frame_capacity: usize = DebuggerDAPFrames::frame_capacity()
+    frame_stride: u64 = (frame_capacity + DAPStackHandle::FRAME_RESERVED_SLOTS).u64()
+    expected_frame_id: u64 = DAPStackHandle::GENERATION * frame_stride + DAPStackHandle::LAST_FRAME.u64() + DAPStackHandle::FRAME_RESERVED_SLOTS.u64()
+    frame_id: u64 = DebuggerDAPFrames::frame_reference_encode(DAPStackHandle::GENERATION, DAPStackHandle::LAST_FRAME)
+    return DAPStackFailure::FRAME_HANDLE_ENCODE_WRONG if frame_id != expected_frame_id
+    return DAPStackFailure::FRAME_HANDLE_DECODE_WRONG if DebuggerDAPFrames::frame_reference_decode(DAPStackHandle::GENERATION, DAPStackHandle::LAST_FRAME, frame_id) != DAPStackHandle::LAST_FRAME
+    return DAPStackFailure::FRAME_HANDLE_STALE_ACCEPTED if DebuggerDAPFrames::frame_reference_decode(DAPStackHandle::NEXT_GENERATION, DAPStackHandle::LAST_FRAME, frame_id) != frame_capacity or DebuggerDAPFrames::frame_reference_encode(DAPStackHandle::GENERATION, frame_capacity) != DAPStackHandle::INVALID_REFERENCE
+    return DAPStackFailure::FRAME_HANDLE_OVERFLOW_ACCEPTED if DebuggerDAPFrames::frame_reference_encode(DAPStackHandle::MAX_U64, DAPStackHandle::FIRST_FRAME) != DAPStackHandle::INVALID_REFERENCE
+
+    locals_stride: u64 = frame_capacity.u64()
+    expected_locals_reference: u64 = DAPStackHandle::GENERATION * locals_stride + DAPStackHandle::LAST_FRAME.u64()
+    locals_reference: u64 = DebuggerDAPFrames::variables_reference_encode(DAPStackHandle::GENERATION, DAPStackHandle::LAST_FRAME)
+    return DAPStackFailure::LOCALS_HANDLE_ENCODE_WRONG if locals_reference != expected_locals_reference
+    return DAPStackFailure::LOCALS_HANDLE_DECODE_WRONG if DebuggerDAPFrames::variables_reference_decode(DAPStackHandle::GENERATION, DAPStackHandle::LAST_FRAME, locals_reference) != DAPStackHandle::LAST_FRAME
+    return DAPStackFailure::LOCALS_HANDLE_STALE_ACCEPTED if DebuggerDAPFrames::variables_reference_decode(DAPStackHandle::NEXT_GENERATION, DAPStackHandle::LAST_FRAME, locals_reference) != frame_capacity or DebuggerDAPFrames::variables_reference_encode(DAPStackHandle::GENERATION, frame_capacity) != DAPStackHandle::INVALID_REFERENCE
+    return DAPStackFailure::LOCALS_HANDLE_INITIAL_GENERATION_WRONG if DebuggerDAPFrames::variables_reference_encode(DAPStackHandle::NO_GENERATION, DAPStackHandle::FIRST_FRAME) != locals_stride or DebuggerDAPFrames::variables_reference_decode(DAPStackHandle::NO_GENERATION, DAPStackHandle::LAST_FRAME, locals_stride) != DAPStackHandle::FIRST_FRAME
+    return DAPStackExpected::SUCCESS
+
+
 def main() -> i64:
     frames: i64 = test_frame_page()
     return frames if frames != DAPStackExpected::SUCCESS
     locals: i64 = test_frame_locals()
     return locals if locals != DAPStackExpected::SUCCESS
-    return test_stack_trace_payload()
+    payload: i64 = test_stack_trace_payload()
+    return payload if payload != DAPStackExpected::SUCCESS
+    return test_generation_scoped_references()

@@ -31,6 +31,16 @@ module DebuggerDAPFrames:
         const module StackCount:
             NO_FRAMES: usize = 0
 
+        const module ReferenceHandle:
+            INVALID_REFERENCE: u64 = 0
+            NO_GENERATION: u64 = 0
+            FALLBACK_GENERATION: u64 = 1
+            FRAME_ID_RESERVED_SLOTS: usize = 1
+            FRAME_ID_STRIDE: usize = Bounds::FRAME_CAPACITY + FRAME_ID_RESERVED_SLOTS
+            LOCALS_REFERENCE_STRIDE: usize = Bounds::FRAME_CAPACITY
+            MAX_REFERENCE: u64 = 18446744073709551615
+            NO_FRAME_INDEX: usize = Bounds::FRAME_CAPACITY
+
         const module MachineStack:
             RETURN_ADDRESS_INCREMENT: u64 = 1
 
@@ -74,6 +84,53 @@ module DebuggerDAPFrames:
 
         def frame_capacity() -> usize:
             return Bounds::FRAME_CAPACITY
+
+        # Frame IDs reserve zero and partition the remaining integer space by
+        # stop generation, allowing old DAP handles to be rejected without a
+        # mutable global handle table.
+        def frame_reference_encode(generation: u64, frame_index: usize) -> u64:
+            return ReferenceHandle::INVALID_REFERENCE if frame_index >= Bounds::FRAME_CAPACITY
+            frame_offset: u64 = frame_index.u64() + ReferenceHandle::FRAME_ID_RESERVED_SLOTS.u64()
+            stride: u64 = ReferenceHandle::FRAME_ID_STRIDE.u64()
+            return ReferenceHandle::INVALID_REFERENCE if generation > (ReferenceHandle::MAX_REFERENCE - frame_offset) / stride
+            return generation * stride + frame_offset
+
+        # `last_frame_index` is inclusive so callers can pass the managed
+        # return-stack depth or native total-frame-count minus one.
+        def frame_reference_decode(generation: u64, last_frame_index: usize, reference: u64) -> usize:
+            return ReferenceHandle::NO_FRAME_INDEX if last_frame_index >= Bounds::FRAME_CAPACITY
+            stride: u64 = ReferenceHandle::FRAME_ID_STRIDE.u64()
+            return ReferenceHandle::NO_FRAME_INDEX if generation > ReferenceHandle::MAX_REFERENCE / stride
+            generation_base: u64 = generation * stride
+            return ReferenceHandle::NO_FRAME_INDEX if reference <= generation_base
+            frame_offset: u64 = reference - generation_base
+            return ReferenceHandle::NO_FRAME_INDEX if frame_offset < ReferenceHandle::FRAME_ID_RESERVED_SLOTS.u64() or frame_offset > Bounds::FRAME_CAPACITY.u64()
+            frame_index: usize = (frame_offset - ReferenceHandle::FRAME_ID_RESERVED_SLOTS.u64()).usize()
+            return ReferenceHandle::NO_FRAME_INDEX if frame_index > last_frame_index
+            return frame_index
+
+        # A scope reference uses its own generation stride and falls back to a
+        # non-zero synthetic generation for the initial stop.
+        def variables_reference_encode(generation: u64, frame_index: usize) -> u64:
+            return ReferenceHandle::INVALID_REFERENCE if frame_index >= Bounds::FRAME_CAPACITY
+            normalized_generation: u64 = ReferenceHandle::FALLBACK_GENERATION if generation == ReferenceHandle::NO_GENERATION else generation
+            frame_offset: u64 = frame_index.u64()
+            stride: u64 = ReferenceHandle::LOCALS_REFERENCE_STRIDE.u64()
+            return ReferenceHandle::INVALID_REFERENCE if normalized_generation > (ReferenceHandle::MAX_REFERENCE - frame_offset) / stride
+            return normalized_generation * stride + frame_offset
+
+        def variables_reference_decode(generation: u64, last_frame_index: usize, reference: u64) -> usize:
+            return ReferenceHandle::NO_FRAME_INDEX if last_frame_index >= Bounds::FRAME_CAPACITY
+            normalized_generation: u64 = ReferenceHandle::FALLBACK_GENERATION if generation == ReferenceHandle::NO_GENERATION else generation
+            stride: u64 = ReferenceHandle::LOCALS_REFERENCE_STRIDE.u64()
+            return ReferenceHandle::NO_FRAME_INDEX if normalized_generation > ReferenceHandle::MAX_REFERENCE / stride
+            generation_base: u64 = normalized_generation * stride
+            return ReferenceHandle::NO_FRAME_INDEX if reference < generation_base
+            frame_offset: u64 = reference - generation_base
+            return ReferenceHandle::NO_FRAME_INDEX if frame_offset >= Bounds::FRAME_CAPACITY.u64()
+            frame_index: usize = frame_offset.usize()
+            return ReferenceHandle::NO_FRAME_INDEX if frame_index > last_frame_index
+            return frame_index
 
         def frame_count(machine: DebuggerEDIR::Machine&) -> usize:
             return StackCount::NO_FRAMES if machine.return_stack_pointer > Bounds::CALL_DEPTH_CAPACITY

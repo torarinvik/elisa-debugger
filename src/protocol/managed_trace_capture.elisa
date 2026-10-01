@@ -1,0 +1,73 @@
+# Shared bounded trace snapshot construction. This module deliberately avoids
+# trace readers and restore code so export-only clients keep a smaller surface.
+
+include "./managed_service.elisa"
+include "../trace/recorder.elisa"
+include "../trace/pipeline.elisa"
+
+module DebuggerManagedTraceCapture:
+    private:
+        const module ErrorDetail:
+            TRACE_CAPABILITY: u32 = 1
+            TRACE_STATE: u32 = 2
+            UNJOURNALED_SIDE_STATE: u32 = 3
+
+        const module SideState:
+            NO_RECORDS: usize = 0
+
+        const module Boundary:
+            FIRST_INDEX: usize = 0
+            NO_RECORDED_EVENTS: usize = 0
+
+        const module ExportPolicy:
+            CAPABILITY_REQUIRED: bool = true
+            CAPABILITY_NOT_REQUIRED_FOR_VERIFICATION: bool = false
+
+        def capture_error(failure: DebuggerErrors::DebuggerError) -> DebuggerTracePipeline::BundleBuildResult:
+            return DebuggerTracePipeline::BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
+
+        # These side streams have no event-aligned encoding yet. Reject an
+        # exact capture before export could omit their state from replay.
+        def capture_has_unjournaled_side_state(service: DebuggerManagedService::Service&) -> bool:
+            return true if service.controller.state.branches.count != SideState::NO_RECORDS
+            return true if service.controller.state.tasks.task_count != SideState::NO_RECORDS or service.controller.state.tasks.wait_count != SideState::NO_RECORDS
+            return true if service.controller.state.tasks.scheduler.count != SideState::NO_RECORDS or service.controller.state.tasks.scheduler.cursor != SideState::NO_RECORDS
+            return true if service.controller.state.tasks.scheduler.replaying or service.controller.state.tasks.scheduler.diverged or service.controller.state.tasks.scheduler.overflowed
+            return true if service.controller.state.effects.count != SideState::NO_RECORDS
+            return true if service.controller.state.resources.count != SideState::NO_RECORDS
+            return true if service.controller.state.adapters.clock.count != SideState::NO_RECORDS
+            return true if service.controller.state.adapters.random.count != SideState::NO_RECORDS
+            return service.controller.state.adapters.console.count != SideState::NO_RECORDS
+
+    public:
+        def capture_export_bundle(service: mutable DebuggerManagedService::Service&) -> DebuggerTracePipeline::BundleBuildResult can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            return capture_bundle(service, ExportPolicy::CAPABILITY_REQUIRED) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+
+        def capture_verification_bundle(service: mutable DebuggerManagedService::Service&) -> DebuggerTracePipeline::BundleBuildResult can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            return capture_bundle(service, ExportPolicy::CAPABILITY_NOT_REQUIRED_FOR_VERIFICATION) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+
+    private:
+        def capture_bundle(service: mutable DebuggerManagedService::Service&, require_export_capability: bool) -> DebuggerTracePipeline::BundleBuildResult can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            capabilities: DebuggerCapabilities::CapabilitySet = service.controller.session.capabilities
+            return capture_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::TRACE_CAPABILITY)) if capabilities.engine != DebuggerCapabilities::EngineKind.Managed or capabilities.history != DebuggerCapabilities::HistoryKind.Exact or not capabilities.trace_verification or (require_export_capability and not capabilities.trace_export)
+            return capture_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::TRACE_STATE)) if not DebuggerSession::session_can_inspect(service.controller.session)
+            DebuggerManagedService::service_capture_trace_events(service)
+            return capture_error(service.trace_failure) if service.trace_partial
+            if capture_has_unjournaled_side_state(service):
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::UNJOURNALED_SIDE_STATE)
+                service.trace_partial <- true
+                service.trace_failure <- failure
+                return capture_error(failure)
+            recorder: mutable DebuggerTraceRecorder::TraceRecorder
+            DebuggerTraceRecorder::recorder_initialize(recorder, service.controller.session.build, service.controller.engine.recording)
+            for index in Boundary::FIRST_INDEX..<service.recorded_event_count:
+                failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, service.recorded_events[index])
+                return capture_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            # Full checkpoints include VM, scheduler, effect, virtual-resource,
+            # and adapter state. Capture one only at the recorded high-water
+            # boundary, after the final event.
+            if service.recorded_event_count > Boundary::NO_RECORDED_EVENTS and service.controller.engine.event_count == service.recorded_event_count:
+                checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+                failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
+                return capture_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            return DebuggerTracePipeline::bundle_from_recorder(recorder) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast

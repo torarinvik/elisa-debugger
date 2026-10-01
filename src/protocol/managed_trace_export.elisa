@@ -1,0 +1,21 @@
+# Focused typed trace export API shared by file adapters and the full trace
+# service. It excludes file I/O, trace readers, and checkpoint restoration.
+
+include "./managed_trace_capture.elisa"
+include "../trace/export.elisa"
+
+module DebuggerManagedTraceExportService:
+    public:
+        def service_trace_bundle(service: mutable DebuggerManagedService::Service&) -> DebuggerTracePipeline::BundleBuildResult can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            return DebuggerManagedTraceCapture::capture_export_bundle(service) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+
+        def service_trace_export(service: mutable DebuggerManagedService::Service&) -> DebuggerTraceExport::ExportResult can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            built: DebuggerTracePipeline::BundleBuildResult = DebuggerManagedTraceCapture::capture_export_bundle(service) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            failed: mutable DebuggerTraceExport::ExportResult = zeroed
+            DebuggerTraceBinary::writer_initialize(failed.bytes)
+            failed.failure <- built.failure
+            return failed if not built.accepted
+            bundle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTracePipeline::bundle_build_result_bundle(built) can Abort.Panic
+            exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
+            return exported

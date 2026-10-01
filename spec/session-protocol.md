@@ -210,6 +210,38 @@ cancellation models, but the standalone endpoint does not currently emit
 progress events or route cancellation by request ID. Mutation retry rules in
 this contract are not yet enforced by the compact endpoint.
 
+The native snapshot JSON encoders define bounded `stack` and `values` result
+objects for editor-neutral consumers. The stack result preserves thread and
+invocation identities, parent links, function/task/source IDs, raw source
+coordinates, local counts, and a numeric next-frame offset. The values result
+preserves binding/scope/type IDs, semantic kind and availability state,
+storage kind/location, declared size, lowercase hexadecimal bytes, and a
+canonical scalar display when the value is a supported integer or boolean.
+All 64-bit identities and storage coordinates are decimal strings. Composite,
+floating-point, text, reference, and opaque values keep their raw bytes and
+return `display: null` with an explicit `displayStatus`; unavailable values do
+not expose bytes. Clients should retain opaque IDs and use the page's
+`stopGeneration` on every follow-up request.
+
+These result shapes are validated by the
+[`native stack schema`](../schemas/session-protocol-v1.native-stack.schema.json)
+and [`native values schema`](../schemas/session-protocol-v1.native-values.schema.json).
+The following fixtures show the current typed encoder output:
+
+```json
+{"kind":"response","id":"42","ok":true,"result":{"accepted":true,"stopGeneration":"9","stack":{"threadId":"1301","totalFrames":2,"startFrame":0,"frames":[{"index":0,"invocationId":"1401","parentInvocationId":null,"functionId":"1501","taskId":"1601","sourceId":"1701","line":29,"column":6,"localCount":2},{"index":1,"invocationId":"1402","parentInvocationId":"1401","functionId":"1502","taskId":"1601","sourceId":"1701","line":29,"column":6,"localCount":0}],"nextFrame":null,"complete":true}}}
+```
+
+```json
+{"kind":"response","id":"42","ok":true,"result":{"accepted":true,"stopGeneration":"9","frame":{"index":0,"invocationId":"1401"},"totalBindings":2,"startBinding":0,"values":[{"bindingId":"1801","scopeId":"1901","typeId":"2001","name":"binding-1801","kind":"signed","state":"available","storageKind":"stackSlot","storageLocation":"-8","byteSize":"1","bytes":"d6","display":"-42","displayStatus":"available"},{"bindingId":"1802","scopeId":"1901","typeId":"2001","name":"binding-1802","kind":"signed","state":"optimizedAway","storageKind":"unknown","storageLocation":"0","byteSize":"4","bytes":null,"display":null,"displayStatus":"unavailable"}],"complete":true,"nextBinding":null}}
+```
+
+The standalone process currently routes managed inspection only. These native
+result encoders are reusable Elisa API functions and do not imply that the
+process has launched a native target or advertises native stack/value support.
+The server must keep those capabilities disabled until it dispatches the
+native agent session and emits these result objects end to end.
+
 ## Target timeline, history, and branch extensions
 
 These method shapes describe the intended advanced client contract. The

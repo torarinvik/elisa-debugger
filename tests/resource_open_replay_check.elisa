@@ -41,6 +41,7 @@ const module Test:
     FAILURE_READ_MISMATCH: i64 = 14
     FAILURE_SEEK_MISMATCH: i64 = 15
     FAILURE_WRITE_MISMATCH: i64 = 16
+    FAILURE_OPERATION_OVERFLOW: i64 = 17
     TEST_SUCCESS: i64 = 0
 
 def main() -> i64:
@@ -108,4 +109,18 @@ def main() -> i64:
     corrupted_next_handle: u64 = corrupted_store.next_handle
     corrupt_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(corrupted_store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
     return Test::FAILURE_CORRUPT_OPEN if corrupt_open.accepted or corrupt_open.failure.code != DebuggerErrors::ErrorCode.Corrupt or corrupted_store.count != recorded_count or corrupted_store.next_handle != corrupted_next_handle
+
+    overflow_store: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    DebuggerVirtualResources::resources_initialize(overflow_store, DebuggerVirtualResources::ResourceMode.Recording)
+    first_overflow_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(overflow_store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    return Test::FAILURE_OPERATION_OVERFLOW if not first_overflow_open.accepted
+    while overflow_store.operation_count < DebuggerVirtualResources::Limits::MAX_OPERATIONS:
+        fill_operation: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(overflow_store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+        return Test::FAILURE_OPERATION_OVERFLOW if not fill_operation.accepted or not DebuggerErrors::error_is_ok(fill_operation.failure)
+    operation_count_before_overflow: usize = overflow_store.operation_count
+    next_handle_before_overflow: u64 = overflow_store.next_handle
+    overflowed_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(overflow_store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    return Test::FAILURE_OPERATION_OVERFLOW if overflowed_open.accepted or overflowed_open.failure.code != DebuggerErrors::ErrorCode.ResourceLimit or not overflow_store.operation_overflowed or overflow_store.operation_count != operation_count_before_overflow or overflow_store.operation_cursor != operation_count_before_overflow or overflow_store.next_handle != next_handle_before_overflow
+    replay_after_overflow: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(overflow_store)
+    return Test::FAILURE_OPERATION_OVERFLOW if replay_after_overflow.code != DebuggerErrors::ErrorCode.ResourceLimit or overflow_store.mode != DebuggerVirtualResources::ResourceMode.Recording or not DebuggerVirtualResources::resources_is_valid(overflow_store) or DebuggerVirtualResources::resources_replay_complete(overflow_store)
     return Test::TEST_SUCCESS

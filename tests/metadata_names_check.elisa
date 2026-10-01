@@ -1,0 +1,145 @@
+include "../src/metadata/names.elisa"
+
+const module Identity:
+    NO_ID: u64 = 0
+    FILE: u64 = 501
+    LOGICAL_PATH: u64 = 502
+    CONTENT: u64 = 503
+    FUNCTION: u64 = 601
+    FUNCTION_NAME: u64 = 701
+    SECOND_FUNCTION: u64 = 602
+    UNREGISTERED_NAME: u64 = 702
+    FILLER_BASE: u64 = 10000
+    BOUNDARY_NAME: u64 = 90000
+
+const module SourceFixture:
+    PATH: cstr = "main.elisa"
+    PATH_LENGTH: usize = 10
+    FIRST_BYTE: usize = 0
+    LINE_COUNT: u64 = 2
+    FIRST_BYTE_OFFSET: u64 = 0
+    END_BYTE_OFFSET: u64 = 1
+    LINE: u32 = 1
+    START_COLUMN: u32 = 0
+    END_COLUMN: u32 = 1
+    DISCRIMINATOR: u32 = 0
+
+const module NameFixture:
+    TEXT: cstr = "worker"
+    TEXT_LENGTH: usize = 6
+    SHORT_OUTPUT_CAPACITY: usize = 5
+    OTHER_TEXT: cstr = "other"
+    OTHER_TEXT_LENGTH: usize = 5
+    FILLER_TEXT: cstr = "x"
+    FILLER_LENGTH: usize = 1
+    ASCII_A: u8 = 97
+    INVALID_UTF8: u8 = 255
+
+const module ErrorResult:
+    SUCCESS: i64 = 0
+    SOURCE_FILE: i64 = 1
+    SOURCE_FUNCTION: i64 = 2
+    ADD_NAME: i64 = 3
+    LOOKUP: i64 = 4
+    WRONG_LOOKUP: i64 = 5
+    DUPLICATE_ACCEPTED: i64 = 6
+    INVALID_UTF8_ACCEPTED: i64 = 7
+    ZERO_ID_ACCEPTED: i64 = 8
+    MISSING_NAME_RESOLVED: i64 = 9
+    WRONG_MISSING_LENGTH: i64 = 10
+    CAPACITY_FILL: i64 = 11
+    CAPACITY_FAILURE: i64 = 12
+    CORRUPT_STORE_ACCEPTED: i64 = 13
+    MAXIMUM_NAME_REJECTED: i64 = 14
+    OVERSIZED_NAME_ACCEPTED: i64 = 15
+    DIRECT_COPY: i64 = 16
+    MISSING_COPY_ACCEPTED: i64 = 17
+    CORRUPT_LOOKUP_ACCEPTED: i64 = 18
+    CORRUPT_LOOKUP_LENGTH: i64 = 19
+    SHORT_OUTPUT_ACCEPTED: i64 = 20
+    SHORT_OUTPUT_LENGTH: i64 = 21
+
+def main() -> i64:
+    sources: mutable DebuggerSourceStore::SourceStore = DebuggerSourceStore::source_store_new()
+    file: mutable DebuggerMetadata::SourceFile = zeroed
+    file.id <- DebuggerIdentity::debug_id(Identity::FILE)
+    file.logical_path <- DebuggerIdentity::debug_id(Identity::LOGICAL_PATH)
+    file.content <- DebuggerIdentity::debug_id(Identity::CONTENT)
+    file.line_count <- SourceFixture::LINE_COUNT
+    file.path_length <- SourceFixture::PATH_LENGTH
+    for index in SourceFixture::FIRST_BYTE..<SourceFixture::PATH_LENGTH:
+        file.path_bytes[index] <- SourceFixture::PATH[index].u8()
+    added_file: DebuggerErrors::DebuggerError = DebuggerSourceStore::source_store_add_file(sources, file)
+    return ErrorResult::SOURCE_FILE if not DebuggerErrors::error_is_ok(added_file)
+
+    function: mutable DebuggerMetadata::FunctionInfo = zeroed
+    function.id <- DebuggerIdentity::debug_id(Identity::FUNCTION)
+    function.name <- DebuggerIdentity::debug_id(Identity::FUNCTION_NAME)
+    function.source <- DebuggerIdentity::SourceSpan{file: file.id, start_byte: SourceFixture::FIRST_BYTE_OFFSET, end_byte: SourceFixture::END_BYTE_OFFSET, start_line: SourceFixture::LINE, start_column: SourceFixture::START_COLUMN, end_line: SourceFixture::LINE, end_column: SourceFixture::END_COLUMN, discriminator: SourceFixture::DISCRIMINATOR}
+    added_function: DebuggerErrors::DebuggerError = DebuggerSourceStore::source_store_add_function(sources, file.id, function)
+    return ErrorResult::SOURCE_FUNCTION if not DebuggerErrors::error_is_ok(added_function)
+    missing_name_function: mutable DebuggerMetadata::FunctionInfo = function
+    missing_name_function.id <- DebuggerIdentity::debug_id(Identity::SECOND_FUNCTION)
+    missing_name_function.name <- DebuggerIdentity::debug_id(Identity::UNREGISTERED_NAME)
+    added_missing_name_function: DebuggerErrors::DebuggerError = DebuggerSourceStore::source_store_add_function(sources, file.id, missing_name_function)
+    return ErrorResult::SOURCE_FUNCTION if not DebuggerErrors::error_is_ok(added_missing_name_function)
+
+    names: mutable DebuggerMetadataNames::NameStore = zeroed
+    DebuggerMetadataNames::name_store_initialize(names)
+    add_name: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(names, function.name, NameFixture::TEXT.cast[u8&], NameFixture::TEXT_LENGTH)
+    return ErrorResult::ADD_NAME if not DebuggerErrors::error_is_ok(add_name)
+    return ErrorResult::ADD_NAME if not DebuggerMetadataNames::name_store_is_valid(names)
+
+    output: mutable u8[DebuggerMetadataNames::Bounds::MAX_NAME_BYTES] = zeroed
+    output_length: mutable usize = DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+    return ErrorResult::LOOKUP if not DebuggerMetadataNames::name_store_resolve_function(names, sources, function.id, output[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, output_length)
+    return ErrorResult::WRONG_LOOKUP if output_length != NameFixture::TEXT_LENGTH
+    for index in SourceFixture::FIRST_BYTE..<NameFixture::TEXT_LENGTH:
+        return ErrorResult::WRONG_LOOKUP if output[index] != NameFixture::TEXT.cast[u8&][index]
+    output_length <- DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+    return ErrorResult::DIRECT_COPY if not DebuggerMetadataNames::name_store_copy_by_id(names, function.name, output[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, output_length)
+    return ErrorResult::DIRECT_COPY if output_length != NameFixture::TEXT_LENGTH
+    for index in SourceFixture::FIRST_BYTE..<NameFixture::TEXT_LENGTH:
+        return ErrorResult::DIRECT_COPY if output[index] != NameFixture::TEXT.cast[u8&][index]
+    output_length <- DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+    return ErrorResult::SHORT_OUTPUT_ACCEPTED if DebuggerMetadataNames::name_store_copy_by_id(names, function.name, output[SourceFixture::FIRST_BYTE], NameFixture::SHORT_OUTPUT_CAPACITY, output_length)
+    return ErrorResult::SHORT_OUTPUT_LENGTH if output_length != SourceFixture::FIRST_BYTE
+    output_length <- DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+    return ErrorResult::MISSING_COPY_ACCEPTED if DebuggerMetadataNames::name_store_copy_by_id(names, DebuggerIdentity::debug_id(Identity::UNREGISTERED_NAME), output[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, output_length)
+    return ErrorResult::MISSING_COPY_ACCEPTED if output_length != SourceFixture::FIRST_BYTE
+
+    duplicate_name: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(names, function.name, NameFixture::OTHER_TEXT.cast[u8&], NameFixture::OTHER_TEXT_LENGTH)
+    return ErrorResult::DUPLICATE_ACCEPTED if DebuggerErrors::error_is_ok(duplicate_name)
+    invalid_bytes: mutable u8[DebuggerMetadataNames::Bounds::MAX_NAME_BYTES] = zeroed
+    invalid_bytes[SourceFixture::FIRST_BYTE] <- NameFixture::INVALID_UTF8
+    invalid_utf8: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(names, DebuggerIdentity::debug_id(Identity::UNREGISTERED_NAME), invalid_bytes[SourceFixture::FIRST_BYTE], NameFixture::FILLER_LENGTH)
+    return ErrorResult::INVALID_UTF8_ACCEPTED if DebuggerErrors::error_is_ok(invalid_utf8)
+    zero_id: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(names, DebuggerIdentity::debug_id(Identity::NO_ID), NameFixture::FILLER_TEXT.cast[u8&], NameFixture::FILLER_LENGTH)
+    return ErrorResult::ZERO_ID_ACCEPTED if DebuggerErrors::error_is_ok(zero_id)
+    output_length <- DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+    return ErrorResult::MISSING_NAME_RESOLVED if DebuggerMetadataNames::name_store_resolve_function(names, sources, missing_name_function.id, output[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, output_length)
+    return ErrorResult::WRONG_MISSING_LENGTH if output_length != SourceFixture::FIRST_BYTE
+
+    boundary_names: mutable DebuggerMetadataNames::NameStore = zeroed
+    DebuggerMetadataNames::name_store_initialize(boundary_names)
+    boundary_text: mutable u8[DebuggerMetadataNames::Bounds::MAX_NAME_BYTES] = zeroed
+    for index in SourceFixture::FIRST_BYTE..<DebuggerMetadataNames::Bounds::MAX_NAME_BYTES:
+        boundary_text[index] <- NameFixture::ASCII_A
+    maximum_name: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(boundary_names, DebuggerIdentity::debug_id(Identity::BOUNDARY_NAME), boundary_text[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES)
+    return ErrorResult::MAXIMUM_NAME_REJECTED if not DebuggerErrors::error_is_ok(maximum_name)
+    oversized_name: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(boundary_names, DebuggerIdentity::debug_id(Identity::BOUNDARY_NAME + NameFixture::FILLER_LENGTH.u64()), boundary_text[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES + NameFixture::FILLER_LENGTH)
+    return ErrorResult::OVERSIZED_NAME_ACCEPTED if DebuggerErrors::error_is_ok(oversized_name)
+
+    while names.count < DebuggerMetadataNames::Bounds::MAX_NAME_ENTRIES:
+        filler_id: u64 = Identity::FILLER_BASE + names.count.u64()
+        filler_result: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(names, DebuggerIdentity::debug_id(filler_id), NameFixture::FILLER_TEXT.cast[u8&], NameFixture::FILLER_LENGTH)
+        return ErrorResult::CAPACITY_FILL if not DebuggerErrors::error_is_ok(filler_result)
+    return ErrorResult::CAPACITY_FILL if not DebuggerMetadataNames::name_store_is_valid(names)
+    capacity_result: DebuggerErrors::DebuggerError = DebuggerMetadataNames::name_store_add(names, DebuggerIdentity::debug_id(Identity::FILLER_BASE + names.count.u64()), output[SourceFixture::FIRST_BYTE], NameFixture::FILLER_LENGTH)
+    return ErrorResult::CAPACITY_FAILURE if capacity_result.code != DebuggerErrors::ErrorCode.ResourceLimit
+    names.count <- DebuggerMetadataNames::Bounds::MAX_NAME_ENTRIES + NameFixture::FILLER_LENGTH
+    return ErrorResult::CORRUPT_STORE_ACCEPTED if DebuggerMetadataNames::name_store_is_valid(names)
+    output_length <- DebuggerMetadataNames::Bounds::MAX_NAME_BYTES
+    return ErrorResult::CORRUPT_LOOKUP_ACCEPTED if DebuggerMetadataNames::name_store_copy_by_id(names, function.name, output[SourceFixture::FIRST_BYTE], DebuggerMetadataNames::Bounds::MAX_NAME_BYTES, output_length)
+    return ErrorResult::CORRUPT_LOOKUP_LENGTH if output_length != SourceFixture::FIRST_BYTE
+    return ErrorResult::SUCCESS

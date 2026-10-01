@@ -2,6 +2,7 @@
 # The agent speaks root-to-current order; editor stacks present current first.
 
 include "../agent/snapshot_wire.elisa"
+include "../metadata/names.elisa"
 include "../metadata/source_store.elisa"
 include "./dap_frames.elisa"
 
@@ -80,7 +81,7 @@ module DebuggerDAPNativeFrames:
             return true
 
         # The output is caller-owned so adapters do not copy a full stack page.
-        # Source identities can be resolved to path metadata through SourceStore.
+        # Source paths and function labels resolve through their metadata stores.
         def native_stack_page_to_dap(raw: DebuggerAgentSnapshotWire::DecodedSnapshotStackPage&, source_store: mutable DebuggerSourceStore::SourceStore&, result: mutable StackPage&) -> bool:
             result.valid <- false
             result.start_frame <- NativePage::EMPTY_COUNT
@@ -115,9 +116,10 @@ module DebuggerDAPNativeFrames:
             result.valid <- true
             return true
 
-        def native_stack_page_frame(page: StackPage&, index: usize, source_store: mutable DebuggerSourceStore::SourceStore&, output: mutable NativeFrameView&) -> bool:
+        def native_stack_page_frame(page: StackPage&, index: usize, source_store: mutable DebuggerSourceStore::SourceStore&, name_store: mutable DebuggerMetadataNames::NameStore&, output: mutable NativeFrameView&) -> bool:
             return false if not page.valid or page.generation == Identity::NO_ID or page.thread_id == Identity::NO_ID
             return false if not DebuggerSourceStore::source_store_is_valid(source_store)
+            return false if not DebuggerMetadataNames::name_store_is_valid(name_store)
             return false if page.total_frames > DebuggerAgentFrames::agent_shadow_frame_capacity() or page.start_frame > page.total_frames
             return false if page.count > DebuggerAgentSnapshotWire::SnapshotBuffer::MAX_FRAMES_PER_PAGE or page.count > page.total_frames - page.start_frame or index >= page.count
             expected_stack_index: usize = page.start_frame + index
@@ -151,4 +153,7 @@ module DebuggerDAPNativeFrames:
             output.has_source <- page.has_sources[index]
             for name_index in Name::FIRST_BYTE_INDEX..<Name::LABEL_LENGTH:
                 output.name_bytes[name_index] <- Name::LABEL[name_index].u8()
+            resolved_name_length: mutable usize = NativePage::EMPTY_COUNT
+            if DebuggerMetadataNames::name_store_resolve_function(name_store, source_store, output.function, output.name_bytes[Name::FIRST_BYTE_INDEX], DebuggerEDIRCapacity::EDIR_FUNCTION_NAME_CAPACITY, resolved_name_length):
+                output.name_length <- resolved_name_length
             return true

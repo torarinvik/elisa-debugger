@@ -1,0 +1,86 @@
+# Bounded UTF-8 display-name metadata keyed by stable debugger identities.
+
+include "./source_store.elisa"
+
+module DebuggerMetadataNames:
+    private:
+        const module Capacity:
+            NAME_ENTRY_CAPACITY: usize = 128
+
+        const module Index:
+            FIRST: usize = 0
+            INCREMENT: usize = 1
+
+        const module Sentinel:
+            NO_ID: u64 = 0
+            EMPTY_LENGTH: usize = 0
+            ENTRY_INDEX: usize = Capacity::NAME_ENTRY_CAPACITY
+
+        const module Detail:
+            NAME_STORE_CAPACITY: u32 = 1
+            NAME_STORE_ENTRY: u32 = 2
+
+    public:
+        const module Bounds:
+            MAX_NAME_ENTRIES: usize = Capacity::NAME_ENTRY_CAPACITY
+            MAX_NAME_BYTES: usize = DebuggerMetadataCapacity::NAME_TEXT_MAX_BYTES
+
+        struct NameText:
+            id: mutable DebuggerIdentity::DebugId
+            bytes: mutable u8[DebuggerMetadataCapacity::NAME_TEXT_MAX_BYTES]
+            length: mutable usize
+
+        struct NameStore:
+            entries: mutable NameText[Capacity::NAME_ENTRY_CAPACITY]
+            count: mutable usize
+
+        def name_store_initialize(store: mutable NameStore&) -> void:
+            store.count <- Sentinel::EMPTY_LENGTH
+
+        def name_store_find_index(store: mutable NameStore&, name_id: DebuggerIdentity::DebugId) -> usize:
+            return Sentinel::ENTRY_INDEX if store.count > Capacity::NAME_ENTRY_CAPACITY
+            for index in Index::FIRST..<store.count:
+                return index if store.entries[index].id.value == name_id.value
+            return Sentinel::ENTRY_INDEX
+
+        def name_store_add(store: mutable NameStore&, name_id: DebuggerIdentity::DebugId, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::NAME_STORE_CAPACITY) if store.count > Capacity::NAME_ENTRY_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::NAME_STORE_CAPACITY) if store.count >= Capacity::NAME_ENTRY_CAPACITY
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::NAME_STORE_ENTRY) if name_id.value == Sentinel::NO_ID or length == Sentinel::EMPTY_LENGTH or length > Bounds::MAX_NAME_BYTES
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::NAME_STORE_ENTRY) if not DebuggerMetadata::metadata_text_utf8_is_valid(bytes, length, Bounds::MAX_NAME_BYTES)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::NAME_STORE_ENTRY) if name_store_find_index(store, name_id) != Sentinel::ENTRY_INDEX
+            entry_index: usize = store.count
+            store.entries[entry_index].id <- name_id
+            store.entries[entry_index].length <- length
+            for byte_index in Index::FIRST..<length:
+                store.entries[entry_index].bytes[byte_index] <- bytes[byte_index]
+            store.count <- store.count + Index::INCREMENT
+            return DebuggerErrors::no_error()
+
+        def name_store_copy_by_id(store: mutable NameStore&, name_id: DebuggerIdentity::DebugId, output_bytes: mutable u8&, output_capacity: usize, output_length: mutable usize&) -> bool:
+            output_length <- Sentinel::EMPTY_LENGTH
+            return false if not name_store_is_valid(store)
+            name_index: usize = name_store_find_index(store, name_id)
+            return false if name_index == Sentinel::ENTRY_INDEX
+            return false if output_capacity < store.entries[name_index].length
+            output_length <- store.entries[name_index].length
+            for byte_index in Index::FIRST..<output_length:
+                output_bytes[byte_index] <- store.entries[name_index].bytes[byte_index]
+            return true
+
+        def name_store_resolve_function(store: mutable NameStore&, source_store: mutable DebuggerSourceStore::SourceStore&, function_id: DebuggerIdentity::DebugId, output_bytes: mutable u8&, output_capacity: usize, output_length: mutable usize&) -> bool:
+            output_length <- Sentinel::EMPTY_LENGTH
+            return false if not DebuggerSourceStore::source_store_is_valid(source_store)
+            function: DebuggerMetadata::FunctionInfo = DebuggerSourceStore::source_store_find_function(source_store, function_id)
+            return false if function.id.value == Sentinel::NO_ID
+            return name_store_copy_by_id(store, function.name, output_bytes, output_capacity, output_length)
+
+        def name_store_is_valid(store: NameStore&) -> bool:
+            return false if store.count > Capacity::NAME_ENTRY_CAPACITY
+            for index in Index::FIRST..<store.count:
+                entry: NameText = store.entries[index]
+                return false if entry.id.value == Sentinel::NO_ID or entry.length == Sentinel::EMPTY_LENGTH or entry.length > Bounds::MAX_NAME_BYTES
+                return false if not DebuggerMetadata::metadata_text_utf8_is_valid(entry.bytes[Index::FIRST], entry.length, Bounds::MAX_NAME_BYTES)
+                for previous_index in Index::FIRST..<index:
+                    return false if store.entries[previous_index].id.value == entry.id.value
+            return true

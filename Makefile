@@ -147,6 +147,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
+.PHONY: metadata-names-check
 .PHONY: managed-allocations-check concurrency-races-check expression-parser-check timeline-capability-check type-metadata-check
 .PHONY: build-runner-check
 .PHONY: native-jetsam-check native-jetsam-tool native-macos-resources-check native-macos-resources-tool native-agent-controller-check
@@ -221,6 +222,7 @@ module-check: native-local-agent-transport-check
 endif
 module-check: dap-function-breakpoints-check
 module-check: dap-native-frames-check
+module-check: metadata-names-check
 module-check: $(BUILD)/elisa-debugger-timeline-capability-check
 module-check: $(MANAGED_ALLOCATIONS_CHECK)
 
@@ -1098,6 +1100,13 @@ expression-parser-check: $(EXPRESSION_PARSER_CHECK)
 $(BUILD)/elisa-debugger-source-store-check: tests/source_store_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-metadata-names-check: tests/metadata_names_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+metadata-names-check: $(BUILD)/elisa-debugger-metadata-names-check
+	"$(BUILD)/elisa-debugger-metadata-names-check"
 
 $(BUILD)/elisa-debugger-type-metadata-check: tests/type_metadata_check.elisa $(ELISA_BUILD_INPUTS)
 	mkdir -p $(BUILD)

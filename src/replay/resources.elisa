@@ -12,6 +12,9 @@ module DebuggerVirtualResources:
             REPLAY_RESOURCES_DETAIL_DIVERGENCE: u32 = 3
             OFFSET: u32 = 4
             CORRUPT: u32 = 5
+            REPLAY_RESOURCES_DETAIL_OPEN_REQUEST: u32 = 6
+            REPLAY_RESOURCES_DETAIL_OPEN_MISSING: u32 = 7
+            REPLAY_RESOURCES_DETAIL_SEED_MODE: u32 = 8
 
         const module Resource:
             REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY: usize = 16
@@ -50,16 +53,51 @@ module DebuggerVirtualResources:
             eof: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct ResourceOpenResult:
+            accepted: mutable bool
+            handle: mutable DebuggerIdentity::DebugId
+            failure: mutable DebuggerErrors::DebuggerError
+
         def resources_initialize(store: mutable ResourceStore&, mode: ResourceMode) -> void:
             store.count <- Resource::EMPTY_FILE_COUNT
             store.next_handle <- Resource::FIRST_HANDLE
             store.mode <- mode
 
         def resources_open(store: mutable ResourceStore&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64) -> DebuggerIdentity::DebugId:
-            return DebuggerIdentity::debug_id(Resource::NO_HANDLE) if store.mode.u16() > Resource::REPLAY_RESOURCES_RESOURCE_MODE_MAX
-            return DebuggerIdentity::debug_id(Resource::NO_HANDLE) if store.count >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY or store.next_handle == Resource::NO_HANDLE or store.next_handle == Resource::MAX_HANDLE or path.value == Resource::NO_HANDLE or generation == Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION
+            result: ResourceOpenResult = resources_open_checked(store, path, writable, generation)
+            return result.handle
+
+        def resources_open_checked(store: mutable ResourceStore&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64) -> ResourceOpenResult:
+            result: mutable ResourceOpenResult = zeroed
+            result.handle <- DebuggerIdentity::debug_id(Resource::NO_HANDLE)
+            result.failure <- DebuggerErrors::no_error()
+            if not resources_is_valid(store):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+                return result
+            if path.value == Resource::NO_HANDLE or generation == Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE)
+                return result
             for index in 0..<store.count:
-                return DebuggerIdentity::debug_id(Resource::NO_HANDLE) if store.files[index].handle.value == store.next_handle
+                if store.files[index].path.value == path.value and store.files[index].generation == generation:
+                    if store.files[index].writable != writable:
+                        result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPEN_REQUEST)
+                        return result
+                    result.handle <- store.files[index].handle
+                    result.accepted <- true
+                    return result
+            if store.mode == ResourceMode.Replaying:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPEN_MISSING)
+                return result
+            if store.count >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY)
+                return result
+            if store.next_handle == Resource::NO_HANDLE or store.next_handle == Resource::MAX_HANDLE:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY)
+                return result
+            for index in 0..<store.count:
+                if store.files[index].handle.value == store.next_handle:
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+                    return result
             index: usize = store.count
             store.files[index].handle <- DebuggerIdentity::debug_id(store.next_handle)
             store.files[index].path <- path
@@ -67,7 +105,9 @@ module DebuggerVirtualResources:
             store.files[index].generation <- generation
             store.count <- store.count + 1
             store.next_handle <- store.next_handle + Resource::FIRST_HANDLE
-            return store.files[index].handle
+            result.handle <- store.files[index].handle
+            result.accepted <- true
+            return result
 
         def resources_find(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId) -> usize:
             return Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY if store.count > Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
@@ -75,7 +115,11 @@ module DebuggerVirtualResources:
                 return index if store.files[index].handle.value == handle.value
             return Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
 
+        # Install captured initial bytes while recording. Replay must read the
+        # checkpointed resource and cannot reseed it with fresh host data.
         def resources_seed(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT) if not resources_is_valid(store)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::REPLAY_RESOURCES_DETAIL_SEED_MODE) if store.mode != ResourceMode.Recording
             index: usize = resources_find(store, handle)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE) if index >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY) if length > Resource::DATA_CAPACITY
@@ -165,6 +209,7 @@ module DebuggerVirtualResources:
                 return false if file.handle.value >= store.next_handle
                 for previous in 0..<index:
                     return false if store.files[previous].handle.value == file.handle.value
+                    return false if store.files[previous].path.value == file.path.value and store.files[previous].generation == file.generation
             return true
 
         def resources_write(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, input: u8&, length: usize) -> IoResult:

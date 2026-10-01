@@ -1,0 +1,70 @@
+# A replayed virtual file open must resolve the captured identity, not invent
+# a new resource or let fixture seeding replace recorded input.
+
+include "../src/replay/resources.elisa"
+
+const module Test:
+    PATH_ID: u64 = 4001
+    PATH_OFFSET: u64 = 1
+    GENERATION: u64 = 17
+    BYTE_COUNT: usize = 3
+    FIRST_BYTE_INDEX: usize = 0
+    SECOND_BYTE_INDEX: usize = 1
+    LAST_BYTE_INDEX: usize = 2
+    ONE_FILE: usize = 1
+    FIRST_FILE_INDEX: usize = 0
+    FIRST_HANDLE: u64 = 1
+    FIRST_BYTE: u8 = 7
+    SECOND_BYTE: u8 = 8
+    THIRD_BYTE: u8 = 9
+    FAILURE_RECORD_OPEN: i64 = 1
+    FAILURE_RECORD_SEED: i64 = 2
+    FAILURE_MATCHED_OPEN: i64 = 3
+    FAILURE_MISSING_OPEN: i64 = 4
+    FAILURE_CHANGED_GENERATION: i64 = 5
+    FAILURE_CHANGED_ACCESS: i64 = 6
+    FAILURE_STATE_MUTATION: i64 = 7
+    FAILURE_REPLAY_READ: i64 = 8
+    FAILURE_STORE_VALIDATION: i64 = 9
+    FAILURE_CORRUPT_OPEN: i64 = 10
+    TEST_SUCCESS: i64 = 0
+
+def main() -> i64:
+    store: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    DebuggerVirtualResources::resources_initialize(store, DebuggerVirtualResources::ResourceMode.Recording)
+    recorded: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    return Test::FAILURE_RECORD_OPEN if not recorded.accepted or not DebuggerErrors::error_is_ok(recorded.failure) or recorded.handle.value != Test::FIRST_HANDLE or store.count != Test::ONE_FILE
+
+    bytes: mutable u8[Test::BYTE_COUNT] = [Test::FIRST_BYTE, Test::SECOND_BYTE, Test::THIRD_BYTE]
+    seed_failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(store, recorded.handle, bytes[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
+    return Test::FAILURE_RECORD_SEED if not DebuggerErrors::error_is_ok(seed_failure)
+
+    store.mode <- DebuggerVirtualResources::ResourceMode.Replaying
+    recorded_count: usize = store.count
+    recorded_next_handle: u64 = store.next_handle
+    matched: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    return Test::FAILURE_MATCHED_OPEN if not matched.accepted or matched.handle.value != recorded.handle.value or store.count != recorded_count or store.next_handle != recorded_next_handle
+
+    missing: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID + Test::PATH_OFFSET), true, Test::GENERATION)
+    return Test::FAILURE_MISSING_OPEN if missing.accepted or missing.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle
+
+    changed_generation: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION + Test::PATH_OFFSET)
+    return Test::FAILURE_CHANGED_GENERATION if changed_generation.accepted or changed_generation.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle
+
+    changed_access: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), false, Test::GENERATION)
+    return Test::FAILURE_CHANGED_ACCESS if changed_access.accepted or changed_access.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle
+
+    seed_during_replay: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(store, recorded.handle, bytes[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
+    return Test::FAILURE_STATE_MUTATION if seed_during_replay.code != DebuggerErrors::ErrorCode.InvalidState or store.files[Test::FIRST_FILE_INDEX].length != Test::BYTE_COUNT or store.files[Test::FIRST_FILE_INDEX].bytes[Test::FIRST_BYTE_INDEX] != Test::FIRST_BYTE
+
+    restored: mutable u8[Test::BYTE_COUNT] = zeroed
+    read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, matched.handle, restored[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
+    return Test::FAILURE_REPLAY_READ if not DebuggerErrors::error_is_ok(read_result.failure) or read_result.transferred != Test::BYTE_COUNT or restored[Test::FIRST_BYTE_INDEX] != Test::FIRST_BYTE or restored[Test::SECOND_BYTE_INDEX] != Test::SECOND_BYTE or restored[Test::LAST_BYTE_INDEX] != Test::THIRD_BYTE
+    return Test::FAILURE_STORE_VALIDATION if not DebuggerVirtualResources::resources_is_valid(store)
+
+    corrupted_store: mutable DebuggerVirtualResources::ResourceStore = store
+    corrupted_store.next_handle <- recorded.handle.value
+    corrupted_next_handle: u64 = corrupted_store.next_handle
+    corrupt_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(corrupted_store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    return Test::FAILURE_CORRUPT_OPEN if corrupt_open.accepted or corrupt_open.failure.code != DebuggerErrors::ErrorCode.Corrupt or corrupted_store.count != recorded_count or corrupted_store.next_handle != corrupted_next_handle
+    return Test::TEST_SUCCESS

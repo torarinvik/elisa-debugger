@@ -547,10 +547,10 @@ $(COMPILER_EDIR_INTEGRATION_CHECK): tests/compiler_edir_integration_check.elisa 
 # or test runner is involved.
 compiler-edir-check: $(COMPILER_EDIR_INTEGRATION_CHECK) $(BUILD)/elisa-debugger-dap-server
 	mkdir -p $(BUILD)
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
 	"$(COMPILER_EDIR_INTEGRATION_CHECK)"
 	compiler_dap_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize","arguments":{"supportsVariableType":true}}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"$(COMPILER_EDIR_ARTIFACT)"}}' '{"seq":3,"type":"request","command":"pause"}' '{"seq":4,"type":"request","command":"stepIn"}' '{"seq":5,"type":"request","command":"stepIn"}' '{"seq":6,"type":"request","command":"stepIn"}' '{"seq":7,"type":"request","command":"stepIn"}' '{"seq":8,"type":"request","command":"scopes","arguments":{"frameId":$(COMPILER_EDIR_DAP_FRAME_ID)}}' '{"seq":9,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_DAP_LOCAL_REFERENCE)}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); compiler_dap_output=$$(printf %s "$$compiler_dap_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$compiler_dap_output" | grep -F '"name":"local0","value":"40","type":"i64"'
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_FIXTURE)"
 	native_status=0; "$(COMPILER_NATIVE_ARTIFACT)" || native_status=$$?; test "$$native_status" -eq "$(COMPILER_EDIR_EXPECTED_EXIT)"
 
 
@@ -564,13 +564,13 @@ $(COMPILER_EDIR_CORE_IR_CHECK): tests/compiler_edir_core_ir_check.elisa $(ELISA_
 # the current compiler optimization pipeline is exercised on the same source.
 compiler-edir-core-ir-check: $(COMPILER_EDIR_CORE_IR_CHECK)
 	mkdir -p $(BUILD)
-	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_CORE_IR_ARTIFACT)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
+	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" $(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_CORE_IR_ARTIFACT)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
 	"$(COMPILER_EDIR_CORE_IR_CHECK)"
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit llvm -O0 -o "$(COMPILER_EDIR_CORE_IR_LLVM)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit llvm -O0 -o "$(COMPILER_EDIR_CORE_IR_LLVM)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
 	grep -F "$(COMPILER_EDIR_CORE_IR_LLVM_MARKER)" "$(COMPILER_EDIR_CORE_IR_LLVM)" >/dev/null
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_CORE_IR_NATIVE_O0)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_CORE_IR_NATIVE_O0)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
 	native_o0_status=0; "$(COMPILER_EDIR_CORE_IR_NATIVE_O0)" || native_o0_status=$$?; test "$$native_o0_status" -eq "$(COMPILER_EDIR_CORE_IR_EXPECTED_EXIT)"
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O2 -o "$(COMPILER_EDIR_CORE_IR_NATIVE_O2)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O2 -o "$(COMPILER_EDIR_CORE_IR_NATIVE_O2)" "$(COMPILER_EDIR_CORE_IR_FIXTURE)"
 	native_o2_status=0; "$(COMPILER_EDIR_CORE_IR_NATIVE_O2)" || native_o2_status=$$?; test "$$native_o2_status" -eq "$(COMPILER_EDIR_CORE_IR_EXPECTED_EXIT)"
 
 $(COMPILER_EDIR_LOOP_INTEGRATION_CHECK): tests/compiler_edir_counted_loop_check.elisa $(ELISA_BUILD_INPUTS)
@@ -581,10 +581,10 @@ $(COMPILER_EDIR_LOOP_INTEGRATION_CHECK): tests/compiler_edir_counted_loop_check.
 # DAP reverse stepping against the compiler-emitted source spans and branches.
 compiler-edir-loop-check: $(COMPILER_EDIR_LOOP_INTEGRATION_CHECK) $(BUILD)/elisa-debugger-dap-server
 	mkdir -p $(BUILD)
-	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_LOOP_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
+	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" $(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_LOOP_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
 	"$(COMPILER_EDIR_LOOP_INTEGRATION_CHECK)"
 	loop_dap_input=$$(for payload in '{"seq":1,"type":"request","command":"initialize","arguments":{"supportsVariableType":true}}' '{"seq":2,"type":"request","command":"launch","arguments":{"program":"$(COMPILER_EDIR_LOOP_ARTIFACT)","sourcePathRoot":"$(CURDIR)"}}' '{"seq":3,"type":"request","command":"setBreakpoints","arguments":{"source":{"path":"$(CURDIR)/$(COMPILER_EDIR_LOOP_FIXTURE)"},"breakpoints":[{"line":$(COMPILER_EDIR_LOOP_BREAKPOINT_LINE),"condition":"local1 == 0"}]}}' '{"seq":4,"type":"request","command":"continue"}' '{"seq":5,"type":"request","command":"scopes","arguments":{"frameId":$(COMPILER_EDIR_LOOP_DAP_INITIAL_FRAME_ID)}}' '{"seq":6,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_LOOP_DAP_INITIAL_LOCALS_REFERENCE)}}' '{"seq":7,"type":"request","command":"stepIn"}' '{"seq":8,"type":"request","command":"stepIn"}' '{"seq":9,"type":"request","command":"stepIn"}' '{"seq":10,"type":"request","command":"scopes","arguments":{"frameId":$(COMPILER_EDIR_LOOP_DAP_STEPPED_FRAME_ID)}}' '{"seq":11,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_LOOP_DAP_STEPPED_LOCALS_REFERENCE)}}' '{"seq":12,"type":"request","command":"stepBack"}' '{"seq":13,"type":"request","command":"stackTrace","arguments":{"threadId":1}}' '{"seq":14,"type":"request","command":"scopes","arguments":{"frameId":$(COMPILER_EDIR_LOOP_DAP_REVERSED_FRAME_ID)}}' '{"seq":15,"type":"request","command":"variables","arguments":{"variablesReference":$(COMPILER_EDIR_LOOP_DAP_REVERSED_LOCALS_REFERENCE)}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf 'Content-Length: %s\r\n\r\n%s' "$$frame_length" "$$payload"; done); loop_dap_output=$$(printf %s "$$loop_dap_input" | "$(BUILD)/elisa-debugger-dap-server"); echo "$$loop_dap_output" | grep -F '"reason":"breakpoint"'; echo "$$loop_dap_output" | grep -F '"name":"local0","value":"0","type":"i64"'; echo "$$loop_dap_output" | grep -F '"name":"local1","value":"0","type":"i64"'; echo "$$loop_dap_output" | grep -F '"name":"local1","value":"2","type":"i64"'; echo "$$loop_dap_output" | grep -F '"line":4'; test "$$(printf '%s\n' "$$loop_dap_output" | grep -F -c '"name":"local1","value":"2","type":"i64"')" -ge 2
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O0 -o "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_LOOP_FIXTURE)"
 	loop_native_status=0; "$(COMPILER_EDIR_LOOP_NATIVE_ARTIFACT)" || loop_native_status=$$?; test "$$loop_native_status" -eq "$(COMPILER_EDIR_LOOP_EXPECTED_EXIT)"
 
 $(COMPILER_EDIR_CALLS_CHECK): tests/compiler_edir_calls_check.elisa $(ELISA_BUILD_INPUTS)
@@ -597,9 +597,9 @@ $(COMPILER_EDIR_CALLS_CHECK): tests/compiler_edir_calls_check.elisa $(ELISA_BUIL
 # local scripts continue to run while they migrate to the positive gate.
 compiler-edir-calls-check: $(COMPILER_EDIR_CALLS_CHECK)
 	mkdir -p $(BUILD)
-	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O$(COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
+	ELISA_EDIR_SOURCE_ROOT="$(CURDIR)" $(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O$(COMPILER_EDIR_CALLS_EDIR_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
 	"$(COMPILER_EDIR_CALLS_CHECK)"
-	ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O$(COMPILER_EDIR_CALLS_NATIVE_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit exe -O$(COMPILER_EDIR_CALLS_NATIVE_OPTIMIZATION_LEVEL) -o "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" "$(COMPILER_EDIR_CALLS_FIXTURE)"
 	calls_native_status=$(COMPILER_EDIR_CALLS_NATIVE_SUCCESS_STATUS); "$(COMPILER_EDIR_CALLS_NATIVE_ARTIFACT)" || calls_native_status=$$?; test "$$calls_native_status" -eq "$(COMPILER_EDIR_CALLS_EXPECTED_EXIT)"
 
 compiler-edir-calls-unsupported-check: compiler-edir-calls-check

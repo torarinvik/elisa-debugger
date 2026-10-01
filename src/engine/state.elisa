@@ -22,6 +22,10 @@ module DebuggerManagedState:
         const module StateDefaults:
             INITIAL_VALUE_GENERATION: u64 = 0
 
+        const module StateDetail:
+            REPLAY_STATE: u32 = 1
+            RESOURCE_OVERFLOW: u32 = 2
+
     public:
         struct State:
             tasks: mutable DebuggerConcurrencyRuntime::TaskRuntime
@@ -77,3 +81,15 @@ module DebuggerManagedState:
         def state_replay_is_exact(state: mutable State&) -> bool:
             return false if not state_is_valid(state) or not DebuggerVirtualResources::resources_is_exact(state.resources)
             return state_side_effect_modes_are_coherent(state)
+
+        def state_begin_side_effect_replay(state: mutable State&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, StateDetail::RESOURCE_OVERFLOW) if state.resources.operation_overflowed
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, StateDetail::REPLAY_STATE) if not state_replay_is_exact(state)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, StateDetail::REPLAY_STATE) if state.effects.mode != DebuggerEffects::EffectMode.Recording
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerEffects::effect_oracle_begin_replay(state.effects)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            failure <- DebuggerVirtualResources::resources_replay_restart(state.resources)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            failure <- DebuggerReplayAdapters::adapter_snapshot_begin_replay(state.adapters)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            return DebuggerErrors::no_error()

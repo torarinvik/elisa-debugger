@@ -3,6 +3,10 @@
 include "../src/engine/managed.elisa"
 
 const module Test:
+    const module Bounds:
+        FIRST_INDEX: usize = 0
+        ONE_COUNT: usize = 1
+
     const module Image:
         VERSION: u32 = 1
         INSTRUCTION_COUNT: u64 = 2
@@ -30,6 +34,13 @@ const module Test:
     const module Resource:
         PATH_ID: u64 = 3001
         GENERATION: u64 = 1
+        INITIAL_BYTE: u8 = 31
+        UPDATED_BYTE: u8 = 32
+        BYTE_LENGTH: usize = 1
+
+    const module Adapter:
+        SOURCE_ID: u64 = 4001
+        CLOCK_VALUE: u64 = 4002
 
     const module Failure:
         SUCCESS: i64 = 0
@@ -43,6 +54,16 @@ const module Test:
         REPLAY_MODE_NOT_EXACT: i64 = 8
         BRANCH_MODE_NOT_EXACT: i64 = 9
         RECORDING_MODE_RESET_NOT_EXACT: i64 = 10
+        REPLAY_RECORDING_SETUP: i64 = 11
+        REPLAY_MODES_NOT_ALIGNED: i64 = 12
+        RESOURCE_NOT_RESET_TO_INITIAL_IMAGE: i64 = 13
+        EFFECT_REPLY_MISMATCH: i64 = 14
+        ADAPTER_REPLY_MISMATCH: i64 = 15
+        RESOURCE_REPLAY_MISMATCH: i64 = 16
+        REPLAY_NOT_COMPLETE: i64 = 17
+        REPLAY_RESET_NOT_EXACT: i64 = 18
+        RECORDING_EFFECT_CURSOR_ACCEPTED: i64 = 19
+        OVERFLOWED_REPLAY_NOT_ATOMIC: i64 = 20
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -60,6 +81,12 @@ def main() -> i64:
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return Test::Failure::INITIAL_STATE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
+
+    DebuggerEffects::effect_oracle_record(controller.state.effects, DebuggerEffects::EffectKind.Clock, Test::Effect::REQUEST_HASH, Test::Effect::RESULT_HASH, Test::Effect::RESULT_VALUE)
+    controller.state.effects.cursor <- Test::Bounds::ONE_COUNT
+    return Test::Failure::RECORDING_EFFECT_CURSOR_ACCEPTED if DebuggerManagedEngine::managed_is_exact(controller)
+    DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Recording)
+    return Test::Failure::RECORDING_MODE_RESET_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
 
     DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Replaying)
     return Test::Failure::MIXED_REPLAY_MODE_ACCEPTED if DebuggerManagedEngine::managed_is_exact(controller)
@@ -80,6 +107,34 @@ def main() -> i64:
     DebuggerManagedState::state_initialize(controller.state)
     return Test::Failure::RECORDING_MODE_RESET_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
 
+    DebuggerEffects::effect_oracle_record(controller.state.effects, DebuggerEffects::EffectKind.Clock, Test::Effect::REQUEST_HASH, Test::Effect::RESULT_HASH, Test::Effect::RESULT_VALUE)
+    adapter_source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::Adapter::SOURCE_ID)
+    return Test::Failure::REPLAY_RECORDING_SETUP if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::clock_record(controller.state.adapters.clock, adapter_source, Test::Adapter::CLOCK_VALUE))
+    initial_bytes: mutable u8[Test::Resource::BYTE_LENGTH] = [Test::Resource::INITIAL_BYTE]
+    recorded_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(controller.state.resources, DebuggerIdentity::debug_id(Test::Resource::PATH_ID), true, Test::Resource::GENERATION)
+    return Test::Failure::REPLAY_RECORDING_SETUP if not recorded_open.accepted
+    seeded: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(controller.state.resources, recorded_open.handle, initial_bytes[Test::Bounds::FIRST_INDEX], Test::Resource::BYTE_LENGTH)
+    return Test::Failure::REPLAY_RECORDING_SETUP if not DebuggerErrors::error_is_ok(seeded)
+    updated_bytes: mutable u8[Test::Resource::BYTE_LENGTH] = [Test::Resource::UPDATED_BYTE]
+    recorded_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(controller.state.resources, recorded_open.handle, updated_bytes[Test::Bounds::FIRST_INDEX], Test::Resource::BYTE_LENGTH)
+    return Test::Failure::REPLAY_RECORDING_SETUP if not DebuggerErrors::error_is_ok(recorded_write.failure) or recorded_write.transferred != Test::Resource::BYTE_LENGTH
+
+    replay_started: DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(controller.state)
+    return Test::Failure::REPLAY_MODES_NOT_ALIGNED if not DebuggerErrors::error_is_ok(replay_started)
+    return Test::Failure::REPLAY_MODES_NOT_ALIGNED if controller.state.effects.mode != DebuggerEffects::EffectMode.Replaying or controller.state.resources.mode != DebuggerVirtualResources::ResourceMode.Replaying or controller.state.adapters.clock.mode != DebuggerReplayAdapters::AdapterMode.Replaying or controller.state.adapters.random.mode != DebuggerReplayAdapters::AdapterMode.Replaying or controller.state.adapters.console.mode != DebuggerReplayAdapters::AdapterMode.Replaying or not controller.state.adapters.console.output_suppressed
+    return Test::Failure::RESOURCE_NOT_RESET_TO_INITIAL_IMAGE if controller.state.resources.files[Test::Bounds::FIRST_INDEX].bytes[Test::Bounds::FIRST_INDEX] != Test::Resource::INITIAL_BYTE or controller.state.resources.files[Test::Bounds::FIRST_INDEX].cursor != Test::Bounds::FIRST_INDEX
+    effect_reply: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(controller.state.effects, DebuggerEffects::EffectKind.Clock, Test::Effect::REQUEST_HASH)
+    return Test::Failure::EFFECT_REPLY_MISMATCH if not effect_reply.accepted or effect_reply.result_hash != Test::Effect::RESULT_HASH or effect_reply.result_value != Test::Effect::RESULT_VALUE
+    clock_reply: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(controller.state.adapters.clock, adapter_source)
+    return Test::Failure::ADAPTER_REPLY_MISMATCH if not clock_reply.accepted or clock_reply.value != Test::Adapter::CLOCK_VALUE
+    replay_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(controller.state.resources, DebuggerIdentity::debug_id(Test::Resource::PATH_ID), true, Test::Resource::GENERATION)
+    replay_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(controller.state.resources, replay_open.handle, updated_bytes[Test::Bounds::FIRST_INDEX], Test::Resource::BYTE_LENGTH)
+    return Test::Failure::RESOURCE_REPLAY_MISMATCH if not replay_open.accepted or not DebuggerErrors::error_is_ok(replay_write.failure) or replay_write.transferred != Test::Resource::BYTE_LENGTH or controller.state.resources.files[Test::Bounds::FIRST_INDEX].bytes[Test::Bounds::FIRST_INDEX] != Test::Resource::UPDATED_BYTE
+    return Test::Failure::REPLAY_NOT_COMPLETE if not DebuggerEffects::effect_oracle_replay_complete(controller.state.effects) or not DebuggerVirtualResources::resources_replay_complete(controller.state.resources) or not DebuggerReplayAdapters::clock_is_exact(controller.state.adapters.clock) or not DebuggerManagedEngine::managed_is_exact(controller)
+
+    DebuggerManagedState::state_initialize(controller.state)
+    return Test::Failure::REPLAY_RESET_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)
+
     DebuggerEffects::effect_oracle_record(controller.state.effects, DebuggerEffects::EffectKind.FileRead, Test::Effect::REQUEST_HASH, Test::Effect::RESULT_HASH, Test::Effect::RESULT_VALUE)
     return Test::Failure::BARRIER_NOT_DETECTED if DebuggerManagedEngine::managed_is_exact(controller)
     DebuggerEffects::effect_oracle_initialize(controller.state.effects, DebuggerEffects::EffectMode.Recording)
@@ -95,6 +150,8 @@ def main() -> i64:
     overflow_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(overflow_resources, DebuggerIdentity::debug_id(Test::Resource::PATH_ID), true, Test::Resource::GENERATION)
     return Test::Failure::RESOURCE_OVERFLOW_SETUP if overflow_open.accepted or not DebuggerVirtualResources::resources_is_valid(overflow_resources)
     controller.state.resources <- overflow_resources
+    refused_replay: DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(controller.state)
+    return Test::Failure::OVERFLOWED_REPLAY_NOT_ATOMIC if refused_replay.code != DebuggerErrors::ErrorCode.ResourceLimit or controller.state.effects.mode != DebuggerEffects::EffectMode.Recording or controller.state.resources.mode != DebuggerVirtualResources::ResourceMode.Recording or controller.state.adapters.clock.mode != DebuggerReplayAdapters::AdapterMode.Recording
     return Test::Failure::RESOURCE_OVERFLOW_NOT_DETECTED if DebuggerManagedEngine::managed_is_exact(controller)
     DebuggerVirtualResources::resources_initialize(controller.state.resources, DebuggerVirtualResources::ResourceMode.Recording)
     return Test::Failure::RESOURCE_RESET_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)

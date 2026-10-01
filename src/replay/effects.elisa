@@ -246,6 +246,7 @@ module DebuggerEffects:
         def effect_oracle_is_exact(oracle: EffectOracle&) -> bool:
             return false if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor > oracle.count or oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX or oracle.exactness.u16() > Effect::EXACTNESS_MAX or not DebuggerErrors::error_is_ok(oracle.last_error)
             return false if oracle.mode == EffectMode.Live or oracle.mode == EffectMode.Barrier
+            return false if (oracle.mode == EffectMode.Recording or oracle.mode == EffectMode.Virtualized) and oracle.cursor != Effect::EMPTY_CURSOR
             for index in Effect::EMPTY_COUNT..<oracle.count:
                 return false if oracle.records[index].sequence != index.u64() or oracle.records[index].kind.u16() > Effect::REPLAY_EFFECTS_EFFECT_KIND_MAX or oracle.records[index].suppress_external_write != effect_is_external_write(oracle.records[index].kind)
                 return false if not effect_kind_is_fully_captured(oracle.records[index].kind)
@@ -263,6 +264,15 @@ module DebuggerEffects:
         def effect_oracle_replay_complete(oracle: EffectOracle&) -> bool:
             return false if not effect_oracle_is_exact(oracle)
             return oracle.mode != EffectMode.Replaying or oracle.cursor == oracle.count
+
+        def effect_oracle_begin_replay(oracle: mutable EffectOracle&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Effect::ORACLE_CAPACITY.u32()) if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor > oracle.count
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32()) if oracle.overflowed
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT) if not effect_oracle_is_exact(oracle)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::REPLAY_WRITE) if oracle.mode != EffectMode.Recording
+            oracle.mode <- EffectMode.Replaying
+            oracle.cursor <- Effect::EMPTY_CURSOR
+            return DebuggerErrors::no_error()
 
         def effect_record_suppresses_write(record: EffectRecord) -> bool:
             return record.suppress_external_write

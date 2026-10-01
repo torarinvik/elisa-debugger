@@ -49,6 +49,16 @@ const module Storage:
     STACK_OFFSET: i64 = -8
     ZERO: i64 = 0
 
+const module FrameIdentity:
+    THREAD: u64 = 3001
+    INVOCATION: u64 = 3002
+    FUNCTION: u64 = 3003
+    TASK: u64 = 3004
+    SOURCE: u64 = 3005
+    SOURCE_LINE: u32 = 1
+    SOURCE_COLUMN: u32 = 1
+    GENERATION: u64 = 1
+
 const module TestResult:
     SUCCESS: i64 = 0
     SIGNED_ENCODE: i64 = 1
@@ -69,6 +79,11 @@ const module TestResult:
     SIGNED_FORMAT: i64 = 16
     UNSIGNED_FORMAT: i64 = 17
     BOOLEAN_FORMAT: i64 = 18
+    FRAME_INITIALIZE: i64 = 19
+    FRAME_PUSH: i64 = 20
+    FRAME_DECLARE: i64 = 21
+    FRAME_STOP: i64 = 22
+    FRAME_READ: i64 = 23
 
 def debug_id(value: u64) -> DebuggerIdentity::DebugId:
     return DebuggerIdentity::DebugId{value: value}
@@ -140,4 +155,14 @@ def main() -> i64:
     malformed_encoded: mutable DebuggerAgentValueCodec::EncodedScalar = encoded_negative
     malformed_encoded.byte_count <- Width::TOO_MANY_BYTES
     return TestResult::MALFORMED_ENCODED_DESCRIPTOR if DebuggerAgentValueCodec::agent_scalar_descriptor(debug_id(Identity::BINDING), debug_id(Identity::SCOPE), debug_id(Identity::TYPE), DebuggerAgentFrames::AgentStorageKind.StackSlot, Storage::STACK_OFFSET, malformed_encoded).status != DebuggerAgentValueCodec::ValueCodecStatus.InvalidWidth
+
+    shadow_stack: mutable DebuggerAgentFrames::AgentShadowStack = zeroed
+    return TestResult::FRAME_INITIALIZE if DebuggerAgentFrames::agent_shadow_stack_initialize(shadow_stack, debug_id(FrameIdentity::THREAD)) != DebuggerAgentFrames::ShadowStatus.Ready
+    return TestResult::FRAME_PUSH if DebuggerAgentFrames::agent_shadow_frame_push(shadow_stack, debug_id(FrameIdentity::INVOCATION), debug_id(Storage::ZERO.u64()), debug_id(FrameIdentity::FUNCTION), debug_id(FrameIdentity::TASK), debug_id(FrameIdentity::SOURCE), FrameIdentity::SOURCE_LINE, FrameIdentity::SOURCE_COLUMN) != DebuggerAgentFrames::ShadowStatus.Ready
+    canonical_declaration: DebuggerAgentFrames::ShadowStatus = DebuggerAgentValueCodec::agent_shadow_binding_declare_scalar(shadow_stack, debug_id(FrameIdentity::INVOCATION), debug_id(Identity::BINDING), debug_id(Identity::SCOPE), debug_id(Identity::TYPE), DebuggerAgentFrames::AgentStorageKind.StackSlot, Storage::STACK_OFFSET, encoded_negative)
+    return TestResult::FRAME_DECLARE if canonical_declaration != DebuggerAgentFrames::ShadowStatus.Ready
+    return TestResult::FRAME_STOP if DebuggerAgentFrames::agent_shadow_stack_begin_stop(shadow_stack, FrameIdentity::GENERATION) != DebuggerAgentFrames::ShadowStatus.Ready
+    stored_binding: DebuggerAgentFrames::BindingReadResult = DebuggerAgentFrames::agent_shadow_binding_read(shadow_stack, debug_id(FrameIdentity::INVOCATION), debug_id(Identity::BINDING), FrameIdentity::GENERATION)
+    round_trip: DebuggerAgentValueCodec::DecodedScalar = DebuggerAgentValueCodec::agent_scalar_decode(stored_binding.descriptor)
+    return TestResult::FRAME_READ if stored_binding.status != DebuggerAgentFrames::ShadowStatus.Ready or stored_binding.descriptor.bytes[EncodedByte::FIRST] != EncodedByte::NEGATIVE_EIGHT or stored_binding.descriptor.storage_location != Storage::STACK_OFFSET or round_trip.status != DebuggerAgentValueCodec::ValueCodecStatus.Ready or round_trip.signed_value != SignedValue::NEGATIVE_EIGHT
     return TestResult::SUCCESS

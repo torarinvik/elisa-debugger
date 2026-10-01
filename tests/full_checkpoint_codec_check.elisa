@@ -54,6 +54,7 @@ const module Test:
     EFFECT_CAPACITY: usize = 256
     RESOURCE_CAPACITY: usize = 16
     EFFECT_KIND_CLOCK_CODE: u16 = 0
+    EFFECT_KIND_RANDOM_CODE: u16 = 1
     CODEC_CAPACITY_OFFSET: usize = 1
     NO_SYNC_RESOURCE: u64 = 0
     NO_PARENT_TASK: u64 = 0
@@ -201,7 +202,7 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     effects: mutable DebuggerEffects::EffectOracle = zeroed
     DebuggerEffects::effect_oracle_initialize(effects, DebuggerEffects::EffectMode.Recording)
     DebuggerEffects::effect_oracle_record(effects, DebuggerEffects::EffectKind.Clock, Test::EFFECT_REQUEST_HASH, Test::EFFECT_RESULT_HASH, Test::EFFECT_RESULT_VALUE)
-    DebuggerEffects::effect_oracle_record(effects, DebuggerEffects::EffectKind.Clock, Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET, Test::EFFECT_RESULT_HASH + Test::SECOND_EFFECT_OFFSET, Test::EFFECT_RESULT_VALUE + Test::SECOND_EFFECT_OFFSET)
+    DebuggerEffects::effect_oracle_record_random(effects, Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET, Test::EFFECT_RESULT_HASH + Test::SECOND_EFFECT_OFFSET, Test::ADAPTER_RANDOM_SECOND)
 
     resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
     DebuggerVirtualResources::resources_initialize(resources, DebuggerVirtualResources::ResourceMode.Recording)
@@ -497,7 +498,7 @@ def check_round_trip() -> i64:
     portable_checkpoint.tasks.scheduler_decisions[0].task.os_thread <- Test::REMAPPED_OS_THREAD
     DebuggerFullCheckpoint::full_checkpoint_seal_side_state(portable_checkpoint)
     return Test::PORTABLE_TASK_CHECKPOINT_FAILURE if not DebuggerFullCheckpoint::full_checkpoint_is_valid(portable_checkpoint)
-    return Test::EFFECT_ROUND_TRIP_FAILURE if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or checkpoint.effects.count != 2 or checkpoint.effects.records[0].kind.u16() != Test::EFFECT_KIND_CLOCK_CODE or checkpoint.effects.records[1].kind.u16() != Test::EFFECT_KIND_CLOCK_CODE
+    return Test::EFFECT_ROUND_TRIP_FAILURE if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects) or checkpoint.effects.count != 2 or checkpoint.effects.records[0].kind.u16() != Test::EFFECT_KIND_CLOCK_CODE or checkpoint.effects.records[1].kind.u16() != Test::EFFECT_KIND_RANDOM_CODE or checkpoint.effects.records[1].result_value.u64() != Test::ADAPTER_RANDOM_SECOND
     return Test::RESOURCE_ROUND_TRIP_FAILURE if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
     return Test::ADAPTER_RESTORE_FAILURE if not DebuggerReplayAdapters::adapter_snapshot_is_valid(checkpoint.adapters) or checkpoint.adapters.clock.cursor != Test::ADAPTER_CURSOR or checkpoint.adapters.random.cursor != Test::ADAPTER_CURSOR or checkpoint.adapters.console.cursor != Test::ADAPTER_CURSOR
     encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
@@ -508,6 +509,11 @@ def check_round_trip() -> i64:
     decoded: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length)
     return Test::DECODE_ROUND_TRIP_FAILURE if decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not DebuggerFullCheckpoint::full_checkpoint_is_valid(decoded.checkpoint)
     return Test::DECODE_ROUND_TRIP_FAILURE if not checkpoints_are_equal(checkpoint, decoded.checkpoint)
+    restored_effects: mutable DebuggerEffects::EffectOracle = decoded.checkpoint.effects
+    restored_effects.mode <- DebuggerEffects::EffectMode.Replaying
+    restored_clock: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result(restored_effects, DebuggerEffects::EffectKind.Clock, Test::EFFECT_REQUEST_HASH)
+    restored_random: DebuggerEffects::RandomEffectReplay = DebuggerEffects::effect_oracle_replay_random_result(restored_effects, Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET)
+    return Test::EFFECT_ROUND_TRIP_FAILURE if not restored_clock.accepted or restored_clock.result_value != Test::EFFECT_RESULT_VALUE or not restored_random.accepted or restored_random.value != Test::ADAPTER_RANDOM_SECOND or not DebuggerEffects::effect_oracle_replay_complete(restored_effects)
     restored_adapters: mutable DebuggerReplayAdapters::AdapterSnapshot = zeroed
     return Test::ADAPTER_RESTORE_FAILURE if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_restore_adapters(restored_adapters, decoded.checkpoint)) or not adapter_snapshot_is_equal(checkpoint.adapters, restored_adapters)
     source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_SOURCE_ID)

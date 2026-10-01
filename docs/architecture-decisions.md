@@ -53,16 +53,17 @@ observational, incomplete, diverged, and corrupt states. Replayed effects must
 match the recorded kind and request identity; external writes carry a recorded
 suppression policy and are never implicitly sent to the real world.
 
-The generic scalar `EffectOracle` currently qualifies only successful clock
-samples for exact replay. Its records do not contain complete random byte
-streams, console input/output, file contents, network payloads, process state,
-or foreign-call results. Recording any of those kinds marks the oracle
-incomplete, and replay refuses the incomplete data even if a serialized
-exactness flag is forged. The dedicated clock/random/console adapters and
-virtual file store are not yet joined to these effect records in the durable
-trace/replay path. Wire their complete samples and resource identities through
-managed checkpoints and trace chunks before those effects can contribute to an
-exact replay claim.
+The generic scalar `EffectOracle` qualifies clock values and individual
+unsigned 64-bit random samples for exact replay. Random samples use the typed
+`effect_oracle_record_random` and `effect_oracle_replay_random_result` APIs;
+their complete 64-bit value is preserved by the checkpoint codec. Callers
+provide stable request/result hashes, which must identify the relevant call
+shape and stream position. Console input/output, file contents, network
+payloads, process state, and foreign-call results still exceed the scalar
+record shape. Recording those kinds marks the oracle incomplete, and replay
+refuses incomplete data even if a serialized exactness flag is forged. The
+typed console adapters and virtual file store still need a shared durable
+effect-event path before those effects can contribute to exact replay.
 
 ## Protocols
 

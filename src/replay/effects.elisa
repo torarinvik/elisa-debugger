@@ -80,6 +80,13 @@ module DebuggerEffects:
             suppress_external_write: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct RandomEffectReplay:
+            accepted: mutable bool
+            result_hash: mutable u64
+            value: mutable u64
+            suppress_external_write: mutable bool
+            failure: mutable DebuggerErrors::DebuggerError
+
         # The caller owns the fixed record buffer. Empty logical extent makes
         # old slots unreachable; recording overwrites each slot before commit.
         def effect_oracle_initialize(oracle: mutable EffectOracle&, mode: EffectMode) -> void:
@@ -98,13 +105,13 @@ module DebuggerEffects:
             return true if kind == EffectKind.ConsoleOutput
             return kind == EffectKind.FileWrite or kind == EffectKind.NetworkWrite or kind == EffectKind.Process or kind == EffectKind.Foreign
 
-        # The generic oracle stores one scalar result and opaque request/result
-        # hashes. Only a clock sample is fully represented by that shape. The
-        # typed random/console adapters and virtual resource store have richer
-        # records, but they are not currently part of this oracle's checkpoint
-        # contract, so their effect kinds must not inherit exactness here.
+        # The generic oracle stores one 64-bit scalar result and opaque
+        # request/result hashes. Clock results use the signed scalar API;
+        # random results use the typed unsigned API below. The checkpoint codec
+        # preserves the scalar's full bit pattern, so both are replayable.
+        # Console and resource effects need richer payload records.
         def effect_kind_is_fully_captured(kind: EffectKind) -> bool:
-            return kind == EffectKind.Clock
+            return kind == EffectKind.Clock or kind == EffectKind.Random
 
         def effect_oracle_record(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> void:
             return if oracle.exactness == Exactness.Diverged or (not DebuggerErrors::error_is_ok(oracle.last_error) and oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported)
@@ -132,6 +139,12 @@ module DebuggerEffects:
                 if not effect_kind_is_fully_captured(kind):
                     oracle.exactness <- Exactness.Incomplete
                     oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT) if DebuggerErrors::error_is_ok(oracle.last_error)
+
+        # Random samples span the full unsigned 64-bit range. Store their bit
+        # pattern in the oracle's fixed-width scalar slot and expose a typed
+        # unsigned replay result so callers never need signed arithmetic.
+        def effect_oracle_record_random(oracle: mutable EffectOracle&, request_hash: u64, result_hash: u64, value: u64) -> void:
+            effect_oracle_record(oracle, EffectKind.Random, request_hash, result_hash, value.i64())
 
         def effect_oracle_replay(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64) -> void:
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
@@ -225,6 +238,10 @@ module DebuggerEffects:
                 return effect_replay_failure(oracle, initial_failure)
             oracle.cursor <- oracle.cursor + Effect::CURSOR_INCREMENT
             return EffectReplay{accepted: true, result_hash: record.result_hash, result_value: record.result_value, suppress_external_write: record.suppress_external_write, failure: DebuggerErrors::no_error()}
+
+        def effect_oracle_replay_random_result(oracle: mutable EffectOracle&, request_hash: u64) -> RandomEffectReplay:
+            replay: EffectReplay = effect_oracle_replay_result(oracle, EffectKind.Random, request_hash)
+            return RandomEffectReplay{accepted: replay.accepted, result_hash: replay.result_hash, value: replay.result_value.u64(), suppress_external_write: replay.suppress_external_write, failure: replay.failure}
 
         def effect_oracle_is_exact(oracle: EffectOracle&) -> bool:
             return false if oracle.count > Effect::ORACLE_CAPACITY or oracle.cursor > oracle.count or oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX or oracle.exactness.u16() > Effect::EXACTNESS_MAX or not DebuggerErrors::error_is_ok(oracle.last_error)

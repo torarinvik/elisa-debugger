@@ -11,6 +11,7 @@ include "./commands.elisa"
 include "../protocol/request.elisa"
 include "../protocol/dispatcher.elisa"
 include "../protocol/managed_service.elisa"
+include "../protocol/managed_trace_file.elisa"
 
 extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
 extern printf(format: cstr, ...) -> int can[Console]
@@ -39,8 +40,12 @@ module DebuggerCLIEntrypoint:
         const module First:
             CLI_ENTRYPOINT_FIRST_REQUEST_ID: u64 = 1
 
+        const module RequestSentinel:
+            NO_EXPECTED_GENERATION: u64 = 0
+            NO_TARGET_EVENT: u64 = 0
+
         const module Line:
-            CLI_ENTRYPOINT_LINE_CAPACITY: usize = 256
+            CLI_ENTRYPOINT_LINE_CAPACITY: usize = DebuggerCLI::Limits::MAX_LINE_BYTES
 
         const module Stdin:
             FD: int = 0
@@ -97,15 +102,21 @@ module DebuggerCLIEntrypoint:
             if request.method == DebuggerProtocolRequest::RequestMethod.Threads:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Cli::UNSUPPORTED_RESULT_DETAIL)
                 return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
-            return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, 0)
+            return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, RequestSentinel::NO_EXPECTED_GENERATION)
 
-        def process_line(service: mutable DebuggerManagedService::Service&, session: mutable DebuggerSession::Session&, line: u8&, length: usize, request_id: u64) -> void can[Console]:
-            parsed: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(line, length, 0)
+        def process_line(service: mutable DebuggerManagedService::Service&, session: mutable DebuggerSession::Session&, line: u8&, length: usize, request_id: u64) -> void can[Console, Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            parsed: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(line, length, RequestSentinel::NO_EXPECTED_GENERATION)
             method: DebuggerProtocolRequest::RequestMethod = method_from_command(parsed.command)
-            request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: request_id, has_id: true, expected_generation: parsed.expected_generation, target_event: 0, valid: parsed.valid and method != DebuggerProtocolRequest::RequestMethod.Unknown}
+            request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: request_id, has_id: true, expected_generation: parsed.expected_generation, target_event: RequestSentinel::NO_TARGET_EVENT, valid: parsed.valid and method != DebuggerProtocolRequest::RequestMethod.Unknown}
             request.target_event <- parsed.argument if parsed.command == DebuggerCLI::Command.Seek and parsed.argument_present
             if not parsed.valid:
                 _ = printf("error code=%d detail=%u\n", parsed.failure.code, parsed.failure.detail) can Console
+            elif parsed.command == DebuggerCLI::Command.SaveTrace:
+                exported: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(service, parsed.text_argument[DebuggerCLI::Limits::FIRST_TEXT_ARGUMENT_BYTE_INDEX], parsed.text_argument_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+                if exported.accepted:
+                    _ = printf("saved trace bytes=%llu chunks=%llu\n", exported.bytes_written.u64(), exported.chunk_count.u64()) can Console
+                else:
+                    _ = printf("error code=%d detail=%u\n", exported.failure.code, exported.failure.detail) can Console
             else:
                 result: DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
                 session <- result.session
@@ -119,7 +130,7 @@ module DebuggerCLIEntrypoint:
             _ = fflush(null) can Console
 
     public:
-        def run_cli() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def run_cli() -> i64 can[Console, Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             session: mutable DebuggerSession::Session = initial_session()
             service: mutable DebuggerManagedService::Service
             DebuggerManagedService::service_initialize(service, session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))

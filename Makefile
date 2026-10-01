@@ -29,6 +29,8 @@ COMPILER_EDIR_ARTIFACT := $(BUILD)/compiler_edir_arithmetic.edir
 COMPILER_NATIVE_ARTIFACT := $(BUILD)/compiler_edir_arithmetic_native
 COMPILER_EDIR_INTEGRATION_CHECK := $(BUILD)/elisa-debugger-compiler-edir-integration-check
 COMPILER_EDIR_EXPECTED_EXIT := 42
+CLI_SAVE_TRACE_EXPECTED_GENERATION_COUNT := 3
+CLI_SAVE_TRACE_PATH := $(BUILD)/cli-save trace.trace
 DAP_STACK_FRAME_ID_STRIDE := 18
 DAP_STACK_FRAME_ID_FIRST_OFFSET := 1
 DAP_LOCALS_REFERENCE_STRIDE := 17
@@ -1244,7 +1246,7 @@ smoke: check server server-version-check dap-server cli cli-flush-check ffi-chec
 	cli_inspection=$$(printf 'launch\npause\nstack\nlocals\n' | "$(BUILD)/elisa-debugger-cli"); echo "$$cli_inspection" | grep -F 'frame id='; echo "$$cli_inspection" | grep -F 'locals count=0'
 	cli_unwired=$$(printf 'launch\npause\ntasks\nevaluate\nbreak\nwatch\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_unwired" | grep -c '^error code=')" -eq 4
 	printf 'launch\npause\nseek 1\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=2'
-	cli_save_trace=$$(printf 'launch\npause\nsaveTrace\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_save_trace" | grep -c '^ok generation=')" -eq 2 && printf '%s\n' "$$cli_save_trace" | tail -n 1 | grep -F 'error code='
+	cli_save_trace=$$(printf 'launch\npause\nstep\nsaveTrace $(CLI_SAVE_TRACE_PATH)\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_save_trace" | grep -c '^ok generation=')" -eq $(CLI_SAVE_TRACE_EXPECTED_GENERATION_COUNT) && printf '%s\n' "$$cli_save_trace" | tail -n 1 | grep -F 'saved trace bytes=' && test -s "$(CLI_SAVE_TRACE_PATH)"
 	cli_replay=$$(printf 'launch\npause\nreplay\n' | "$(BUILD)/elisa-debugger-cli"); test "$$(printf '%s\n' "$$cli_replay" | grep -c '^ok generation=')" -eq 2 && printf '%s\n' "$$cli_replay" | tail -n 1 | grep -F 'error code='
 	printf 'run\nclose\n' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=0'
 	printf 'launch' | "$(BUILD)/elisa-debugger-cli" | grep -F 'ok generation=0'

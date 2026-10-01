@@ -158,11 +158,13 @@ not an allocation profiler or proof of the cause of a memory spike.
 
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
-`checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`) and reports
-machine-readable generation/status lines through the same dispatcher used by
-the session server. Commands that require a request payload remain available
-through the framed session service, while the line mode keeps one stable,
-argument-free operation vocabulary.
+`checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`). Session
+commands share the dispatcher used by the headless service. Use
+`saveTrace <path>` to transactionally write an exact managed trace to a file;
+for example, `saveTrace build/session.trace`. The compact JSON process still
+cannot carry a destination path or return trace artifact bytes, so trace-file
+export is currently available through the interactive CLI and typed Elisa
+service API.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

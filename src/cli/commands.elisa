@@ -39,6 +39,11 @@ module DebuggerCLI:
             NAME_CLOSE: cstr = "close"
             TOKEN_INDEX_INCREMENT: usize = 1
 
+        const module CommandLine:
+            MAX_BYTES: usize = 256
+            INCREMENT: usize = 1
+            ASCII_NUL: u8 = 0
+
         const module Decimal:
             BASE: u64 = 10
 
@@ -127,6 +132,9 @@ module DebuggerCLI:
             command: mutable Command
             argument: mutable u64
             argument_present: mutable bool
+            text_argument: mutable u8[CommandLine::MAX_BYTES]
+            text_argument_length: mutable usize
+            text_argument_present: mutable bool
             expected_generation: mutable u64
             consumed: mutable usize
             valid: mutable bool
@@ -179,14 +187,18 @@ module DebuggerCLI:
             return Command.Unknown
 
     public:
+        const module Limits:
+            MAX_LINE_BYTES: usize = CommandLine::MAX_BYTES
+            FIRST_TEXT_ARGUMENT_BYTE_INDEX: usize = 0
+
         # Parse one bounded command line. The parser deliberately accepts only
-        # an optional unsigned numeric argument; paths and expressions stay
-        # opaque IDs in the structured protocol instead of becoming shell text.
+        # an unsigned numeric argument, except saveTrace which accepts a
+        # bounded raw destination path. Paths never pass through a shell.
         def command_parse_line(payload: u8&, length: usize, expected_generation: u64) -> ParsedCommand:
             result: mutable ParsedCommand = zeroed
             result.expected_generation <- expected_generation
             result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::COMMAND)
-            return result if length == 0 or length > CommandName::MAX_LENGTH
+            return result if length == 0 or length > CommandLine::MAX_BYTES
             index: mutable usize = 0
             while index < length and command_is_whitespace(payload[index]):
                 index <- index + 1
@@ -201,7 +213,23 @@ module DebuggerCLI:
             return result if result.command == Command.Unknown
             while index < length and command_is_whitespace(payload[index]):
                 index <- index + 1
+            return result if index == length and result.command == Command.SaveTrace
             if index < length:
+                if result.command == Command.SaveTrace:
+                    path_end: mutable usize = length
+                    while path_end > index and command_is_whitespace(payload[path_end - CommandLine::INCREMENT]):
+                        path_end <- path_end - CommandLine::INCREMENT
+                    return result if path_end == index or path_end - index > CommandLine::MAX_BYTES
+                    for path_index in index..<path_end:
+                        byte: u8 = payload[path_index]
+                        return result if byte == CommandLine::ASCII_NUL
+                        result.text_argument[path_index - index] <- byte
+                    result.text_argument_length <- path_end - index
+                    result.text_argument_present <- true
+                    result.consumed <- path_end
+                    result.valid <- true
+                    result.failure <- DebuggerErrors::no_error()
+                    return result
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ARGUMENT)
                 digits: mutable usize = 0
                 while index < length and not command_is_whitespace(payload[index]):
@@ -229,7 +257,7 @@ module DebuggerCLI:
             return command_parse_line(payload, length, Sentinel::EXPECTED_GENERATION)
 
         def command_is_mutating(command: Command) -> bool:
-            return command == Command.Run or command == Command.Launch or command == Command.Attach or command == Command.Pause or command == Command.Continue or command == Command.Step or command == Command.ReverseStep or command == Command.ReverseStepOver or command == Command.ReverseStepOut or command == Command.Seek or command == Command.Break or command == Command.Watch or command == Command.Record or command == Command.Replay or command == Command.Checkpoint or command == Command.Branch or command == Command.Quit
+            return command == Command.Run or command == Command.Launch or command == Command.Attach or command == Command.Pause or command == Command.Continue or command == Command.Step or command == Command.ReverseStep or command == Command.ReverseStepOver or command == Command.ReverseStepOut or command == Command.Seek or command == Command.Break or command == Command.Watch or command == Command.Record or command == Command.Replay or command == Command.SaveTrace or command == Command.Checkpoint or command == Command.Branch or command == Command.Quit
 
         def command_validate(request: CommandRequest, generation: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::STALE_GENERATION) if request.expected_generation != Sentinel::EXPECTED_GENERATION and request.expected_generation != generation

@@ -1,0 +1,44 @@
+# Optional file adapter for managed trace export. The core trace service stays
+# independent of filesystem effects; CLI and host integrations opt in here.
+
+include "./managed_trace.elisa"
+include "../trace/file.elisa"
+
+module DebuggerManagedTraceFile:
+    private:
+        const module Boundary:
+            FIRST_BYTE_INDEX: usize = 0
+
+    public:
+        enum ExportStatus:
+            Ready
+            ExportRejected
+            WriteRejected
+
+        struct ExportResult:
+            accepted: mutable bool
+            status: mutable ExportStatus
+            file_status: mutable DebuggerTraceFile::FileStatus
+            bytes_written: mutable usize
+            chunk_count: mutable usize
+            failure: mutable DebuggerErrors::DebuggerError
+
+        # Build and validate an exact trace before asking the file layer to
+        # replace the destination atomically.
+        def export_service_trace(service: mutable DebuggerManagedService::Service&, path: u8&, path_length: usize) -> ExportResult can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            result: mutable ExportResult = zeroed
+            result.status <- ExportStatus.ExportRejected
+            result.file_status <- DebuggerTraceFile::FileStatus.InvalidTrace
+            exported: DebuggerTraceExport::ExportResult = DebuggerManagedTraceService::service_trace_export(service) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            if not DebuggerErrors::error_is_ok(exported.failure):
+                result.failure <- exported.failure
+                return result
+            result.bytes_written <- exported.bytes.length
+            result.chunk_count <- exported.chunk_count
+            written: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(path, path_length, exported.bytes.bytes[Boundary::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
+            result.file_status <- written.status
+            result.failure <- written.failure
+            result.accepted <- written.accepted
+            result.status <- ExportStatus.Ready if written.accepted
+            result.status <- ExportStatus.WriteRejected if not written.accepted
+            return result

@@ -109,7 +109,7 @@ module DebuggerVirtualResources:
         def resources_operation_is_valid(operation: ResourceOperation, index: usize) -> bool:
             return false if operation.sequence != index.u64() or operation.kind.u16() > Resource::OPERATION_KIND_MAX or operation.handle.value == Resource::NO_HANDLE
             return false if operation.kind == ResourceOperationKind.Open and (operation.path.value == Resource::NO_HANDLE or operation.generation == Resource::NO_GENERATION or operation.offset != Resource::EMPTY_OPERATION_CURSOR or operation.requested != Resource::EMPTY_OPERATION_COUNT or operation.transferred != Resource::EMPTY_OPERATION_COUNT or operation.eof)
-            return false if operation.kind == ResourceOperationKind.Read and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.requested > Resource::DATA_CAPACITY or operation.transferred > operation.requested or operation.eof != (operation.requested > Resource::EMPTY_OPERATION_COUNT and operation.transferred < operation.requested))
+            return false if operation.kind == ResourceOperationKind.Read and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.requested > Resource::DATA_CAPACITY or operation.transferred > operation.requested or operation.transferred > Resource::DATA_CAPACITY - operation.offset or operation.eof != (operation.requested > Resource::EMPTY_OPERATION_COUNT and operation.transferred < operation.requested))
             return false if operation.kind == ResourceOperationKind.Write and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.transferred != operation.requested or operation.eof)
             return false if operation.kind == ResourceOperationKind.Write and operation.requested > Resource::DATA_CAPACITY - operation.offset
             return false if operation.kind == ResourceOperationKind.Seek and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.requested != Resource::EMPTY_OPERATION_COUNT or operation.transferred != Resource::EMPTY_OPERATION_COUNT or operation.eof)
@@ -458,11 +458,11 @@ module DebuggerVirtualResources:
                     return false if not operation_has_prior_open
                 file: VirtualFile = store.files[operation_file_index]
                 return false if operation.kind == ResourceOperationKind.Write and not file.writable
-                return false if operation.kind == ResourceOperationKind.Read and operation.offset > file.length
-                return false if operation.kind == ResourceOperationKind.Read and operation.transferred > file.length - operation.offset
-                return false if operation.kind == ResourceOperationKind.Write and operation.offset > file.length
-                return false if operation.kind == ResourceOperationKind.Write and operation.transferred > file.length - operation.offset
-                return false if operation.kind == ResourceOperationKind.Seek and operation.offset > file.length
+                # The journal can contain future operations while replay is at a
+                # prefix, and replay restart restores the initial file length.
+                # Validate each operation against its live cursor/length when it
+                # executes; comparing every historical offset with the current
+                # length rejects valid writes that extend the initial file.
             return true
 
         def resources_write(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, input: u8&, length: usize) -> IoResult:

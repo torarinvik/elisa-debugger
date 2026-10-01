@@ -42,7 +42,19 @@ const module Test:
     FAILURE_SEEK_MISMATCH: i64 = 15
     FAILURE_WRITE_MISMATCH: i64 = 16
     FAILURE_OPERATION_OVERFLOW: i64 = 17
+    FAILURE_APPEND_REPLAY: i64 = 18
     TEST_SUCCESS: i64 = 0
+
+    const module AppendReplay:
+        PATH_ID: u64 = 4101
+        GENERATION: u64 = 18
+        INITIAL_LENGTH: usize = 1
+        APPENDED_LENGTH: usize = 1
+        INITIAL_BYTE: u8 = 21
+        APPENDED_BYTE: u8 = 22
+        FIRST_INDEX: usize = 0
+        APPEND_OFFSET: usize = 1
+        OPERATION_COUNT: usize = 3
 
 def main() -> i64:
     store: mutable DebuggerVirtualResources::ResourceStore = zeroed
@@ -123,4 +135,25 @@ def main() -> i64:
     return Test::FAILURE_OPERATION_OVERFLOW if overflowed_open.accepted or overflowed_open.failure.code != DebuggerErrors::ErrorCode.ResourceLimit or not overflow_store.operation_overflowed or overflow_store.operation_count != operation_count_before_overflow or overflow_store.operation_cursor != operation_count_before_overflow or overflow_store.next_handle != next_handle_before_overflow
     replay_after_overflow: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(overflow_store)
     return Test::FAILURE_OPERATION_OVERFLOW if replay_after_overflow.code != DebuggerErrors::ErrorCode.ResourceLimit or overflow_store.mode != DebuggerVirtualResources::ResourceMode.Recording or not DebuggerVirtualResources::resources_is_valid(overflow_store) or DebuggerVirtualResources::resources_is_exact(overflow_store) or DebuggerVirtualResources::resources_replay_complete(overflow_store)
+
+    append_store: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    DebuggerVirtualResources::resources_initialize(append_store, DebuggerVirtualResources::ResourceMode.Recording)
+    append_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(append_store, DebuggerIdentity::debug_id(Test::AppendReplay::PATH_ID), true, Test::AppendReplay::GENERATION)
+    return Test::FAILURE_APPEND_REPLAY if not append_open.accepted
+    initial_byte: mutable u8[Test::AppendReplay::INITIAL_LENGTH] = [Test::AppendReplay::INITIAL_BYTE]
+    append_seed_failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(append_store, append_open.handle, initial_byte[Test::AppendReplay::FIRST_INDEX], Test::AppendReplay::INITIAL_LENGTH)
+    return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_seed_failure)
+    append_seek_failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(append_store, append_open.handle, Test::AppendReplay::APPEND_OFFSET)
+    return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_seek_failure)
+    appended_byte: mutable u8[Test::AppendReplay::APPENDED_LENGTH] = [Test::AppendReplay::APPENDED_BYTE]
+    append_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(append_store, append_open.handle, appended_byte[Test::AppendReplay::FIRST_INDEX], Test::AppendReplay::APPENDED_LENGTH)
+    return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_write.failure) or append_store.files[Test::AppendReplay::FIRST_INDEX].length != Test::AppendReplay::INITIAL_LENGTH + Test::AppendReplay::APPENDED_LENGTH
+    append_restart: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(append_store)
+    return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_restart)
+    append_replay_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(append_store, DebuggerIdentity::debug_id(Test::AppendReplay::PATH_ID), true, Test::AppendReplay::GENERATION)
+    return Test::FAILURE_APPEND_REPLAY if not append_replay_open.accepted
+    append_replay_seek: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(append_store, append_replay_open.handle, Test::AppendReplay::APPEND_OFFSET)
+    return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_replay_seek)
+    append_replay_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(append_store, append_replay_open.handle, appended_byte[Test::AppendReplay::FIRST_INDEX], Test::AppendReplay::APPENDED_LENGTH)
+    return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_replay_write.failure) or append_store.files[Test::AppendReplay::FIRST_INDEX].length != Test::AppendReplay::INITIAL_LENGTH + Test::AppendReplay::APPENDED_LENGTH or append_store.files[Test::AppendReplay::FIRST_INDEX].bytes[Test::AppendReplay::APPEND_OFFSET] != Test::AppendReplay::APPENDED_BYTE or not DebuggerVirtualResources::resources_replay_complete(append_store) or append_store.operation_count != Test::AppendReplay::OPERATION_COUNT
     return Test::TEST_SUCCESS

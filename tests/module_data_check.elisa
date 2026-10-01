@@ -32,6 +32,7 @@ const module Test:
         SEED_REPLAY_RESULT: i64 = 176
         PATH_GENERATION_OFFSET: u64 = 1
         BYTE_COUNT: usize = 3
+        ONE_BYTE_LENGTH: usize = 1
         FIRST_BYTE_INDEX: usize = 0
         FIRST_FILE_INDEX: usize = 0
         LAST_BYTE_INDEX: usize = 2
@@ -44,6 +45,17 @@ const module Test:
         REPLAY_READ_RESULT: i64 = 20
         RESET_SEEK_RESULT: i64 = 101
         ZERO_READ_RESULT: i64 = 102
+        REPLAY_RESTART_RESULT: i64 = 178
+        BRANCH_SEEK_RESULT: i64 = 179
+        BRANCH_WRITE_RESULT: i64 = 180
+        STORE_VALIDATION_RESULT: i64 = 98
+        SEQUENCE_CORRUPTION_ACCEPTED: i64 = 96
+        COUNTER_CORRUPTION_ACCEPTED: i64 = 103
+        CURSOR_CORRUPTION_READ_ACCEPTED: i64 = 58
+        CURSOR_CORRUPTION_WRITE_ACCEPTED: i64 = 59
+        LENGTH_CORRUPTION_READ_ACCEPTED: i64 = 94
+        LENGTH_CORRUPTION_SEEK_ACCEPTED: i64 = 95
+        INVALID_NEXT_HANDLE: u64 = 99
     const module RuntimeValidation:
         INCONSISTENT_STATUS_RESULT: i64 = 156
     const module BranchHistory:
@@ -176,7 +188,7 @@ const module Test:
     FULL_CHECKPOINT_HASH: u64 = 991
     FULL_CHECKPOINT_RESULT_FAILURE: i64 = 146
     INVALID_FULL_RESTORE_RESULT: i64 = 147
-    INVALID_FULL_CHECKPOINT_SCHEMA: u32 = 4
+    INVALID_FULL_CHECKPOINT_SCHEMA: u32 = 5
     INVALID_FULL_CHECKPOINT_ID: u64 = 99
     INVALID_FULL_CHECKPOINT_BRANCH: u64 = 18446744073709551615
     FULL_CHECKPOINT_TAMPER_HASH_DELTA: u64 = 1
@@ -716,7 +728,21 @@ def check_virtual_resources() -> i64:
     return Test::ResourceValidation::INVALID_PATH_OPEN_RESULT if DebuggerVirtualResources::resources_open(resources, DebuggerIdentity::debug_id(Test::ResourceValidation::NO_HANDLE), true, Test::RESOURCE_GENERATION).value != Test::ResourceValidation::NO_HANDLE
     return Test::ResourceValidation::INVALID_GENERATION_OPEN_RESULT if DebuggerVirtualResources::resources_open(resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID + Test::ResourceValidation::PATH_GENERATION_OFFSET), true, Test::ResourceValidation::NO_HANDLE).value != Test::ResourceValidation::NO_HANDLE
     return Test::ResourceValidation::RECORD_SEED_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seed(resources, resource_handle, resource_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::BYTE_COUNT))
-    resources.mode <- DebuggerVirtualResources::ResourceMode.Replaying
+
+    recorded_bytes: mutable u8[Test::ResourceValidation::BYTE_COUNT] = zeroed
+    recorded_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, recorded_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::BYTE_COUNT)
+    return Test::ResourceValidation::REPLAY_READ_RESULT if not DebuggerErrors::error_is_ok(recorded_read.failure) or recorded_read.transferred != Test::ResourceValidation::BYTE_COUNT or recorded_bytes[Test::ResourceValidation::LAST_BYTE_INDEX] != Test::RESOURCE_ORIGINAL_THIRD
+    return Test::ResourceValidation::RESET_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
+    recorded_zero_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, recorded_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ZERO_LENGTH)
+    return Test::ResourceValidation::ZERO_READ_RESULT if not DebuggerErrors::error_is_ok(recorded_zero_read.failure) or recorded_zero_read.eof or recorded_zero_read.transferred != Test::ResourceValidation::ZERO_LENGTH
+    write_byte: mutable u8[Test::ResourceValidation::ONE_BYTE_LENGTH] = [Test::RESOURCE_PARENT_WRITE]
+    recorded_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(resources, resource_handle, write_byte[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::ResourceValidation::REPLAY_WRITE_RESULT if not DebuggerErrors::error_is_ok(recorded_write.failure) or recorded_write.transferred != Test::ResourceValidation::ONE_BYTE_LENGTH
+    return Test::ResourceValidation::RESET_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
+    parent_recorded_bytes: mutable u8[Test::ResourceValidation::ONE_BYTE_LENGTH] = zeroed
+    parent_recorded_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, parent_recorded_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::ResourceValidation::REPLAY_READ_RESULT if not DebuggerErrors::error_is_ok(parent_recorded_read.failure) or parent_recorded_read.transferred != Test::ResourceValidation::ONE_BYTE_LENGTH or parent_recorded_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX] != Test::RESOURCE_PARENT_WRITE
+    return Test::ResourceValidation::REPLAY_RESTART_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_replay_restart(resources))
     existing_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), true, Test::RESOURCE_GENERATION)
     return Test::ResourceValidation::OPEN_REQUEST_RESULT if not existing_open.accepted or existing_open.handle.value != resource_handle.value
     before_missing_count: usize = resources.count
@@ -733,55 +759,57 @@ def check_virtual_resources() -> i64:
     rejected_seed: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(resources, resource_handle, resource_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::BYTE_COUNT)
     return Test::ResourceValidation::SEED_REPLAY_RESULT if rejected_seed.code != DebuggerErrors::ErrorCode.InvalidState or resources.files[Test::ResourceValidation::FIRST_FILE_INDEX].length != Test::ResourceValidation::BYTE_COUNT or resources.files[Test::ResourceValidation::FIRST_FILE_INDEX].bytes[Test::ResourceValidation::FIRST_BYTE_INDEX] != Test::RESOURCE_ORIGINAL_FIRST
     read_bytes: mutable u8[Test::ResourceValidation::BYTE_COUNT] = zeroed
-    read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, read_bytes[0], Test::ResourceValidation::BYTE_COUNT)
-    return Test::ResourceValidation::REPLAY_READ_RESULT if read_result.transferred != Test::ResourceValidation::BYTE_COUNT or read_bytes[Test::ResourceValidation::LAST_BYTE_INDEX] != Test::RESOURCE_ORIGINAL_THIRD
+    read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, read_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::BYTE_COUNT)
+    return Test::ResourceValidation::REPLAY_READ_RESULT if not DebuggerErrors::error_is_ok(read_result.failure) or read_result.transferred != Test::ResourceValidation::BYTE_COUNT or read_bytes[Test::ResourceValidation::LAST_BYTE_INDEX] != Test::RESOURCE_ORIGINAL_THIRD
     return Test::ResourceValidation::RESET_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
     zero_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, read_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ZERO_LENGTH)
-    return Test::ResourceValidation::ZERO_READ_RESULT if zero_read.eof or zero_read.transferred != Test::ResourceValidation::ZERO_LENGTH
-    return 98 if not DebuggerVirtualResources::resources_is_valid(resources)
+    return Test::ResourceValidation::ZERO_READ_RESULT if not DebuggerErrors::error_is_ok(zero_read.failure) or zero_read.eof or zero_read.transferred != Test::ResourceValidation::ZERO_LENGTH
+    return Test::ResourceValidation::STORE_VALIDATION_RESULT if not DebuggerVirtualResources::resources_is_valid(resources)
     invalid_resource_sequence: mutable DebuggerVirtualResources::ResourceStore = resources
     invalid_resource_sequence.next_handle <- resource_handle.value
-    return 96 if DebuggerVirtualResources::resources_is_valid(invalid_resource_sequence)
+    return Test::ResourceValidation::SEQUENCE_CORRUPTION_ACCEPTED if DebuggerVirtualResources::resources_is_valid(invalid_resource_sequence)
     invalid_resource_counter: mutable DebuggerVirtualResources::ResourceStore = resources
-    invalid_resource_counter.next_handle <- 99
-    return 103 if DebuggerVirtualResources::resources_is_valid(invalid_resource_counter)
-    write_byte: mutable u8[1] = [Test::RESOURCE_PARENT_WRITE]
-    write_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(resources, resource_handle, write_byte[0], 1)
-    return 21 if write_result.transferred != 1
+    invalid_resource_counter.next_handle <- Test::ResourceValidation::INVALID_NEXT_HANDLE
+    return Test::ResourceValidation::COUNTER_CORRUPTION_ACCEPTED if DebuggerVirtualResources::resources_is_valid(invalid_resource_counter)
+    write_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(resources, resource_handle, write_byte[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::ResourceValidation::REPLAY_WRITE_RESULT if not DebuggerErrors::error_is_ok(write_result.failure) or write_result.transferred != Test::ResourceValidation::ONE_BYTE_LENGTH
     branch_resources: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_branch(resources)
-    return 28 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(branch_resources, resource_handle, 0))
-    branch_byte: mutable u8[1] = [Test::RESOURCE_BRANCH_WRITE]
-    branch_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(branch_resources, resource_handle, branch_byte[0], 1)
-    return 29 if branch_write.transferred != 1
-    return 30 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(resources, resource_handle, 0))
-    parent_bytes: mutable u8[1] = zeroed
-    parent_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, parent_bytes[0], 1)
-    return 31 if parent_read.transferred != 1 or parent_bytes[0] != Test::RESOURCE_PARENT_WRITE
-    return Test::RESOURCE_PARENT_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(branch_resources, resource_handle, 0))
-    branch_bytes: mutable u8[1] = zeroed
-    branch_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(branch_resources, resource_handle, branch_bytes[0], 1)
-    return Test::RESOURCE_BRANCH_READ_RESULT if branch_read.transferred != 1 or branch_bytes[0] != Test::RESOURCE_BRANCH_WRITE
-    read_only_resources: mutable DebuggerVirtualResources::ResourceStore = resources
-    read_only_file: mutable DebuggerVirtualResources::VirtualFile = read_only_resources.files[0]
-    read_only_file.writable <- false
-    read_only_resources.files[0] <- read_only_file
-    read_only_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(read_only_resources, resource_handle, write_byte[0], 1)
-    return Test::ResourceValidation::REPLAY_WRITE_RESULT if read_only_write.failure.code != DebuggerErrors::ErrorCode.Diverged or read_only_write.transferred != 0
+    return Test::ResourceValidation::BRANCH_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(branch_resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
+    branch_byte: mutable u8[Test::ResourceValidation::ONE_BYTE_LENGTH] = [Test::RESOURCE_BRANCH_WRITE]
+    branch_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(branch_resources, resource_handle, branch_byte[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::ResourceValidation::BRANCH_WRITE_RESULT if not DebuggerErrors::error_is_ok(branch_write.failure) or branch_write.transferred != Test::ResourceValidation::ONE_BYTE_LENGTH
+    return Test::ResourceValidation::RESET_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
+    parent_bytes: mutable u8[Test::ResourceValidation::ONE_BYTE_LENGTH] = zeroed
+    parent_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, resource_handle, parent_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::ResourceValidation::REPLAY_READ_RESULT if not DebuggerErrors::error_is_ok(parent_read.failure) or parent_read.transferred != Test::ResourceValidation::ONE_BYTE_LENGTH or parent_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX] != Test::RESOURCE_PARENT_WRITE
+    return Test::RESOURCE_PARENT_SEEK_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(branch_resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
+    branch_bytes: mutable u8[Test::ResourceValidation::ONE_BYTE_LENGTH] = zeroed
+    branch_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(branch_resources, resource_handle, branch_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::RESOURCE_BRANCH_READ_RESULT if not DebuggerErrors::error_is_ok(branch_read.failure) or branch_read.transferred != Test::ResourceValidation::ONE_BYTE_LENGTH or branch_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX] != Test::RESOURCE_BRANCH_WRITE
+    read_only_resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    DebuggerVirtualResources::resources_initialize(read_only_resources, DebuggerVirtualResources::ResourceMode.Recording)
+    read_only_handle: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(read_only_resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), false, Test::RESOURCE_GENERATION)
+    _ = DebuggerVirtualResources::resources_seed(read_only_resources, read_only_handle, resource_bytes[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::BYTE_COUNT)
+    return Test::ResourceValidation::REPLAY_RESTART_RESULT if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_replay_restart(read_only_resources))
+    read_only_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(read_only_resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), false, Test::RESOURCE_GENERATION)
+    return Test::ResourceValidation::OPEN_REQUEST_RESULT if not read_only_open.accepted
+    read_only_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(read_only_resources, read_only_handle, write_byte[Test::ResourceValidation::FIRST_BYTE_INDEX], Test::ResourceValidation::ONE_BYTE_LENGTH)
+    return Test::ResourceValidation::REPLAY_WRITE_RESULT if read_only_write.failure.code != DebuggerErrors::ErrorCode.Diverged or read_only_write.transferred != Test::ResourceValidation::ZERO_LENGTH
     corrupted_resources: mutable DebuggerVirtualResources::ResourceStore = resources
-    corrupted_file: mutable DebuggerVirtualResources::VirtualFile = corrupted_resources.files[0]
-    corrupted_file.cursor <- corrupted_file.length + 1
-    corrupted_resources.files[0] <- corrupted_file
+    corrupted_file: mutable DebuggerVirtualResources::VirtualFile = corrupted_resources.files[Test::ResourceValidation::FIRST_FILE_INDEX]
+    corrupted_file.cursor <- corrupted_file.length + Test::ResourceValidation::ONE_BYTE_LENGTH
+    corrupted_resources.files[Test::ResourceValidation::FIRST_FILE_INDEX] <- corrupted_file
     corrupted_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(corrupted_resources, resource_handle, parent_bytes[0], 1)
-    return 58 if corrupted_read.failure.code != DebuggerErrors::ErrorCode.Corrupt
+    return Test::ResourceValidation::CURSOR_CORRUPTION_READ_ACCEPTED if corrupted_read.failure.code != DebuggerErrors::ErrorCode.Corrupt
     corrupted_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(corrupted_resources, resource_handle, write_byte[0], 1)
-    return 59 if corrupted_write.failure.code != DebuggerErrors::ErrorCode.Corrupt
+    return Test::ResourceValidation::CURSOR_CORRUPTION_WRITE_ACCEPTED if corrupted_write.failure.code != DebuggerErrors::ErrorCode.Corrupt
     corrupted_length_resources: mutable DebuggerVirtualResources::ResourceStore = resources
-    corrupted_length_file: mutable DebuggerVirtualResources::VirtualFile = corrupted_length_resources.files[0]
+    corrupted_length_file: mutable DebuggerVirtualResources::VirtualFile = corrupted_length_resources.files[Test::ResourceValidation::FIRST_FILE_INDEX]
     corrupted_length_file.length <- Test::INVALID_RESOURCE_LENGTH
-    corrupted_length_resources.files[0] <- corrupted_length_file
+    corrupted_length_resources.files[Test::ResourceValidation::FIRST_FILE_INDEX] <- corrupted_length_file
     corrupted_length_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(corrupted_length_resources, resource_handle, parent_bytes[0], 1)
-    return 94 if corrupted_length_read.failure.code != DebuggerErrors::ErrorCode.Corrupt
-    return 95 if DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(corrupted_length_resources, resource_handle, 0))
+    return Test::ResourceValidation::LENGTH_CORRUPTION_READ_ACCEPTED if corrupted_length_read.failure.code != DebuggerErrors::ErrorCode.Corrupt
+    return Test::ResourceValidation::LENGTH_CORRUPTION_SEEK_ACCEPTED if DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_seek(corrupted_length_resources, resource_handle, Test::ResourceValidation::FILE_START_OFFSET))
     return 0
 
 def check_task_checkpoint() -> i64:

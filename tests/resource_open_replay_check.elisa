@@ -8,15 +8,23 @@ const module Test:
     PATH_OFFSET: u64 = 1
     GENERATION: u64 = 17
     BYTE_COUNT: usize = 3
+    ONE_BYTE: usize = 1
     FIRST_BYTE_INDEX: usize = 0
     SECOND_BYTE_INDEX: usize = 1
     LAST_BYTE_INDEX: usize = 2
     ONE_FILE: usize = 1
+    ONE_OPEN_OPERATION: usize = 1
+    AFTER_READ_OPERATION: usize = 2
+    AFTER_SEEK_OPERATION: usize = 3
     FIRST_FILE_INDEX: usize = 0
     FIRST_HANDLE: u64 = 1
     FIRST_BYTE: u8 = 7
     SECOND_BYTE: u8 = 8
     THIRD_BYTE: u8 = 9
+    WRITE_BYTE: u8 = 10
+    CHANGED_WRITE_BYTE: u8 = 11
+    MISMATCH_SEEK_OFFSET: usize = 1
+    FILE_START_OFFSET: usize = 0
     FAILURE_RECORD_OPEN: i64 = 1
     FAILURE_RECORD_SEED: i64 = 2
     FAILURE_MATCHED_OPEN: i64 = 3
@@ -27,6 +35,12 @@ const module Test:
     FAILURE_REPLAY_READ: i64 = 8
     FAILURE_STORE_VALIDATION: i64 = 9
     FAILURE_CORRUPT_OPEN: i64 = 10
+    FAILURE_RECORD_READ: i64 = 11
+    FAILURE_REPLAY_RESTART: i64 = 12
+    FAILURE_RECORD_WRITE: i64 = 13
+    FAILURE_READ_MISMATCH: i64 = 14
+    FAILURE_SEEK_MISMATCH: i64 = 15
+    FAILURE_WRITE_MISMATCH: i64 = 16
     TEST_SUCCESS: i64 = 0
 
 def main() -> i64:
@@ -39,20 +53,31 @@ def main() -> i64:
     seed_failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(store, recorded.handle, bytes[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
     return Test::FAILURE_RECORD_SEED if not DebuggerErrors::error_is_ok(seed_failure)
 
-    store.mode <- DebuggerVirtualResources::ResourceMode.Replaying
+    recorded_output: mutable u8[Test::BYTE_COUNT] = zeroed
+    recorded_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, recorded.handle, recorded_output[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
+    return Test::FAILURE_RECORD_READ if not DebuggerErrors::error_is_ok(recorded_read.failure) or recorded_read.transferred != Test::BYTE_COUNT or recorded_output[Test::LAST_BYTE_INDEX] != Test::THIRD_BYTE
+    recorded_seek: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(store, recorded.handle, Test::FILE_START_OFFSET)
+    return Test::FAILURE_RECORD_WRITE if not DebuggerErrors::error_is_ok(recorded_seek)
+    write_bytes: mutable u8[Test::ONE_BYTE] = [Test::WRITE_BYTE]
+    recorded_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(store, recorded.handle, write_bytes[Test::FIRST_BYTE_INDEX], Test::ONE_BYTE)
+    return Test::FAILURE_RECORD_WRITE if not DebuggerErrors::error_is_ok(recorded_write.failure) or recorded_write.transferred != Test::ONE_BYTE
+
+    restart_failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(store)
+    return Test::FAILURE_REPLAY_RESTART if not DebuggerErrors::error_is_ok(restart_failure)
     recorded_count: usize = store.count
     recorded_next_handle: u64 = store.next_handle
-    matched: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
-    return Test::FAILURE_MATCHED_OPEN if not matched.accepted or matched.handle.value != recorded.handle.value or store.count != recorded_count or store.next_handle != recorded_next_handle
-
+    before_missing_cursor: usize = store.operation_cursor
     missing: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID + Test::PATH_OFFSET), true, Test::GENERATION)
-    return Test::FAILURE_MISSING_OPEN if missing.accepted or missing.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle
+    return Test::FAILURE_MISSING_OPEN if missing.accepted or missing.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle or store.operation_cursor != before_missing_cursor
 
     changed_generation: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION + Test::PATH_OFFSET)
-    return Test::FAILURE_CHANGED_GENERATION if changed_generation.accepted or changed_generation.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle
+    return Test::FAILURE_CHANGED_GENERATION if changed_generation.accepted or changed_generation.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle or store.operation_cursor != before_missing_cursor
 
     changed_access: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), false, Test::GENERATION)
-    return Test::FAILURE_CHANGED_ACCESS if changed_access.accepted or changed_access.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle
+    return Test::FAILURE_CHANGED_ACCESS if changed_access.accepted or changed_access.failure.code != DebuggerErrors::ErrorCode.Diverged or store.count != recorded_count or store.next_handle != recorded_next_handle or store.operation_cursor != before_missing_cursor
+
+    matched: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    return Test::FAILURE_MATCHED_OPEN if not matched.accepted or matched.handle.value != recorded.handle.value or store.count != recorded_count or store.next_handle != recorded_next_handle or store.operation_cursor != Test::ONE_OPEN_OPERATION
 
     seed_during_replay: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seed(store, recorded.handle, bytes[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
     return Test::FAILURE_STATE_MUTATION if seed_during_replay.code != DebuggerErrors::ErrorCode.InvalidState or store.files[Test::FIRST_FILE_INDEX].length != Test::BYTE_COUNT or store.files[Test::FIRST_FILE_INDEX].bytes[Test::FIRST_BYTE_INDEX] != Test::FIRST_BYTE
@@ -60,6 +85,22 @@ def main() -> i64:
     restored: mutable u8[Test::BYTE_COUNT] = zeroed
     read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, matched.handle, restored[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
     return Test::FAILURE_REPLAY_READ if not DebuggerErrors::error_is_ok(read_result.failure) or read_result.transferred != Test::BYTE_COUNT or restored[Test::FIRST_BYTE_INDEX] != Test::FIRST_BYTE or restored[Test::SECOND_BYTE_INDEX] != Test::SECOND_BYTE or restored[Test::LAST_BYTE_INDEX] != Test::THIRD_BYTE
+    restart_again: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(store)
+    return Test::FAILURE_REPLAY_RESTART if not DebuggerErrors::error_is_ok(restart_again)
+    matched_again: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(Test::PATH_ID), true, Test::GENERATION)
+    mismatch_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, matched_again.handle, restored[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT - Test::ONE_BYTE)
+    return Test::FAILURE_READ_MISMATCH if mismatch_read.failure.code != DebuggerErrors::ErrorCode.Diverged or store.operation_cursor != Test::ONE_OPEN_OPERATION or store.files[Test::FIRST_FILE_INDEX].cursor != Test::FIRST_BYTE_INDEX
+    read_result_again: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, matched_again.handle, restored[Test::FIRST_BYTE_INDEX], Test::BYTE_COUNT)
+    return Test::FAILURE_READ_MISMATCH if not DebuggerErrors::error_is_ok(read_result_again.failure) or read_result_again.transferred != Test::BYTE_COUNT
+    mismatch_seek: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(store, matched_again.handle, Test::MISMATCH_SEEK_OFFSET)
+    return Test::FAILURE_SEEK_MISMATCH if mismatch_seek.code != DebuggerErrors::ErrorCode.Diverged or store.operation_cursor != Test::AFTER_READ_OPERATION or store.files[Test::FIRST_FILE_INDEX].cursor != Test::BYTE_COUNT
+    replay_seek: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(store, matched_again.handle, Test::FILE_START_OFFSET)
+    return Test::FAILURE_SEEK_MISMATCH if not DebuggerErrors::error_is_ok(replay_seek)
+    changed_bytes: mutable u8[Test::ONE_BYTE] = [Test::CHANGED_WRITE_BYTE]
+    mismatch_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(store, matched_again.handle, changed_bytes[Test::FIRST_BYTE_INDEX], Test::ONE_BYTE)
+    return Test::FAILURE_WRITE_MISMATCH if mismatch_write.failure.code != DebuggerErrors::ErrorCode.Diverged or store.operation_cursor != Test::AFTER_SEEK_OPERATION or store.files[Test::FIRST_FILE_INDEX].cursor != Test::FILE_START_OFFSET or store.files[Test::FIRST_FILE_INDEX].bytes[Test::FIRST_BYTE_INDEX] != Test::FIRST_BYTE
+    replay_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(store, matched_again.handle, write_bytes[Test::FIRST_BYTE_INDEX], Test::ONE_BYTE)
+    return Test::FAILURE_WRITE_MISMATCH if not DebuggerErrors::error_is_ok(replay_write.failure) or replay_write.transferred != Test::ONE_BYTE or store.files[Test::FIRST_FILE_INDEX].bytes[Test::FIRST_BYTE_INDEX] != Test::WRITE_BYTE or not DebuggerVirtualResources::resources_replay_complete(store)
     return Test::FAILURE_STORE_VALIDATION if not DebuggerVirtualResources::resources_is_valid(store)
 
     corrupted_store: mutable DebuggerVirtualResources::ResourceStore = store

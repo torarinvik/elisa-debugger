@@ -15,16 +15,26 @@ module DebuggerVirtualResources:
             REPLAY_RESOURCES_DETAIL_OPEN_REQUEST: u32 = 6
             REPLAY_RESOURCES_DETAIL_OPEN_MISSING: u32 = 7
             REPLAY_RESOURCES_DETAIL_SEED_MODE: u32 = 8
+            REPLAY_RESOURCES_DETAIL_OPERATION: u32 = 9
+            REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH: u32 = 10
+            REPLAY_RESOURCES_DETAIL_OPERATION_OVERFLOW: u32 = 11
 
         const module Resource:
             REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY: usize = 16
             DATA_CAPACITY: usize = 256
+            OPERATION_CAPACITY: usize = 32
             FIRST_HANDLE: u64 = 1
+            FIRST_INDEX: usize = 0
             MAX_HANDLE: u64 = 18446744073709551615
             NO_HANDLE: u64 = 0
             EMPTY_FILE_COUNT: usize = 0
+            EMPTY_OPERATION_COUNT: usize = 0
+            EMPTY_OPERATION_CURSOR: usize = 0
+            OPERATION_COUNT_INCREMENT: usize = 1
+            OPERATION_CURSOR_INCREMENT: usize = 1
             REPLAY_RESOURCES_RESOURCE_NO_GENERATION: u64 = 0
             REPLAY_RESOURCES_RESOURCE_MODE_MAX: u16 = 2
+            OPERATION_KIND_MAX: u16 = 3
 
 
     public:
@@ -33,20 +43,45 @@ module DebuggerVirtualResources:
             Replaying
             Branch
 
+        enum ResourceOperationKind:
+            Open
+            Read
+            Write
+            Seek
+
         struct VirtualFile:
             handle: mutable DebuggerIdentity::DebugId
             path: mutable DebuggerIdentity::DebugId
             bytes: mutable u8[Resource::DATA_CAPACITY]
+            initial_bytes: mutable u8[Resource::DATA_CAPACITY]
             length: mutable usize
+            initial_length: mutable usize
             cursor: mutable usize
             writable: mutable bool
             generation: mutable u64
+
+        struct ResourceOperation:
+            sequence: mutable u64
+            kind: mutable ResourceOperationKind
+            handle: mutable DebuggerIdentity::DebugId
+            path: mutable DebuggerIdentity::DebugId
+            generation: mutable u64
+            writable: mutable bool
+            offset: mutable usize
+            requested: mutable usize
+            transferred: mutable usize
+            eof: mutable bool
+            bytes: mutable u8[Resource::DATA_CAPACITY]
 
         struct ResourceStore:
             files: mutable VirtualFile[Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY]
             count: mutable usize
             next_handle: mutable u64
             mode: mutable ResourceMode
+            operations: mutable ResourceOperation[Resource::OPERATION_CAPACITY]
+            operation_count: mutable usize
+            operation_cursor: mutable usize
+            operation_overflowed: mutable bool
 
         struct IoResult:
             transferred: mutable usize
@@ -62,6 +97,73 @@ module DebuggerVirtualResources:
             store.count <- Resource::EMPTY_FILE_COUNT
             store.next_handle <- Resource::FIRST_HANDLE
             store.mode <- mode
+            store.operation_count <- Resource::EMPTY_OPERATION_COUNT
+            store.operation_cursor <- Resource::EMPTY_OPERATION_CURSOR
+            store.operation_overflowed <- false
+
+        def resources_operation_is_valid(operation: ResourceOperation, index: usize) -> bool:
+            return false if operation.sequence != index.u64() or operation.kind.u16() > Resource::OPERATION_KIND_MAX or operation.handle.value == Resource::NO_HANDLE
+            return false if operation.kind == ResourceOperationKind.Open and (operation.path.value == Resource::NO_HANDLE or operation.generation == Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION or operation.offset != Resource::EMPTY_OPERATION_CURSOR or operation.requested != Resource::EMPTY_OPERATION_COUNT or operation.transferred != Resource::EMPTY_OPERATION_COUNT or operation.eof)
+            return false if operation.kind == ResourceOperationKind.Read and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.requested > Resource::DATA_CAPACITY or operation.transferred > operation.requested or operation.eof != (operation.requested > Resource::EMPTY_OPERATION_COUNT and operation.transferred < operation.requested))
+            return false if operation.kind == ResourceOperationKind.Write and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.transferred != operation.requested or operation.eof)
+            return false if operation.kind == ResourceOperationKind.Write and operation.requested > Resource::DATA_CAPACITY - operation.offset
+            return false if operation.kind == ResourceOperationKind.Seek and (operation.path.value != Resource::NO_HANDLE or operation.generation != Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION or operation.offset > Resource::DATA_CAPACITY or operation.requested != Resource::EMPTY_OPERATION_COUNT or operation.transferred != Resource::EMPTY_OPERATION_COUNT or operation.eof)
+            return false if operation.kind != ResourceOperationKind.Open and operation.writable
+            return false if operation.kind != ResourceOperationKind.Read and operation.eof
+            return false if operation.kind == ResourceOperationKind.Open and operation.offset != Resource::EMPTY_OPERATION_CURSOR
+            return false if operation.kind == ResourceOperationKind.Seek and operation.transferred != Resource::EMPTY_OPERATION_COUNT
+            return true
+
+        def resources_record_operation(store: mutable ResourceStore&, operation: ResourceOperation) -> DebuggerErrors::DebuggerError:
+            if store.mode == ResourceMode.Replaying:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION)
+            if store.operation_overflowed or store.operation_count >= Resource::OPERATION_CAPACITY:
+                store.operation_overflowed <- true
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_OVERFLOW)
+            updated: mutable ResourceOperation = operation
+            updated.sequence <- store.operation_count.u64()
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT) if not resources_operation_is_valid(updated, store.operation_count)
+            store.operations[store.operation_count] <- updated
+            store.operation_count <- store.operation_count + Resource::OPERATION_COUNT_INCREMENT
+            store.operation_cursor <- store.operation_count
+            return DebuggerErrors::no_error()
+
+        def resources_expect_operation(store: mutable ResourceStore&, request: ResourceOperation, output: mutable ResourceOperation&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION) if store.mode != ResourceMode.Replaying
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_OVERFLOW) if store.operation_overflowed
+            if store.operation_count > Resource::OPERATION_CAPACITY or store.operation_cursor > store.operation_count:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+            if store.operation_cursor >= store.operation_count:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH)
+            recorded: ResourceOperation = store.operations[store.operation_cursor]
+            if not resources_operation_is_valid(recorded, store.operation_cursor):
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+            if request.kind != recorded.kind or (request.kind != ResourceOperationKind.Open and request.handle.value != recorded.handle.value) or request.path.value != recorded.path.value or request.generation != recorded.generation or request.writable != recorded.writable or request.offset != recorded.offset or request.requested != recorded.requested:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH)
+            if request.kind == ResourceOperationKind.Write:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH) if request.transferred != recorded.transferred
+                for byte_index in Resource::FIRST_INDEX..<request.transferred:
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH) if request.bytes[byte_index] != recorded.bytes[byte_index]
+            output <- recorded
+            return DebuggerErrors::no_error()
+
+        def resources_advance_operation(store: mutable ResourceStore&) -> void:
+            store.operation_cursor <- store.operation_cursor + Resource::OPERATION_CURSOR_INCREMENT
+
+        def resources_replay_restart(store: mutable ResourceStore&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT) if not resources_is_valid(store)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_OVERFLOW) if store.operation_overflowed
+            store.mode <- ResourceMode.Replaying
+            store.operation_cursor <- Resource::EMPTY_OPERATION_CURSOR
+            for index in Resource::FIRST_INDEX..<store.count:
+                store.files[index].length <- store.files[index].initial_length
+                store.files[index].cursor <- Resource::EMPTY_OPERATION_CURSOR
+                for byte_index in Resource::FIRST_INDEX..<store.files[index].initial_length:
+                    store.files[index].bytes[byte_index] <- store.files[index].initial_bytes[byte_index]
+            return DebuggerErrors::no_error()
+
+        def resources_replay_complete(store: ResourceStore&) -> bool:
+            return resources_is_valid(store) and store.mode == ResourceMode.Replaying and not store.operation_overflowed and store.operation_cursor == store.operation_count
 
         def resources_open(store: mutable ResourceStore&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64) -> DebuggerIdentity::DebugId:
             result: ResourceOpenResult = resources_open_checked(store, path, writable, generation)
@@ -77,28 +179,58 @@ module DebuggerVirtualResources:
             if path.value == Resource::NO_HANDLE or generation == Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE)
                 return result
-            for index in 0..<store.count:
+            if store.mode == ResourceMode.Replaying:
+                request: mutable ResourceOperation = zeroed
+                request.kind <- ResourceOperationKind.Open
+                request.path <- path
+                request.generation <- generation
+                request.writable <- writable
+                recorded: mutable ResourceOperation = zeroed
+                result.failure <- resources_expect_operation(store, request, recorded)
+                return result if not DebuggerErrors::error_is_ok(result.failure)
+                index: usize = resources_find(store, recorded.handle)
+                if index >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY or store.files[index].path.value != path.value or store.files[index].generation != generation or store.files[index].writable != writable:
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+                    return result
+                resources_advance_operation(store)
+                result.handle <- recorded.handle
+                result.accepted <- true
+                return result
+            for index in Resource::FIRST_INDEX..<store.count:
                 if store.files[index].path.value == path.value and store.files[index].generation == generation:
                     if store.files[index].writable != writable:
                         result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPEN_REQUEST)
                         return result
+                    operation: mutable ResourceOperation = zeroed
+                    operation.kind <- ResourceOperationKind.Open
+                    operation.handle <- store.files[index].handle
+                    operation.path <- path
+                    operation.generation <- generation
+                    operation.writable <- writable
+                    result.failure <- resources_record_operation(store, operation)
+                    return result if not DebuggerErrors::error_is_ok(result.failure)
                     result.handle <- store.files[index].handle
                     result.accepted <- true
                     return result
-            if store.mode == ResourceMode.Replaying:
-                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPEN_MISSING)
-                return result
             if store.count >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY)
                 return result
             if store.next_handle == Resource::NO_HANDLE or store.next_handle == Resource::MAX_HANDLE:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY)
                 return result
-            for index in 0..<store.count:
+            for index in Resource::FIRST_INDEX..<store.count:
                 if store.files[index].handle.value == store.next_handle:
                     result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
                     return result
             index: usize = store.count
+            operation: mutable ResourceOperation = zeroed
+            operation.kind <- ResourceOperationKind.Open
+            operation.handle <- DebuggerIdentity::debug_id(store.next_handle)
+            operation.path <- path
+            operation.generation <- generation
+            operation.writable <- writable
+            result.failure <- resources_record_operation(store, operation)
+            return result if not DebuggerErrors::error_is_ok(result.failure)
             store.files[index].handle <- DebuggerIdentity::debug_id(store.next_handle)
             store.files[index].path <- path
             store.files[index].writable <- writable
@@ -111,22 +243,26 @@ module DebuggerVirtualResources:
 
         def resources_find(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId) -> usize:
             return Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY if store.count > Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
-            for index in 0..<store.count:
+            for index in Resource::FIRST_INDEX..<store.count:
                 return index if store.files[index].handle.value == handle.value
             return Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
 
         # Install captured initial bytes while recording. Replay must read the
-        # checkpointed resource and cannot reseed it with fresh host data.
         def resources_seed(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT) if not resources_is_valid(store)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::REPLAY_RESOURCES_DETAIL_SEED_MODE) if store.mode != ResourceMode.Recording
             index: usize = resources_find(store, handle)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE) if index >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY) if length > Resource::DATA_CAPACITY
-            for byte_index in 0..<length:
+            for operation_index in Resource::FIRST_INDEX..<store.operation_count:
+                operation: ResourceOperation = store.operations[operation_index]
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::REPLAY_RESOURCES_DETAIL_SEED_MODE) if operation.handle.value == handle.value and operation.kind != ResourceOperationKind.Open
+            for byte_index in Resource::FIRST_INDEX..<length:
                 store.files[index].bytes[byte_index] <- bytes[byte_index]
+                store.files[index].initial_bytes[byte_index] <- bytes[byte_index]
             store.files[index].length <- length
-            store.files[index].cursor <- 0
+            store.files[index].initial_length <- length
+            store.files[index].cursor <- Resource::EMPTY_OPERATION_CURSOR
             return DebuggerErrors::no_error()
 
         def resources_clone_snapshot(store: ResourceStore&) -> ResourceStore:
@@ -135,20 +271,31 @@ module DebuggerVirtualResources:
             snapshot.next_handle <- store.next_handle
             snapshot.mode <- store.mode
             copy_count: usize = store.count if store.count <= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY else Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
-            for index in 0..<copy_count:
+            for index in Resource::FIRST_INDEX..<copy_count:
                 snapshot.files[index].handle <- store.files[index].handle
                 snapshot.files[index].path <- store.files[index].path
                 snapshot.files[index].length <- store.files[index].length
+                snapshot.files[index].initial_length <- store.files[index].initial_length
                 snapshot.files[index].cursor <- store.files[index].cursor
                 snapshot.files[index].writable <- store.files[index].writable
                 snapshot.files[index].generation <- store.files[index].generation
-                for byte_index in 0..<Resource::DATA_CAPACITY:
+                for byte_index in Resource::FIRST_INDEX..<Resource::DATA_CAPACITY:
                     snapshot.files[index].bytes[byte_index] <- store.files[index].bytes[byte_index]
+                    snapshot.files[index].initial_bytes[byte_index] <- store.files[index].initial_bytes[byte_index]
+            snapshot.operation_count <- store.operation_count
+            snapshot.operation_cursor <- store.operation_cursor
+            snapshot.operation_overflowed <- store.operation_overflowed
+            operation_copy_count: usize = store.operation_count if store.operation_count <= Resource::OPERATION_CAPACITY else Resource::OPERATION_CAPACITY
+            for index in Resource::FIRST_INDEX..<operation_copy_count:
+                snapshot.operations[index] <- store.operations[index]
             return snapshot
 
         def resources_read(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, output: mutable u8&, length: usize) -> IoResult:
             result: mutable IoResult = zeroed
             result.failure <- DebuggerErrors::no_error()
+            if not resources_is_valid(store):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+                return result
             index: usize = resources_find(store, handle)
             if index >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE)
@@ -159,22 +306,74 @@ module DebuggerVirtualResources:
             if store.files[index].length > Resource::DATA_CAPACITY or store.files[index].cursor > store.files[index].length or store.files[index].cursor > Resource::DATA_CAPACITY:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
                 return result
+            request: mutable ResourceOperation = zeroed
+            request.kind <- ResourceOperationKind.Read
+            request.handle <- handle
+            request.offset <- store.files[index].cursor
+            request.requested <- length
+            if store.mode == ResourceMode.Replaying:
+                recorded: mutable ResourceOperation = zeroed
+                result.failure <- resources_expect_operation(store, request, recorded)
+                return result if not DebuggerErrors::error_is_ok(result.failure)
+                return resources_read_replay_mismatch(result) if recorded.transferred > store.files[index].length - store.files[index].cursor
+                for byte_index in Resource::FIRST_INDEX..<recorded.transferred:
+                    if store.files[index].bytes[store.files[index].cursor + byte_index] != recorded.bytes[byte_index]:
+                        return resources_read_replay_mismatch(result)
+                for byte_index in Resource::FIRST_INDEX..<recorded.transferred:
+                    output[byte_index] <- recorded.bytes[byte_index]
+                store.files[index].cursor <- store.files[index].cursor + recorded.transferred
+                resources_advance_operation(store)
+                result.transferred <- recorded.transferred
+                result.eof <- recorded.eof
+                return result
             available: usize = store.files[index].length - store.files[index].cursor
             result.transferred <- available
             result.transferred <- length if length < available
-            for byte_index in 0..<result.transferred:
-                output[byte_index] <- store.files[index].bytes[store.files[index].cursor + byte_index]
+            request.transferred <- result.transferred
+            request.eof <- length > Resource::EMPTY_OPERATION_COUNT and result.transferred < length
+            for byte_index in Resource::FIRST_INDEX..<result.transferred:
+                request.bytes[byte_index] <- store.files[index].bytes[store.files[index].cursor + byte_index]
+            result.failure <- resources_record_operation(store, request)
+            return result if not DebuggerErrors::error_is_ok(result.failure)
+            for byte_index in Resource::FIRST_INDEX..<result.transferred:
+                output[byte_index] <- request.bytes[byte_index]
             store.files[index].cursor <- store.files[index].cursor + result.transferred
             # A zero-byte probe does not consume data and must not claim EOF
             # merely because the requested length is zero.
-            result.eof <- length > 0 and result.transferred < length
+            result.eof <- request.eof
             return result
 
+        def resources_read_replay_mismatch(result: IoResult) -> IoResult:
+            updated: mutable IoResult = result
+            updated.transferred <- Resource::EMPTY_OPERATION_COUNT
+            updated.eof <- false
+            updated.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH)
+            return updated
+
         def resources_seek(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, offset: usize) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT) if not resources_is_valid(store)
             index: usize = resources_find(store, handle)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE) if index >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
+            if store.mode == ResourceMode.Replaying:
+                request: mutable ResourceOperation = zeroed
+                request.kind <- ResourceOperationKind.Seek
+                request.handle <- handle
+                request.offset <- offset
+                recorded: mutable ResourceOperation = zeroed
+                failure: DebuggerErrors::DebuggerError = resources_expect_operation(store, request, recorded)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_OPERATION_MISMATCH) if offset > store.files[index].length
+                store.files[index].cursor <- offset
+                resources_advance_operation(store)
+                return DebuggerErrors::no_error()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT) if store.files[index].length > Resource::DATA_CAPACITY
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::OFFSET) if offset > store.files[index].length
+            operation: mutable ResourceOperation = zeroed
+            operation.kind <- ResourceOperationKind.Seek
+            operation.handle <- handle
+            operation.offset <- offset
+            failure: DebuggerErrors::DebuggerError = resources_record_operation(store, operation)
+            return failure if not DebuggerErrors::error_is_ok(failure)
             store.files[index].cursor <- offset
             return DebuggerErrors::no_error()
 
@@ -186,36 +385,82 @@ module DebuggerVirtualResources:
             # shallow aggregate copy. Clamp a corrupted count before indexing so cloning an
             # invalid store cannot turn validation input into an out-of-bounds read.
             branch: mutable ResourceStore = zeroed
-            branch.count <- store.count if store.count <= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY else Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
-            branch.next_handle <- store.next_handle
             branch.mode <- ResourceMode.Branch
-            for index in 0..<branch.count:
-                branch.files[index].handle <- store.files[index].handle
-                branch.files[index].path <- store.files[index].path
-                branch.files[index].length <- store.files[index].length
-                branch.files[index].cursor <- store.files[index].cursor
-                branch.files[index].writable <- store.files[index].writable
-                branch.files[index].generation <- store.files[index].generation
-                for byte_index in 0..<Resource::DATA_CAPACITY:
-                    branch.files[index].bytes[byte_index] <- store.files[index].bytes[byte_index]
+            operation_count: usize = store.operation_count if store.operation_count <= Resource::OPERATION_CAPACITY else Resource::OPERATION_CAPACITY
+            branch.operation_count <- store.operation_cursor if store.operation_cursor <= operation_count else operation_count
+            branch.operation_cursor <- branch.operation_count
+            branch.operation_overflowed <- store.operation_overflowed
+            for operation_index in Resource::FIRST_INDEX..<branch.operation_count:
+                branch.operations[operation_index] <- store.operations[operation_index]
+            file_count: usize = store.count if store.count <= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY else Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
+            for source_index in Resource::FIRST_INDEX..<file_count:
+                file_was_opened: mutable bool = false
+                for operation_index in Resource::FIRST_INDEX..<branch.operation_count:
+                    operation: ResourceOperation = branch.operations[operation_index]
+                    if operation.kind == ResourceOperationKind.Open and operation.handle.value == store.files[source_index].handle.value:
+                        file_was_opened <- true
+                if file_was_opened:
+                    target_index: usize = branch.count
+                    branch.files[target_index].handle <- store.files[source_index].handle
+                    branch.files[target_index].path <- store.files[source_index].path
+                    branch.files[target_index].length <- store.files[source_index].length
+                    branch.files[target_index].initial_length <- store.files[source_index].initial_length
+                    branch.files[target_index].cursor <- store.files[source_index].cursor
+                    branch.files[target_index].writable <- store.files[source_index].writable
+                    branch.files[target_index].generation <- store.files[source_index].generation
+                    for byte_index in Resource::FIRST_INDEX..<Resource::DATA_CAPACITY:
+                        branch.files[target_index].bytes[byte_index] <- store.files[source_index].bytes[byte_index]
+                        branch.files[target_index].initial_bytes[byte_index] <- store.files[source_index].initial_bytes[byte_index]
+                    branch.count <- branch.count + Resource::OPERATION_COUNT_INCREMENT
+            branch.next_handle <- branch.count.u64() + Resource::FIRST_HANDLE
+            return branch if not resources_is_valid(branch)
             return branch
 
         def resources_is_valid(store: ResourceStore&) -> bool:
             return false if store.count > Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY or store.next_handle == Resource::NO_HANDLE or store.mode.u16() > Resource::REPLAY_RESOURCES_RESOURCE_MODE_MAX
+            return false if store.operation_count > Resource::OPERATION_CAPACITY or store.operation_cursor > store.operation_count
             return false if store.next_handle != store.count.u64() + Resource::FIRST_HANDLE
-            for index in 0..<store.count:
+            return false if store.mode != ResourceMode.Replaying and store.operation_cursor != store.operation_count
+            return false if store.operation_overflowed and (store.operation_count != Resource::OPERATION_CAPACITY or store.mode == ResourceMode.Replaying)
+            for index in Resource::FIRST_INDEX..<store.count:
                 file: VirtualFile = store.files[index]
-                return false if file.handle.value == Resource::NO_HANDLE or file.path.value == Resource::NO_HANDLE or file.generation == Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION or file.length > Resource::DATA_CAPACITY or file.cursor > file.length
+                return false if file.handle.value == Resource::NO_HANDLE or file.path.value == Resource::NO_HANDLE or file.generation == Resource::REPLAY_RESOURCES_RESOURCE_NO_GENERATION or file.length > Resource::DATA_CAPACITY or file.initial_length > file.length or file.cursor > file.length
                 return false if file.handle.value >= store.next_handle
-                for previous in 0..<index:
+                for previous in Resource::FIRST_INDEX..<index:
                     return false if store.files[previous].handle.value == file.handle.value
                     return false if store.files[previous].path.value == file.path.value and store.files[previous].generation == file.generation
+            for operation_index in Resource::FIRST_INDEX..<store.operation_count:
+                operation: ResourceOperation = store.operations[operation_index]
+                return false if not resources_operation_is_valid(operation, operation_index)
+                operation_file_found: mutable bool = false
+                operation_file_index: mutable usize = Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
+                for file_index in Resource::FIRST_INDEX..<store.count:
+                    if store.files[file_index].handle.value == operation.handle.value:
+                        operation_file_found <- true
+                        operation_file_index <- file_index
+                return false if not operation_file_found
+                return false if operation_file_index >= Resource::REPLAY_RESOURCES_RESOURCE_FILE_CAPACITY
+                return false if operation.kind == ResourceOperationKind.Open and (store.files[operation_file_index].path.value != operation.path.value or store.files[operation_file_index].generation != operation.generation or store.files[operation_file_index].writable != operation.writable)
+                if operation.kind != ResourceOperationKind.Open:
+                    operation_has_prior_open: mutable bool = false
+                    for prior_operation_index in Resource::FIRST_INDEX..<operation_index:
+                        prior_operation: ResourceOperation = store.operations[prior_operation_index]
+                        if prior_operation.kind == ResourceOperationKind.Open and prior_operation.handle.value == operation.handle.value:
+                            operation_has_prior_open <- true
+                    return false if not operation_has_prior_open
+                file: VirtualFile = store.files[operation_file_index]
+                return false if operation.kind == ResourceOperationKind.Write and not file.writable
+                return false if operation.kind == ResourceOperationKind.Read and operation.offset > file.length
+                return false if operation.kind == ResourceOperationKind.Read and operation.transferred > file.length - operation.offset
+                return false if operation.kind == ResourceOperationKind.Write and operation.offset > file.length
+                return false if operation.kind == ResourceOperationKind.Write and operation.transferred > file.length - operation.offset
+                return false if operation.kind == ResourceOperationKind.Seek and operation.offset > file.length
             return true
 
         def resources_write(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, input: u8&, length: usize) -> IoResult:
             result: mutable IoResult = zeroed
             result.failure <- DebuggerErrors::no_error()
-            if store.mode.u16() > Resource::REPLAY_RESOURCES_RESOURCE_MODE_MAX:
+            if not resources_is_valid(store):
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
                 return result
             index: usize = resources_find(store, handle)
@@ -226,7 +471,8 @@ module DebuggerVirtualResources:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_DIVERGENCE)
                 return result
             if not store.files[index].writable:
-                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, Detail::HANDLE)
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::REPLAY_RESOURCES_DETAIL_DIVERGENCE) if store.mode == ResourceMode.Replaying
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.PermissionDenied, false, Detail::HANDLE) if store.mode != ResourceMode.Replaying
                 return result
             if store.files[index].length > Resource::DATA_CAPACITY or store.files[index].cursor > store.files[index].length or store.files[index].cursor > Resource::DATA_CAPACITY:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
@@ -234,9 +480,25 @@ module DebuggerVirtualResources:
             if length > Resource::DATA_CAPACITY - store.files[index].cursor:
                 result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::REPLAY_RESOURCES_DETAIL_CAPACITY)
                 return result
-            for byte_index in 0..<length:
-                store.files[index].bytes[store.files[index].cursor + byte_index] <- input[byte_index]
+            request: mutable ResourceOperation = zeroed
+            request.kind <- ResourceOperationKind.Write
+            request.handle <- handle
+            request.offset <- store.files[index].cursor
+            request.requested <- length
+            request.transferred <- length
+            for byte_index in Resource::FIRST_INDEX..<length:
+                request.bytes[byte_index] <- input[byte_index]
+            if store.mode == ResourceMode.Replaying:
+                recorded: mutable ResourceOperation = zeroed
+                result.failure <- resources_expect_operation(store, request, recorded)
+                return result if not DebuggerErrors::error_is_ok(result.failure)
+            else:
+                result.failure <- resources_record_operation(store, request)
+                return result if not DebuggerErrors::error_is_ok(result.failure)
+            for byte_index in Resource::FIRST_INDEX..<length:
+                store.files[index].bytes[store.files[index].cursor + byte_index] <- request.bytes[byte_index]
             store.files[index].cursor <- store.files[index].cursor + length
             store.files[index].length <- store.files[index].cursor if store.files[index].length < store.files[index].cursor
             result.transferred <- length
+            resources_advance_operation(store) if store.mode == ResourceMode.Replaying
             return result

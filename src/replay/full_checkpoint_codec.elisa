@@ -17,6 +17,7 @@ const module DebuggerFullCheckpointCodecCapacity:
     EFFECT_CAPACITY: usize = 256
     RESOURCE_CAPACITY: usize = 16
     RESOURCE_DATA_CAPACITY: usize = 256
+    RESOURCE_OPERATION_CAPACITY: usize = 32
     ADAPTER_SAMPLE_CAPACITY: usize = 128
     CONSOLE_RECORD_CAPACITY: usize = 64
     CONSOLE_DATA_CAPACITY: usize = 256
@@ -24,13 +25,14 @@ const module DebuggerFullCheckpointCodecCapacity:
     WAIT_EDGE_BYTES: usize = U64_BYTES * 3 + U16_BYTES
     SCHEDULE_DECISION_BYTES: usize = U64_BYTES * 2 + TASK_INFO_BYTES + U16_BYTES
     EFFECT_RECORD_BYTES: usize = U64_BYTES * 4 + U16_BYTES + BOOL_BYTES
-    RESOURCE_FILE_HEADER_BYTES: usize = U64_BYTES * 5 + BOOL_BYTES
+    RESOURCE_FILE_HEADER_BYTES: usize = U64_BYTES * 6 + BOOL_BYTES
+    RESOURCE_OPERATION_HEADER_BYTES: usize = U64_BYTES * 7 + U16_BYTES + BOOL_BYTES * 2
     # Header/schema fields, recording coordinates, stable build identity,
     # complete-image fingerprint, and its validity bit.
     OUTER_FIXED_BYTES: usize = U32_BYTES * 4 + U64_BYTES * 9 + BOOL_BYTES
     TASK_FIXED_BYTES: usize = U64_BYTES * 6 + U16_BYTES + BOOL_BYTES * 3
     EFFECT_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES * 4 + BOOL_BYTES * 2 + U32_BYTES
-    RESOURCE_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES
+    RESOURCE_FIXED_BYTES: usize = U64_BYTES * 4 + U16_BYTES + BOOL_BYTES
     ADAPTER_SAMPLE_BYTES: usize = U64_BYTES * 3
     ADAPTER_FIXED_BYTES: usize = U64_BYTES * 2 + U16_BYTES + BOOL_BYTES + U16_BYTES * 2 + BOOL_BYTES + U32_BYTES
     CONSOLE_RECORD_HEADER_BYTES: usize = U64_BYTES * 3 + U16_BYTES * 2 + BOOL_BYTES
@@ -38,7 +40,7 @@ const module DebuggerFullCheckpointCodecCapacity:
     CHECKSUM_BYTES: usize = U64_BYTES
     MAX_TASK_BYTES: usize = TASK_FIXED_BYTES + TASK_CAPACITY * TASK_INFO_BYTES + WAIT_CAPACITY * WAIT_EDGE_BYTES + SCHEDULE_CAPACITY * SCHEDULE_DECISION_BYTES
     MAX_EFFECT_BYTES: usize = EFFECT_FIXED_BYTES + EFFECT_CAPACITY * EFFECT_RECORD_BYTES
-    MAX_RESOURCE_BYTES: usize = RESOURCE_FIXED_BYTES + RESOURCE_CAPACITY * (RESOURCE_FILE_HEADER_BYTES + RESOURCE_DATA_CAPACITY)
+    MAX_RESOURCE_BYTES: usize = RESOURCE_FIXED_BYTES + RESOURCE_CAPACITY * (RESOURCE_FILE_HEADER_BYTES + RESOURCE_DATA_CAPACITY * 2) + RESOURCE_OPERATION_CAPACITY * (RESOURCE_OPERATION_HEADER_BYTES + RESOURCE_DATA_CAPACITY)
     MAX_CLOCK_BYTES: usize = ADAPTER_FIXED_BYTES + ADAPTER_SAMPLE_CAPACITY * ADAPTER_SAMPLE_BYTES
     MAX_RANDOM_BYTES: usize = ADAPTER_FIXED_BYTES + ADAPTER_SAMPLE_CAPACITY * ADAPTER_SAMPLE_BYTES
     MAX_CONSOLE_BYTES: usize = CONSOLE_FIXED_BYTES + CONSOLE_RECORD_CAPACITY * (CONSOLE_RECORD_HEADER_BYTES + CONSOLE_DATA_CAPACITY)
@@ -49,7 +51,7 @@ module DebuggerFullCheckpointCodec:
     private:
         const module Codec:
             REPLAY_FULL_CHECKPOINT_CODEC_MAGIC: u32 = 1263022918
-            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 3
+            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 4
             REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS: u64 = 8
             REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK: u64 = 255
             FIRST_INDEX: usize = 0
@@ -61,6 +63,7 @@ module DebuggerFullCheckpointCodec:
             REPLAY_FULL_CHECKPOINT_CODEC_EFFECT_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::EFFECT_CAPACITY
             REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_CAPACITY
             REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_DATA_CAPACITY
+            REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_OPERATION_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::RESOURCE_OPERATION_CAPACITY
             REPLAY_FULL_CHECKPOINT_CODEC_ADAPTER_SAMPLE_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::ADAPTER_SAMPLE_CAPACITY
             REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_RECORD_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::CONSOLE_RECORD_CAPACITY
             REPLAY_FULL_CHECKPOINT_CODEC_CONSOLE_DATA_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::CONSOLE_DATA_CAPACITY
@@ -286,16 +289,36 @@ module DebuggerFullCheckpointCodec:
             writer_put_u64(writer, resources.count.u64())
             writer_put_u64(writer, resources.next_handle)
             writer_put_u16(writer, resources.mode.u16())
+            writer_put_u64(writer, resources.operation_count.u64())
+            writer_put_u64(writer, resources.operation_cursor.u64())
+            writer_put_bool(writer, resources.operation_overflowed)
             for index in Codec::FIRST_INDEX..<resources.count:
                 file: DebuggerVirtualResources::VirtualFile = resources.files[index]
                 writer_put_u64(writer, file.handle.value)
                 writer_put_u64(writer, file.path.value)
                 writer_put_u64(writer, file.length.u64())
                 writer_put_u64(writer, file.cursor.u64())
+                writer_put_u64(writer, file.initial_length.u64())
                 writer_put_bool(writer, file.writable)
                 writer_put_u64(writer, file.generation)
                 for byte_index in Codec::FIRST_INDEX..<file.length:
                     writer_put_byte(writer, file.bytes[byte_index])
+                for byte_index in Codec::FIRST_INDEX..<file.initial_length:
+                    writer_put_byte(writer, file.initial_bytes[byte_index])
+            for index in Codec::FIRST_INDEX..<resources.operation_count:
+                operation: DebuggerVirtualResources::ResourceOperation = resources.operations[index]
+                writer_put_u64(writer, operation.sequence)
+                writer_put_u16(writer, operation.kind.u16())
+                writer_put_u64(writer, operation.handle.value)
+                writer_put_u64(writer, operation.path.value)
+                writer_put_u64(writer, operation.generation)
+                writer_put_bool(writer, operation.writable)
+                writer_put_u64(writer, operation.offset.u64())
+                writer_put_u64(writer, operation.requested.u64())
+                writer_put_u64(writer, operation.transferred.u64())
+                writer_put_bool(writer, operation.eof)
+                for byte_index in Codec::FIRST_INDEX..<operation.transferred:
+                    writer_put_byte(writer, operation.bytes[byte_index])
 
         def reader_initialize(reader: mutable CheckpointReader&, bytes: u8&, length: usize) -> void:
             reader.length <- Codec::FIRST_INDEX
@@ -480,6 +503,16 @@ module DebuggerFullCheckpointCodec:
             reader.failed <- true
             return DebuggerVirtualResources::ResourceMode.Recording
 
+        def reader_take_resource_operation_kind(reader: mutable CheckpointReader&) -> DebuggerVirtualResources::ResourceOperationKind:
+            code: u16 = reader_take_u16(reader)
+            reader.failed <- true if code > Codec::ENUM_THREE
+            return DebuggerVirtualResources::ResourceOperationKind.Open if code == Codec::ENUM_ZERO
+            return DebuggerVirtualResources::ResourceOperationKind.Read if code == Codec::ENUM_ONE
+            return DebuggerVirtualResources::ResourceOperationKind.Write if code == Codec::ENUM_TWO
+            return DebuggerVirtualResources::ResourceOperationKind.Seek if code == Codec::ENUM_THREE
+            reader.failed <- true
+            return DebuggerVirtualResources::ResourceOperationKind.Open
+
         def reader_take_adapter_mode(reader: mutable CheckpointReader&) -> DebuggerReplayAdapters::AdapterMode:
             code: u16 = reader_take_u16(reader)
             reader.failed <- true if code > Codec::ENUM_TWO
@@ -586,20 +619,44 @@ module DebuggerFullCheckpointCodec:
             resources.count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_CAPACITY)
             resources.next_handle <- reader_take_u64(reader)
             resources.mode <- reader_take_resource_mode(reader)
+            resources.operation_count <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_OPERATION_CAPACITY)
+            resources.operation_cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_OPERATION_CAPACITY)
+            resources.operation_overflowed <- reader_take_bool(reader)
             return resources if reader.failed
-            for index in 0..<resources.count:
+            return resources if resources.operation_cursor > resources.operation_count
+            for index in Codec::FIRST_INDEX..<resources.count:
                 resources.files[index].handle <- DebuggerIdentity::debug_id(reader_take_u64(reader))
                 resources.files[index].path <- DebuggerIdentity::debug_id(reader_take_u64(reader))
                 resources.files[index].length <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
                 resources.files[index].cursor <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
+                resources.files[index].initial_length <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
                 resources.files[index].writable <- reader_take_bool(reader)
                 resources.files[index].generation <- reader_take_u64(reader)
                 return resources if reader.failed
-                if resources.files[index].cursor > resources.files[index].length:
+                if resources.files[index].cursor > resources.files[index].length or resources.files[index].cursor > Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY:
                     reader.failed <- true
                     return resources
                 for byte_index in Codec::FIRST_INDEX..<resources.files[index].length:
                     resources.files[index].bytes[byte_index] <- reader_take_byte(reader)
+                for byte_index in Codec::FIRST_INDEX..<resources.files[index].initial_length:
+                    resources.files[index].initial_bytes[byte_index] <- reader_take_byte(reader)
+            for index in Codec::FIRST_INDEX..<resources.operation_count:
+                operation: mutable DebuggerVirtualResources::ResourceOperation = zeroed
+                operation.sequence <- reader_take_u64(reader)
+                operation.kind <- reader_take_resource_operation_kind(reader)
+                operation.handle <- DebuggerIdentity::debug_id(reader_take_u64(reader))
+                operation.path <- DebuggerIdentity::debug_id(reader_take_u64(reader))
+                operation.generation <- reader_take_u64(reader)
+                operation.writable <- reader_take_bool(reader)
+                operation.offset <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
+                operation.requested <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
+                operation.transferred <- reader_take_count(reader, Codec::REPLAY_FULL_CHECKPOINT_CODEC_RESOURCE_DATA_CAPACITY)
+                operation.eof <- reader_take_bool(reader)
+                return resources if reader.failed
+                for byte_index in Codec::FIRST_INDEX..<operation.transferred:
+                    operation.bytes[byte_index] <- reader_take_byte(reader)
+                resources.operations[index] <- operation
+                return resources if reader.failed
             return resources
 
         def reader_take_adapter_error(reader: mutable CheckpointReader&) -> DebuggerErrors::DebuggerError:

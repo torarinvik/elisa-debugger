@@ -6,6 +6,7 @@ include "./format.elisa"
 include "./manifest.elisa"
 include "../replay/checkpoint_codec.elisa"
 include "../replay/full_checkpoint_codec.elisa"
+include "../core/events.elisa"
 
 const module DebuggerTraceStorageCapacity:
     TRACE_STORAGE_PAYLOAD_CAPACITY: usize = DebuggerFullCheckpointCodecCapacity::FULL_CHECKPOINT_CODEC_CAPACITY
@@ -34,7 +35,7 @@ module DebuggerTraceStorage:
             FOOTER: u32 = 1380270920
 
         const module Layout:
-            FORMAT_VERSION: u16 = 1
+            FORMAT_VERSION: u16 = 2
             HEADER_BYTES: usize = DebuggerTraceStorageLimits::CHUNK_HEADER_BYTES
             FOOTER_BYTES: usize = DebuggerTraceStorageLimits::FOOTER_BYTES
 
@@ -64,11 +65,16 @@ module DebuggerTraceStorage:
             STORAGE_EVENTENCODING_ID_BYTES: usize = 8
             STORAGE_EVENTENCODING_MICROSTEP_BYTES: usize = 4
             STORAGE_EVENTENCODING_ENUM_BYTES: usize = 2
-            STORAGE_EVENTENCODING_EVENT_PAYLOAD_HASH_BYTES: usize = 8
-            STORAGE_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES * 2 + EventEncoding::STORAGE_EVENTENCODING_EVENT_PAYLOAD_HASH_BYTES
-            QUALITY_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES - EventEncoding::STORAGE_EVENTENCODING_EVENT_PAYLOAD_HASH_BYTES - EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES
+            STORAGE_EVENTENCODING_STATE_HASH_BYTES: usize = 8
+            STORAGE_EVENTENCODING_PAYLOAD_KIND_BYTES: usize = 2
+            STORAGE_EVENTENCODING_PAYLOAD_LENGTH_BYTES: usize = 2
+            STORAGE_EVENTENCODING_PAYLOAD_HASH_BYTES: usize = 8
+            STORAGE_EVENTENCODING_PAYLOAD_BYTES: usize = DebuggerEventPayloadLimits::MAX_BYTES
+            STORAGE_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES * 2 + EventEncoding::STORAGE_EVENTENCODING_STATE_HASH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_KIND_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_LENGTH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_HASH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_BYTES
+            QUALITY_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES
             QUALITY_HIGH_BYTE_OFFSET: usize = 1
             BRANCH_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 2
+            PAYLOAD_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES * 2 + EventEncoding::STORAGE_EVENTENCODING_STATE_HASH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_KIND_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_LENGTH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_HASH_BYTES
             STORAGE_EVENTENCODING_BYTE_BITS: u64 = 8
 
         const module EventKind:
@@ -170,8 +176,16 @@ module DebuggerTraceStorage:
                 kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
                 quality: u16 = DebuggerTraceBinary::reader_take_u16(reader)
                 _ = DebuggerTraceBinary::reader_take_u64(reader)
+                payload_kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+                payload_length: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+                payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+                event_payload: mutable u8[EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_BYTES] = zeroed
+                for payload_index in 0..<EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_BYTES:
+                    event_payload[payload_index] <- DebuggerTraceBinary::reader_take_byte(reader)
                 recording_id <- event_recording if recording_id == Identity::STORAGE_IDENTITY_NO_RECORDING
                 return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == Identity::STORAGE_IDENTITY_NO_RECORDING or event_recording != recording_id or task != position_task or kind > EventKind::STORAGE_EVENTKIND_MAX_EVENT_KIND or quality > EventQuality::STORAGE_EVENTQUALITY_MAX_EVENT_QUALITY or quality == EventQuality::STORAGE_EVENTQUALITY_CORRUPT
+                return false if payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or not DebuggerEvents::event_payload_body_is_canonical(DebuggerEvents::event_payload_kind_from_code(payload_kind), event_payload[0], payload_length.usize(), payload_hash)
+                return false if quality == EventQuality::EXACT_CODE and (kind == DebuggerEvents::EventKind.Input.u16() or kind == DebuggerEvents::EventKind.Output.u16()) and payload_kind == DebuggerEvents::EventPayloadKind.None.u16()
             return DebuggerTraceBinary::reader_is_valid(reader) and reader.offset == reader.length
 
     public:

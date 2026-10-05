@@ -21,6 +21,7 @@ module DebuggerTraceReader:
             READER_DETAIL_ENUM: u32 = 5
             TASK: u32 = 6
             STORAGE_STATUS: u32 = 7
+            EVENT_ENVELOPE: u32 = 8
 
         const module EventEncoding:
             READER_EVENTENCODING_SCHEMA_BYTES: usize = 4
@@ -28,8 +29,12 @@ module DebuggerTraceReader:
             ID_BYTES: usize = 8
             MICROSTEP_BYTES: usize = 4
             ENUM_BYTES: usize = 2
-            READER_EVENTENCODING_EVENT_PAYLOAD_HASH_BYTES: usize = 8
-            READER_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::READER_EVENTENCODING_SCHEMA_BYTES + EventEncoding::ORDINAL_BYTES + EventEncoding::ID_BYTES * 7 + EventEncoding::MICROSTEP_BYTES + EventEncoding::ENUM_BYTES * 2 + EventEncoding::READER_EVENTENCODING_EVENT_PAYLOAD_HASH_BYTES
+            STATE_HASH_BYTES: usize = 8
+            PAYLOAD_KIND_BYTES: usize = 2
+            PAYLOAD_LENGTH_BYTES: usize = 2
+            PAYLOAD_HASH_BYTES: usize = 8
+            PAYLOAD_BYTES: usize = DebuggerEventPayloadLimits::MAX_BYTES
+            READER_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::READER_EVENTENCODING_SCHEMA_BYTES + EventEncoding::ORDINAL_BYTES + EventEncoding::ID_BYTES * 7 + EventEncoding::MICROSTEP_BYTES + EventEncoding::ENUM_BYTES * 2 + EventEncoding::STATE_HASH_BYTES + EventEncoding::PAYLOAD_KIND_BYTES + EventEncoding::PAYLOAD_LENGTH_BYTES + EventEncoding::PAYLOAD_HASH_BYTES + EventEncoding::PAYLOAD_BYTES
 
         const module EventKind:
             READER_EVENTKIND_MAX_EVENT_KIND: u16 = 20
@@ -249,6 +254,9 @@ module DebuggerTraceReader:
                 microstep: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
                 kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
                 quality: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
+                state_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
+                payload_kind_code: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
+                payload_length: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
                 payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::READER_DETAIL_ENUM) if kind > EventKind::READER_EVENTKIND_MAX_EVENT_KIND or quality > EventQuality::READER_EVENTQUALITY_MAX_EVENT_QUALITY or quality == DebuggerEvents::EventQuality.Corrupt.u16()
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if schema != reader.manifest.schema.u32()
@@ -268,7 +276,15 @@ module DebuggerTraceReader:
                 event.position <- DebuggerIdentity::Position{recording: recording, branch: branch, event: event_id, task: position_task, invocation: invocation, statement: statement, microstep: microstep}
                 event.kind <- event_kind_from_code(kind)
                 event.quality <- event_quality_from_code(quality)
+                event.state_hash <- state_hash
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::READER_DETAIL_ENUM) if payload_kind_code > DebuggerEvents::EventPayloadKind.Error.u16()
+                event.payload_kind <- DebuggerEvents::event_payload_kind_from_code(payload_kind_code)
+                event.payload_length <- payload_length
                 event.payload_hash <- payload_hash
+                for payload_index in 0..<EventEncoding::PAYLOAD_BYTES:
+                    event.payload[payload_index] <- DebuggerTraceBinary::reader_take_byte(event_reader)
+                envelope_failure: u32 = DebuggerEvents::event_envelope_validation_detail(event)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::EVENT_ENVELOPE + envelope_failure) if envelope_failure != 0
                 reader.events[reader.event_count] <- event
                 reader.event_count <- reader.event_count + 1
                 if ordinal == Sequence::READER_SEQUENCE_MAX_EVENT:

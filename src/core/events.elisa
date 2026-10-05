@@ -1,10 +1,34 @@
 include "./identity.elisa"
 
+const module DebuggerEventPayloadLimits:
+    MAX_BYTES: usize = 64
+
 module DebuggerEvents:
     private:
         const module Event:
             CORE_EVENTS_EVENT_KIND_MAX: u16 = 20
             CORE_EVENTS_EVENT_QUALITY_MAX: u16 = 4
+            CORE_EVENTS_PAYLOAD_KIND_MAX: u16 = 4
+
+        const module Payload:
+            CAPACITY: usize = DebuggerEventPayloadLimits::MAX_BYTES
+            EMPTY_LENGTH: usize = 0
+            EMPTY_HASH: u64 = 0
+            HASH_OFFSET_BASIS: u64 = 14695981039346656037
+            HASH_PRIME: u64 = 1099511628211
+            SCALAR_BYTES: usize = 8
+            ERROR_BYTES: usize = Payload::SCALAR_BYTES
+            MINIMUM_LENGTH: usize = 1
+            ZERO_BYTE: u8 = 0
+
+        const module EnvelopeValidation:
+            VALID: u32 = 0
+            POSITION: u32 = 1
+            TASK: u32 = 2
+            KIND: u32 = 3
+            QUALITY: u32 = 4
+            PAYLOAD: u32 = 5
+            REQUIRED_IO_PAYLOAD: u32 = 6
 
 
     public:
@@ -38,6 +62,13 @@ module DebuggerEvents:
             Diverged
             Corrupt
 
+        enum EventPayloadKind:
+            None
+            Bytes
+            SignedScalar
+            UnsignedScalar
+            Error
+
         struct EventEnvelope:
             schema: mutable u32
             ordinal: mutable u64
@@ -45,7 +76,68 @@ module DebuggerEvents:
             position: mutable DebuggerIdentity::Position
             kind: mutable EventKind
             quality: mutable EventQuality
+            state_hash: mutable u64
+            payload_kind: mutable EventPayloadKind
+            payload_length: mutable u16
             payload_hash: mutable u64
+            payload: mutable u8[Payload::CAPACITY]
+
+        def event_payload_kind_is_valid(kind: EventPayloadKind) -> bool:
+            return kind.u16() <= Event::CORE_EVENTS_PAYLOAD_KIND_MAX
+
+        def event_payload_length_is_valid(kind: EventPayloadKind, length: usize) -> bool:
+            return true if kind == EventPayloadKind.None and length == Payload::EMPTY_LENGTH
+            return length >= Payload::MINIMUM_LENGTH and length <= Payload::CAPACITY if kind == EventPayloadKind.Bytes
+            return length == Payload::SCALAR_BYTES if kind == EventPayloadKind.SignedScalar or kind == EventPayloadKind.UnsignedScalar
+            return length == Payload::ERROR_BYTES if kind == EventPayloadKind.Error
+            return false
+
+        def event_payload_kind_from_code(code: u16) -> EventPayloadKind:
+            return EventPayloadKind.None if code == EventPayloadKind.None.u16()
+            return EventPayloadKind.Bytes if code == EventPayloadKind.Bytes.u16()
+            return EventPayloadKind.SignedScalar if code == EventPayloadKind.SignedScalar.u16()
+            return EventPayloadKind.UnsignedScalar if code == EventPayloadKind.UnsignedScalar.u16()
+            return EventPayloadKind.Error
+
+        def event_payload_body_is_canonical(kind: EventPayloadKind, bytes: u8&, length: usize, expected_hash: u64) -> bool:
+            return false if not event_payload_kind_is_valid(kind) or not event_payload_length_is_valid(kind, length) or length > Payload::CAPACITY
+            if kind == EventPayloadKind.None:
+                return false if expected_hash != Payload::EMPTY_HASH
+            else:
+                return false if expected_hash != event_payload_hash(bytes, length)
+            for index in length..<Payload::CAPACITY:
+                return false if bytes[index] != Payload::ZERO_BYTE
+            return true
+
+        def event_payload_hash(bytes: u8&, length: usize) -> u64:
+            return Payload::EMPTY_HASH if length == Payload::EMPTY_LENGTH
+            return Payload::EMPTY_HASH if length > Payload::CAPACITY
+            hash: mutable u64 = Payload::HASH_OFFSET_BASIS
+            for index in Payload::EMPTY_LENGTH..<length:
+                hash <- (hash ^ bytes[index].u64()) * Payload::HASH_PRIME
+            return hash
+
+        def event_payload_is_canonical(event: EventEnvelope) -> bool:
+            return false if not event_payload_kind_is_valid(event.payload_kind) or event.payload_length.usize() > Payload::CAPACITY
+            return event_payload_body_is_canonical(event.payload_kind, event.payload[0], event.payload_length.usize(), event.payload_hash)
+
+        def event_envelope_set_payload(event: mutable EventEnvelope&, kind: EventPayloadKind, bytes: u8&, length: usize) -> bool:
+            return false if not event_payload_kind_is_valid(kind) or not event_payload_length_is_valid(kind, length) or length > Payload::CAPACITY
+            return false if kind == EventPayloadKind.None
+            payload_copy: mutable u8[Payload::CAPACITY] = zeroed
+            for index in Payload::EMPTY_LENGTH..<length:
+                payload_copy[index] <- bytes[index]
+            for index in Payload::EMPTY_LENGTH..<Payload::CAPACITY:
+                event.payload[index] <- Payload::ZERO_BYTE
+            for index in Payload::EMPTY_LENGTH..<length:
+                event.payload[index] <- payload_copy[index]
+            event.payload_kind <- kind
+            event.payload_length <- length.u16()
+            event.payload_hash <- event_payload_hash(event.payload[0], length)
+            return true
+
+        def event_payload_capacity() -> usize:
+            return Payload::CAPACITY
 
         def event_is_committed(event: EventEnvelope) -> bool:
             return event.kind == EventKind.MutationCommit or event.kind == EventKind.Output or event.kind == EventKind.Input
@@ -56,14 +148,26 @@ module DebuggerEvents:
         def event_quality_is_valid(quality: EventQuality) -> bool:
             return quality.u16() <= Event::CORE_EVENTS_EVENT_QUALITY_MAX
 
+        def event_envelope_validation_detail(event: EventEnvelope) -> u32:
+            return EnvelopeValidation::POSITION if event.ordinal != event.position.event
+            return EnvelopeValidation::TASK if event.task.value != event.position.task.value
+            return EnvelopeValidation::KIND if not event_kind_is_valid(event.kind)
+            return EnvelopeValidation::QUALITY if not event_quality_is_valid(event.quality)
+            return EnvelopeValidation::PAYLOAD if not event_payload_is_canonical(event)
+            return EnvelopeValidation::REQUIRED_IO_PAYLOAD if event.quality == EventQuality.Exact and (event.kind == EventKind.Input or event.kind == EventKind.Output) and event.payload_kind == EventPayloadKind.None
+            return EnvelopeValidation::VALID
+
         def event_envelope_is_well_formed(event: EventEnvelope) -> bool:
-            return false if event.ordinal != event.position.event or event.task.value != event.position.task.value
-            return event_kind_is_valid(event.kind) and event_quality_is_valid(event.quality)
+            return event_envelope_validation_detail(event) == EnvelopeValidation::VALID
 
         def event_envelopes_equal(left: EventEnvelope, right: EventEnvelope) -> bool:
-            return left.schema == right.schema and left.ordinal == right.ordinal and left.task.value == right.task.value and left.position.recording.value == right.position.recording.value and left.position.branch.value == right.position.branch.value and left.position.event == right.position.event and left.position.task.value == right.position.task.value and left.position.invocation.value == right.position.invocation.value and left.position.statement.value == right.position.statement.value and left.position.microstep == right.position.microstep and left.kind == right.kind and left.quality == right.quality and left.payload_hash == right.payload_hash
+            return false if not event_envelope_is_well_formed(left) or not event_envelope_is_well_formed(right)
+            return false if left.schema != right.schema or left.ordinal != right.ordinal or left.task.value != right.task.value or left.position.recording.value != right.position.recording.value or left.position.branch.value != right.position.branch.value or left.position.event != right.position.event or left.position.task.value != right.position.task.value or left.position.invocation.value != right.position.invocation.value or left.position.statement.value != right.position.statement.value or left.position.microstep != right.position.microstep or left.kind != right.kind or left.quality != right.quality or left.state_hash != right.state_hash or left.payload_kind != right.payload_kind or left.payload_length != right.payload_length or left.payload_hash != right.payload_hash
+            for index in Payload::EMPTY_LENGTH..<left.payload_length.usize():
+                return false if left.payload[index] != right.payload[index]
+            return true
 
-        def event_envelope(schema: u32, ordinal: u64, position: DebuggerIdentity::Position, kind: EventKind, quality: EventQuality, payload_hash: u64) -> EventEnvelope:
+        def event_envelope(schema: u32, ordinal: u64, position: DebuggerIdentity::Position, kind: EventKind, quality: EventQuality, state_hash: u64) -> EventEnvelope:
             return EventEnvelope{
                 schema: schema,
                 ordinal: ordinal,
@@ -71,5 +175,9 @@ module DebuggerEvents:
                 position: position,
                 kind: kind,
                 quality: quality,
-                payload_hash: payload_hash
+                state_hash: state_hash,
+                payload_kind: EventPayloadKind.None,
+                payload_length: Payload::EMPTY_LENGTH.u16(),
+                payload_hash: Payload::EMPTY_HASH,
+                payload: zeroed
             }

@@ -19,6 +19,8 @@ const module Test:
     PAYLOAD_BYTE: u8 = 42
     SCHEMA: u32 = 2
     EVENT_SCHEMA: u32 = 2
+    RECORDER_EVENT_SCHEMA: u32 = 3
+    LEGACY_EVENT_PAYLOAD_BYTES: usize = 64
     EVENT_ORDINAL: u64 = 0
     EVENT_PAYLOAD: u64 = 123
     BUILD_COMPILER: u64 = 1
@@ -89,7 +91,7 @@ def test_encode_event(event: DebuggerEvents::EventEnvelope) -> DebuggerTraceBina
     DebuggerTraceBinary::writer_put_u16(writer, event.payload_kind.u16())
     DebuggerTraceBinary::writer_put_u16(writer, event.payload_length)
     DebuggerTraceBinary::writer_put_u64(writer, event.payload_hash)
-    for index in 0..<DebuggerEventPayloadLimits::MAX_BYTES:
+    for index in 0..<Test::LEGACY_EVENT_PAYLOAD_BYTES:
         DebuggerTraceBinary::writer_put_byte(writer, event.payload[index])
     return writer
 
@@ -110,7 +112,7 @@ def test_event_chunk() -> DebuggerTraceStorage::StoredChunk:
 
 def test_record_one_event(recorder: mutable DebuggerTraceRecorder::TraceRecorder&) -> bool:
     position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::RECORDING_ID))
-    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::RECORDER_EVENT_SCHEMA, Test::EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
     append_error: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, event)
     return false if not DebuggerErrors::error_is_ok(append_error)
     finalize_error: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_finalize(recorder)
@@ -257,7 +259,7 @@ def check_schema_recorder() -> i64:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder
     DebuggerTraceRecorder::recorder_initialize(recorder, build, DebuggerIdentity::debug_id(Test::RECORDING_ID + 2))
     position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::RECORDING_ID))
-    event: mutable DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA + 1, Test::EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
+    event: mutable DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::RECORDER_EVENT_SCHEMA + 1, Test::EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
     failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, event)
     return 1 if DebuggerErrors::error_is_ok(failure) or failure.detail != 4
     return 0
@@ -372,7 +374,7 @@ def check_recorder_and_bundle() -> i64 can[Memory.Allocate, Memory.Release, Abor
     recorder: mutable DebuggerTraceRecorder::TraceRecorder
     DebuggerTraceRecorder::recorder_initialize(recorder, recorder_build, DebuggerIdentity::debug_id(Test::RECORDING_ID))
     position: DebuggerIdentity::Position = DebuggerIdentity::initial_position(DebuggerIdentity::debug_id(Test::RECORDING_ID))
-    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
+    event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::RECORDER_EVENT_SCHEMA, Test::EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
     append_error: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, event)
     return 12 if not DebuggerErrors::error_is_ok(append_error)
     invalid_position_event: mutable DebuggerEvents::EventEnvelope = event
@@ -524,7 +526,7 @@ def check_checkpoint_and_reader_validation() -> i64 can[Memory.Allocate, Memory.
     return 38 if DebuggerErrors::error_is_ok(duplicate_manifest_error)
     corrupt_recorder: mutable DebuggerTraceRecorder::TraceRecorder
     DebuggerTraceRecorder::recorder_initialize(corrupt_recorder, build, DebuggerIdentity::debug_id(Test::RECORDING_ID + 1))
-    bad_event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::BAD_EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
+    bad_event: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::RECORDER_EVENT_SCHEMA, Test::BAD_EVENT_ORDINAL, position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, Test::EVENT_PAYLOAD)
     bad_append: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(corrupt_recorder, bad_event)
     return 24 if DebuggerErrors::error_is_ok(bad_append)
     return 25 if DebuggerErrors::error_is_ok(DebuggerTraceRecorder::recorder_finalize(corrupt_recorder))
@@ -568,7 +570,7 @@ def check_storage_mutation_validation() -> i64 can[Memory.Allocate, Memory.Relea
     exported_report: DebuggerTraceVerify::VerificationReport = DebuggerTraceVerify::verify_storage(exported.bytes.bytes[0], exported.bytes.length)
     return Test::EXPORTED_STORAGE_RESULT if exported_report.state != DebuggerTraceVerify::VerificationState.Exact or not exported_report.replayable
     malformed_event_chunk: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
-    malformed_event_chunk.payload[0] <- (Test::EVENT_SCHEMA + 1).u8()
+    malformed_event_chunk.payload[0] <- (Test::RECORDER_EVENT_SCHEMA + 1).u8()
     malformed_event_payload: mutable DebuggerTraceBinary::ByteWriter = zeroed
     DebuggerTraceBinary::writer_initialize(malformed_event_payload)
     for malformed_index in 0..<malformed_event_chunk.payload_length:

@@ -17,6 +17,8 @@ include "../vm/edir_codec.elisa"
 include "../vm/edir_identity.elisa"
 include "./state.elisa"
 
+extern malloc(size: usize) -> mutable heap void&? can[Memory.Allocate]
+
 module DebuggerManagedEngine:
     private:
         const module Detail:
@@ -135,6 +137,9 @@ module DebuggerManagedEngine:
             EMPTY_EXPRESSION_DETAIL: u32 = 5
             OUTPUT_LIMIT_DETAIL: u32 = 6
 
+        const module HistoryStorage:
+            SIDE_HISTORY_INITIALIZED: bool = true
+
 
         def managed_build_identity_matches(left: DebuggerIdentity::BuildIdentity, right: DebuggerIdentity::BuildIdentity) -> bool:
             return left.compiler.value == right.compiler.value and left.runtime.value == right.runtime.value and left.source.value == right.source.value and left.target.value == right.target.value and left.metadata_version == right.metadata_version
@@ -153,7 +158,8 @@ module DebuggerManagedEngine:
             last_breakpoint_branch: mutable DebuggerIdentity::DebugId
             log_output: mutable u8[Logpoint::OUTPUT_CAPACITY]
             log_output_length: mutable usize
-            side_history: mutable DebuggerFullCheckpoint::ManagedCheckpoint[DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY]
+            side_history: mutable heap void&?
+            side_history_initialized: mutable bool
             side_history_count: mutable usize
 
     private:
@@ -164,6 +170,18 @@ module DebuggerManagedEngine:
             call_site: mutable DebuggerIdentity::DebugId
             invocation: mutable DebuggerIdentity::DebugId
             valid: mutable bool
+
+        def managed_side_checkpoint_at(controller: ManagedController&, event: usize) -> DebuggerFullCheckpoint::ManagedCheckpoint:
+            return zeroed if controller.side_history == null
+            trusted Unsafe.PointerCast:
+                history: mutable heap DebuggerFullCheckpoint::ManagedCheckpoint& = controller.side_history.cast[mutable heap DebuggerFullCheckpoint::ManagedCheckpoint&]
+                return history[event]
+
+        def managed_side_checkpoint_store(controller: mutable ManagedController&, event: usize, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint) -> void:
+            return if controller.side_history == null
+            trusted Unsafe.PointerCast:
+                history: mutable heap DebuggerFullCheckpoint::ManagedCheckpoint& = controller.side_history.cast[mutable heap DebuggerFullCheckpoint::ManagedCheckpoint&]
+                history[event] <- checkpoint
 
         def managed_active_effect_identity(controller: ManagedController&) -> ManagedEffectIdentity:
             return ManagedEffectIdentity{call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), valid: false} if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
@@ -178,16 +196,16 @@ module DebuggerManagedEngine:
             return false if event_index >= DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY or event_index > controller.side_history_count
             checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = managed_full_checkpoint(controller)
             return false if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint))
-            if event_index < controller.side_history_count and (controller.side_history[event_index].side_state_hash != checkpoint.side_state_hash or controller.side_history[event_index].state_hash != checkpoint.state_hash):
+            if event_index < controller.side_history_count and (managed_side_checkpoint_at(controller, event_index).side_state_hash != checkpoint.side_state_hash or managed_side_checkpoint_at(controller, event_index).state_hash != checkpoint.state_hash):
                 controller.side_history_count <- event_index + DebuggerReplayEngine::Limits::BOUNDARY_INCREMENT
-            controller.side_history[event_index] <- checkpoint
+            managed_side_checkpoint_store(controller, event_index, checkpoint)
             if event_index == controller.side_history_count:
                 controller.side_history_count <- controller.side_history_count + DebuggerReplayEngine::Limits::BOUNDARY_INCREMENT
             return true
 
         def managed_side_checkpoint_is_valid(controller: mutable ManagedController&, event: usize) -> bool:
             return false if event >= controller.side_history_count or event >= DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY
-            checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = controller.side_history[event]
+            checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = managed_side_checkpoint_at(controller, event)
             return false if checkpoint.event != event.u64() or checkpoint.recording.value != controller.engine.recording.value
             return false if checkpoint.branch.value != DebuggerReplayEngine::replay_engine_branch_at(controller.engine, event.u64()).value
             return false if not managed_build_identity_matches(checkpoint.build, controller.session.build)
@@ -205,12 +223,12 @@ module DebuggerManagedEngine:
             return false if not managed_side_checkpoint_is_valid(controller, event)
             current: DebuggerFullCheckpoint::ManagedCheckpoint = managed_full_checkpoint(controller)
             return false if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_validate(current))
-            return controller.side_history[event].side_state_hash == current.side_state_hash and controller.side_history[event].state_hash == current.state_hash
+            return managed_side_checkpoint_at(controller, event).side_state_hash == current.side_state_hash and managed_side_checkpoint_at(controller, event).state_hash == current.state_hash
 
         def managed_side_checkpoint_restore(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if not managed_side_checkpoint_is_valid(controller, event)
             candidate_state: mutable DebuggerManagedState::State = controller.state
-            failure: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_restore(candidate_state, controller.side_history[event])
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_restore(candidate_state, managed_side_checkpoint_at(controller, event))
             return failure if not DebuggerErrors::error_is_ok(failure)
             controller.state <- candidate_state
             return DebuggerErrors::no_error()
@@ -246,7 +264,14 @@ module DebuggerManagedEngine:
                 _ = managed_side_checkpoint_capture_current(controller)
             return replay
 
-        def managed_initialize(controller: mutable ManagedController&, session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recording: DebuggerIdentity::DebugId) -> void:
+        def managed_initialize(controller: mutable ManagedController&, session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recording: DebuggerIdentity::DebugId) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            if not controller.side_history_initialized:
+                storage: mutable heap void&? = malloc(size_of(DebuggerFullCheckpoint::ManagedCheckpoint) * DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY)
+                if storage == null:
+                    panic("managed history allocation failed")
+                trusted Unsafe.PointerCast:
+                    controller.side_history <- storage
+                controller.side_history_initialized <- HistoryStorage::SIDE_HISTORY_INITIALIZED
             controller.session <- session
             DebuggerReplayEngine::replay_engine_initialize(controller.engine, image, recording)
             # Configuration created before launch must already carry the
@@ -748,7 +773,7 @@ module DebuggerManagedEngine:
                 controller.engine.event_count <- original_event_count
                 controller.engine.engine_error <- original_engine_error
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
-            if controller.side_history[target_event].state_hash != DebuggerReplayEngine::replay_engine_state_hash(controller.engine):
+            if managed_side_checkpoint_at(controller, target_event).state_hash != DebuggerReplayEngine::replay_engine_state_hash(controller.engine):
                 controller.engine.machine <- original_machine
                 controller.engine.event_count <- original_event_count
                 controller.engine.engine_error <- original_engine_error
@@ -767,7 +792,6 @@ module DebuggerManagedEngine:
         def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if event != controller.engine.event_count and managed_history_has_unaligned_side_state(controller)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if event != controller.engine.event_count and not managed_side_checkpoint_is_valid(controller, event)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if event.u64() != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             original_machine: DebuggerEDIR::Machine = controller.engine.machine
             original_event_count: usize = controller.engine.event_count
@@ -792,7 +816,12 @@ module DebuggerManagedEngine:
                 controller.engine.engine_error <- original_engine_error
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
             if event != original_event_count:
-                if controller.side_history[event].state_hash != DebuggerReplayEngine::replay_engine_state_hash(controller.engine):
+                if not managed_side_checkpoint_is_valid(controller, event):
+                    controller.engine.machine <- original_machine
+                    controller.engine.event_count <- original_event_count
+                    controller.engine.engine_error <- original_engine_error
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+                if managed_side_checkpoint_at(controller, event).state_hash != DebuggerReplayEngine::replay_engine_state_hash(controller.engine):
                     controller.engine.machine <- original_machine
                     controller.engine.event_count <- original_event_count
                     controller.engine.engine_error <- original_engine_error

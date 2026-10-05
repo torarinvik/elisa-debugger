@@ -12,6 +12,7 @@ include "../protocol/request.elisa"
 include "../protocol/dispatcher.elisa"
 include "../protocol/managed_service.elisa"
 include "../protocol/managed_trace_file.elisa"
+include "../query/timeline.elisa"
 
 extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
 extern printf(format: cstr, ...) -> int can[Console]
@@ -50,6 +51,18 @@ module DebuggerCLIEntrypoint:
         const module Stdin:
             FD: int = 0
 
+        const module TimelineText:
+            AVAILABLE: cstr = "available"
+            UNAVAILABLE: cstr = "unavailable"
+            TRUE: cstr = "true"
+            FALSE: cstr = "false"
+            REASON_READY: cstr = "ready"
+            REASON_UNSUPPORTED: cstr = "unsupported-history"
+            REASON_NOT_STOPPED: cstr = "session-not-stopped"
+            REASON_INEXACT: cstr = "state-not-exact"
+            REASON_SIDE_STATE: cstr = "side-state-unaligned"
+            REASON_BOUNDARY: cstr = "at-boundary"
+
 
         def write_frame(frame: DebuggerManagedInspection::FrameSnapshot) -> void can[Console]:
             _ = printf("frame id=%llu event=%llu instruction=%llu accumulator=%lld result=%lld returnDepth=%llu\n", frame.id.value, frame.event, frame.instruction.value, frame.accumulator, frame.result, frame.return_depth.u64()) can Console
@@ -63,6 +76,24 @@ module DebuggerCLIEntrypoint:
                     _ = printf("local[%llu]=%lld\n", entry.index.u64(), entry.value) can Console
                 else:
                     _ = printf("local[%llu]=uninitialized\n", entry.index.u64()) can Console
+
+        def timeline_availability_text(available: bool) -> cstr:
+            return TimelineText::AVAILABLE if available else TimelineText::UNAVAILABLE
+
+        def timeline_boolean_text(value: bool) -> cstr:
+            return TimelineText::TRUE if value else TimelineText::FALSE
+
+        def timeline_reason_text(reason: DebuggerTimeline::HistoryEligibilityReason) -> cstr:
+            return TimelineText::REASON_READY if reason == DebuggerTimeline::HistoryEligibilityReason.Ready
+            return TimelineText::REASON_UNSUPPORTED if reason == DebuggerTimeline::HistoryEligibilityReason.UnsupportedHistory
+            return TimelineText::REASON_NOT_STOPPED if reason == DebuggerTimeline::HistoryEligibilityReason.SessionNotStopped
+            return TimelineText::REASON_INEXACT if reason == DebuggerTimeline::HistoryEligibilityReason.StateNotExact
+            return TimelineText::REASON_SIDE_STATE if reason == DebuggerTimeline::HistoryEligibilityReason.SideStateUnaligned
+            return TimelineText::REASON_BOUNDARY
+
+        def write_timeline(service: mutable DebuggerManagedService::Service&) -> void can[Console]:
+            timeline: DebuggerTimeline::Timeline = DebuggerManagedService::service_timeline(service)
+            _ = printf("timeline stopGeneration=%llu event=%llu branch=%llu retained=%s[%llu,%llu] exact=%s[%llu,%llu] canSeek=%s canReverse=%s reason=%s\n", service.controller.session.stop_generation, timeline.position.event, timeline.position.branch.value, timeline_availability_text(timeline.bounds.has_retained), timeline.bounds.retained_first, timeline.bounds.retained_last, timeline_availability_text(timeline.bounds.has_exact), timeline.bounds.exact_first, timeline.bounds.exact_last, timeline_boolean_text(timeline.eligibility.can_seek), timeline_boolean_text(timeline.eligibility.can_reverse), timeline_reason_text(timeline.eligibility.reason)) can Console
         def method_from_command(command: DebuggerCLI::Command) -> DebuggerProtocolRequest::RequestMethod:
             return DebuggerProtocolRequest::RequestMethod.Launch if command == DebuggerCLI::Command.Run or command == DebuggerCLI::Command.Launch
             return DebuggerProtocolRequest::RequestMethod.Attach if command == DebuggerCLI::Command.Attach
@@ -73,6 +104,7 @@ module DebuggerCLIEntrypoint:
             return DebuggerProtocolRequest::RequestMethod.ReverseStepOver if command == DebuggerCLI::Command.ReverseStepOver
             return DebuggerProtocolRequest::RequestMethod.ReverseStepOut if command == DebuggerCLI::Command.ReverseStepOut
             return DebuggerProtocolRequest::RequestMethod.Seek if command == DebuggerCLI::Command.Seek
+            return DebuggerProtocolRequest::RequestMethod.Timeline if command == DebuggerCLI::Command.Timeline
             return DebuggerProtocolRequest::RequestMethod.Stack if command == DebuggerCLI::Command.Stack
             return DebuggerProtocolRequest::RequestMethod.Variables if command == DebuggerCLI::Command.Locals or command == DebuggerCLI::Command.Inspect
             return DebuggerProtocolRequest::RequestMethod.Evaluate if command == DebuggerCLI::Command.Evaluate
@@ -96,7 +128,7 @@ module DebuggerCLIEntrypoint:
             if request.method == DebuggerProtocolRequest::RequestMethod.ReverseStepOver or request.method == DebuggerProtocolRequest::RequestMethod.ReverseStepOut:
                 result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
-            if request.method == DebuggerProtocolRequest::RequestMethod.Launch or request.method == DebuggerProtocolRequest::RequestMethod.Pause or request.method == DebuggerProtocolRequest::RequestMethod.Continue or request.method == DebuggerProtocolRequest::RequestMethod.Step or request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep or request.method == DebuggerProtocolRequest::RequestMethod.Seek or request.method == DebuggerProtocolRequest::RequestMethod.Stack or request.method == DebuggerProtocolRequest::RequestMethod.Variables or request.method == DebuggerProtocolRequest::RequestMethod.Checkpoint or request.method == DebuggerProtocolRequest::RequestMethod.Compare or request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify or request.method == DebuggerProtocolRequest::RequestMethod.TraceExport or request.method == DebuggerProtocolRequest::RequestMethod.Replay or request.method == DebuggerProtocolRequest::RequestMethod.Close or request.method == DebuggerProtocolRequest::RequestMethod.Evaluate or request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints or request.method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints:
+            if request.method == DebuggerProtocolRequest::RequestMethod.Launch or request.method == DebuggerProtocolRequest::RequestMethod.Pause or request.method == DebuggerProtocolRequest::RequestMethod.Continue or request.method == DebuggerProtocolRequest::RequestMethod.Step or request.method == DebuggerProtocolRequest::RequestMethod.ReverseStep or request.method == DebuggerProtocolRequest::RequestMethod.Seek or request.method == DebuggerProtocolRequest::RequestMethod.Timeline or request.method == DebuggerProtocolRequest::RequestMethod.Stack or request.method == DebuggerProtocolRequest::RequestMethod.Variables or request.method == DebuggerProtocolRequest::RequestMethod.Checkpoint or request.method == DebuggerProtocolRequest::RequestMethod.Compare or request.method == DebuggerProtocolRequest::RequestMethod.TraceVerify or request.method == DebuggerProtocolRequest::RequestMethod.TraceExport or request.method == DebuggerProtocolRequest::RequestMethod.Replay or request.method == DebuggerProtocolRequest::RequestMethod.Close or request.method == DebuggerProtocolRequest::RequestMethod.Evaluate or request.method == DebuggerProtocolRequest::RequestMethod.SetBreakpoints or request.method == DebuggerProtocolRequest::RequestMethod.SetDataBreakpoints:
                 result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: request.method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
             if request.method == DebuggerProtocolRequest::RequestMethod.Threads:
@@ -125,6 +157,7 @@ module DebuggerCLIEntrypoint:
                     _ = printf("ok generation=%llu\n", session.stop_generation) can Console
                     write_frame(DebuggerManagedService::service_frame(service)) can Console if parsed.command == DebuggerCLI::Command.Stack
                     write_locals(service) can Console if parsed.command == DebuggerCLI::Command.Locals or parsed.command == DebuggerCLI::Command.Inspect
+                    write_timeline(service) can Console if parsed.command == DebuggerCLI::Command.Timeline
                 else:
                     _ = printf("error code=%d detail=%u\n", result.failure.code, result.failure.detail) can Console
             _ = fflush(null) can Console

@@ -1,4 +1,5 @@
 include "../src/vm/edir.elisa"
+include "../src/vm/edir_identity.elisa"
 include "../src/core/identity.elisa"
 
 const module Test:
@@ -27,6 +28,23 @@ const module Test:
     NESTED_FRAME_SLOT: usize = 32
     GLOBAL_INSTRUCTION_COUNT: u64 = 2
     FIRST_GLOBAL: i64 = 0
+    IDENTITY_SOURCE_FILE_ID: u64 = 22
+    IDENTITY_SOURCE_PATH_ID: u64 = 23
+    IDENTITY_SOURCE_CONTENT_ID: u64 = 24
+    IDENTITY_SOURCE_PATH_LENGTH: usize = 1
+    IDENTITY_SOURCE_PATH_BYTE: u8 = 120
+    IDENTITY_SOURCE_LINE: u32 = 1
+    IDENTITY_SOURCE_START_BYTE: u64 = 3
+    IDENTITY_SOURCE_END_BYTE: u64 = 8
+    IDENTITY_SOURCE_START_COLUMN: u32 = 3
+    IDENTITY_SOURCE_END_COLUMN: u32 = 8
+    IDENTITY_SOURCE_DISCRIMINATOR: u32 = 2
+    IDENTITY_CHANGED_CONTENT_ID: u64 = 25
+    IDENTITY_DISCRIMINATOR_INCREMENT: u32 = 1
+    IDENTITY_FIRST_CALL_SITE_INDEX: usize = 1
+    IDENTITY_SECOND_CALL_SITE_INDEX: usize = 4
+    IDENTITY_PROGRAM_INSTRUCTION_COUNT: u64 = 5
+    IDENTITY_OVERSIZED_INSTRUCTION_COUNT: u64 = 257
 
 
 def main() -> i64:
@@ -38,6 +56,46 @@ def main() -> i64:
     image.instructions[2] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: span}
     image.instructions[3] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: 7, b: 0, source: span}
     image.instructions[4] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: 0, b: 0, source: span}
+    identity_image: mutable DebuggerEDIR::ProgramImage = image
+    identity_span: mutable DebuggerIdentity::SourceSpan = zeroed
+    identity_span.file <- DebuggerIdentity::debug_id(Test::IDENTITY_SOURCE_FILE_ID)
+    identity_span.start_byte <- Test::IDENTITY_SOURCE_START_BYTE
+    identity_span.end_byte <- Test::IDENTITY_SOURCE_END_BYTE
+    identity_span.start_line <- Test::IDENTITY_SOURCE_LINE
+    identity_span.start_column <- Test::IDENTITY_SOURCE_START_COLUMN
+    identity_span.end_line <- Test::IDENTITY_SOURCE_LINE
+    identity_span.end_column <- Test::IDENTITY_SOURCE_END_COLUMN
+    identity_span.discriminator <- Test::IDENTITY_SOURCE_DISCRIMINATOR
+    identity_file: mutable DebuggerMetadata::SourceFile = zeroed
+    identity_file.id <- DebuggerIdentity::debug_id(Test::IDENTITY_SOURCE_FILE_ID)
+    identity_file.logical_path <- DebuggerIdentity::debug_id(Test::IDENTITY_SOURCE_PATH_ID)
+    identity_file.content <- DebuggerIdentity::debug_id(Test::IDENTITY_SOURCE_CONTENT_ID)
+    identity_file.line_count <- Test::IDENTITY_SOURCE_LINE.u64()
+    identity_file.path_length <- Test::IDENTITY_SOURCE_PATH_LENGTH
+    identity_file.path_bytes[0] <- Test::IDENTITY_SOURCE_PATH_BYTE
+    identity_image.source_file_count <- Test::IDENTITY_SOURCE_PATH_LENGTH
+    identity_image.source_files[0] <- identity_file
+    identity_image.instructions[Test::IDENTITY_FIRST_CALL_SITE_INDEX].source <- identity_span
+    identity_image.instructions[Test::IDENTITY_SECOND_CALL_SITE_INDEX].source <- identity_span
+    first_call_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(identity_image, Test::IDENTITY_FIRST_CALL_SITE_INDEX)
+    repeated_call_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(identity_image, Test::IDENTITY_FIRST_CALL_SITE_INDEX)
+    return 29 if not first_call_site.valid or first_call_site.value.value == 0 or first_call_site.value.value != repeated_call_site.value.value
+    changed_site: mutable DebuggerEDIR::ProgramImage = identity_image
+    changed_site.instructions[Test::IDENTITY_FIRST_CALL_SITE_INDEX].source.discriminator <- identity_span.discriminator + Test::IDENTITY_DISCRIMINATOR_INCREMENT
+    changed_call_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(changed_site, Test::IDENTITY_FIRST_CALL_SITE_INDEX)
+    return 30 if not changed_call_site.valid or changed_call_site.value.value == first_call_site.value.value
+    changed_content: mutable DebuggerEDIR::ProgramImage = identity_image
+    changed_content.source_files[0].content <- DebuggerIdentity::debug_id(Test::IDENTITY_CHANGED_CONTENT_ID)
+    changed_content_call_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(changed_content, Test::IDENTITY_FIRST_CALL_SITE_INDEX)
+    return 32 if not changed_content_call_site.valid or changed_content_call_site.value.value == first_call_site.value.value
+    distinct_call_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(identity_image, Test::IDENTITY_SECOND_CALL_SITE_INDEX)
+    return 33 if not distinct_call_site.valid or distinct_call_site.value.value == first_call_site.value.value
+    missing_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(identity_image, Test::IDENTITY_PROGRAM_INSTRUCTION_COUNT.usize())
+    return 31 if missing_site.valid or missing_site.value.value != 0
+    oversized_identity_image: mutable DebuggerEDIR::ProgramImage = identity_image
+    oversized_identity_image.program.instruction_count <- Test::IDENTITY_OVERSIZED_INSTRUCTION_COUNT
+    oversized_instruction_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(oversized_identity_image, Test::IDENTITY_FIRST_CALL_SITE_INDEX)
+    return 34 if oversized_instruction_site.valid or oversized_instruction_site.value.value != 0
     machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(image, DebuggerEDIR::machine_new(), Test::RUN_BUDGET)
     return 1 if DebuggerEDIR::machine_is_faulted(machine)
     return 2 if not DebuggerEDIR::machine_is_halted(machine)

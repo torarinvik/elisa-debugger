@@ -1,0 +1,77 @@
+# Stable source-derived identities for deterministic EDIR effect replay.
+
+include "./edir.elisa"
+
+module DebuggerEDIRIdentity:
+    private:
+        const module Hash:
+            OFFSET_BASIS: u64 = 14695981039346656037
+            PRIME: u64 = 1099511628211
+            BYTE_BITS: u64 = 8
+            BYTE_MASK: u64 = 255
+            U64_BYTE_COUNT: usize = 8
+            U32_BYTE_COUNT: usize = 4
+
+        const module Domain:
+            EFFECT_CALL_SITE: u64 = 1162101074
+
+        const module Sentinel:
+            NO_SOURCE_FILE: u64 = 0
+            NO_IDENTITY: u64 = 0
+
+        def hash_byte(hash: u64, byte: u8) -> u64:
+            return (hash ^ byte.u64()) * Hash::PRIME
+
+        def hash_u64(hash: u64, value: u64) -> u64:
+            updated: mutable u64 = hash
+            for index in 0..<Hash::U64_BYTE_COUNT:
+                byte: u8 = ((value >> (Hash::BYTE_BITS * index.u64())) & Hash::BYTE_MASK).u8()
+                updated <- hash_byte(updated, byte)
+            return updated
+
+        def hash_u32(hash: u64, value: u32) -> u64:
+            updated: mutable u64 = hash
+            for index in 0..<Hash::U32_BYTE_COUNT:
+                byte: u8 = ((value.u64() >> (Hash::BYTE_BITS * index.u64())) & Hash::BYTE_MASK).u8()
+                updated <- hash_byte(updated, byte)
+            return updated
+
+        def invalid_identity() -> StableIdentity:
+            return StableIdentity{value: DebuggerIdentity::debug_id(Sentinel::NO_IDENTITY), valid: false}
+
+        def instruction_index_is_valid(image: DebuggerEDIR::ProgramImage&, instruction_index: usize) -> bool:
+            return false if image.program.instruction_count > DebuggerEDIR::instruction_capacity().u64()
+            return instruction_index < image.program.instruction_count.usize()
+
+    public:
+        struct StableIdentity:
+            value: mutable DebuggerIdentity::DebugId
+            valid: mutable bool
+
+        # The identity is tied to exact source content, instruction position,
+        # and the compiler's source discriminator within one verified image.
+        def effect_call_site_identity(image: DebuggerEDIR::ProgramImage&, instruction_index: usize) -> StableIdentity:
+            return invalid_identity() if not instruction_index_is_valid(image, instruction_index)
+            return invalid_identity() if image.source_file_count > DebuggerEDIR::source_file_capacity()
+            source: DebuggerIdentity::SourceSpan = image.instructions[instruction_index].source
+            return invalid_identity() if source.file.value == Sentinel::NO_SOURCE_FILE or not DebuggerMetadata::source_span_is_valid(source)
+            file: mutable DebuggerMetadata::SourceFile = zeroed
+            found_file: mutable bool = false
+            for file_index in 0..<image.source_file_count:
+                candidate: DebuggerMetadata::SourceFile = image.source_files[file_index]
+                if candidate.id.value == source.file.value:
+                    file <- candidate
+                    found_file <- true
+                    break
+            return invalid_identity() if not found_file or not DebuggerMetadata::source_file_is_valid(file)
+            return invalid_identity() if source.start_line.u64() > file.line_count or source.end_line.u64() > file.line_count
+            hash: mutable u64 = Hash::OFFSET_BASIS
+            hash <- hash_u64(hash, Domain::EFFECT_CALL_SITE)
+            hash <- hash_u64(hash, instruction_index.u64())
+            hash <- hash_u64(hash, file.content.value)
+            hash <- hash_u64(hash, file.id.value)
+            hash <- hash_u64(hash, source.start_byte)
+            hash <- hash_u64(hash, source.end_byte)
+            hash <- hash_u32(hash, source.discriminator)
+            return invalid_identity() if hash == Sentinel::NO_IDENTITY
+            return StableIdentity{value: DebuggerIdentity::debug_id(hash), valid: true}

@@ -1,5 +1,6 @@
 include "../src/vm/edir.elisa"
 include "../src/vm/edir_identity.elisa"
+include "../src/replay/engine.elisa"
 include "../src/core/identity.elisa"
 
 const module Test:
@@ -55,6 +56,11 @@ const module Test:
     IDENTITY_RECURSIVE_STACK_SLOT: usize = 1
     IDENTITY_OUTER_CALL_INSTRUCTION: usize = 1
     IDENTITY_RECURSIVE_CALL_INSTRUCTION: usize = 7
+    IDENTITY_RECORDING_ID: u64 = 88
+    IDENTITY_OUTER_FRAME_STEP_COUNT: usize = 2
+    IDENTITY_RECURSIVE_FRAME_STEP_COUNT: usize = 4
+    IDENTITY_OUTER_CALL_EVENT_INDEX: usize = 1
+    IDENTITY_RECURSIVE_CALL_EVENT_INDEX: usize = 5
 
 
 def main() -> i64:
@@ -155,6 +161,19 @@ def main() -> i64:
     oversized_invocation_machine.return_stack_pointer <- DebuggerEDIR::call_depth_capacity() + Test::IDENTITY_INVALID_DEPTH_INCREMENT
     oversized_invocation: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_invocation_identity(recursive, oversized_invocation_machine)
     return 38 if oversized_invocation.valid
+    identity_engine: mutable DebuggerReplayEngine::ReplayEngine = zeroed
+    DebuggerReplayEngine::replay_engine_initialize(identity_engine, recursive, DebuggerIdentity::debug_id(Test::IDENTITY_RECORDING_ID))
+    for step_index in 0..<Test::IDENTITY_OUTER_FRAME_STEP_COUNT:
+        DebuggerReplayEngine::replay_engine_step(identity_engine)
+    outer_position: DebuggerIdentity::Position = DebuggerReplayEngine::replay_engine_position(identity_engine)
+    outer_recorded_invocation: DebuggerIdentity::DebugId = identity_engine.events[Test::IDENTITY_OUTER_CALL_EVENT_INDEX].position.invocation
+    return 43 if identity_engine.engine_error != DebuggerReplayEngine::EngineError.None or outer_position.invocation.value == 0 or outer_position.invocation.value != outer_recorded_invocation.value
+    for step_index in 0..<Test::IDENTITY_RECURSIVE_FRAME_STEP_COUNT:
+        DebuggerReplayEngine::replay_engine_step(identity_engine)
+    recursive_position: DebuggerIdentity::Position = DebuggerReplayEngine::replay_engine_position(identity_engine)
+    recursive_recorded_invocation: DebuggerIdentity::DebugId = identity_engine.events[Test::IDENTITY_RECURSIVE_CALL_EVENT_INDEX].position.invocation
+    return 44 if identity_engine.engine_error != DebuggerReplayEngine::EngineError.None or recursive_position.invocation.value == 0 or recursive_position.invocation.value != recursive_recorded_invocation.value
+    return 45 if outer_position.invocation.value == recursive_position.invocation.value
     recursive_verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image(recursive)
     return 26 if not recursive_verification.valid
     recursive_machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(recursive, DebuggerEDIR::machine_new(), Test::RUN_BUDGET)

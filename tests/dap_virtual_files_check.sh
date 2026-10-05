@@ -43,7 +43,7 @@ Content-Length:/g' |
 }
 
 initialize=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$INITIALIZE_SEQUENCE")
-launch=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s","elisaVirtualFiles":[{"path":"data/input.bin","contentsHex":"41"}]}}' "$LAUNCH_SEQUENCE" "$fixture")
+launch=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s","elisaVirtualFiles":[{"handle":1,"path":"data/input.bin","contentsHex":"41"}]}}' "$LAUNCH_SEQUENCE" "$fixture")
 configuration_done=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$CONFIGURATION_DONE_SEQUENCE")
 continue_request=$(printf '{"seq":%s,"type":"request","command":"continue"}' "$CONTINUE_SEQUENCE")
 input="$(frame "$initialize")$(frame "$launch")$(frame "$configuration_done")$(frame "$continue_request")"

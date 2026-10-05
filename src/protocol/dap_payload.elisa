@@ -140,10 +140,12 @@ module DebuggerDAPPayload:
             VIRTUAL_FILE_PATH: u8 = 33
             VIRTUAL_FILE_CONTENTS_HEX: u8 = 34
             VIRTUAL_FILE_WRITABLE: u8 = 35
+            VIRTUAL_FILE_HANDLE: u8 = 36
             ELISA_VIRTUAL_FILES_LENGTH: usize = 17
             VIRTUAL_FILE_PATH_LENGTH: usize = 4
             VIRTUAL_FILE_CONTENTS_HEX_LENGTH: usize = 11
             VIRTUAL_FILE_WRITABLE_LENGTH: usize = 8
+            VIRTUAL_FILE_HANDLE_LENGTH: usize = 6
 
         const module StackTraceParsing:
             FIRST_PROPERTY_OCCURRENCE: usize = 0
@@ -224,6 +226,9 @@ module DebuggerDAPPayload:
             NO_PATH_ID: u64 = 0
             INITIAL_GENERATION: u64 = 1
             FALSE_BOOLEAN_VALUE: u64 = 0
+            FIRST_HANDLE: u64 = 1
+            HANDLE_INCREMENT: u64 = 1
+            NO_HANDLE: u64 = 0
 
         const module SourcePaths:
             NO_SOURCE_REFERENCE: u64 = 0
@@ -355,6 +360,7 @@ module DebuggerDAPPayload:
             return DapFields::VIRTUAL_FILE_PATH_LENGTH if field == DapFields::VIRTUAL_FILE_PATH
             return DapFields::VIRTUAL_FILE_CONTENTS_HEX_LENGTH if field == DapFields::VIRTUAL_FILE_CONTENTS_HEX
             return DapFields::VIRTUAL_FILE_WRITABLE_LENGTH if field == DapFields::VIRTUAL_FILE_WRITABLE
+            return DapFields::VIRTUAL_FILE_HANDLE_LENGTH if field == DapFields::VIRTUAL_FILE_HANDLE
             return DapFields::START_LENGTH if field == DapFields::START
             return DapFields::ARGUMENTS_LENGTH if field == DapFields::ARGUMENTS
             return DapFields::PROGRAM_LENGTH if field == DapFields::PROGRAM
@@ -397,6 +403,13 @@ module DebuggerDAPPayload:
                 return Character::ASCII_UPPER_H if position == FieldBytePosition::POSITION_EIGHT
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_NINE
                 return Character::ASCII_LOWER_X
+            if field == DapFields::VIRTUAL_FILE_HANDLE:
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_H if position == FieldBytePosition::POSITION_ZERO
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_A if position == FieldBytePosition::POSITION_ONE
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_N if position == FieldBytePosition::POSITION_TWO
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_D if position == FieldBytePosition::POSITION_THREE
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_L if position == FieldBytePosition::POSITION_FOUR
+                return Character::DAP_PAYLOAD_CHARACTER_ASCII_E
             return Character::ASCII_W if position == FieldBytePosition::POSITION_ZERO
             return Character::DAP_PAYLOAD_CHARACTER_ASCII_R if position == FieldBytePosition::POSITION_ONE
             return Character::DAP_PAYLOAD_CHARACTER_ASCII_I if position == FieldBytePosition::POSITION_TWO
@@ -407,7 +420,7 @@ module DebuggerDAPPayload:
             return Character::DAP_PAYLOAD_CHARACTER_ASCII_E
 
         def field_byte(field: u8, position: usize) -> u8:
-            return virtual_file_field_byte(field, position) if field == DapFields::ELISA_VIRTUAL_FILES or field == DapFields::VIRTUAL_FILE_PATH or field == DapFields::VIRTUAL_FILE_CONTENTS_HEX or field == DapFields::VIRTUAL_FILE_WRITABLE
+            return virtual_file_field_byte(field, position) if field == DapFields::ELISA_VIRTUAL_FILES or field == DapFields::VIRTUAL_FILE_PATH or field == DapFields::VIRTUAL_FILE_CONTENTS_HEX or field == DapFields::VIRTUAL_FILE_WRITABLE or field == DapFields::VIRTUAL_FILE_HANDLE
             if field == DapFields::HOST_EFFECT_REQUEST_ID:
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_R if position == FieldBytePosition::POSITION_ZERO
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_ONE
@@ -1220,6 +1233,7 @@ module DebuggerDAPPayload:
 
         struct VirtualFileSnapshot:
             path_id: mutable u64
+            handle: mutable u64
             generation: mutable u64
             bytes: mutable u8[VirtualFileSnapshots::MAX_SNAPSHOT_BYTES]
             length: mutable usize
@@ -1261,6 +1275,11 @@ module DebuggerDAPPayload:
             return zeroed if cursor >= length
             contents_end: usize = json_string_end(payload, length, contents_start)
             return zeroed if contents_end != cursor + VirtualFileSnapshots::NEXT_RESOURCE
+            handle_start: usize = object_field_value_start(payload, length, object_start, DapFields::VIRTUAL_FILE_HANDLE, VirtualFileSnapshots::FIRST_PROPERTY)
+            return zeroed if handle_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, object_start, DapFields::VIRTUAL_FILE_HANDLE, VirtualFileSnapshots::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            handle_value: ParsedValue = parse_unsigned_bounded(payload, length, handle_start, NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64)
+            return zeroed if not handle_value.valid or handle_value.value == VirtualFileSnapshots::NO_HANDLE
+            snapshot.handle <- handle_value.value
             writable_start: usize = object_field_value_start(payload, length, object_start, DapFields::VIRTUAL_FILE_WRITABLE, VirtualFileSnapshots::FIRST_PROPERTY)
             return zeroed if object_field_value_start(payload, length, object_start, DapFields::VIRTUAL_FILE_WRITABLE, VirtualFileSnapshots::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
             if writable_start != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX:
@@ -1280,6 +1299,8 @@ module DebuggerDAPPayload:
                 return false if request.count >= VirtualFileSnapshots::MAX_SNAPSHOT_COUNT or payload[cursor] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
                 snapshot: VirtualFileSnapshot = virtual_file_snapshot_parse(payload, length, cursor)
                 return false if snapshot.path_id == VirtualFileSnapshots::NO_PATH_ID
+                expected_handle: u64 = VirtualFileSnapshots::FIRST_HANDLE + request.count.u64() * VirtualFileSnapshots::HANDLE_INCREMENT
+                return false if snapshot.handle != expected_handle
                 for index in VirtualFileSnapshots::FIRST_RESOURCE..<request.count:
                     return false if request.snapshots[index].path_id == snapshot.path_id
                 request.snapshots[request.count] <- snapshot

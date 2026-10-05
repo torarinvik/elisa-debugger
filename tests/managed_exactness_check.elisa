@@ -109,6 +109,14 @@ const module Test:
         CONSOLE_KIND: u16 = 5
         SIDE_STATE_KIND_COUNT: u16 = 6
 
+    const module ConsoleHistory:
+        OUTPUT_BYTE: u8 = 66
+        OUTPUT_LENGTH: usize = 1
+        INITIAL_EVENT: usize = 0
+        RECORDED_EVENT: usize = 1
+        FIRST_RECORD: usize = 0
+        FIRST_BYTE: usize = 0
+
     const module Failure:
         SUCCESS: i64 = 0
         INITIAL_STATE_NOT_EXACT: i64 = 1
@@ -139,6 +147,7 @@ const module Test:
         CAPACITY_BRIDGE_PARTIALLY_RECORDED: i64 = 26
         EFFECT_HISTORY_RESTORE_FAILED: i64 = 27
         MISSING_TARGET_SEEK_NOT_ATOMIC: i64 = 28
+        CONSOLE_HISTORY_RESTORE_FAILED: i64 = 29
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -270,6 +279,24 @@ def managed_effect_time_travel_restores_state(session: DebuggerSession::Session,
     seek_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::HistoryBarrier::FIRST_EVENT)
     return false if not DebuggerErrors::error_is_ok(seek_failure) or controller.engine.event_count != Test::HistoryBarrier::FIRST_EVENT
     return controller.state.effects.count == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.count == Test::Bounds::ONE_COUNT and controller.state.adapters.random.count == Test::Bounds::ONE_COUNT
+
+def managed_console_output_time_travel_restores_state(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    output: mutable u8[Test::ConsoleHistory::OUTPUT_LENGTH] = [Test::ConsoleHistory::OUTPUT_BYTE]
+    written: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(controller.state.adapters.console, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[Test::ConsoleHistory::FIRST_BYTE], Test::ConsoleHistory::OUTPUT_LENGTH)
+    return false if not written.accepted or written.transferred != Test::ConsoleHistory::OUTPUT_LENGTH or controller.state.adapters.console.count != Test::Bounds::ONE_COUNT
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller)) or controller.engine.event_count != Test::ConsoleHistory::RECORDED_EVENT
+
+    reverse_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step(controller)
+    return false if not DebuggerErrors::error_is_ok(reverse_failure) or controller.engine.event_count != Test::ConsoleHistory::INITIAL_EVENT
+    return false if controller.state.adapters.console.count != Test::Bounds::FIRST_INDEX or controller.state.adapters.console.cursor != Test::Bounds::FIRST_INDEX
+
+    seek_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::ConsoleHistory::RECORDED_EVENT)
+    return false if not DebuggerErrors::error_is_ok(seek_failure) or controller.engine.event_count != Test::ConsoleHistory::RECORDED_EVENT
+    restored: DebuggerReplayAdapters::ConsoleRecord = controller.state.adapters.console.records[Test::ConsoleHistory::FIRST_RECORD]
+    return controller.state.adapters.console.count == Test::Bounds::ONE_COUNT and restored.kind == DebuggerReplayAdapters::ConsoleRecordKind.Output and restored.channel == DebuggerReplayAdapters::ConsoleChannel.Stdout and restored.length == Test::ConsoleHistory::OUTPUT_LENGTH and restored.bytes[Test::ConsoleHistory::FIRST_BYTE] == Test::ConsoleHistory::OUTPUT_BYTE
 
 def managed_effect_bridges_reject_mixed_modes() -> bool:
     recording_state: mutable DebuggerManagedState::State = zeroed
@@ -403,6 +430,7 @@ def main() -> i64:
     image.instructions[Test::Image::RETURN_INSTRUCTION].source <- source_span
     return Test::Failure::ACTIVE_IDENTITY_BRIDGE_FAILED if not managed_effect_bridges_use_active_identity(session, image)
     return Test::Failure::EFFECT_HISTORY_RESTORE_FAILED if not managed_effect_time_travel_restores_state(session, image)
+    return Test::Failure::CONSOLE_HISTORY_RESTORE_FAILED if not managed_console_output_time_travel_restores_state(session, image)
     return Test::Failure::MIXED_BRIDGE_MODE_ACCEPTED if not managed_effect_bridges_reject_mixed_modes()
     return Test::Failure::CAPACITY_BRIDGE_PARTIALLY_RECORDED if not managed_effect_record_capacity_is_atomic()
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()

@@ -107,10 +107,16 @@ module DebuggerDAPServer:
             RESPONSE_REQUEST_HASH_PREFIX_LENGTH: usize = 16
             RESPONSE_PAYLOAD_PREFIX: cstr = ",\"payload\":"
             RESPONSE_PAYLOAD_PREFIX_LENGTH: usize = 11
+            RESPONSE_REQUESTED_PREFIX: cstr = ",\"requested\":"
+            RESPONSE_REQUESTED_PREFIX_LENGTH: usize = 13
+            INPUT_BYTE_MAX: u64 = 255
+            INPUT_EOF_BITS: u64 = 18446744073709551615
             RESPONSE_END: cstr = "}}}"
             RESPONSE_END_LENGTH: usize = 3
             U64_HEX_WIDTH: usize = 16
             U64_HEX_FORMAT: cstr = "%016llx"
+            INPUT_KIND: cstr = "consoleInput"
+            INPUT_KIND_LENGTH: usize = 12
             OUTPUT_KIND: cstr = "consoleOutput"
             OUTPUT_KIND_LENGTH: usize = 13
             CLOCK_KIND: cstr = "clockNow"
@@ -1554,17 +1560,20 @@ module DebuggerDAPServer:
         def host_effect_kind_name(kind: DebuggerManagedEngine::HostEffectKind) -> cstr:
             return HostEffectExtension::CLOCK_KIND if kind == DebuggerManagedEngine::HostEffectKind.ClockNow
             return HostEffectExtension::RANDOM_KIND if kind == DebuggerManagedEngine::HostEffectKind.RandomU64
+            return HostEffectExtension::INPUT_KIND if kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput
             return HostEffectExtension::OUTPUT_KIND
 
         def host_effect_kind_name_length(kind: DebuggerManagedEngine::HostEffectKind) -> usize:
             return HostEffectExtension::CLOCK_KIND_LENGTH if kind == DebuggerManagedEngine::HostEffectKind.ClockNow
             return HostEffectExtension::RANDOM_KIND_LENGTH if kind == DebuggerManagedEngine::HostEffectKind.RandomU64
+            return HostEffectExtension::INPUT_KIND_LENGTH if kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput
             return HostEffectExtension::OUTPUT_KIND_LENGTH
 
         def write_host_effect_response(command: cstr, command_length: usize, request_sequence: u64, response_sequence: u64, provider_request_id: u64, request: DebuggerManagedEngine::HostEffectRequest) -> void can[Console, Unsafe.PointerCast]:
             kind_name_length: usize = host_effect_kind_name_length(request.kind)
             payload_field_length: usize = HostEffectExtension::RESPONSE_PAYLOAD_PREFIX_LENGTH + decimal_digits(request.payload) if request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleOutput else 0
-            body_length: u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + command_length + HostEffectExtension::RESPONSE_PREFIX_LENGTH + decimal_digits(HostEffectExtension::VERSION) + HostEffectExtension::RESPONSE_REQUEST_ID_PREFIX_LENGTH + decimal_digits(provider_request_id) + HostEffectExtension::RESPONSE_KIND_PREFIX_LENGTH + kind_name_length + HostEffectExtension::RESPONSE_CALL_SITE_PREFIX_LENGTH + HostEffectExtension::U64_HEX_WIDTH + HostEffectExtension::RESPONSE_INVOCATION_PREFIX_LENGTH + HostEffectExtension::U64_HEX_WIDTH + HostEffectExtension::RESPONSE_REQUEST_HASH_PREFIX_LENGTH + HostEffectExtension::U64_HEX_WIDTH + payload_field_length + HostEffectExtension::RESPONSE_END_LENGTH).u64()
+            requested_field_length: usize = HostEffectExtension::RESPONSE_REQUESTED_PREFIX_LENGTH + decimal_digits(request.payload) if request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput else 0
+            body_length: u64 = (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + command_length + HostEffectExtension::RESPONSE_PREFIX_LENGTH + decimal_digits(HostEffectExtension::VERSION) + HostEffectExtension::RESPONSE_REQUEST_ID_PREFIX_LENGTH + decimal_digits(provider_request_id) + HostEffectExtension::RESPONSE_KIND_PREFIX_LENGTH + kind_name_length + HostEffectExtension::RESPONSE_CALL_SITE_PREFIX_LENGTH + HostEffectExtension::U64_HEX_WIDTH + HostEffectExtension::RESPONSE_INVOCATION_PREFIX_LENGTH + HostEffectExtension::U64_HEX_WIDTH + HostEffectExtension::RESPONSE_REQUEST_HASH_PREFIX_LENGTH + HostEffectExtension::U64_HEX_WIDTH + payload_field_length + requested_field_length + HostEffectExtension::RESPONSE_END_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(ResponseEnvelope::DAP_BODY_PREFIX) can Console
             _ = printf("%llu", response_sequence) can Console
@@ -1590,6 +1599,9 @@ module DebuggerDAPServer:
             _ = printf("\"") can Console
             if request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleOutput:
                 _ = printf(HostEffectExtension::RESPONSE_PAYLOAD_PREFIX) can Console
+                _ = printf("%llu", request.payload) can Console
+            elif request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput:
+                _ = printf(HostEffectExtension::RESPONSE_REQUESTED_PREFIX) can Console
                 _ = printf("%llu", request.payload) can Console
             _ = printf(HostEffectExtension::RESPONSE_END) can Console, Unsafe.PointerCast
 
@@ -1911,6 +1923,11 @@ module DebuggerDAPServer:
                     failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_HOST_EFFECT_DETAIL_ARGUMENT)
                     return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
                 result <- DebuggerManagedService::service_record_console_output(service, pending.request)
+            elif pending.request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput:
+                if not response.has_value or (response.value != HostEffectExtension::INPUT_EOF_BITS and response.value > HostEffectExtension::INPUT_BYTE_MAX):
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_HOST_EFFECT_DETAIL_ARGUMENT)
+                    return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+                result <- DebuggerManagedService::service_record_console_input(service, pending.request, DebuggerManagedService::service_host_effect_result_hash(response.value), response.value.i64())
             else:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_HOST_EFFECT_DETAIL_STATE)
                 return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)

@@ -5,7 +5,8 @@ This document defines the optional host-effects extension implemented by
 for managed EDIR host operations while the DAP process keeps ownership of the
 debug session and records each accepted result in its managed history.
 
-The extension currently covers `clockNow`, `randomU64`, and `consoleOutput`.
+The extension covers `clockNow`, `randomU64`, `consoleInput`, and
+`consoleOutput`.
 It can yield while processing DAP `continue`, `next`, `stepIn`, or `stepOut`.
 The `stepBack` and `reverseContinue` operations do not request new host values.
 Only one host request may be pending per DAP process.
@@ -107,15 +108,48 @@ without `valueHigh` or `valueLow`:
 }
 ```
 
+For `consoleInput`, the extension object contains a decimal `requested` count.
+Version 1 requests exactly one byte from stdin. Read one byte or report EOF,
+then return its unsigned byte value in the same two-half encoding used for
+`randomU64`. Represent EOF with all bits set (`valueHigh` and `valueLow` both
+`4294967295`), which the managed EDIR operation receives as signed `-1`:
+
+```json
+{
+  "seq": 17,
+  "type": "response",
+  "request_seq": 12,
+  "command": "continue",
+  "success": true,
+  "body": {
+    "allThreadsContinued": false,
+    "elisaHostEffect": {
+      "version": 1,
+      "requestId": 12,
+      "kind": "consoleInput",
+      "callSite": "f91c637f64439291",
+      "invocation": "22e93844e3dcb96c",
+      "requestHash": "6910afcd3785940a",
+      "requested": 1
+    }
+  }
+}
+```
+
+The provider reply for the byte `A` uses `valueHigh: 0` and `valueLow: 65`.
+EOF uses `valueHigh: 4294967295` and `valueLow: 4294967295`.
+
 A successful provider request receives a response with `success: true` and
 `body.accepted: true`. Accepting a clock or random result records and commits
 the effect in the managed session. Accepting console output records the byte
-as an effect. The DAP target remains stopped; the reply does not issue a
-second `continue` or step operation. The user can then choose the next
+as an effect. Accepting console input records the byte or EOF together with a
+stdin journal entry. The DAP target remains stopped; the reply does not issue
+a second `continue` or step operation. The user can then choose the next
 execution action.
 
 The client must not send extra result fields for console output, omit either
-half for clock/random, or send a second reply. A malformed, mismatched, or
+half for clock/random/input, provide input values outside `0..255` (except the
+all-bits-set EOF value), or send a second reply. A malformed, mismatched, or
 stale reply gets `success: false` and leaves the pending request available for
 a corrected reply. A reply when no request is pending also gets
 `success: false`. Clients should branch on `success`, not parse the current
@@ -127,9 +161,9 @@ request is pending is rejected without changing the session.
 Accepted values are stored in the managed effect journal with the operation's
 call-site and invocation identity. Managed reverse navigation restores the
 corresponding historical position. Replay consumes recorded provider results
-instead of querying the clock or random source again; console output replay
-does not emit the byte a second time. A new DAP process owns a new session and
-does not reopen the prior process's history.
+instead of querying the clock, random source, or stdin again; console output
+replay does not emit the byte a second time. A new DAP process owns a new
+session and does not reopen the prior process's history.
 
 ## IDE integration
 

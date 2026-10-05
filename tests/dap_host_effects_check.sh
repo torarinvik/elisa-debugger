@@ -3,6 +3,7 @@ set -eu
 
 server=${1:?expected DAP server path}
 fixture=${2:?expected compiler-produced host-effect EDIR path}
+input_fixture=${3:?expected compiler-produced console-input EDIR path}
 
 readonly INITIALIZE_SEQUENCE=1
 readonly LAUNCH_SEQUENCE=2
@@ -31,6 +32,20 @@ readonly STEP_EFFECT_SEQUENCE=5
 readonly STEP_REPLY_SEQUENCE=6
 readonly STEP_CLOCK_VALUE_HIGH=0
 readonly STEP_CLOCK_VALUE_LOW=3
+readonly INPUT_INITIALIZE_SEQUENCE=20
+readonly INPUT_LAUNCH_SEQUENCE=21
+readonly INPUT_CONFIGURATION_SEQUENCE=22
+readonly INPUT_CONTINUE_SEQUENCE=23
+readonly INPUT_INVALID_REPLY_SEQUENCE=24
+readonly INPUT_REPLY_SEQUENCE=25
+readonly INPUT_COMPLETION_SEQUENCE=26
+readonly INPUT_BYTE_HIGH=0
+readonly INPUT_BYTE_LOW=65
+readonly INPUT_INVALID_BYTE_LOW=256
+readonly INPUT_EOF_HIGH=4294967295
+readonly INPUT_EOF_LOW=4294967295
+readonly INPUT_BYTE_EXIT_CODE=65
+readonly INPUT_EOF_EXIT_CODE=-1
 
 frame() {
     payload=$1
@@ -86,6 +101,33 @@ check_step_host_effect() {
     assert_frame_lengths "$step_output"
 }
 
+check_console_input() {
+    input_high=$1
+    input_low=$2
+    expected_exit_code=$3
+    include_invalid_reply=$4
+    initialize=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$INPUT_INITIALIZE_SEQUENCE")
+    launch=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$INPUT_LAUNCH_SEQUENCE" "$input_fixture")
+    configuration=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$INPUT_CONFIGURATION_SEQUENCE")
+    continue_for_input=$(printf '{"seq":%s,"type":"request","command":"continue"}' "$INPUT_CONTINUE_SEQUENCE")
+    invalid_reply=$(printf '{"seq":%s,"type":"request","command":"elisa/provideHostEffect","arguments":{"requestId":%s,"valueHigh":%s,"valueLow":%s}}' "$INPUT_INVALID_REPLY_SEQUENCE" "$INPUT_CONTINUE_SEQUENCE" "$INPUT_BYTE_HIGH" "$INPUT_INVALID_BYTE_LOW")
+    reply=$(printf '{"seq":%s,"type":"request","command":"elisa/provideHostEffect","arguments":{"requestId":%s,"valueHigh":%s,"valueLow":%s}}' "$INPUT_REPLY_SEQUENCE" "$INPUT_CONTINUE_SEQUENCE" "$input_high" "$input_low")
+    completion=$(printf '{"seq":%s,"type":"request","command":"continue"}' "$INPUT_COMPLETION_SEQUENCE")
+    input_stream="$(frame "$initialize")$(frame "$launch")$(frame "$configuration")$(frame "$continue_for_input")"
+    if [ "$include_invalid_reply" = true ]; then
+        input_stream="${input_stream}$(frame "$invalid_reply")"
+    fi
+    input_stream="${input_stream}$(frame "$reply")$(frame "$completion")"
+    input_output=$(printf '%s' "$input_stream" | "$server")
+    printf '%s\n' "$input_output" | grep -F '"kind":"consoleInput"' | grep -F '"requested":1' >/dev/null
+    if [ "$include_invalid_reply" = true ]; then
+        printf '%s\n' "$input_output" | grep -F '"command":"elisa/provideHostEffect","success":false' >/dev/null
+    fi
+    printf '%s\n' "$input_output" | grep -F '"command":"elisa/provideHostEffect","success":true' >/dev/null
+    printf '%s\n' "$input_output" | grep -F "\"event\":\"exited\",\"body\":{\"exitCode\":$expected_exit_code}" >/dev/null
+    assert_frame_lengths "$input_output"
+}
+
 initialize_payload=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$INITIALIZE_SEQUENCE")
 launch_payload=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$LAUNCH_SEQUENCE" "$fixture")
 configuration_done_payload=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$CONFIGURATION_DONE_SEQUENCE")
@@ -123,3 +165,5 @@ assert_frame_lengths "$output"
 check_step_host_effect "next"
 check_step_host_effect "stepIn"
 check_step_host_effect "stepOut"
+check_console_input "$INPUT_BYTE_HIGH" "$INPUT_BYTE_LOW" "$INPUT_BYTE_EXIT_CODE" true
+check_console_input "$INPUT_EOF_HIGH" "$INPUT_EOF_LOW" "$INPUT_EOF_EXIT_CODE" false

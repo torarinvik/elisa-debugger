@@ -91,8 +91,8 @@ already owns the same in-process managed service. The standalone headless
 session process exposes the compact `createSession` ownership handshake; it
 does not turn the DAP process into a shareable session.
 
-For managed programs that use clock, random, or console output, read the
-`supportsElisaHostEffects` and `elisaHostEffectsVersion` fields from
+For managed programs that use clock, random, console input, or console output,
+read the `supportsElisaHostEffects` and `elisaHostEffectsVersion` fields from
 `initialize`. Version 1 returns a typed request in the response body for
 `continue`, `next`, `stepIn`, and `stepOut`; the client must provide the result
 through `elisa/provideHostEffect` on that same session. See the

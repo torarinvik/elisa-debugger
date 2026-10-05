@@ -125,8 +125,8 @@ applies to both source and function breakpoints. Data breakpoints, restart,
 `setVariable`, and disassembly remain unsupported. Plugins should use the
 actual capability response rather than the broader typed Elisa module surface.
 The adapter also advertises optional host-effects extension version 1 for
-clock, random, and console output. Clients that implement it must inspect
-execution responses and reply through the same DAP session; see the
+clock, random, console input, and console output. Clients that implement it
+must inspect execution responses and reply through the same DAP session; see the
 [host-effects contract](spec/dap-host-effects-v1.md).
 
 `build/elisa-debugger-jetsam` is a read-only macOS memory-pressure report

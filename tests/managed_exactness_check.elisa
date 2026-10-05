@@ -130,6 +130,7 @@ const module Test:
         CLOCK_BRIDGE_NOT_ATOMIC: i64 = 22
         RANDOM_BRIDGE_NOT_ATOMIC: i64 = 23
         ACTIVE_IDENTITY_BRIDGE_FAILED: i64 = 24
+        MIXED_BRIDGE_MODE_ACCEPTED: i64 = 25
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -217,6 +218,24 @@ def managed_effect_bridges_use_active_identity(session: DebuggerSession::Session
     return false if not replayed_random.accepted or replayed_random.value != Test::RandomBridge::RANDOM_VALUE
     return controller.state.effects.cursor == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.cursor == Test::Bounds::ONE_COUNT and controller.state.adapters.random.cursor == Test::Bounds::ONE_COUNT
 
+def managed_effect_bridges_reject_mixed_modes() -> bool:
+    recording_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(recording_state)
+    recording_state.adapters.random.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    record_failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(recording_state, DebuggerIdentity::debug_id(Test::ClockBridge::CALL_SITE_ID), DebuggerIdentity::debug_id(Test::ClockBridge::ADAPTER_SOURCE_ID), DebuggerIdentity::debug_id(Test::ClockBridge::INVOCATION_ID), Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if record_failure.code != DebuggerErrors::ErrorCode.InvalidState or recording_state.effects.count != Test::Bounds::FIRST_INDEX or recording_state.adapters.clock.count != Test::Bounds::FIRST_INDEX
+
+    replay_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(replay_state)
+    recorded: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(replay_state, DebuggerIdentity::debug_id(Test::ClockBridge::CALL_SITE_ID), DebuggerIdentity::debug_id(Test::ClockBridge::ADAPTER_SOURCE_ID), DebuggerIdentity::debug_id(Test::ClockBridge::INVOCATION_ID), Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    replay_started: DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(replay_state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    replay_state.adapters.random.mode <- DebuggerReplayAdapters::AdapterMode.Recording
+    replay_failure: DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(replay_state, DebuggerIdentity::debug_id(Test::ClockBridge::CALL_SITE_ID), DebuggerIdentity::debug_id(Test::ClockBridge::ADAPTER_SOURCE_ID), DebuggerIdentity::debug_id(Test::ClockBridge::INVOCATION_ID), Test::ClockBridge::REQUEST_HASH)
+    return false if replay_failure.accepted or replay_failure.failure.code != DebuggerErrors::ErrorCode.InvalidState
+    return replay_state.effects.cursor == Test::Bounds::FIRST_INDEX and replay_state.adapters.clock.cursor == Test::Bounds::FIRST_INDEX
+
 def managed_history_side_state_barriers_work(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
@@ -287,6 +306,7 @@ def main() -> i64:
     image.instructions[Test::Image::FIRST_INSTRUCTION].source <- source_span
     image.instructions[Test::Image::RETURN_INSTRUCTION].source <- source_span
     return Test::Failure::ACTIVE_IDENTITY_BRIDGE_FAILED if not managed_effect_bridges_use_active_identity(session, image)
+    return Test::Failure::MIXED_BRIDGE_MODE_ACCEPTED if not managed_effect_bridges_reject_mixed_modes()
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()
     return Test::Failure::RANDOM_BRIDGE_NOT_ATOMIC if not managed_random_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)

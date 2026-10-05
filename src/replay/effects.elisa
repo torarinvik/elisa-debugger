@@ -10,6 +10,7 @@ module DebuggerEffects:
             REPLAY_WRITE: u32 = 1
             REPLAY_EFFECTS_DETAIL_ENUM: u32 = 2
             UNSUPPORTED_EFFECT: u32 = 3
+            MISSING_CALL_SITE: u32 = 4
 
         const module Effect:
             ORACLE_CAPACITY: usize = 256
@@ -116,6 +117,9 @@ module DebuggerEffects:
         def effect_kind_is_fully_captured(kind: EffectKind) -> bool:
             return kind == EffectKind.Clock or kind == EffectKind.Random
 
+        def effect_record_is_fully_captured(record: EffectRecord) -> bool:
+            return effect_kind_is_fully_captured(record.kind) and not DebuggerIdentity::debug_id_is_zero(record.call_site)
+
         def effect_oracle_record_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: i64) -> void:
             return if oracle.exactness == Exactness.Diverged or (not DebuggerErrors::error_is_ok(oracle.last_error) and oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported)
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
@@ -142,7 +146,13 @@ module DebuggerEffects:
                 if not effect_kind_is_fully_captured(kind):
                     oracle.exactness <- Exactness.Incomplete
                     oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT) if DebuggerErrors::error_is_ok(oracle.last_error)
+                else:
+                    if DebuggerIdentity::debug_id_is_zero(call_site):
+                        oracle.exactness <- Exactness.Incomplete
+                        oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::MISSING_CALL_SITE) if DebuggerErrors::error_is_ok(oracle.last_error)
 
+        # Keep the original call shape for observational callers. A zero source
+        # identity deliberately makes a recorded Clock/Random stream inexact.
         def effect_oracle_record(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> void:
             effect_oracle_record_at(oracle, kind, DebuggerIdentity::debug_id(Effect::NO_CALL_SITE), request_hash, result_hash, value)
 
@@ -171,7 +181,7 @@ module DebuggerEffects:
                 return
             if oracle.exactness == Exactness.Exact and DebuggerErrors::error_is_ok(oracle.last_error):
                 for index in Effect::EMPTY_COUNT..<oracle.count:
-                    if not effect_kind_is_fully_captured(oracle.records[index].kind):
+                    if not effect_record_is_fully_captured(oracle.records[index]):
                         oracle.exactness <- Exactness.Incomplete
                         oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT)
                         return
@@ -237,7 +247,7 @@ module DebuggerEffects:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
                 return effect_replay_failure(oracle, initial_failure)
             for index in Effect::EMPTY_COUNT..<oracle.count:
-                if not effect_kind_is_fully_captured(oracle.records[index].kind):
+                if not effect_record_is_fully_captured(oracle.records[index]):
                     initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::UNSUPPORTED_EFFECT)
                     oracle.exactness <- Exactness.Incomplete
                     return effect_replay_unavailable(oracle, initial_failure)
@@ -267,7 +277,7 @@ module DebuggerEffects:
             return false if (oracle.mode == EffectMode.Recording or oracle.mode == EffectMode.Virtualized) and oracle.cursor != Effect::EMPTY_CURSOR
             for index in Effect::EMPTY_COUNT..<oracle.count:
                 return false if oracle.records[index].sequence != index.u64() or oracle.records[index].kind.u16() > Effect::REPLAY_EFFECTS_EFFECT_KIND_MAX or oracle.records[index].suppress_external_write != effect_is_external_write(oracle.records[index].kind)
-                return false if not effect_kind_is_fully_captured(oracle.records[index].kind)
+                return false if not effect_record_is_fully_captured(oracle.records[index])
             return oracle.exactness == Exactness.Exact and not oracle.overflowed
 
         def effect_oracle_last_value(oracle: EffectOracle&) -> i64:

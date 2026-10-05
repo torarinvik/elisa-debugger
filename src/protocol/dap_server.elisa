@@ -150,6 +150,8 @@ module DebuggerDAPServer:
             SEEK_COMMAND_HASH: u64 = 2765507781635767
             SUCCESS_PREFIX: cstr = "\",\"success\":true,\"body\":{\"version\":"
             SUCCESS_PREFIX_LENGTH: usize = 35
+            STOP_GENERATION_PREFIX: cstr = ",\"stopGeneration\":"
+            STOP_GENERATION_PREFIX_LENGTH: usize = 18
             CURRENT_EVENT_PREFIX: cstr = ",\"currentEvent\":"
             CURRENT_EVENT_PREFIX_LENGTH: usize = 16
             RETAINED_RANGE_PREFIX: cstr = ",\"hasRetainedRange\":"
@@ -1582,13 +1584,13 @@ module DebuggerDAPServer:
             else:
                 _ = printf("%s", TimelineNavigation::FALSE_VALUE) can Console
 
-        def write_timeline_response(timeline: DebuggerTimeline::Timeline, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+        def write_timeline_response(timeline: DebuggerTimeline::Timeline, stop_generation: u64, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
             bounds: DebuggerTimeline::HistoryBounds = timeline.bounds
             retained_first: u64 = bounds.retained_first if bounds.has_retained else TimelineNavigation::RETAINED_EMPTY_EVENT
             retained_last: u64 = bounds.retained_last if bounds.has_retained else TimelineNavigation::RETAINED_EMPTY_EVENT
             exact_first: u64 = bounds.exact_first if bounds.has_exact else TimelineNavigation::RETAINED_EMPTY_EVENT
             exact_last: u64 = bounds.exact_last if bounds.has_exact else TimelineNavigation::RETAINED_EMPTY_EVENT
-            body_length: mutable u64 = (TimelineNavigation::SUCCESS_PREFIX_LENGTH + decimal_digits(TimelineNavigation::VERSION) + TimelineNavigation::CURRENT_EVENT_PREFIX_LENGTH + decimal_digits(bounds.current) + TimelineNavigation::RETAINED_RANGE_PREFIX_LENGTH + timeline_boolean_length(bounds.has_retained) + TimelineNavigation::RETAINED_FIRST_PREFIX_LENGTH + decimal_digits(retained_first) + TimelineNavigation::RETAINED_LAST_PREFIX_LENGTH + decimal_digits(retained_last) + TimelineNavigation::EXACT_RANGE_PREFIX_LENGTH + timeline_boolean_length(bounds.has_exact) + TimelineNavigation::EXACT_FIRST_PREFIX_LENGTH + decimal_digits(exact_first) + TimelineNavigation::EXACT_LAST_PREFIX_LENGTH + decimal_digits(exact_last) + TimelineNavigation::CAN_SEEK_PREFIX_LENGTH + timeline_boolean_length(timeline.eligibility.can_seek) + TimelineNavigation::CAN_REVERSE_PREFIX_LENGTH + timeline_boolean_length(timeline.eligibility.can_reverse) + TimelineNavigation::SUCCESS_SUFFIX_LENGTH).u64()
+            body_length: mutable u64 = (TimelineNavigation::SUCCESS_PREFIX_LENGTH + decimal_digits(TimelineNavigation::VERSION) + TimelineNavigation::STOP_GENERATION_PREFIX_LENGTH + decimal_digits(stop_generation) + TimelineNavigation::CURRENT_EVENT_PREFIX_LENGTH + decimal_digits(bounds.current) + TimelineNavigation::RETAINED_RANGE_PREFIX_LENGTH + timeline_boolean_length(bounds.has_retained) + TimelineNavigation::RETAINED_FIRST_PREFIX_LENGTH + decimal_digits(retained_first) + TimelineNavigation::RETAINED_LAST_PREFIX_LENGTH + decimal_digits(retained_last) + TimelineNavigation::EXACT_RANGE_PREFIX_LENGTH + timeline_boolean_length(bounds.has_exact) + TimelineNavigation::EXACT_FIRST_PREFIX_LENGTH + decimal_digits(exact_first) + TimelineNavigation::EXACT_LAST_PREFIX_LENGTH + decimal_digits(exact_last) + TimelineNavigation::CAN_SEEK_PREFIX_LENGTH + timeline_boolean_length(timeline.eligibility.can_seek) + TimelineNavigation::CAN_REVERSE_PREFIX_LENGTH + timeline_boolean_length(timeline.eligibility.can_reverse) + TimelineNavigation::SUCCESS_SUFFIX_LENGTH).u64()
             body_length <- body_length + (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + TimelineNavigation::GET_TIMELINE_COMMAND_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
             _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
             _ = printf(ResponseEnvelope::DAP_BODY_PREFIX) can Console
@@ -1599,6 +1601,8 @@ module DebuggerDAPServer:
             _ = printf("%s", TimelineNavigation::GET_TIMELINE_COMMAND) can Console
             _ = printf("%s", TimelineNavigation::SUCCESS_PREFIX) can Console
             _ = printf("%llu", TimelineNavigation::VERSION) can Console
+            _ = printf("%s", TimelineNavigation::STOP_GENERATION_PREFIX) can Console
+            _ = printf("%llu", stop_generation) can Console
             _ = printf("%s", TimelineNavigation::CURRENT_EVENT_PREFIX) can Console
             _ = printf("%llu", bounds.current) can Console
             _ = printf("%s", TimelineNavigation::RETAINED_RANGE_PREFIX) can Console
@@ -2089,6 +2093,7 @@ module DebuggerDAPServer:
                 return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
             request: mutable DebuggerProtocolRequest::Request = request_for(method, request_id)
             request.target_event <- seek.event_index
+            request.expected_generation <- seek.expected_stop_generation
             result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
 
@@ -2552,7 +2557,7 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE:
-                write_timeline_response(DebuggerManagedService::service_timeline(service), request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                write_timeline_response(DebuggerManagedService::service_timeline(service), service.controller.session.stop_generation, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_NEXT:
                 write_dynamic_response(response_sequence, request_sequence, ExecutionControl::DAP_NEXT_COMMAND, ExecutionControl::DAP_NEXT_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast

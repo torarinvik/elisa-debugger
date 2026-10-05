@@ -4,6 +4,7 @@
 include "./managed_trace_export.elisa"
 include "../trace/verify.elisa"
 include "../trace/reader.elisa"
+include "../trace/file_reader.elisa"
 include "../vm/edir_codec.elisa"
 include "../core/events.elisa"
 
@@ -49,9 +50,28 @@ module DebuggerManagedTraceService:
             BUILD: u32 = 17
             IMAGE: u32 = 18
 
+        const module FileRestoreDetail:
+            DESTINATION: u32 = 19
+
+        const module FileRestoreDestination:
+            NO_SIDE_EVENTS: usize = 0
+            NO_SCHEDULER_CURSOR: usize = 0
+            NO_SCHEDULER_RECORDS: usize = 0
+            SCHEDULER_NOT_ACTIVE: bool = false
+
         def trace_restore_error(code: DebuggerErrors::ErrorCode, retryable: bool, detail: u32) -> DebuggerManagedService::Result:
             failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(code, retryable, detail)
             return DebuggerManagedService::Result{accepted: false, failure: failure}
+
+        def trace_restore_file_destination_is_fresh(service: DebuggerManagedService::Service&) -> bool:
+            return false if service.controller.session.state != DebuggerSession::SessionState.Created or service.controller.engine.event_count != RestoreRequest::INITIAL_EVENT.usize() or service.recorded_event_count != Boundary::NO_RECORDED_EVENTS or service.trace_partial
+            return false if service.controller.state.branches.count != FileRestoreDestination::NO_SIDE_EVENTS
+            return false if service.controller.state.tasks.task_count != FileRestoreDestination::NO_SIDE_EVENTS or service.controller.state.tasks.wait_count != FileRestoreDestination::NO_SIDE_EVENTS
+            return false if service.controller.state.tasks.scheduler.count != FileRestoreDestination::NO_SCHEDULER_RECORDS or service.controller.state.tasks.scheduler.cursor != FileRestoreDestination::NO_SCHEDULER_CURSOR
+            return false if service.controller.state.tasks.scheduler.replaying != FileRestoreDestination::SCHEDULER_NOT_ACTIVE or service.controller.state.tasks.scheduler.diverged or service.controller.state.tasks.scheduler.overflowed
+            return false if service.controller.state.effects.count != FileRestoreDestination::NO_SIDE_EVENTS or service.controller.state.resources.count != FileRestoreDestination::NO_SIDE_EVENTS
+            return false if service.controller.state.adapters.clock.count != FileRestoreDestination::NO_SIDE_EVENTS or service.controller.state.adapters.random.count != FileRestoreDestination::NO_SIDE_EVENTS
+            return service.controller.state.adapters.console.count == FileRestoreDestination::NO_SIDE_EVENTS
 
         def trace_restore_build_matches(build: DebuggerIdentity::BuildIdentity, manifest: DebuggerTraceManifest::BundleManifest) -> bool:
             return build.compiler.value == manifest.compiler.value and build.runtime.value == manifest.runtime.value and build.source.value == manifest.source.value and build.target.value == manifest.target.value and build.metadata_version == manifest.metadata_version
@@ -207,3 +227,23 @@ module DebuggerManagedTraceService:
         # may be seeded beforehand and is preserved.
         def service_restore_fresh_checkpoint(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerManagedService::Result:
             return trace_restore_fresh_checkpoint(service, checkpoint)
+
+        # Restore an exact committed artifact into a new service state. File
+        # decoding and replay happen against temporary owned state; the caller's
+        # service is replaced only after compatibility, checkpoint, and prefix
+        # verification all succeed.
+        def service_trace_restore_file(service: mutable DebuggerManagedService::Service&, path: u8&, path_length: usize, target_event: u64) -> DebuggerManagedService::Result can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            return trace_restore_error(DebuggerErrors::ErrorCode.InvalidState, false, FileRestoreDetail::DESTINATION) if not trace_restore_file_destination_is_fresh(service)
+            loaded: mutable DebuggerTraceFileReader::LoadResult = DebuggerTraceFileReader::trace_file_reader_load(path, path_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            return DebuggerManagedService::result_error(loaded.failure) if not loaded.accepted
+            reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceFileReader::trace_file_reader_result_reader(loaded) can Abort.Panic
+            fresh_session: DebuggerSession::Session = DebuggerSession::new_session(service.controller.session.id, service.controller.session.build, service.controller.session.capabilities)
+            fresh_session.stop_generation <- service.controller.session.stop_generation
+            temporary: mutable DebuggerManagedService::Service
+            DebuggerManagedService::service_initialize(temporary, fresh_session, service.controller.engine.image, reader.recording)
+            trace_restore_preserve_configuration(temporary, service, target_event)
+            restored: DebuggerManagedService::Result = trace_restore_checkpoint(temporary, reader, target_event)
+            DebuggerTraceFileReader::trace_file_reader_result_destroy(loaded) can Memory.Release, Unsafe.PointerCast
+            return restored if not restored.accepted
+            service <- temporary
+            return restored

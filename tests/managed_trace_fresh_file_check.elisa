@@ -1,0 +1,109 @@
+# Fresh-session replay from a committed trace file must reconstruct the same
+# managed execution state without depending on the recording service instance.
+
+include "../src/core/capabilities.elisa"
+include "../src/core/identity.elisa"
+include "../src/core/session.elisa"
+include "../src/engine/default_image.elisa"
+include "../src/protocol/managed_service.elisa"
+include "../src/protocol/request.elisa"
+include "../src/protocol/managed_trace.elisa"
+include "../src/protocol/managed_trace_file.elisa"
+include "../src/replay/engine.elisa"
+
+const module Test:
+    COMPILER_ID: u64 = 701
+    RUNTIME_ID: u64 = 702
+    SOURCE_ID: u64 = 703
+    TARGET_ID: u64 = 704
+    METADATA_VERSION: u32 = 1
+    ORIGINAL_SESSION_ID: u64 = 705
+    FRESH_SESSION_ID: u64 = 706
+    ORIGINAL_RECORDING_ID: u64 = 707
+    FRESH_RECORDING_ID: u64 = 708
+    FIRST_REQUEST_ID: u64 = 1
+    SECOND_REQUEST_ID: u64 = 2
+    THIRD_REQUEST_ID: u64 = 3
+    INITIAL_EVENT: u64 = 0
+    EXPECTED_EVENT: u64 = 1
+    PATH_CAPACITY: usize = 64
+    PATH_FIRST_BYTE: usize = 0
+    PATH_INCREMENT: usize = 1
+    PATH_NUL: u8 = 0
+
+const module TestPaths:
+    TRACE: cstr = "build/managed-trace-fresh-file.eltr"
+
+const module TestResult:
+    OK: i64 = 0
+    ORIGINAL_LAUNCH: i64 = 1
+    ORIGINAL_PAUSE: i64 = 2
+    ORIGINAL_STEP: i64 = 3
+    ORIGINAL_POSITION: i64 = 4
+    EXPORT: i64 = 5
+    FRESH_RESTORE: i64 = 6
+    FRESH_IDENTITY: i64 = 7
+    FRESH_STATE: i64 = 8
+    REPLAY_REJECTED_ATOMICALLY: i64 = 9
+
+def copy_path(source: cstr, output: mutable u8&) -> usize:
+    length: mutable usize = Test::PATH_FIRST_BYTE
+    while length < Test::PATH_CAPACITY:
+        byte: u8 = source[length].u8()
+        break if byte == Test::PATH_NUL
+        output[length] <- byte
+        length <- length + Test::PATH_INCREMENT
+    return length
+
+def build_identity() -> DebuggerIdentity::BuildIdentity:
+    return DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(Test::COMPILER_ID),
+        runtime: DebuggerIdentity::debug_id(Test::RUNTIME_ID),
+        source: DebuggerIdentity::debug_id(Test::SOURCE_ID),
+        target: DebuggerIdentity::debug_id(Test::TARGET_ID),
+        metadata_version: Test::METADATA_VERSION
+    }
+
+def dispatch(service: mutable DebuggerManagedService::Service&, method: DebuggerProtocolRequest::RequestMethod, request_id: u64) -> DebuggerManagedService::Result:
+    request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{
+        method: method,
+        id: request_id,
+        has_id: true,
+        expected_generation: Test::INITIAL_EVENT,
+        target_event: Test::INITIAL_EVENT,
+        valid: true
+    }
+    return DebuggerManagedService::service_dispatch(service, request)
+
+def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    path: mutable u8[Test::PATH_CAPACITY] = zeroed
+    path_length: usize = copy_path(TestPaths::TRACE, path[Test::PATH_FIRST_BYTE])
+    build: DebuggerIdentity::BuildIdentity = build_identity()
+
+    original_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::ORIGINAL_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    original: mutable DebuggerManagedService::Service
+    DebuggerManagedService::service_initialize(original, original_session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Test::ORIGINAL_RECORDING_ID))
+    launched: DebuggerManagedService::Result = dispatch(original, DebuggerProtocolRequest::RequestMethod.Launch, Test::FIRST_REQUEST_ID)
+    return TestResult::ORIGINAL_LAUNCH if not launched.accepted
+    paused: DebuggerManagedService::Result = dispatch(original, DebuggerProtocolRequest::RequestMethod.Pause, Test::SECOND_REQUEST_ID)
+    return TestResult::ORIGINAL_PAUSE if not paused.accepted
+    stepped: DebuggerManagedService::Result = dispatch(original, DebuggerProtocolRequest::RequestMethod.Step, Test::THIRD_REQUEST_ID)
+    return TestResult::ORIGINAL_STEP if not stepped.accepted
+    return TestResult::ORIGINAL_POSITION if original.controller.engine.event_count.u64() != Test::EXPECTED_EVENT
+
+    exported: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(original, path[Test::PATH_FIRST_BYTE], path_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::EXPORT if not exported.accepted
+
+    fresh_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::FRESH_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    fresh: mutable DebuggerManagedService::Service
+    DebuggerManagedService::service_initialize(fresh, fresh_session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Test::FRESH_RECORDING_ID))
+    restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(fresh, path[Test::PATH_FIRST_BYTE], path_length, Test::EXPECTED_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::FRESH_RESTORE if not restored.accepted
+    return TestResult::FRESH_IDENTITY if fresh.controller.session.id.value != Test::FRESH_SESSION_ID or fresh.controller.engine.recording.value != Test::ORIGINAL_RECORDING_ID
+    original_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(original.controller.engine)
+    fresh_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(fresh.controller.engine)
+    return TestResult::FRESH_STATE if fresh.controller.engine.event_count.u64() != Test::EXPECTED_EVENT or fresh.controller.session.state != DebuggerSession::SessionState.Stopped or fresh.controller.session.stop_generation == Test::INITIAL_EVENT or fresh_hash != original_hash
+
+    rejected: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(fresh, path[Test::PATH_FIRST_BYTE], path_length, Test::EXPECTED_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::REPLAY_REJECTED_ATOMICALLY if rejected.accepted or fresh.controller.engine.event_count.u64() != Test::EXPECTED_EVENT or DebuggerReplayEngine::replay_engine_state_hash(fresh.controller.engine) != original_hash
+    return TestResult::OK

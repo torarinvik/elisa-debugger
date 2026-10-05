@@ -152,6 +152,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: cli-flush-check cli-timeline-check cli-parser-check concurrency-scheduler-check native-breakpoint-lifecycle-check dap-logpoints-check dap-function-breakpoints-check effect-oracle-check
 .PHONY: resource-open-replay-check
 .PHONY: trace-file-check
+.PHONY: managed-trace-fresh-file-check
 .PHONY: module-trace-check
 .PHONY: remote-authorization-check server-version-check server-ownership-check compiler-edir-loop-check compiler-edir-calls-check compiler-edir-calls-unsupported-check compiler-edir-core-ir-check compiler-edir-host-effects-check
 .PHONY: protocol-client-ordering-check session-ownership-check
@@ -271,6 +272,7 @@ module-check: $(MANAGED_ALLOCATIONS_CHECK)
 # Keep the remote artifact transfer regression in the aggregate module gate.
 module-check: $(BUILD)/elisa-debugger-remote-artifacts-check
 module-check: trace-file-check
+module-check: managed-trace-fresh-file-check
 module-check: $(BUILD)/elisa-debugger-native-elf-check
 module-check: $(BUILD)/elisa-debugger-native-macho-check
 module-check: $(BUILD)/elisa-debugger-native-dwarf-line-check
@@ -396,6 +398,13 @@ managed-exactness-check: $(BUILD)/elisa-debugger-managed-exactness-check
 
 managed-trace-service-check: $(BUILD)/elisa-debugger-managed-trace-service-check
 	"$(BUILD)/elisa-debugger-managed-trace-service-check"
+
+managed-trace-fresh-file-check: $(BUILD)/elisa-debugger-managed-trace-fresh-file-check
+	"$(BUILD)/elisa-debugger-managed-trace-fresh-file-check"
+
+$(BUILD)/elisa-debugger-managed-trace-fresh-file-check: tests/managed_trace_fresh_file_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 managed-source-path-check: $(BUILD)/elisa-debugger-managed-source-path-check
 	"$(BUILD)/elisa-debugger-managed-source-path-check"

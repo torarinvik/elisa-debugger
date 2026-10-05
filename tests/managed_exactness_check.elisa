@@ -426,10 +426,12 @@ def managed_host_effect_time_travel_is_exact(session: DebuggerSession::Session, 
     return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
     clock_request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(controller)
     return false if not clock_request.valid or clock_request.kind != DebuggerManagedEngine::HostEffectKind.ClockNow or clock_request.request_hash == 0 or clock_request.call_site.value == 0 or clock_request.invocation.value == 0
-    pending_step: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step(controller)
-    return false if pending_step.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.engine.machine.program_counter != Test::HistoryBarrier::INITIAL_EVENT.u64() or controller.engine.machine.faulted
-    pending_continue: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(controller, DebuggerReplayEngine::Limits::HISTORY_CAPACITY.u64())
-    return false if pending_continue.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.engine.machine.faulted
+    pending_step: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_step_with_outcome(controller)
+    return false if pending_step.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or pending_step.failure.code != DebuggerErrors::ErrorCode.Unavailable or not pending_step.host_effect.valid or pending_step.position.event != Test::HistoryBarrier::INITIAL_EVENT.u64()
+    return false if controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.engine.machine.program_counter != Test::HistoryBarrier::INITIAL_EVENT.u64() or controller.engine.machine.faulted
+    pending_continue: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(controller, DebuggerReplayEngine::Limits::HISTORY_CAPACITY.u64())
+    return false if pending_continue.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or pending_continue.failure.code != DebuggerErrors::ErrorCode.Unavailable or pending_continue.host_effect.request_hash != clock_request.request_hash
+    return false if controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.engine.machine.faulted
 
     clock_recorded: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_clock_effect(controller, clock_request.request_hash, Test::HostResult::CLOCK_RESULT_HASH, Test::HostResult::CLOCK_VALUE)
     return false if not DebuggerErrors::error_is_ok(clock_recorded) or controller.engine.event_count != Test::Bounds::ONE_COUNT or controller.engine.machine.program_counter != Test::HostProgram::RANDOM_INSTRUCTION.u64() or controller.engine.machine.accumulator != Test::HostResult::CLOCK_VALUE

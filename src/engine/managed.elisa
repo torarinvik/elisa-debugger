@@ -262,6 +262,17 @@ module DebuggerManagedEngine:
             request_hash: mutable u64
             valid: mutable bool
 
+        enum ExecutionOutcomeKind:
+            Completed
+            AwaitingHostEffect
+            Failed
+
+        struct ExecutionOutcome:
+            kind: mutable ExecutionOutcomeKind
+            position: mutable DebuggerIdentity::Position
+            host_effect: mutable HostEffectRequest
+            failure: mutable DebuggerErrors::DebuggerError
+
         # Host effect providers use the current EDIR source and active call
         # stack directly, keeping editor adapters out of identity derivation.
         def managed_host_effect_request(controller: ManagedController&) -> HostEffectRequest:
@@ -688,6 +699,16 @@ module DebuggerManagedEngine:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return DebuggerErrors::no_error()
 
+        # Integration layers can consume this typed result without depending
+        # on private error-detail values to recognize a host-provider yield.
+        def managed_continue_with_outcome(controller: mutable ManagedController&, max_steps: u64) -> ExecutionOutcome:
+            failure: DebuggerErrors::DebuggerError = managed_continue(controller, max_steps)
+            return managed_execution_outcome(controller, failure)
+
+        def managed_step_with_outcome(controller: mutable ManagedController&) -> ExecutionOutcome:
+            failure: DebuggerErrors::DebuggerError = managed_step(controller)
+            return managed_execution_outcome(controller, failure)
+
         def managed_step_into(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             controller.log_output_length <- Logpoint::FIRST_INDEX
             controller.last_error <- DebuggerErrors::no_error()
@@ -767,6 +788,15 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
     private:
+        def managed_execution_outcome(controller: ManagedController&, failure: DebuggerErrors::DebuggerError) -> ExecutionOutcome:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            current_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
+            breakpoint_reported_here: bool = controller.has_last_breakpoint_stop and controller.last_breakpoint_event == controller.engine.event_count.u64() and controller.last_breakpoint_instruction == controller.engine.machine.program_counter and controller.last_breakpoint_branch.value == current_branch.value
+            kind: mutable ExecutionOutcomeKind = ExecutionOutcomeKind.Completed
+            kind <- ExecutionOutcomeKind.AwaitingHostEffect if request.valid and (failure.detail == Detail::HOST_EFFECT_REQUEST or not breakpoint_reported_here)
+            kind <- ExecutionOutcomeKind.Failed if not DebuggerErrors::error_is_ok(failure) and kind != ExecutionOutcomeKind.AwaitingHostEffect
+            return ExecutionOutcome{kind: kind, position: DebuggerReplayEngine::replay_engine_position(controller.engine), host_effect: request, failure: failure}
+
         def managed_clock_effect_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::EffectReplay:
             return DebuggerEffects::EffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, result_value: HostEffectReplayDefaults::NO_CLOCK_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
 

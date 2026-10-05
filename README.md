@@ -170,9 +170,10 @@ an exact event; the optional generation rejects stale scripted seeks. Use
 `saveTrace <path>` to transactionally write an exact managed trace to a file;
 for example, `saveTrace build/session.trace`. In a new CLI process, use
 `openTrace <event> <path>` to validate a saved trace against the CLI's default
-managed image and reconstruct a checkpointed event before inspecting its
-timeline; for example, `openTrace 1 build/session.trace`. The path is the
-remaining text after the event, so spaces are preserved. The compact JSON
+managed image, replay its bounded history, and position at the requested event
+before inspecting or seeking through its timeline; for example,
+`openTrace 1 build/session.trace`. The path is the remaining text after the
+event, so spaces are preserved. The compact JSON
 process still cannot carry a destination path or return trace artifact bytes,
 so trace-file export is currently available through the interactive CLI and
 typed Elisa service API. Trace-file restore is available through the

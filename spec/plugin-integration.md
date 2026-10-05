@@ -34,6 +34,12 @@ stored in the artifact. The [launch-configuration schema](../schemas/dap-launch-
 documents these fields. It also lists `args`, `cwd`, `env`, and `stopOnEntry`
 as ignored because the current adapter does not apply them.
 
+If `initialize` advertises `supportsElisaVirtualFiles` version 1, the plugin
+may add `elisaVirtualFiles` snapshots to the launch configuration. The schema
+documents each snapshot's handle, logical path, bytes, bounds, and read-only
+flag; the [wire contract](dap-virtual-files-v1.md) defines handle order and
+replay behavior.
+
 Managed DAP source breakpoints support numeric `hitCondition` strings such as
 `"2"`: the breakpoint begins stopping when its second matching hit is
 observed. The current engine then stops on subsequent matching hits as well.

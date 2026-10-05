@@ -80,4 +80,5 @@ host path access, or editing a snapshot during a recording.
 The headless service API and DAP extension are separate integration surfaces.
 The DAP schema is not a cross-language ABI for directly calling Elisa modules.
 See [plugin integration](plugin-integration.md) for the editor transport
-guidance.
+guidance and the [launch-configuration schema](../schemas/dap-launch-configuration.schema.json)
+for the VS Code-style client configuration shape.

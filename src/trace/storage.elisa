@@ -2,6 +2,7 @@
 # file writer, making round-trip and malformed-input tests independent of libc.
 
 include "./binary.elisa"
+include "./event_codec.elisa"
 include "./format.elisa"
 include "./manifest.elisa"
 include "../replay/checkpoint_codec.elisa"
@@ -58,32 +59,6 @@ module DebuggerTraceStorage:
             STORAGE_CHUNKKIND_CHECKPOINT: u16 = 3
             RESOURCE: u16 = 4
             INDEX: u16 = 5
-
-        const module EventEncoding:
-            STORAGE_EVENTENCODING_SCHEMA_BYTES: usize = 4
-            STORAGE_EVENTENCODING_ORDINAL_BYTES: usize = 8
-            STORAGE_EVENTENCODING_ID_BYTES: usize = 8
-            STORAGE_EVENTENCODING_MICROSTEP_BYTES: usize = 4
-            STORAGE_EVENTENCODING_ENUM_BYTES: usize = 2
-            STORAGE_EVENTENCODING_STATE_HASH_BYTES: usize = 8
-            STORAGE_EVENTENCODING_PAYLOAD_KIND_BYTES: usize = 2
-            STORAGE_EVENTENCODING_PAYLOAD_LENGTH_BYTES: usize = 2
-            STORAGE_EVENTENCODING_PAYLOAD_HASH_BYTES: usize = 8
-            STORAGE_EVENTENCODING_PAYLOAD_BYTES: usize = DebuggerEventPayloadLimits::MAX_BYTES
-            STORAGE_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES * 2 + EventEncoding::STORAGE_EVENTENCODING_STATE_HASH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_KIND_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_LENGTH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_HASH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_BYTES
-            QUALITY_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES
-            QUALITY_HIGH_BYTE_OFFSET: usize = 1
-            BRANCH_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 2
-            PAYLOAD_OFFSET: usize = EventEncoding::STORAGE_EVENTENCODING_SCHEMA_BYTES + EventEncoding::STORAGE_EVENTENCODING_ORDINAL_BYTES + EventEncoding::STORAGE_EVENTENCODING_ID_BYTES * 7 + EventEncoding::STORAGE_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::STORAGE_EVENTENCODING_ENUM_BYTES * 2 + EventEncoding::STORAGE_EVENTENCODING_STATE_HASH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_KIND_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_LENGTH_BYTES + EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_HASH_BYTES
-            STORAGE_EVENTENCODING_BYTE_BITS: u64 = 8
-
-        const module EventKind:
-            STORAGE_EVENTKIND_MAX_EVENT_KIND: u16 = 20
-
-        const module EventQuality:
-            EXACT_CODE: u16 = 0
-            STORAGE_EVENTQUALITY_MAX_EVENT_QUALITY: u16 = 4
-            STORAGE_EVENTQUALITY_CORRUPT: u16 = 4
 
         const module Identity:
             STORAGE_IDENTITY_NO_RECORDING: u64 = 0
@@ -156,37 +131,22 @@ module DebuggerTraceStorage:
             return DebuggerTraceBinary::bytes_checksum_matches(bytes, length, expected)
 
         def storage_event_payload_is_valid_with_recording(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64, recording_id: mutable u64&) -> bool:
-            return false if payload_length == 0 or payload_length % EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES != 0
-            event_count: usize = payload_length / EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES
-            return false if event_count == 0 or first_event > Sequence::STORAGE_SEQUENCE_MAX_EVENT - (event_count - 1).u64()
-            return false if last_event != first_event + (event_count - 1).u64()
+            return false if payload_length == 0 or schema != Layout::FORMAT_VERSION.u32()
             reader: mutable DebuggerTraceBinary::ByteReader
             DebuggerTraceBinary::reader_initialize(reader, bytes[payload_offset], payload_length)
-            for index in Index::FIRST_INDEX..<event_count:
-                event_schema: u32 = DebuggerTraceBinary::reader_take_u32(reader)
-                ordinal: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                event_recording: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                branch: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                position_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                position_task: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                _ = DebuggerTraceBinary::reader_take_u32(reader)
-                kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
-                quality: u16 = DebuggerTraceBinary::reader_take_u16(reader)
-                _ = DebuggerTraceBinary::reader_take_u64(reader)
-                payload_kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
-                payload_length: u16 = DebuggerTraceBinary::reader_take_u16(reader)
-                payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(reader)
-                event_payload: mutable u8[EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_BYTES] = zeroed
-                for payload_index in 0..<EventEncoding::STORAGE_EVENTENCODING_PAYLOAD_BYTES:
-                    event_payload[payload_index] <- DebuggerTraceBinary::reader_take_byte(reader)
-                recording_id <- event_recording if recording_id == Identity::STORAGE_IDENTITY_NO_RECORDING
-                return false if event_schema != schema or ordinal != first_event + index.u64() or position_event != ordinal or event_recording == Identity::STORAGE_IDENTITY_NO_RECORDING or event_recording != recording_id or task != position_task or kind > EventKind::STORAGE_EVENTKIND_MAX_EVENT_KIND or quality > EventQuality::STORAGE_EVENTQUALITY_MAX_EVENT_QUALITY or quality == EventQuality::STORAGE_EVENTQUALITY_CORRUPT
-                return false if payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or not DebuggerEvents::event_payload_body_is_canonical(DebuggerEvents::event_payload_kind_from_code(payload_kind), event_payload[0], payload_length.usize(), payload_hash)
-                return false if quality == EventQuality::EXACT_CODE and (kind == DebuggerEvents::EventKind.Input.u16() or kind == DebuggerEvents::EventKind.Output.u16()) and payload_kind == DebuggerEvents::EventPayloadKind.None.u16()
-            return DebuggerTraceBinary::reader_is_valid(reader) and reader.offset == reader.length
+            event_count: mutable usize = Index::FIRST_INDEX
+            while reader.offset < reader.length:
+                return false if event_count.u64() > Sequence::STORAGE_SEQUENCE_MAX_EVENT - first_event
+                decoded: DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(reader)
+                return false if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+                event: DebuggerEvents::EventEnvelope = decoded.event
+                return false if event.ordinal != first_event + event_count.u64() or event.position.event != event.ordinal or event.position.recording.value == Identity::STORAGE_IDENTITY_NO_RECORDING or event.task.value != event.position.task.value or event.quality == DebuggerEvents::EventQuality.Corrupt
+                return false if recording_id != Identity::STORAGE_IDENTITY_NO_RECORDING and event.position.recording.value != recording_id
+                recording_id <- event.position.recording.value if recording_id == Identity::STORAGE_IDENTITY_NO_RECORDING
+                event_count <- event_count + 1
+            return false if not DebuggerTraceBinary::reader_is_valid(reader) or event_count == Index::FIRST_INDEX
+            return false if event_count - 1 > (Sequence::STORAGE_SEQUENCE_MAX_EVENT - first_event).usize()
+            return last_event == first_event + (event_count - 1).u64()
 
     public:
         def storage_event_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, schema: u32, first_event: u64, last_event: u64) -> bool:
@@ -199,27 +159,27 @@ module DebuggerTraceStorage:
         # valid prefix while leaving trailing bytes to be interpreted as a
         # second message.
         def storage_event_payload_is_exact(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
-            return false if payload_length == 0 or payload_length % EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES != 0
-            event_count: usize = payload_length / EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES
-            for index in Index::FIRST_INDEX..<event_count:
-                event_offset: usize = payload_offset + index * EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES
-                quality_offset: usize = event_offset + EventEncoding::QUALITY_OFFSET
-                quality_low: u64 = bytes[quality_offset].u64()
-                quality_high: u64 = bytes[quality_offset + EventEncoding::QUALITY_HIGH_BYTE_OFFSET].u64()
-                quality: u16 = (quality_low | (quality_high << EventEncoding::STORAGE_EVENTENCODING_BYTE_BITS)).u16()
-                return false if quality != EventQuality::EXACT_CODE
+            return false if payload_length == 0
+            reader: mutable DebuggerTraceBinary::ByteReader
+            DebuggerTraceBinary::reader_initialize(reader, bytes[payload_offset], payload_length)
+            while reader.offset < reader.length:
+                decoded: DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(reader)
+                return false if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+                event: DebuggerEvents::EventEnvelope = decoded.event
+                return false if event.quality != DebuggerEvents::EventQuality.Exact
+            return false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
             return true
 
         def storage_event_payload_has_root_branches(bytes: u8&, payload_offset: usize, payload_length: usize) -> bool:
-            return false if payload_length == 0 or payload_length % EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES != 0
-            event_count: usize = payload_length / EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES
-            for index in Index::FIRST_INDEX..<event_count:
-                event_offset: usize = payload_offset + index * EventEncoding::STORAGE_EVENTENCODING_ENCODED_BYTES
-                branch_offset: usize = event_offset + EventEncoding::BRANCH_OFFSET
-                branch: mutable u64 = 0
-                for byte_index in Index::FIRST_INDEX..<EventEncoding::STORAGE_EVENTENCODING_ID_BYTES:
-                    branch <- branch | (bytes[branch_offset + byte_index].u64() << (byte_index.u64() * EventEncoding::STORAGE_EVENTENCODING_BYTE_BITS))
-                return false if branch != Identity::STORAGE_IDENTITY_ROOT_BRANCH
+            return false if payload_length == 0
+            reader: mutable DebuggerTraceBinary::ByteReader
+            DebuggerTraceBinary::reader_initialize(reader, bytes[payload_offset], payload_length)
+            while reader.offset < reader.length:
+                decoded: DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(reader)
+                return false if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+                event: DebuggerEvents::EventEnvelope = decoded.event
+                return false if event.position.branch.value != Identity::STORAGE_IDENTITY_ROOT_BRANCH
+            return false if not DebuggerTraceBinary::reader_is_valid(reader) or reader.offset != reader.length
             return true
 
         def storage_checkpoint_payload_is_valid(bytes: u8&, payload_offset: usize, payload_length: usize, first_event: u64, last_event: u64) -> bool:

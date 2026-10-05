@@ -21,6 +21,10 @@ module DebuggerTraceEventCodec:
             PAYLOAD_HASH_BYTES: usize = 8
             FIXED_BYTES: usize = Record::SCHEMA_BYTES + Record::ORDINAL_BYTES + Record::ID_BYTES * Record::ID_FIELD_COUNT + Record::MICROSTEP_BYTES + Record::ENUM_BYTES * Record::ENUM_FIELD_COUNT + Record::STATE_HASH_BYTES + Record::PAYLOAD_KIND_BYTES + Record::PAYLOAD_LENGTH_BYTES + Record::PAYLOAD_HASH_BYTES
 
+        const module Version:
+            LEGACY_FIXED_PAYLOAD: u32 = 2
+            VARIABLE_PAYLOAD: u32 = 3
+
         const module Index:
             FIRST_PAYLOAD_BYTE: usize = 0
 
@@ -39,11 +43,14 @@ module DebuggerTraceEventCodec:
         def event_record_maximum_size() -> usize:
             return Record::FIXED_BYTES + DebuggerEvents::event_payload_capacity()
 
+        def event_record_schema_is_supported(schema: u32) -> bool:
+            return schema == Version::LEGACY_FIXED_PAYLOAD or schema == Version::VARIABLE_PAYLOAD
+
         def event_record_encoded_size(event: DebuggerEvents::EventEnvelope) -> usize:
-            return Record::FIXED_BYTES + event.payload_length.usize() if DebuggerEvents::event_envelope_is_well_formed(event) else 0
+            return Record::FIXED_BYTES + event.payload_length.usize() if event.schema == Version::VARIABLE_PAYLOAD and DebuggerEvents::event_envelope_is_well_formed(event) else 0
 
         def event_record_encode(event: DebuggerEvents::EventEnvelope, writer: mutable DebuggerTraceBinary::ByteWriter&) -> bool:
-            return false if not DebuggerEvents::event_envelope_is_well_formed(event)
+            return false if event.schema != Version::VARIABLE_PAYLOAD or not DebuggerEvents::event_envelope_is_well_formed(event)
             DebuggerTraceBinary::writer_put_u32(writer, event.schema)
             DebuggerTraceBinary::writer_put_u64(writer, event.ordinal)
             DebuggerTraceBinary::writer_put_u64(writer, event.task.value)
@@ -116,14 +123,16 @@ module DebuggerTraceEventCodec:
             payload_kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
             event.payload_length <- DebuggerTraceBinary::reader_take_u16(reader)
             event.payload_hash <- DebuggerTraceBinary::reader_take_u64(reader)
-            if kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality > DebuggerEvents::EventQuality.Corrupt.u16() or payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or event.payload_length.usize() > DebuggerEvents::event_payload_capacity():
+            return result if not DebuggerTraceBinary::reader_is_valid(reader)
+            if not event_record_schema_is_supported(event.schema) or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality > DebuggerEvents::EventQuality.Corrupt.u16() or payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or event.payload_length.usize() > DebuggerEvents::event_payload_capacity():
                 reader.failed <- true
                 return result
             event.position <- DebuggerIdentity::Position{recording: recording, branch: branch, event: position_event, task: position_task, invocation: invocation, statement: statement, microstep: microstep}
             event.kind <- event_kind_from_code(kind)
             event.quality <- event_quality_from_code(quality)
             event.payload_kind <- DebuggerEvents::event_payload_kind_from_code(payload_kind)
-            for index in Index::FIRST_PAYLOAD_BYTE..<event.payload_length.usize():
+            stored_payload_length: usize = DebuggerEvents::event_payload_capacity() if event.schema == Version::LEGACY_FIXED_PAYLOAD else event.payload_length.usize()
+            for index in Index::FIRST_PAYLOAD_BYTE..<stored_payload_length:
                 event.payload[index] <- DebuggerTraceBinary::reader_take_byte(reader)
             if DebuggerTraceBinary::reader_is_valid(reader) and DebuggerEvents::event_envelope_is_well_formed(event):
                 result.event <- event

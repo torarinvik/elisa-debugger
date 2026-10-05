@@ -2,6 +2,7 @@
 # decoding event envelopes and exposes only the verified prefix after damage.
 
 include "./binary.elisa"
+include "./event_codec.elisa"
 include "./storage.elisa"
 include "./manifest.elisa"
 include "../core/events.elisa"
@@ -22,25 +23,6 @@ module DebuggerTraceReader:
             TASK: u32 = 6
             STORAGE_STATUS: u32 = 7
             EVENT_ENVELOPE: u32 = 8
-
-        const module EventEncoding:
-            READER_EVENTENCODING_SCHEMA_BYTES: usize = 4
-            ORDINAL_BYTES: usize = 8
-            ID_BYTES: usize = 8
-            MICROSTEP_BYTES: usize = 4
-            ENUM_BYTES: usize = 2
-            STATE_HASH_BYTES: usize = 8
-            PAYLOAD_KIND_BYTES: usize = 2
-            PAYLOAD_LENGTH_BYTES: usize = 2
-            PAYLOAD_HASH_BYTES: usize = 8
-            PAYLOAD_BYTES: usize = DebuggerEventPayloadLimits::MAX_BYTES
-            READER_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::READER_EVENTENCODING_SCHEMA_BYTES + EventEncoding::ORDINAL_BYTES + EventEncoding::ID_BYTES * 7 + EventEncoding::MICROSTEP_BYTES + EventEncoding::ENUM_BYTES * 2 + EventEncoding::STATE_HASH_BYTES + EventEncoding::PAYLOAD_KIND_BYTES + EventEncoding::PAYLOAD_LENGTH_BYTES + EventEncoding::PAYLOAD_HASH_BYTES + EventEncoding::PAYLOAD_BYTES
-
-        const module EventKind:
-            READER_EVENTKIND_MAX_EVENT_KIND: u16 = 20
-
-        const module EventQuality:
-            READER_EVENTQUALITY_MAX_EVENT_QUALITY: u16 = 4
 
         const module Capacity:
             READER_CAPACITY_EVENTS: usize = 256
@@ -165,36 +147,6 @@ module DebuggerTraceReader:
                 free(reader.full_checkpoints.cast[heap void&]) can Memory.Release
                 free(reader.cast[heap void&]) can Memory.Release
 
-        def event_kind_from_code(code: u16) -> DebuggerEvents::EventKind:
-            return DebuggerEvents::EventKind.ExecutionBoundary if code == 0
-            return DebuggerEvents::EventKind.CallEntry if code == 1
-            return DebuggerEvents::EventKind.CallExit if code == 2
-            return DebuggerEvents::EventKind.Unwind if code == 3
-            return DebuggerEvents::EventKind.ScopeEnter if code == 4
-            return DebuggerEvents::EventKind.ScopeExit if code == 5
-            return DebuggerEvents::EventKind.Allocation if code == 6
-            return DebuggerEvents::EventKind.Release if code == 7
-            return DebuggerEvents::EventKind.RegionReset if code == 8
-            return DebuggerEvents::EventKind.MutationAttempt if code == 9
-            return DebuggerEvents::EventKind.MutationCommit if code == 10
-            return DebuggerEvents::EventKind.Input if code == 11
-            return DebuggerEvents::EventKind.Output if code == 12
-            return DebuggerEvents::EventKind.Scheduler if code == 13
-            return DebuggerEvents::EventKind.Synchronization if code == 14
-            return DebuggerEvents::EventKind.Atomic if code == 15
-            return DebuggerEvents::EventKind.Fault if code == 16
-            return DebuggerEvents::EventKind.Checkpoint if code == 17
-            return DebuggerEvents::EventKind.Module if code == 18
-            return DebuggerEvents::EventKind.DebuggerMutation if code == 19
-            return DebuggerEvents::EventKind.TraceHealth
-
-        def event_quality_from_code(code: u16) -> DebuggerEvents::EventQuality:
-            return DebuggerEvents::EventQuality.Exact if code == 0
-            return DebuggerEvents::EventQuality.Partial if code == 1
-            return DebuggerEvents::EventQuality.Observational if code == 2
-            return DebuggerEvents::EventQuality.Diverged if code == 3
-            return DebuggerEvents::EventQuality.Corrupt
-
         def reader_ingest_manifest(reader: mutable TraceReader&, chunk: DebuggerTraceStorage::StoredChunk&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if reader.manifest_seen
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.sequence != reader.next_sequence
@@ -223,76 +175,47 @@ module DebuggerTraceReader:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.payload_length == 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.header.payload_length != chunk.payload_length.u64() or chunk.header.checksum != chunk.checksum
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if chunk.payload_length > Capacity::READER_CAPACITY_MAX_PAYLOAD_BYTES
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if chunk.payload_length % EventEncoding::READER_EVENTENCODING_ENCODED_BYTES != 0
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.sequence != reader.next_sequence
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.schema != reader.manifest.schema.u32()
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if not DebuggerTrace::trace_chunk_range_valid(chunk.header)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CHECKSUM) if not DebuggerTraceBinary::bytes_checksum_matches(chunk.payload[0], chunk.payload_length, chunk.checksum)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if reader.event_count >= Capacity::READER_CAPACITY_EVENTS
-            event_count_in_chunk: u64 = (chunk.payload_length / EventEncoding::READER_EVENTENCODING_ENCODED_BYTES).u64()
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if not DebuggerTraceStorage::storage_event_payload_is_valid(chunk.payload[0], 0, chunk.payload_length, chunk.header.schema, chunk.header.first_event, chunk.header.last_event)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if reader.event_exhausted
-            # Check the last ordinal so one event at u64::MAX remains valid without increment overflow.
-            event_offset_in_chunk: u64 = event_count_in_chunk - 1
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if event_offset_in_chunk > Sequence::READER_SEQUENCE_MAX_EVENT - reader.next_event
-            expected_last_event: u64 = reader.next_event + event_offset_in_chunk
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.first_event != reader.next_event or chunk.header.last_event != expected_last_event
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if chunk.header.first_event != reader.next_event
+            event_offset_in_chunk: u64 = chunk.header.last_event - chunk.header.first_event
+            remaining_capacity: usize = Capacity::READER_CAPACITY_EVENTS - reader.event_count
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if event_offset_in_chunk >= remaining_capacity.u64()
+            expected_event_count: u64 = event_offset_in_chunk + Sequence::EVENT_INDEX_OFFSET.u64()
             event_reader: mutable DebuggerTraceBinary::ByteReader
             DebuggerTraceBinary::reader_initialize(event_reader, chunk.payload[0], chunk.payload_length)
-            while event_reader.offset + EventEncoding::READER_EVENTENCODING_ENCODED_BYTES <= event_reader.length:
+            events_decoded: mutable u64 = Sequence::FIRST
+            while event_reader.offset < event_reader.length:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if reader.event_exhausted
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::READER_DETAIL_CAPACITY) if reader.event_count >= Capacity::READER_CAPACITY_EVENTS
-                event: mutable DebuggerEvents::EventEnvelope = zeroed
-                schema: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
-                ordinal: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                recording: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                branch: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                event_id: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                position_task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                statement: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                microstep: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
-                kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                quality: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                state_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                payload_kind_code: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                payload_length: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::READER_DETAIL_ENUM) if kind > EventKind::READER_EVENTKIND_MAX_EVENT_KIND or quality > EventQuality::READER_EVENTQUALITY_MAX_EVENT_QUALITY or quality == DebuggerEvents::EventQuality.Corrupt.u16()
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if schema != reader.manifest.schema.u32()
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if ordinal != reader.next_event
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::TASK) if task.value != position_task.value
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if recording.value == 0
+                decoded: DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(event_reader)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+                event: DebuggerEvents::EventEnvelope = decoded.event
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if event.ordinal != reader.next_event
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::TASK) if event.task.value != event.position.task.value
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if event.position.recording.value == 0
                 if not reader.recording_seen:
-                    reader.recording <- recording
+                    reader.recording <- event.position.recording
                     reader.recording_seen <- true
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if recording.value != reader.recording.value
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if event.position.recording.value != reader.recording.value
                 for checkpoint_index in 0..<reader.full_checkpoint_count:
-                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if reader.full_checkpoints[checkpoint_index].recording.value != recording.value
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if event_id != ordinal
-                event.schema <- schema
-                event.ordinal <- ordinal
-                event.task <- task
-                event.position <- DebuggerIdentity::Position{recording: recording, branch: branch, event: event_id, task: position_task, invocation: invocation, statement: statement, microstep: microstep}
-                event.kind <- event_kind_from_code(kind)
-                event.quality <- event_quality_from_code(quality)
-                event.state_hash <- state_hash
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::READER_DETAIL_ENUM) if payload_kind_code > DebuggerEvents::EventPayloadKind.Error.u16()
-                event.payload_kind <- DebuggerEvents::event_payload_kind_from_code(payload_kind_code)
-                event.payload_length <- payload_length
-                event.payload_hash <- payload_hash
-                for payload_index in 0..<EventEncoding::PAYLOAD_BYTES:
-                    event.payload[payload_index] <- DebuggerTraceBinary::reader_take_byte(event_reader)
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING) if reader.full_checkpoints[checkpoint_index].recording.value != event.position.recording.value
                 envelope_failure: u32 = DebuggerEvents::event_envelope_validation_detail(event)
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::EVENT_ENVELOPE + envelope_failure) if envelope_failure != 0
                 reader.events[reader.event_count] <- event
                 reader.event_count <- reader.event_count + 1
-                if ordinal == Sequence::READER_SEQUENCE_MAX_EVENT:
+                events_decoded <- events_decoded + Sequence::EVENT_INDEX_OFFSET.u64()
+                if event.ordinal == Sequence::READER_SEQUENCE_MAX_EVENT:
                     reader.event_exhausted <- true
                 else:
                     reader.next_event <- reader.next_event + 1
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING + 10) if not DebuggerTraceBinary::reader_is_valid(event_reader)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENCODING + 20) if event_reader.offset != event_reader.length
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if events_decoded != expected_event_count
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::SEQUENCE) if reader.next_sequence == Sequence::MAX_CHUNK
             reader.next_sequence <- reader.next_sequence + 1
             reader.event_chunk_count <- reader.event_chunk_count + 1
@@ -414,7 +337,7 @@ module DebuggerTraceReader:
             for index in 0..<reader.event_count:
                 event: DebuggerEvents::EventEnvelope = reader.events[index]
                 return false if index.u64() > Sequence::READER_SEQUENCE_MAX_EVENT - reader.manifest.first_event
-                return false if event.ordinal != reader.manifest.first_event + index.u64() or event.schema != reader.manifest.schema.u32() or event.position.recording.value != reader.recording.value or event.position.branch.value != Identity::READER_IDENTITY_ROOT_BRANCH or event.position.event != event.ordinal or event.task.value != event.position.task.value or event.quality != DebuggerEvents::EventQuality.Exact
+                return false if event.ordinal != reader.manifest.first_event + index.u64() or not DebuggerTraceEventCodec::event_record_schema_is_supported(event.schema) or event.position.recording.value != reader.recording.value or event.position.branch.value != Identity::READER_IDENTITY_ROOT_BRANCH or event.position.event != event.ordinal or event.task.value != event.position.task.value or event.quality != DebuggerEvents::EventQuality.Exact
             for index in 0..<reader.full_checkpoint_count:
                 return false if reader.full_checkpoints[index].branch.value != Identity::READER_IDENTITY_ROOT_BRANCH
             return true

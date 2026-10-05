@@ -3,6 +3,7 @@
 # buffer ends exact recording with a verified prefix instead of dropping events.
 
 include "./binary.elisa"
+include "./event_codec.elisa"
 include "./format.elisa"
 include "./storage.elisa"
 include "./manifest.elisa"
@@ -22,7 +23,8 @@ module DebuggerTraceRecorder:
             RECORDER_INITIAL_CHUNK_COUNT: usize = 0
 
         const module Version:
-            EVENT_SCHEMA: u32 = 2
+            TRACE_SCHEMA: u32 = 2
+            EVENT_SCHEMA: u32 = 3
 
         const module Sequence:
             RECORDER_SEQUENCE_MANIFEST: u64 = 0
@@ -45,19 +47,6 @@ module DebuggerTraceRecorder:
             RECORDER_IDENTITY_NO_RECORDING: u64 = 0
             RECORDER_IDENTITY_ROOT_BRANCH: u64 = 0
 
-        const module EventEncoding:
-            RECORDER_EVENTENCODING_SCHEMA_BYTES: usize = 4
-            RECORDER_EVENTENCODING_ORDINAL_BYTES: usize = 8
-            RECORDER_EVENTENCODING_ID_BYTES: usize = 8
-            RECORDER_EVENTENCODING_MICROSTEP_BYTES: usize = 4
-            RECORDER_EVENTENCODING_ENUM_BYTES: usize = 2
-            RECORDER_EVENTENCODING_STATE_HASH_BYTES: usize = 8
-            RECORDER_EVENTENCODING_PAYLOAD_KIND_BYTES: usize = 2
-            RECORDER_EVENTENCODING_PAYLOAD_LENGTH_BYTES: usize = 2
-            RECORDER_EVENTENCODING_PAYLOAD_HASH_BYTES: usize = 8
-            RECORDER_EVENTENCODING_PAYLOAD_BYTES: usize = DebuggerEventPayloadLimits::MAX_BYTES
-            RECORDER_EVENTENCODING_ENCODED_BYTES: usize = EventEncoding::RECORDER_EVENTENCODING_SCHEMA_BYTES + EventEncoding::RECORDER_EVENTENCODING_ORDINAL_BYTES + EventEncoding::RECORDER_EVENTENCODING_ID_BYTES * 7 + EventEncoding::RECORDER_EVENTENCODING_MICROSTEP_BYTES + EventEncoding::RECORDER_EVENTENCODING_ENUM_BYTES * 2 + EventEncoding::RECORDER_EVENTENCODING_STATE_HASH_BYTES + EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_KIND_BYTES + EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_LENGTH_BYTES + EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_HASH_BYTES + EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_BYTES
-            POSITION_EVENT_OFFSET: usize = EventEncoding::RECORDER_EVENTENCODING_SCHEMA_BYTES + EventEncoding::RECORDER_EVENTENCODING_ORDINAL_BYTES + EventEncoding::RECORDER_EVENTENCODING_ID_BYTES * 3
 
 
     public:
@@ -92,26 +81,8 @@ module DebuggerTraceRecorder:
             return
 
     private:
-        def encode_event(event: DebuggerEvents::EventEnvelope, writer: mutable DebuggerTraceBinary::ByteWriter&) -> void:
-            DebuggerTraceBinary::writer_put_u32(writer, event.schema)
-            DebuggerTraceBinary::writer_put_u64(writer, event.ordinal)
-            DebuggerTraceBinary::writer_put_u64(writer, event.task.value)
-            DebuggerTraceBinary::writer_put_u64(writer, event.position.recording.value)
-            DebuggerTraceBinary::writer_put_u64(writer, event.position.branch.value)
-            DebuggerTraceBinary::writer_put_u64(writer, event.position.event)
-            DebuggerTraceBinary::writer_put_u64(writer, event.position.task.value)
-            DebuggerTraceBinary::writer_put_u64(writer, event.position.invocation.value)
-            DebuggerTraceBinary::writer_put_u64(writer, event.position.statement.value)
-            DebuggerTraceBinary::writer_put_u32(writer, event.position.microstep)
-            DebuggerTraceBinary::writer_put_u16(writer, event.kind.u16())
-            DebuggerTraceBinary::writer_put_u16(writer, event.quality.u16())
-            DebuggerTraceBinary::writer_put_u64(writer, event.state_hash)
-            DebuggerTraceBinary::writer_put_u16(writer, event.payload_kind.u16())
-            DebuggerTraceBinary::writer_put_u16(writer, event.payload_length)
-            DebuggerTraceBinary::writer_put_u64(writer, event.payload_hash)
-            for index in 0..<EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_BYTES:
-                DebuggerTraceBinary::writer_put_byte(writer, event.payload[index])
-            return
+        def encode_event(event: DebuggerEvents::EventEnvelope, writer: mutable DebuggerTraceBinary::ByteWriter&) -> bool:
+            return DebuggerTraceEventCodec::event_record_encode(event, writer)
 
         def recorder_event_is_valid(recorder: TraceRecorder&, event: DebuggerEvents::EventEnvelope) -> bool:
             return event.schema == Version::EVENT_SCHEMA and recorder.recording.value != Identity::RECORDER_IDENTITY_NO_RECORDING and event.position.recording.value == recorder.recording.value and event.position.branch.value == Identity::RECORDER_IDENTITY_ROOT_BRANCH and DebuggerEvents::event_envelope_is_well_formed(event) and event.quality != DebuggerEvents::EventQuality.Corrupt
@@ -131,11 +102,12 @@ module DebuggerTraceRecorder:
             encoded: mutable DebuggerTraceBinary::ByteWriter
             DebuggerTraceBinary::writer_initialize(encoded)
             for index in 0..<recorder.pending_count:
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::RECORDER_DETAIL_ENCODING) if encoded.length > Capacity::RECORDER_CAPACITY_MAX_PAYLOAD_BYTES - EventEncoding::RECORDER_EVENTENCODING_ENCODED_BYTES
-                encode_event(recorder.pending[index], encoded)
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::RECORDER_DETAIL_ENCODING) if not DebuggerTraceBinary::writer_is_valid(encoded)
+                event_size: usize = DebuggerTraceEventCodec::event_record_encoded_size(recorder.pending[index])
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::RECORDER_DETAIL_ENCODING) if event_size == 0
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::RECORDER_DETAIL_ENCODING) if encoded.length > Capacity::RECORDER_CAPACITY_MAX_PAYLOAD_BYTES - event_size
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::RECORDER_DETAIL_ENCODING) if not encode_event(recorder.pending[index], encoded) or not DebuggerTraceBinary::writer_is_valid(encoded)
             chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
-            chunk.header <- DebuggerTrace::ChunkHeader{schema: Version::EVENT_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: recorder.chunk_count.u64() + Sequence::EVENT_OFFSET, first_event: recorder.pending[0].ordinal, last_event: recorder.pending[recorder.pending_count - 1].ordinal, payload_length: encoded.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(encoded)}
+            chunk.header <- DebuggerTrace::ChunkHeader{schema: Version::TRACE_SCHEMA, kind: DebuggerTrace::ChunkKind.Events, sequence: recorder.chunk_count.u64() + Sequence::EVENT_OFFSET, first_event: recorder.pending[0].ordinal, last_event: recorder.pending[recorder.pending_count - 1].ordinal, payload_length: encoded.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(encoded)}
             chunk.payload_length <- encoded.length
             chunk.checksum <- DebuggerTraceBinary::writer_checksum(encoded)
             for index in 0..<encoded.length:
@@ -292,36 +264,32 @@ module DebuggerTraceRecorder:
 
     private:
         def recorder_chunk_is_exact(chunk: DebuggerTraceStorage::StoredChunk&, expected_first: u64, recording: DebuggerIdentity::DebugId) -> bool:
-            return false if chunk.header.kind != DebuggerTrace::ChunkKind.Events or chunk.payload_length == 0 or chunk.payload_length % EventEncoding::RECORDER_EVENTENCODING_ENCODED_BYTES != 0
-            event_count: usize = chunk.payload_length / EventEncoding::RECORDER_EVENTENCODING_ENCODED_BYTES
-            return false if event_count == 0 or expected_first > Sequence::MAX_ORDINAL - (event_count - 1).u64()
-            return false if chunk.header.first_event != expected_first or chunk.header.last_event != expected_first + (event_count - 1).u64()
+            return false if chunk.header.kind != DebuggerTrace::ChunkKind.Events or chunk.payload_length == 0
             event_reader: mutable DebuggerTraceBinary::ByteReader
             DebuggerTraceBinary::reader_initialize(event_reader, chunk.payload[0], chunk.payload_length)
-            for index in 0..<event_count:
-                schema: u32 = DebuggerTraceBinary::reader_take_u32(event_reader)
-                ordinal: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                event_recording: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                branch: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                position_event: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                position_task: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(DebuggerTraceBinary::reader_take_u64(event_reader))
-                _ = DebuggerTraceBinary::reader_take_u64(event_reader)
-                _ = DebuggerTraceBinary::reader_take_u64(event_reader)
-                _ = DebuggerTraceBinary::reader_take_u32(event_reader)
-                kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                quality: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                _ = DebuggerTraceBinary::reader_take_u64(event_reader)
-                payload_kind: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                payload_length: u16 = DebuggerTraceBinary::reader_take_u16(event_reader)
-                payload_hash: u64 = DebuggerTraceBinary::reader_take_u64(event_reader)
-                payload: mutable u8[EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_BYTES] = zeroed
-                for payload_index in 0..<EventEncoding::RECORDER_EVENTENCODING_PAYLOAD_BYTES:
-                    payload[payload_index] <- DebuggerTraceBinary::reader_take_byte(event_reader)
-                return false if schema != Version::EVENT_SCHEMA or ordinal != expected_first + index.u64() or position_event != ordinal or event_recording.value != recording.value or branch.value != Identity::RECORDER_IDENTITY_ROOT_BRANCH or task.value != position_task.value or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality != DebuggerEvents::EventQuality.Exact.u16()
-                return false if payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or not DebuggerEvents::event_payload_body_is_canonical(DebuggerEvents::event_payload_kind_from_code(payload_kind), payload[0], payload_length.usize(), payload_hash)
-                return false if (kind == DebuggerEvents::EventKind.Input.u16() or kind == DebuggerEvents::EventKind.Output.u16()) and payload_kind == DebuggerEvents::EventPayloadKind.None.u16()
-            return DebuggerTraceBinary::reader_is_valid(event_reader) and event_reader.offset == event_reader.length
+            event_count: mutable usize = Count::RECORDER_INITIAL_PENDING_COUNT
+            while event_reader.offset < event_reader.length:
+                return false if event_count.u64() > Sequence::MAX_ORDINAL - expected_first
+                decoded: DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(event_reader)
+                return false if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+                event: DebuggerEvents::EventEnvelope = decoded.event
+                return false if event.schema != Version::EVENT_SCHEMA or event.ordinal != expected_first + event_count.u64() or event.position.event != event.ordinal or event.position.recording.value != recording.value or event.position.branch.value != Identity::RECORDER_IDENTITY_ROOT_BRANCH or event.task.value != event.position.task.value or event.quality != DebuggerEvents::EventQuality.Exact
+                event_count <- event_count + Sequence::EVENT_OFFSET.usize()
+            return false if not DebuggerTraceBinary::reader_is_valid(event_reader) or event_count == Count::RECORDER_INITIAL_PENDING_COUNT
+            return false if event_count - 1 > (Sequence::MAX_ORDINAL - expected_first).usize()
+            return chunk.header.first_event == expected_first and chunk.header.last_event == expected_first + (event_count - 1).u64()
+
+        def recorder_chunk_event_count(chunk: DebuggerTraceStorage::StoredChunk&) -> u64:
+            return 0 if chunk.header.kind != DebuggerTrace::ChunkKind.Events or chunk.payload_length == 0
+            event_reader: mutable DebuggerTraceBinary::ByteReader
+            DebuggerTraceBinary::reader_initialize(event_reader, chunk.payload[0], chunk.payload_length)
+            event_count: mutable usize = Count::RECORDER_INITIAL_PENDING_COUNT
+            while event_reader.offset < event_reader.length:
+                decoded: DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(event_reader)
+                return 0 if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+                event_count <- event_count + Sequence::EVENT_OFFSET.usize()
+            return 0 if not DebuggerTraceBinary::reader_is_valid(event_reader) or event_reader.offset != event_reader.length
+            return event_count.u64()
 
         def recorder_checkpoint_chunk_is_exact(chunk: DebuggerTraceStorage::StoredChunk&, recording: DebuggerIdentity::DebugId, first_event: u64, last_event: u64) -> bool:
             return false if not DebuggerTraceStorage::storage_checkpoint_chunk_is_valid(chunk)
@@ -344,7 +312,7 @@ module DebuggerTraceRecorder:
             manifest_bytes: DebuggerTraceBinary::ByteWriter = DebuggerTraceManifest::manifest_encode(recorder.manifest)
             return DebuggerTraceStorage::StorageStatus.Oversized if not DebuggerTraceBinary::writer_is_valid(manifest_bytes)
             manifest_chunk: mutable DebuggerTraceStorage::StoredChunk = zeroed
-            manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: Version::EVENT_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: Sequence::RECORDER_SEQUENCE_MANIFEST, first_event: recorder.manifest.first_event, last_event: recorder.manifest.last_event, payload_length: manifest_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_bytes)}
+            manifest_chunk.header <- DebuggerTrace::ChunkHeader{schema: Version::TRACE_SCHEMA, kind: DebuggerTrace::ChunkKind.Manifest, sequence: Sequence::RECORDER_SEQUENCE_MANIFEST, first_event: recorder.manifest.first_event, last_event: recorder.manifest.last_event, payload_length: manifest_bytes.length.u64(), checksum: DebuggerTraceBinary::writer_checksum(manifest_bytes)}
             manifest_chunk.payload_length <- manifest_bytes.length
             manifest_chunk.checksum <- DebuggerTraceBinary::writer_checksum(manifest_bytes)
             for index in 0..<manifest_bytes.length:
@@ -380,7 +348,7 @@ module DebuggerTraceRecorder:
                 return false if not DebuggerTraceBinary::writer_is_valid(encoded)
                 if recorder.chunks[index].header.kind == DebuggerTrace::ChunkKind.Events:
                     return false if not recorder_chunk_is_exact(recorder.chunks[index], expected_event, recorder.recording)
-                    event_count: u64 = (recorder.chunks[index].payload_length / EventEncoding::RECORDER_EVENTENCODING_ENCODED_BYTES).u64()
+                    event_count: u64 = recorder_chunk_event_count(recorder.chunks[index])
                     return false if event_count == 0 or expected_event > Sequence::MAX_ORDINAL - event_count
                     expected_event <- expected_event + event_count
                 elif recorder.chunks[index].header.kind == DebuggerTrace::ChunkKind.Checkpoint:

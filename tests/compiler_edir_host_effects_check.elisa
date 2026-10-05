@@ -1,0 +1,105 @@
+# Compiler-produced host effects must reach managed providers as exact events.
+
+include "../src/engine/managed.elisa"
+include "../src/vm/edir_file.elisa"
+
+const module Test:
+    const module Artifact:
+        PATH: cstr = "build/host.edir"
+        PATH_LENGTH: usize = 15
+        EXPECTED_PROGRAM_VERSION: u32 = 2
+
+    const module Identity:
+        SESSION_ID: u64 = 9101
+        RECORDING_ID: u64 = 9102
+        COMPILER_ID: u64 = 9103
+        RUNTIME_ID: u64 = 9104
+        SOURCE_ID: u64 = 9105
+        TARGET_ID: u64 = 9106
+        METADATA_VERSION: u32 = 1
+
+    const module Provider:
+        CLOCK_VALUE: i64 = 29
+        CLOCK_RESULT_HASH: u64 = 9201
+        RANDOM_VALUE: u64 = 13
+        RANDOM_RESULT_HASH: u64 = 9202
+
+    const module Bounds:
+        FIRST_INDEX: usize = 0
+        EVENT_INCREMENT: usize = 1
+        MAX_RUN_TURNS: usize = 8
+        MAX_CONTINUE_STEPS: u64 = 64
+        NO_TARGET_EVENT: usize = 0
+
+    const module Failure:
+        SUCCESS: i64 = 0
+        ARTIFACT_LOAD: i64 = 1
+        ARTIFACT_VERSION: i64 = 2
+        ARTIFACT_EFFECT_ORDER: i64 = 3
+        SESSION_SETUP: i64 = 4
+        HOST_REQUEST: i64 = 5
+        CLOCK_RECORD: i64 = 6
+        RANDOM_RECORD: i64 = 7
+        EXECUTION: i64 = 8
+        RESULT: i64 = 9
+        EXACTNESS: i64 = 10
+        REVERSE_RANDOM: i64 = 11
+        RANDOM_NOT_RESTORED: i64 = 12
+
+
+def main() -> i64 can[Blocking.IO, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
+    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(Test::Artifact::PATH.cast[u8&], Test::Artifact::PATH_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return Test::Failure::ARTIFACT_LOAD if not loaded.valid
+    return Test::Failure::ARTIFACT_VERSION if loaded.image.program.version != Test::Artifact::EXPECTED_PROGRAM_VERSION or loaded.image.program.instruction_count == Test::Bounds::NO_TARGET_EVENT.u64()
+
+    clock_index: mutable usize = DebuggerEDIR::instruction_capacity()
+    random_index: mutable usize = DebuggerEDIR::instruction_capacity()
+    for instruction_index in Test::Bounds::FIRST_INDEX..<loaded.image.program.instruction_count.usize():
+        instruction: DebuggerEDIR::Instruction = loaded.image.instructions[instruction_index]
+        if instruction.opcode == DebuggerEDIR::Opcode.ClockNow:
+            return Test::Failure::ARTIFACT_EFFECT_ORDER if clock_index != DebuggerEDIR::instruction_capacity()
+            clock_index <- instruction_index
+        if instruction.opcode == DebuggerEDIR::Opcode.RandomU64:
+            return Test::Failure::ARTIFACT_EFFECT_ORDER if random_index != DebuggerEDIR::instruction_capacity()
+            random_index <- instruction_index
+    return Test::Failure::ARTIFACT_EFFECT_ORDER if clock_index >= random_index or random_index >= loaded.image.program.instruction_count.usize()
+
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::Identity::COMPILER_ID), runtime: DebuggerIdentity::debug_id(Test::Identity::RUNTIME_ID), source: DebuggerIdentity::debug_id(Test::Identity::SOURCE_ID), target: DebuggerIdentity::debug_id(Test::Identity::TARGET_ID), metadata_version: Test::Identity::METADATA_VERSION}
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::Identity::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, loaded.image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return Test::Failure::SESSION_SETUP if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller))
+
+    clock_event: mutable usize = Test::Bounds::NO_TARGET_EVENT
+    random_event: mutable usize = Test::Bounds::NO_TARGET_EVENT
+    turns: mutable usize = Test::Bounds::FIRST_INDEX
+    while turns < Test::Bounds::MAX_RUN_TURNS and not controller.engine.machine.halted:
+        outcome: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(controller, Test::Bounds::MAX_CONTINUE_STEPS)
+        if outcome.kind == DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect:
+            return Test::Failure::HOST_REQUEST if not outcome.host_effect.valid
+            if outcome.host_effect.kind == DebuggerManagedEngine::HostEffectKind.ClockNow:
+                return Test::Failure::CLOCK_RECORD if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_record_clock_effect(controller, outcome.host_effect.request_hash, Test::Provider::CLOCK_RESULT_HASH, Test::Provider::CLOCK_VALUE))
+                clock_event <- controller.engine.event_count
+            elif outcome.host_effect.kind == DebuggerManagedEngine::HostEffectKind.RandomU64:
+                return Test::Failure::RANDOM_RECORD if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_record_random_effect(controller, outcome.host_effect.request_hash, Test::Provider::RANDOM_RESULT_HASH, Test::Provider::RANDOM_VALUE))
+                random_event <- controller.engine.event_count
+            else:
+                return Test::Failure::HOST_REQUEST
+        elif outcome.kind == DebuggerManagedEngine::ExecutionOutcomeKind.Failed:
+            return Test::Failure::EXECUTION
+        turns <- turns + Test::Bounds::EVENT_INCREMENT
+
+    return Test::Failure::EXECUTION if not controller.engine.machine.halted or clock_event == Test::Bounds::NO_TARGET_EVENT or random_event == Test::Bounds::NO_TARGET_EVENT
+    return Test::Failure::RESULT if controller.engine.machine.result != Test::Provider::RANDOM_VALUE.i64()
+    return Test::Failure::EXACTNESS if controller.state.effects.count != Test::Bounds::EVENT_INCREMENT + Test::Bounds::EVENT_INCREMENT or controller.state.adapters.clock.count != Test::Bounds::EVENT_INCREMENT or controller.state.adapters.random.count != Test::Bounds::EVENT_INCREMENT or not DebuggerManagedEngine::managed_is_exact(controller)
+
+    final_event: usize = controller.engine.event_count
+    reverse_before_random: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, random_event - Test::Bounds::EVENT_INCREMENT)
+    return Test::Failure::REVERSE_RANDOM if not DebuggerErrors::error_is_ok(reverse_before_random) or controller.engine.event_count != random_event - Test::Bounds::EVENT_INCREMENT
+    return Test::Failure::REVERSE_RANDOM if controller.state.effects.count != Test::Bounds::EVENT_INCREMENT or controller.state.adapters.random.count != Test::Bounds::NO_TARGET_EVENT
+    forward_after_random: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, random_event)
+    return Test::Failure::RANDOM_NOT_RESTORED if not DebuggerErrors::error_is_ok(forward_after_random) or controller.engine.event_count != random_event
+    return Test::Failure::RANDOM_NOT_RESTORED if controller.state.adapters.random.count != Test::Bounds::EVENT_INCREMENT or controller.engine.effect_result_bits[random_event - Test::Bounds::EVENT_INCREMENT] != Test::Provider::RANDOM_VALUE
+    final_seek: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, final_event)
+    return Test::Failure::EXACTNESS if not DebuggerErrors::error_is_ok(final_seek) or not controller.engine.machine.halted or not DebuggerManagedEngine::managed_is_exact(controller)
+    return Test::Failure::SUCCESS

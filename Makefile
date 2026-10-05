@@ -307,7 +307,7 @@ module-check: $(BUILD)/elisa-debugger-type-metadata-check
 ifeq ($(shell uname -s),Darwin)
 	"$(BUILD)/elisa-debugger-native-macos-resources-check"
 	"$(BUILD)/elisa-debugger-native-macos-memory-check"
-	"$(BUILD)/elisa-debugger-native-macos-attach-check"
+	sh tests/native_macos_attach_check.sh "$(BUILD)/elisa-debugger-native-macos-attach-check"
 endif
 	"$(BUILD)/elisa-debugger-native-symbols-identity-check"
 	"$(BUILD)/elisa-debugger-native-symbol-loader-check"

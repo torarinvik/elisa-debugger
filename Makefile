@@ -33,6 +33,8 @@ COMPILER_EDIR_HOST_EFFECT_ARTIFACT := $(BUILD)/host.edir
 COMPILER_EDIR_HOST_EFFECT_CHECK := $(BUILD)/elisa-debugger-compiler-edir-host-effects-check
 COMPILER_EDIR_HOST_INPUT_FIXTURE := tests/compiler_edir_host_input_fixture.elisa
 COMPILER_EDIR_HOST_INPUT_ARTIFACT := $(BUILD)/host-input.edir
+COMPILER_EDIR_VIRTUAL_FILE_FIXTURE := tests/compiler_edir_virtual_file_fixture.elisa
+COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT := $(BUILD)/virtual-file.edir
 COMPILER_EDIR_EXPECTED_EXIT := 42
 CLI_SAVE_TRACE_EXPECTED_GENERATION_COUNT := 3
 CLI_SAVE_TRACE_PATH := $(BUILD)/cli-save trace.trace
@@ -199,6 +201,14 @@ dap-server: $(BUILD)/elisa-debugger-dap-server
 dap-host-effects-check: $(BUILD)/elisa-debugger-dap-server compiler-edir-host-effects-check
 dap-host-effects-check: $(COMPILER_EDIR_HOST_INPUT_ARTIFACT)
 	sh tests/dap_host_effects_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(COMPILER_EDIR_HOST_EFFECT_ARTIFACT)" "$(COMPILER_EDIR_HOST_INPUT_ARTIFACT)"
+
+.PHONY: dap-virtual-files-check
+dap-virtual-files-check: $(BUILD)/elisa-debugger-dap-server
+	mkdir -p $(BUILD)
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT)" "$(COMPILER_EDIR_VIRTUAL_FILE_FIXTURE)"
+	sh tests/dap_virtual_files_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT)"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O2 -o "$(COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT)" "$(COMPILER_EDIR_VIRTUAL_FILE_FIXTURE)"
+	sh tests/dap_virtual_files_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT)"
 
 dap-logpoints-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 	sh tests/dap_logpoints_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_LOGPOINT_LINE)"

@@ -55,6 +55,7 @@ const module Test:
         RESULT_HASH: u64 = 6106
         RESULT_VALUE: i64 = 6107
         MISMATCH_ADAPTER_SOURCE_ID: u64 = 6108
+        MISMATCH_CLOCK_VALUE: u64 = 6109
 
     const module RandomBridge:
         CALL_SITE_ID: u64 = 7101
@@ -171,6 +172,18 @@ def managed_clock_effect_bridge_is_atomic() -> bool:
     return false if adapter_mismatch.accepted or adapter_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
     return false if adapter_mismatch_state.effects.cursor != Test::Bounds::FIRST_INDEX or adapter_mismatch_state.adapters.clock.cursor != Test::Bounds::FIRST_INDEX
     return false if adapter_mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or adapter_mismatch_state.adapters.clock.exact
+
+    value_mismatch_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(value_mismatch_state)
+    recorded <- DebuggerManagedState::state_record_clock_effect(value_mismatch_state, call_site, adapter_source, invocation, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    value_mismatch_state.adapters.clock.samples[Test::Bounds::FIRST_INDEX].value <- Test::ClockBridge::MISMATCH_CLOCK_VALUE
+    replay_started <- DebuggerManagedState::state_begin_side_effect_replay(value_mismatch_state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    value_mismatch: DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(value_mismatch_state, call_site, adapter_source, invocation, Test::ClockBridge::REQUEST_HASH)
+    return false if value_mismatch.accepted or value_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
+    return false if value_mismatch_state.effects.cursor != Test::Bounds::FIRST_INDEX or value_mismatch_state.adapters.clock.cursor != Test::Bounds::FIRST_INDEX
+    return false if value_mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or value_mismatch_state.adapters.clock.exact
     return true
 
 def managed_random_effect_bridge_is_atomic() -> bool:

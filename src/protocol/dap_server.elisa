@@ -20,6 +20,7 @@ include "./dap_payload.elisa"
 include "./dap.elisa"
 include "../vm/edir_file.elisa"
 include "./dap_frames.elisa"
+include "../query/timeline.elisa"
 
 module DebuggerDAPServer:
     private:
@@ -139,6 +140,41 @@ module DebuggerDAPServer:
         const module VirtualFileExtension:
             VERSION: u64 = 1
 
+        const module TimelineNavigation:
+            VERSION: u64 = 1
+            GET_TIMELINE_COMMAND: cstr = "elisa/getTimeline"
+            GET_TIMELINE_COMMAND_LENGTH: usize = 17
+            GET_TIMELINE_COMMAND_HASH: u64 = 3910407198999854232
+            SEEK_COMMAND: cstr = "elisa/seek"
+            SEEK_COMMAND_LENGTH: usize = 10
+            SEEK_COMMAND_HASH: u64 = 2765507781635767
+            SUCCESS_PREFIX: cstr = "\",\"success\":true,\"body\":{\"version\":"
+            SUCCESS_PREFIX_LENGTH: usize = 35
+            CURRENT_EVENT_PREFIX: cstr = ",\"currentEvent\":"
+            CURRENT_EVENT_PREFIX_LENGTH: usize = 16
+            RETAINED_FIRST_PREFIX: cstr = ",\"retainedFirst\":"
+            RETAINED_FIRST_PREFIX_LENGTH: usize = 17
+            RETAINED_LAST_PREFIX: cstr = ",\"retainedLast\":"
+            RETAINED_LAST_PREFIX_LENGTH: usize = 16
+            EXACT_RANGE_PREFIX: cstr = ",\"hasExactRange\":"
+            EXACT_RANGE_PREFIX_LENGTH: usize = 17
+            EXACT_FIRST_PREFIX: cstr = ",\"exactFirst\":"
+            EXACT_FIRST_PREFIX_LENGTH: usize = 14
+            EXACT_LAST_PREFIX: cstr = ",\"exactLast\":"
+            EXACT_LAST_PREFIX_LENGTH: usize = 13
+            CAN_SEEK_PREFIX: cstr = ",\"canSeek\":"
+            CAN_SEEK_PREFIX_LENGTH: usize = 11
+            CAN_REVERSE_PREFIX: cstr = ",\"canReverse\":"
+            CAN_REVERSE_PREFIX_LENGTH: usize = 14
+            SUCCESS_SUFFIX: cstr = "}}"
+            SUCCESS_SUFFIX_LENGTH: usize = 2
+            TRUE_VALUE: cstr = "true"
+            TRUE_VALUE_LENGTH: usize = 4
+            FALSE_VALUE: cstr = "false"
+            FALSE_VALUE_LENGTH: usize = 5
+            RETAINED_EMPTY_EVENT: u64 = 0
+            NO_PENDING_REQUEST_ID: u64 = 0
+
         const module CommandDispatch:
             DAP_UNKNOWN_COMMAND_HASH: u64 = 0
             COMMAND_HASH_INITIALIZE: u64 = 2872973214862224
@@ -164,6 +200,8 @@ module DebuggerDAPServer:
             COMMAND_HASH_TERMINATE: u64 = 101818530709089
             COMMAND_HASH_HOST_EFFECT_REPLY: u64 = HostEffectExtension::REPLY_COMMAND_HASH
             COMMAND_HASH_HOST_EFFECT_CANCEL: u64 = HostEffectCancellation::COMMAND_HASH
+            COMMAND_HASH_GET_TIMELINE: u64 = TimelineNavigation::GET_TIMELINE_COMMAND_HASH
+            COMMAND_HASH_TIMELINE_SEEK: u64 = TimelineNavigation::SEEK_COMMAND_HASH
             DAP_HASH_MULTIPLIER: u64 = 31
             MAX_KNOWN_DAP_COMMAND_LENGTH: usize = HostEffectExtension::REPLY_COMMAND_LENGTH
 
@@ -191,6 +229,7 @@ module DebuggerDAPServer:
             DAP_LAUNCH_VIRTUAL_FILES_HANDLE: u32 = 17
             DAP_HOST_EFFECT_CANCEL_DETAIL_ARGUMENT: u32 = 18
             DAP_HOST_EFFECT_CANCEL_DETAIL_STATE: u32 = 19
+            DAP_TIMELINE_SEEK_DETAIL_ARGUMENT: u32 = 20
 
         const module Evaluate:
             DAP_EVALUATE_COMMAND: cstr = "evaluate"
@@ -324,8 +363,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaHostEffectCancellation\":true,\"elisaHostEffectCancellationVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 697
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaHostEffectCancellation\":true,\"elisaHostEffectCancellationVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1,\"supportsElisaTimelineNavigation\":true,\"elisaTimelineNavigationVersion\":1}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 771
 
         const module JsonWire:
             JSON_FIRST_BYTE_INDEX: usize = 0
@@ -839,6 +878,8 @@ module DebuggerDAPServer:
             return CommandDispatch::COMMAND_HASH_TERMINATE if candidate_hash == CommandDispatch::COMMAND_HASH_TERMINATE and dap_json_string_matches_ascii(payload, start, end, Lifecycle::DAP_TERMINATE_COMMAND, Lifecycle::DAP_TERMINATE_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_HOST_EFFECT_REPLY if candidate_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_REPLY and dap_json_string_matches_ascii(payload, start, end, HostEffectExtension::REPLY_COMMAND, HostEffectExtension::REPLY_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL if candidate_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL and dap_json_string_matches_ascii(payload, start, end, HostEffectCancellation::COMMAND, HostEffectCancellation::COMMAND_LENGTH)
+            return CommandDispatch::COMMAND_HASH_GET_TIMELINE if candidate_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE and dap_json_string_matches_ascii(payload, start, end, TimelineNavigation::GET_TIMELINE_COMMAND, TimelineNavigation::GET_TIMELINE_COMMAND_LENGTH)
+            return CommandDispatch::COMMAND_HASH_TIMELINE_SEEK if candidate_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK and dap_json_string_matches_ascii(payload, start, end, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH)
             return CommandDispatch::DAP_UNKNOWN_COMMAND_HASH
 
         def json_primitive_literal_length(kind: u8) -> u8:
@@ -1531,6 +1572,50 @@ module DebuggerDAPServer:
             _ = printf(command) can Console
             _ = printf(suffix) can Console
 
+        def timeline_boolean_length(value: bool) -> usize:
+            return TimelineNavigation::TRUE_VALUE_LENGTH if value else TimelineNavigation::FALSE_VALUE_LENGTH
+
+        def write_timeline_boolean(value: bool) -> void can[Console, Unsafe.PointerCast]:
+            if value:
+                _ = printf("%s", TimelineNavigation::TRUE_VALUE) can Console
+            else:
+                _ = printf("%s", TimelineNavigation::FALSE_VALUE) can Console
+
+        def write_timeline_response(timeline: DebuggerTimeline::Timeline, request_sequence: u64, response_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            bounds: DebuggerTimeline::HistoryBounds = timeline.bounds
+            retained_first: u64 = bounds.retained_first if bounds.has_retained else TimelineNavigation::RETAINED_EMPTY_EVENT
+            retained_last: u64 = bounds.retained_last if bounds.has_retained else TimelineNavigation::RETAINED_EMPTY_EVENT
+            exact_first: u64 = bounds.exact_first if bounds.has_exact else TimelineNavigation::RETAINED_EMPTY_EVENT
+            exact_last: u64 = bounds.exact_last if bounds.has_exact else TimelineNavigation::RETAINED_EMPTY_EVENT
+            body_length: mutable u64 = (TimelineNavigation::SUCCESS_PREFIX_LENGTH + decimal_digits(TimelineNavigation::VERSION) + TimelineNavigation::CURRENT_EVENT_PREFIX_LENGTH + decimal_digits(bounds.current) + TimelineNavigation::RETAINED_FIRST_PREFIX_LENGTH + decimal_digits(retained_first) + TimelineNavigation::RETAINED_LAST_PREFIX_LENGTH + decimal_digits(retained_last) + TimelineNavigation::EXACT_RANGE_PREFIX_LENGTH + timeline_boolean_length(bounds.has_exact) + TimelineNavigation::EXACT_FIRST_PREFIX_LENGTH + decimal_digits(exact_first) + TimelineNavigation::EXACT_LAST_PREFIX_LENGTH + decimal_digits(exact_last) + TimelineNavigation::CAN_SEEK_PREFIX_LENGTH + timeline_boolean_length(timeline.eligibility.can_seek) + TimelineNavigation::CAN_REVERSE_PREFIX_LENGTH + timeline_boolean_length(timeline.eligibility.can_reverse) + TimelineNavigation::SUCCESS_SUFFIX_LENGTH).u64()
+            body_length <- body_length + (ResponseEnvelope::DAP_BODY_PREFIX_LENGTH + decimal_digits(response_sequence) + ResponseEnvelope::DAP_BODY_MIDDLE_LENGTH + decimal_digits(request_sequence) + ResponseEnvelope::DAP_COMMAND_PREFIX_LENGTH + TimelineNavigation::GET_TIMELINE_COMMAND_LENGTH + JsonWire::DAP_JSON_TERMINATOR_LENGTH).u64()
+            _ = printf("Content-Length: %llu\r\n\r\n", body_length) can Console
+            _ = printf(ResponseEnvelope::DAP_BODY_PREFIX) can Console
+            _ = printf("%llu", response_sequence) can Console
+            _ = printf(ResponseEnvelope::DAP_BODY_MIDDLE) can Console
+            _ = printf("%llu", request_sequence) can Console
+            _ = printf(ResponseEnvelope::DAP_COMMAND_PREFIX) can Console
+            _ = printf("%s", TimelineNavigation::GET_TIMELINE_COMMAND) can Console
+            _ = printf("%s", TimelineNavigation::SUCCESS_PREFIX) can Console
+            _ = printf("%llu", TimelineNavigation::VERSION) can Console
+            _ = printf("%s", TimelineNavigation::CURRENT_EVENT_PREFIX) can Console
+            _ = printf("%llu", bounds.current) can Console
+            _ = printf("%s", TimelineNavigation::RETAINED_FIRST_PREFIX) can Console
+            _ = printf("%llu", retained_first) can Console
+            _ = printf("%s", TimelineNavigation::RETAINED_LAST_PREFIX) can Console
+            _ = printf("%llu", retained_last) can Console
+            _ = printf("%s", TimelineNavigation::EXACT_RANGE_PREFIX) can Console
+            write_timeline_boolean(bounds.has_exact) can Console, Unsafe.PointerCast
+            _ = printf("%s", TimelineNavigation::EXACT_FIRST_PREFIX) can Console
+            _ = printf("%llu", exact_first) can Console
+            _ = printf("%s", TimelineNavigation::EXACT_LAST_PREFIX) can Console
+            _ = printf("%llu", exact_last) can Console
+            _ = printf("%s", TimelineNavigation::CAN_SEEK_PREFIX) can Console
+            write_timeline_boolean(timeline.eligibility.can_seek) can Console, Unsafe.PointerCast
+            _ = printf("%s", TimelineNavigation::CAN_REVERSE_PREFIX) can Console
+            write_timeline_boolean(timeline.eligibility.can_reverse) can Console, Unsafe.PointerCast
+            _ = printf("%s", TimelineNavigation::SUCCESS_SUFFIX) can Console
+
         # Echo the validated command token for unknown DAP requests. Keeping
         # its original JSON escapes preserves the request's exact string value.
         def write_unknown_command_response(response_sequence: u64, request_sequence: u64, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
@@ -1990,6 +2075,20 @@ module DebuggerDAPServer:
             result: DebuggerManagedService::Result = DebuggerManagedService::service_reverse_continue(service)
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.ReverseStep, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
 
+        def dispatch_timeline_seek(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize, pending: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult:
+            method: DebuggerProtocolRequest::RequestMethod = DebuggerProtocolRequest::RequestMethod.Seek
+            if pending.active:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_HOST_EFFECT_DETAIL_STATE)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            seek: DebuggerDAPPayload::TimelineSeekRequest = DebuggerDAPPayload::timeline_seek_request_parse(payload, payload_length)
+            if not seek.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_TIMELINE_SEEK_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            request: mutable DebuggerProtocolRequest::Request = request_for(method, request_id)
+            request.target_event <- seek.event_index
+            result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
+
         def dispatch_memory(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult:
             request: DebuggerDAPPayload::MemoryRequest = DebuggerDAPPayload::memory_request_parse(payload, payload_length)
             if not request.valid:
@@ -2167,6 +2266,10 @@ module DebuggerDAPServer:
                 return dispatch_host_effect_reply(service, payload, payload_length, pending_host_effect)
             if command_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL:
                 return dispatch_host_effect_cancel(service, payload, payload_length, pending_host_effect)
+            if command_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE:
+                return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Timeline, request_id)
+            if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK:
+                return dispatch_timeline_seek(service, request_id, payload, payload_length, pending_host_effect)
             if command_hash == CommandDispatch::COMMAND_HASH_PAUSE:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Pause, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_NEXT:
@@ -2442,6 +2545,12 @@ module DebuggerDAPServer:
             if command_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL:
                 write_dynamic_response(response_sequence, request_sequence, HostEffectCancellation::COMMAND, HostEffectCancellation::COMMAND_LENGTH, HostEffectCancellation::SUCCESS_SUFFIX, HostEffectCancellation::SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
+            if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK:
+                write_dynamic_response(response_sequence, request_sequence, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE:
+                write_timeline_response(DebuggerManagedService::service_timeline(service), request_sequence, response_sequence) can Console, Unsafe.PointerCast
+                return
             if command_hash == CommandDispatch::COMMAND_HASH_NEXT:
                 write_dynamic_response(response_sequence, request_sequence, ExecutionControl::DAP_NEXT_COMMAND, ExecutionControl::DAP_NEXT_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
@@ -2500,6 +2609,7 @@ module DebuggerDAPServer:
             return DebuggerDAP::RequestKind.Step if command_hash == CommandDispatch::COMMAND_HASH_NEXT or command_hash == CommandDispatch::COMMAND_HASH_STEP_IN or command_hash == CommandDispatch::COMMAND_HASH_STEP_OUT or command_hash == CommandDispatch::COMMAND_HASH_STEP_BACK
             return DebuggerDAP::RequestKind.ReverseContinue if command_hash == CommandDispatch::COMMAND_HASH_REVERSE_CONTINUE
             return DebuggerDAP::RequestKind.Terminate if command_hash == CommandDispatch::COMMAND_HASH_TERMINATE
+            return DebuggerDAP::RequestKind.Step if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK
             return DebuggerDAP::RequestKind.Other
 
     public:

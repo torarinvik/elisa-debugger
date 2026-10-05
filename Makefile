@@ -210,6 +210,10 @@ dap-virtual-files-check: $(BUILD)/elisa-debugger-dap-server
 	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O2 -o "$(COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT)" "$(COMPILER_EDIR_VIRTUAL_FILE_FIXTURE)"
 	sh tests/dap_virtual_files_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(COMPILER_EDIR_VIRTUAL_FILE_ARTIFACT)"
 
+.PHONY: dap-timeline-navigation-check
+dap-timeline-navigation-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
+	sh tests/dap_timeline_navigation_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir"
+
 dap-logpoints-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 	sh tests/dap_logpoints_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_LOGPOINT_LINE)"
 	sh tests/dap_step_in_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_CALLEE_SOURCE_LINE)"

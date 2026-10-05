@@ -44,6 +44,26 @@ const module Test:
         SOURCE_ID: u64 = 4001
         CLOCK_VALUE: u64 = 4002
 
+    const module HistoryBarrier:
+        FIRST_EVENT: usize = 1
+        INITIAL_EVENT: usize = 0
+        PREVIOUS_EVENT_OFFSET: usize = 1
+        ROOT_TASK_ID: u64 = 0
+        RESOURCE_PATH_ID: u64 = 5001
+        RESOURCE_GENERATION: u64 = 1
+        EFFECT_CALL_SITE_ID: u64 = 5002
+        EFFECT_INVOCATION_ID: u64 = 5003
+        EFFECT_REQUEST_HASH: u64 = 5004
+        EFFECT_RESULT_HASH: u64 = 5005
+        EFFECT_RESULT_VALUE: i64 = 5006
+        ADAPTER_SOURCE_ID: u64 = 5007
+        ADAPTER_VALUE: u64 = 5008
+        EFFECTS_KIND: u16 = 0
+        RESOURCES_KIND: u16 = 1
+        ADAPTERS_KIND: u16 = 2
+        TASKS_KIND: u16 = 3
+        SIDE_STATE_KIND_COUNT: u16 = 4
+
     const module Failure:
         SUCCESS: i64 = 0
         INITIAL_STATE_NOT_EXACT: i64 = 1
@@ -66,6 +86,35 @@ const module Test:
         REPLAY_RESET_NOT_EXACT: i64 = 18
         RECORDING_EFFECT_CURSOR_ACCEPTED: i64 = 19
         OVERFLOWED_REPLAY_NOT_ATOMIC: i64 = 20
+        TIME_TRAVEL_BARRIER_NOT_DETECTED: i64 = 21
+
+def managed_history_side_state_barriers_work(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller)) or controller.engine.event_count != Test::HistoryBarrier::FIRST_EVENT
+
+    for state_kind in Test::Bounds::FIRST_INDEX.u16()..<Test::HistoryBarrier::SIDE_STATE_KIND_COUNT:
+        DebuggerManagedState::state_initialize(controller.state)
+        if state_kind == Test::HistoryBarrier::EFFECTS_KIND:
+            DebuggerEffects::effect_oracle_record_in_invocation(controller.state.effects, DebuggerEffects::EffectKind.Clock, DebuggerIdentity::debug_id(Test::HistoryBarrier::EFFECT_CALL_SITE_ID), DebuggerIdentity::debug_id(Test::HistoryBarrier::EFFECT_INVOCATION_ID), Test::HistoryBarrier::EFFECT_REQUEST_HASH, Test::HistoryBarrier::EFFECT_RESULT_HASH, Test::HistoryBarrier::EFFECT_RESULT_VALUE)
+        if state_kind == Test::HistoryBarrier::RESOURCES_KIND:
+            opened: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(controller.state.resources, DebuggerIdentity::debug_id(Test::HistoryBarrier::RESOURCE_PATH_ID), false, Test::HistoryBarrier::RESOURCE_GENERATION)
+            return false if not opened.accepted
+        if state_kind == Test::HistoryBarrier::ADAPTERS_KIND:
+            failure: DebuggerErrors::DebuggerError = DebuggerReplayAdapters::clock_record(controller.state.adapters.clock, DebuggerIdentity::debug_id(Test::HistoryBarrier::ADAPTER_SOURCE_ID), Test::HistoryBarrier::ADAPTER_VALUE)
+            return false if not DebuggerErrors::error_is_ok(failure)
+        if state_kind == Test::HistoryBarrier::TASKS_KIND:
+            task_id: DebuggerIdentity::DebugId = DebuggerConcurrencyRuntime::runtime_spawn(controller.state.tasks, DebuggerIdentity::debug_id(Test::HistoryBarrier::ROOT_TASK_ID))
+            return false if task_id.value == Test::HistoryBarrier::ROOT_TASK_ID
+
+        event_before: usize = controller.engine.event_count
+        machine_hash_before: u64 = DebuggerReplayEngine::replay_engine_state_hash(controller.engine)
+        reverse_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step(controller)
+        return false if reverse_failure.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != event_before or DebuggerReplayEngine::replay_engine_state_hash(controller.engine) != machine_hash_before
+        seek_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::HistoryBarrier::INITIAL_EVENT)
+        return false if seek_failure.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != event_before or DebuggerReplayEngine::replay_engine_state_hash(controller.engine) != machine_hash_before
+    return true
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -80,6 +129,7 @@ def main() -> i64:
     image.program <- DebuggerEDIR::Program{version: Test::Image::VERSION, instruction_count: Test::Image::INSTRUCTION_COUNT, local_count: Test::Image::LOCAL_COUNT, has_return: Test::Image::HAS_RETURN}
     image.instructions[Test::Image::FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::Image::CONSTANT_VALUE, b: Test::Image::UNUSED_OPERAND, source: zeroed}
     image.instructions[Test::Image::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::Image::UNUSED_OPERAND, b: Test::Image::UNUSED_OPERAND, source: zeroed}
+    return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return Test::Failure::INITIAL_STATE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)

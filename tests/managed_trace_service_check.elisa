@@ -150,7 +150,6 @@ const module TraceServiceTestCheckpointIndex:
 const module TraceServiceTestDispatch:
     PAUSE_REQUEST_ID: u64 = 2
     STEP_REQUEST_ID: u64 = 3
-    FRESH_CHECKPOINT_REVERSE_REQUEST_ID: u64 = 4
     NO_EXPECTED_GENERATION: u64 = 0
     INITIAL_EVENT: u64 = 0
 
@@ -313,14 +312,22 @@ def fresh_checkpoint_configuration_is_preserved(service: DebuggerManagedService:
     return false if not DebuggerTimeline::history_bounds_is_valid(service.timeline.bounds)
     return service.recorded_event_count == checkpoint_event.usize()
 
-def fresh_checkpoint_reverse_step_has_prefix(service: mutable DebuggerManagedService::Service&, checkpoint_event: u64) -> bool:
-    request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.ReverseStep, id: TraceServiceTestDispatch::FRESH_CHECKPOINT_REVERSE_REQUEST_ID, has_id: true, expected_generation: TraceServiceTestDispatch::NO_EXPECTED_GENERATION, target_event: TraceServiceTestDispatch::INITIAL_EVENT, valid: true}
-    reversed: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
-    return false if not reversed.accepted
-    expected_event: u64 = checkpoint_event - TraceServiceTestTrace::PREVIOUS_EVENT_OFFSET.u64()
-    return false if service.controller.engine.event_count.u64() != expected_event
-    historical: DebuggerCheckpoint::MachineSnapshot = service.controller.engine.history[service.controller.engine.event_count]
-    return DebuggerCheckpoint::snapshot_matches_machine(historical, service.controller.engine.machine)
+def fresh_checkpoint_reverse_step_respects_side_state_barrier(service: mutable DebuggerManagedService::Service&, checkpoint_event: u64) -> bool:
+    machine_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine)
+    clock_count: usize = service.controller.state.adapters.clock.count
+    clock_cursor: usize = service.controller.state.adapters.clock.cursor
+    random_count: usize = service.controller.state.adapters.random.count
+    random_cursor: usize = service.controller.state.adapters.random.cursor
+    console_count: usize = service.controller.state.adapters.console.count
+    console_cursor: usize = service.controller.state.adapters.console.cursor
+    reversed: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step(service.controller)
+    return false if reversed.code != DebuggerErrors::ErrorCode.Unavailable
+    return false if service.controller.engine.event_count.u64() != checkpoint_event or service.controller.session.position.event != checkpoint_event
+    return false if DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) != machine_hash
+    return false if service.controller.state.adapters.clock.count != clock_count or service.controller.state.adapters.clock.cursor != clock_cursor
+    return false if service.controller.state.adapters.random.count != random_count or service.controller.state.adapters.random.cursor != random_cursor
+    return false if service.controller.state.adapters.console.count != console_count or service.controller.state.adapters.console.cursor != console_cursor
+    return true
 
 def build_mismatch_is_atomic(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, reader: DebuggerTraceReader::TraceReader&) -> bool:
     mismatched_build: mutable DebuggerIdentity::BuildIdentity = build
@@ -433,7 +440,7 @@ def interior_checkpoint_restore_preserves_exactness_barrier(build: DebuggerIdent
     return TraceServiceTestFailure::FRESH_CHECKPOINT_RESTORE_FAILED if not restored.accepted
     return TraceServiceTestFailure::FRESH_CHECKPOINT_STATE_MISMATCH if not fresh_checkpoint_machine_matches(checkpoint.checkpoint, service) or not fresh_checkpoint_side_state_matches(checkpoint.checkpoint, service)
     return TraceServiceTestFailure::FRESH_CHECKPOINT_CONFIGURATION_LOST if not fresh_checkpoint_configuration_is_preserved(service, checkpoint.checkpoint.event, TraceServiceTestRestore::INITIAL_EVENT)
-    return TraceServiceTestFailure::FRESH_CHECKPOINT_REVERSE_FAILED if not fresh_checkpoint_reverse_step_has_prefix(service, checkpoint.checkpoint.event)
+    return TraceServiceTestFailure::FRESH_CHECKPOINT_REVERSE_FAILED if not fresh_checkpoint_reverse_step_respects_side_state_barrier(service, checkpoint.checkpoint.event)
     return TraceServiceTestRestore::SUCCESS
 
 def unjournaled_side_state_is_partial(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, session_id: u64, side_state: u16) -> bool:

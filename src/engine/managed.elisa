@@ -30,6 +30,9 @@ module DebuggerManagedEngine:
             INITIAL_INDEX: usize = 0
             PREVIOUS_OFFSET: usize = 1
 
+        const module SideState:
+            NO_RECORDS: usize = 0
+
         const module Checkpoint:
             ENGINE_MANAGED_CHECKPOINT_ID_OFFSET: u64 = 1
             ENGINE_MANAGED_CHECKPOINT_MAX_ID: u64 = 18446744073709551615
@@ -522,6 +525,20 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
     private:
+        # Engine history stores VM snapshots only. Until side-effect state is
+        # restored at the same event boundary, moving the VM alone would
+        # expose a mixed historical state to clients.
+        def managed_history_has_unaligned_side_state(controller: mutable ManagedController&) -> bool:
+            return true if not DebuggerManagedState::state_replay_is_exact(controller.state)
+            return true if controller.state.tasks.task_count != SideState::NO_RECORDS or controller.state.tasks.wait_count != SideState::NO_RECORDS
+            return true if controller.state.tasks.scheduler.count != SideState::NO_RECORDS or controller.state.tasks.scheduler.cursor != SideState::NO_RECORDS
+            return true if controller.state.tasks.scheduler.replaying or controller.state.tasks.scheduler.diverged or controller.state.tasks.scheduler.overflowed
+            return true if controller.state.effects.count != SideState::NO_RECORDS or controller.state.effects.cursor != SideState::NO_RECORDS
+            return true if controller.state.resources.count != SideState::NO_RECORDS or controller.state.resources.operation_count != SideState::NO_RECORDS or controller.state.resources.operation_cursor != SideState::NO_RECORDS or controller.state.resources.operation_overflowed
+            return true if controller.state.adapters.clock.count != SideState::NO_RECORDS or controller.state.adapters.clock.cursor != SideState::NO_RECORDS
+            return true if controller.state.adapters.random.count != SideState::NO_RECORDS or controller.state.adapters.random.cursor != SideState::NO_RECORDS
+            return controller.state.adapters.console.count != SideState::NO_RECORDS or controller.state.adapters.console.cursor != SideState::NO_RECORDS
+
         def managed_reverse_snapshot_is_valid(controller: mutable ManagedController&, event: usize) -> bool:
             return false if event >= controller.engine.event_count or event >= DebuggerReplayEngine::replay_engine_history_capacity()
             snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[event]
@@ -628,6 +645,7 @@ module DebuggerManagedEngine:
         def managed_reverse_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_reverse(controller.session)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.event_count == Event::INITIAL_INDEX
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if managed_history_has_unaligned_side_state(controller)
             original_machine: DebuggerEDIR::Machine = controller.engine.machine
             original_event_count: usize = controller.engine.event_count
             original_engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
@@ -644,6 +662,7 @@ module DebuggerManagedEngine:
 
         def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if event != controller.engine.event_count and managed_history_has_unaligned_side_state(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if event.u64() != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             original_machine: DebuggerEDIR::Machine = controller.engine.machine
             original_event_count: usize = controller.engine.event_count

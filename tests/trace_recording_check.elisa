@@ -1,6 +1,7 @@
 # Focused compile-time coverage for recorder chunks and lossless reading.
 
 include "../src/trace/binary.elisa"
+include "../src/trace/event_codec.elisa"
 include "../src/trace/storage.elisa"
 include "../src/trace/manifest.elisa"
 include "../src/trace/recorder.elisa"
@@ -91,6 +92,15 @@ const module Test:
         KIND_OFFSET: usize = 84
         LENGTH_OFFSET: usize = 86
         BODY_OFFSET: usize = 96
+
+    const module VariableCodec:
+        NO_PAYLOAD_FAILURE: i64 = 61
+        PAYLOAD_FAILURE: i64 = 62
+        TRUNCATED_FAILURE: i64 = 63
+        PAYLOAD_LENGTH: usize = 3
+        FIRST: u8 = 17
+        SECOND: u8 = 34
+        THIRD: u8 = 51
 
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
@@ -327,6 +337,35 @@ def check_event_envelope_contract() -> i64:
     return Test::RESULT_EVENT_ENVELOPE_CONTRACT if DebuggerEvents::event_envelope_is_well_formed(mismatched_task)
     return 0
 
+def check_variable_event_codec() -> i64:
+    event: mutable DebuggerEvents::EventEnvelope = make_event(Test::RECORDING, Test::EVENT_SCHEMA, Test::FIRST_EVENT)
+    encoded: mutable DebuggerTraceBinary::ByteWriter = zeroed
+    DebuggerTraceBinary::writer_initialize(encoded)
+    return Test::VariableCodec::NO_PAYLOAD_FAILURE if not DebuggerTraceEventCodec::event_record_encode(event, encoded)
+    return Test::VariableCodec::NO_PAYLOAD_FAILURE if encoded.length != DebuggerTraceEventCodec::event_record_fixed_size()
+    reader: mutable DebuggerTraceBinary::ByteReader = zeroed
+    DebuggerTraceBinary::reader_initialize(reader, encoded.bytes[0], encoded.length)
+    decoded: mutable DebuggerTraceEventCodec::DecodeResult = DebuggerTraceEventCodec::event_record_decode(reader)
+    return Test::VariableCodec::NO_PAYLOAD_FAILURE if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+    return Test::VariableCodec::NO_PAYLOAD_FAILURE if reader.offset != reader.length
+    return Test::VariableCodec::NO_PAYLOAD_FAILURE if not DebuggerEvents::event_envelopes_equal(event, decoded.event)
+
+    payload: mutable u8[Test::VariableCodec::PAYLOAD_LENGTH] = [Test::VariableCodec::FIRST, Test::VariableCodec::SECOND, Test::VariableCodec::THIRD]
+    return Test::VariableCodec::PAYLOAD_FAILURE if not DebuggerEvents::event_envelope_set_payload(event, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::VariableCodec::PAYLOAD_LENGTH)
+    DebuggerTraceBinary::writer_initialize(encoded)
+    return Test::VariableCodec::PAYLOAD_FAILURE if not DebuggerTraceEventCodec::event_record_encode(event, encoded)
+    return Test::VariableCodec::PAYLOAD_FAILURE if encoded.length != DebuggerTraceEventCodec::event_record_fixed_size() + Test::VariableCodec::PAYLOAD_LENGTH
+    DebuggerTraceBinary::reader_initialize(reader, encoded.bytes[0], encoded.length)
+    decoded <- DebuggerTraceEventCodec::event_record_decode(reader)
+    return Test::VariableCodec::PAYLOAD_FAILURE if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready
+    return Test::VariableCodec::PAYLOAD_FAILURE if reader.offset != reader.length
+    return Test::VariableCodec::PAYLOAD_FAILURE if not DebuggerEvents::event_envelopes_equal(event, decoded.event)
+
+    DebuggerTraceBinary::reader_initialize(reader, encoded.bytes[0], encoded.length - 1)
+    decoded <- DebuggerTraceEventCodec::event_record_decode(reader)
+    return Test::VariableCodec::TRUNCATED_FAILURE if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Invalid or DebuggerTraceBinary::reader_is_valid(reader)
+    return 0
+
 def check_payload_round_trip() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     recorder: mutable DebuggerTraceRecorder::TraceRecorder
     DebuggerTraceRecorder::recorder_initialize(recorder, build_identity(), DebuggerIdentity::debug_id(Test::RECORDING))
@@ -384,6 +423,7 @@ def check_payload_round_trip() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.P
     return 0
 
 def main() -> i64:
+    return check_variable_event_codec() if check_variable_event_codec() != 0
     return check_event_envelope_contract() if check_event_envelope_contract() != 0
     return check_payload_round_trip() if check_payload_round_trip() != 0
     return check_record_and_read() if check_record_and_read() != 0

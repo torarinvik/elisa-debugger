@@ -21,11 +21,13 @@ module DebuggerEDIR:
             CLOCK_RANDOM_PROGRAM_VERSION: u32 = 2
             CONSOLE_OUTPUT_PROGRAM_VERSION: u32 = 3
             CONSOLE_INPUT_PROGRAM_VERSION: u32 = 4
-            PROGRAM_VERSION: u32 = 4
-            MAX_OPCODE: u16 = 23
+            VIRTUAL_FILE_PROGRAM_VERSION: u32 = 5
+            PROGRAM_VERSION: u32 = 5
+            MAX_OPCODE: u16 = 24
 
         const module HostEffect:
             CONSOLE_OUTPUT_BYTE_MAX: i64 = 255
+            NO_RESOURCE_HANDLE: i64 = 0
 
         const module Limit:
             INSTRUCTIONS: usize = DebuggerEDIRCapacity::EDIR_INSTRUCTION_CAPACITY
@@ -170,6 +172,7 @@ module DebuggerEDIR:
             RandomU64
             ConsoleWriteByte
             ConsoleReadByte
+            VirtualFileReadByte
 
         enum VerificationError:
             None
@@ -301,7 +304,7 @@ module DebuggerEDIR:
             verification.valid <- true
             verification.verification_error <- VerificationError.None
             verification.instruction <- 0
-            if program.version != Format::LEGACY_PROGRAM_VERSION and program.version != Format::CLOCK_RANDOM_PROGRAM_VERSION and program.version != Format::CONSOLE_OUTPUT_PROGRAM_VERSION and program.version != Format::CONSOLE_INPUT_PROGRAM_VERSION:
+            if program.version != Format::LEGACY_PROGRAM_VERSION and program.version != Format::CLOCK_RANDOM_PROGRAM_VERSION and program.version != Format::CONSOLE_OUTPUT_PROGRAM_VERSION and program.version != Format::CONSOLE_INPUT_PROGRAM_VERSION and program.version != Format::VIRTUAL_FILE_PROGRAM_VERSION:
                 verification.valid <- false
                 verification.verification_error <- VerificationError.UnknownVersion
                 return verification
@@ -328,6 +331,8 @@ module DebuggerEDIR:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.a != 0 or instruction.b != 0
             if instruction.opcode == Opcode.ConsoleWriteByte:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.a < 0 or instruction.a > HostEffect::CONSOLE_OUTPUT_BYTE_MAX or instruction.b != 0
+            if instruction.opcode == Opcode.VirtualFileReadByte:
+                return verification_failure(VerificationError.InvalidOperand, index) if instruction.a <= HostEffect::NO_RESOURCE_HANDLE or instruction.b != 0
             if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal or instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal or instruction.opcode == Opcode.LoadMemory or instruction.opcode == Opcode.StoreMemory or instruction.opcode == Opcode.Allocate:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
             if instruction.opcode == Opcode.Add or instruction.opcode == Opcode.Subtract or instruction.opcode == Opcode.Multiply or instruction.opcode == Opcode.Divide or instruction.opcode == Opcode.CompareEqual or instruction.opcode == Opcode.CompareLess or instruction.opcode == Opcode.Constant or instruction.opcode == Opcode.Negate:
@@ -347,6 +352,8 @@ module DebuggerEDIR:
             if program_version < Format::CONSOLE_OUTPUT_PROGRAM_VERSION and instruction.opcode == Opcode.ConsoleWriteByte:
                 return verification_failure(VerificationError.UnknownVersion, index)
             if program_version < Format::CONSOLE_INPUT_PROGRAM_VERSION and instruction.opcode == Opcode.ConsoleReadByte:
+                return verification_failure(VerificationError.UnknownVersion, index)
+            if program_version < Format::VIRTUAL_FILE_PROGRAM_VERSION and instruction.opcode == Opcode.VirtualFileReadByte:
                 return verification_failure(VerificationError.UnknownVersion, index)
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
@@ -514,7 +521,7 @@ module DebuggerEDIR:
                 machine.faulted <- true
                 machine.halted <- true
                 return
-            if instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64 or instruction.opcode == Opcode.ConsoleWriteByte or instruction.opcode == Opcode.ConsoleReadByte:
+            if instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64 or instruction.opcode == Opcode.ConsoleWriteByte or instruction.opcode == Opcode.ConsoleReadByte or instruction.opcode == Opcode.VirtualFileReadByte:
                 # Bare VM stepping has no host provider. Managed execution must
                 # resolve this request and use machine_step_effect_result.
                 machine.faulted <- true
@@ -678,7 +685,7 @@ module DebuggerEDIR:
         # machine transition, so the event and VM value can commit together.
         def machine_step_effect_result(machine: mutable Machine&, instruction: Instruction, result_bits: u64) -> bool:
             return false if machine.halted or machine.faulted or machine.steps >= Step::MAX_COUNT
-            return false if instruction.opcode != Opcode.ClockNow and instruction.opcode != Opcode.RandomU64 and instruction.opcode != Opcode.ConsoleWriteByte and instruction.opcode != Opcode.ConsoleReadByte
+            return false if instruction.opcode != Opcode.ClockNow and instruction.opcode != Opcode.RandomU64 and instruction.opcode != Opcode.ConsoleWriteByte and instruction.opcode != Opcode.ConsoleReadByte and instruction.opcode != Opcode.VirtualFileReadByte
             return false if not verify_instruction_operands(instruction, machine.program_counter).valid
             return false if machine.program_counter >= Limit::INSTRUCTIONS.u64() or machine.return_stack_pointer > MachineCapacity::VM_EDIR_MAX_CALL_DEPTH or machine.heap_next > MachineCapacity::VM_EDIR_MAX_MEMORY
             machine.accumulator <- result_bits.i64()
@@ -687,7 +694,7 @@ module DebuggerEDIR:
             return true
 
         def opcode_is_host_effect(opcode: Opcode) -> bool:
-            return opcode == Opcode.ClockNow or opcode == Opcode.RandomU64 or opcode == Opcode.ConsoleWriteByte or opcode == Opcode.ConsoleReadByte
+            return opcode == Opcode.ClockNow or opcode == Opcode.RandomU64 or opcode == Opcode.ConsoleWriteByte or opcode == Opcode.ConsoleReadByte or opcode == Opcode.VirtualFileReadByte
 
         def machine_run(image: mutable ProgramImage&, machine: Machine, max_steps: u64) -> Machine:
             updated: mutable Machine = machine

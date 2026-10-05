@@ -17,8 +17,9 @@ const module DebuggerEDIRCapacity:
 module DebuggerEDIR:
     private:
         const module Format:
-            PROGRAM_VERSION: u32 = 1
-            MAX_OPCODE: u16 = 19
+            LEGACY_PROGRAM_VERSION: u32 = 1
+            PROGRAM_VERSION: u32 = 2
+            MAX_OPCODE: u16 = 21
 
         const module Limit:
             INSTRUCTIONS: usize = DebuggerEDIRCapacity::EDIR_INSTRUCTION_CAPACITY
@@ -159,6 +160,8 @@ module DebuggerEDIR:
             BranchZero
             Call
             Return
+            ClockNow
+            RandomU64
 
         enum VerificationError:
             None
@@ -290,7 +293,7 @@ module DebuggerEDIR:
             verification.valid <- true
             verification.verification_error <- VerificationError.None
             verification.instruction <- 0
-            if program.version != Format::PROGRAM_VERSION:
+            if program.version != Format::LEGACY_PROGRAM_VERSION and program.version != Format::PROGRAM_VERSION:
                 verification.valid <- false
                 verification.verification_error <- VerificationError.UnknownVersion
                 return verification
@@ -313,7 +316,7 @@ module DebuggerEDIR:
 
         def verify_instruction_operands(instruction: Instruction, index: u64) -> Verification:
             return verification_failure(VerificationError.InvalidOpcode, index) if instruction.opcode.u16() > Format::MAX_OPCODE
-            if instruction.opcode == Opcode.Nop or instruction.opcode == Opcode.Return:
+            if instruction.opcode == Opcode.Nop or instruction.opcode == Opcode.Return or instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.a != 0 or instruction.b != 0
             if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal or instruction.opcode == Opcode.LoadGlobal or instruction.opcode == Opcode.StoreGlobal or instruction.opcode == Opcode.LoadMemory or instruction.opcode == Opcode.StoreMemory or instruction.opcode == Opcode.Allocate:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
@@ -323,6 +326,14 @@ module DebuggerEDIR:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.b != 0
             if instruction.opcode == Opcode.Call:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.b < 0
+            return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
+
+        def verify_instruction_version(instruction: Instruction, index: u64, program_version: u32) -> Verification:
+            if program_version < Format::PROGRAM_VERSION:
+                if instruction.opcode == Opcode.ClockNow:
+                    return verification_failure(VerificationError.UnknownVersion, index)
+                if instruction.opcode == Opcode.RandomU64:
+                    return verification_failure(VerificationError.UnknownVersion, index)
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
         def verify_local_initialization(image: ProgramImage&) -> Verification:
@@ -418,9 +429,12 @@ module DebuggerEDIR:
         def verify_image(image: ProgramImage&) -> Verification:
             program_verification: Verification = verify_program(image.program)
             return program_verification if not program_verification.valid
+            program_version: u32 = image.program.version
             saw_return: mutable bool = false
             for index in 0..<image.program.instruction_count.usize():
                 instruction: Instruction = image.instructions[index]
+                version_verification: Verification = verify_instruction_version(instruction, index.u64(), program_version)
+                return version_verification if not version_verification.valid
                 operand_verification: Verification = verify_instruction_operands(instruction, index.u64())
                 return operand_verification if not operand_verification.valid
                 if instruction.opcode == Opcode.LoadLocal or instruction.opcode == Opcode.StoreLocal:
@@ -483,6 +497,12 @@ module DebuggerEDIR:
                 machine.halted <- true
                 return
             if machine.steps >= Step::MAX_COUNT:
+                machine.faulted <- true
+                machine.halted <- true
+                return
+            if instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64:
+                # Bare VM stepping has no host provider. Managed execution must
+                # resolve this request and use machine_step_effect_result.
                 machine.faulted <- true
                 machine.halted <- true
                 return
@@ -638,6 +658,19 @@ module DebuggerEDIR:
                     machine.program_counter <- machine.return_stack[machine.return_stack_pointer]
             machine.steps <- machine.steps + Step::EDIR_STEP_INCREMENT
             return
+
+        # Commit a provider result for one verified effect instruction. The
+        # caller journals the request/result before invoking this checked
+        # machine transition, so the event and VM value can commit together.
+        def machine_step_effect_result(machine: mutable Machine&, instruction: Instruction, result_bits: u64) -> bool:
+            return false if machine.halted or machine.faulted or machine.steps >= Step::MAX_COUNT
+            return false if instruction.opcode != Opcode.ClockNow and instruction.opcode != Opcode.RandomU64
+            return false if not verify_instruction_operands(instruction, machine.program_counter).valid
+            return false if machine.program_counter >= Limit::INSTRUCTIONS.u64() or machine.return_stack_pointer > MachineCapacity::VM_EDIR_MAX_CALL_DEPTH or machine.heap_next > MachineCapacity::VM_EDIR_MAX_MEMORY
+            machine.accumulator <- result_bits.i64()
+            machine.program_counter <- machine.program_counter + Step::EDIR_STEP_INCREMENT
+            machine.steps <- machine.steps + Step::EDIR_STEP_INCREMENT
+            return true
 
         def machine_run(image: mutable ProgramImage&, machine: Machine, max_steps: u64) -> Machine:
             updated: mutable Machine = machine

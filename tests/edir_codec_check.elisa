@@ -2,6 +2,15 @@ include "../src/vm/edir_codec.elisa"
 include "../src/core/identity.elisa"
 
 const module Test:
+    const module EffectInstruction:
+        PROGRAM_VERSION: u32 = 2
+        VALUE_BITS: u64 = 9223372036854775809
+        FIRST_INSTRUCTION: usize = 0
+        INITIAL_STEP_COUNT: u64 = 0
+        FIRST_STEP_COUNT: u64 = 1
+        EXPECTED_PC: u64 = 1
+        INVALID_VERSION: u32 = 1
+        NO_OPERAND: i64 = 0
     const module ReaderValidation:
         EMPTY_OFFSET: usize = 0
         MAX_ARTIFACT_STATE_RESULT: i64 = 46
@@ -151,6 +160,29 @@ def main() -> i64:
     return 11 if decoded.image.source_files[Test::FIRST_SOURCE_INDEX].id.value != Test::SOURCE_FILE or decoded.image.source_files[Test::FIRST_SOURCE_INDEX].logical_path.value != Test::SOURCE_LOGICAL_PATH or decoded.image.source_files[Test::FIRST_SOURCE_INDEX].content.value != Test::SOURCE_CONTENT_DIGEST or decoded.image.source_files[Test::FIRST_SOURCE_INDEX].line_count != Test::SOURCE_LINE_COUNT
     for index in 0..<Test::SOURCE_PATH_LENGTH:
         return 12 if decoded.image.source_files[Test::FIRST_SOURCE_INDEX].path_bytes[index] != fixture_source_path_bytes[index]
+
+    effect_image: mutable DebuggerEDIR::ProgramImage = image
+    effect_image.program.version <- Test::EffectInstruction::PROGRAM_VERSION
+    effect_image.instructions[Test::EffectInstruction::FIRST_INSTRUCTION].opcode <- DebuggerEDIR::Opcode.RandomU64
+    effect_image.instructions[Test::EffectInstruction::FIRST_INSTRUCTION].a <- Test::EffectInstruction::NO_OPERAND
+    effect_image.instructions[Test::EffectInstruction::FIRST_INSTRUCTION].b <- Test::EffectInstruction::NO_OPERAND
+    effect_verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image_with_source_table(effect_image)
+    return 38 if not effect_verification.valid
+    effect_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(effect_image)
+    return 33 if not DebuggerTraceBinary::writer_is_valid(effect_encoded)
+    effect_reader: mutable DebuggerTraceBinary::ByteReader = zeroed
+    DebuggerTraceBinary::reader_initialize(effect_reader, effect_encoded.bytes[0], effect_encoded.length)
+    effect_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(effect_reader)
+    return 34 if not effect_decoded.valid or effect_decoded.image.program.version != Test::EffectInstruction::PROGRAM_VERSION or effect_decoded.image.instructions[Test::EffectInstruction::FIRST_INSTRUCTION].opcode != DebuggerEDIR::Opcode.RandomU64
+    effect_machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    effect_committed: bool = DebuggerEDIR::machine_step_effect_result(effect_machine, effect_decoded.image.instructions[Test::EffectInstruction::FIRST_INSTRUCTION], Test::EffectInstruction::VALUE_BITS)
+    return 35 if not effect_committed or effect_machine.accumulator.u64() != Test::EffectInstruction::VALUE_BITS or effect_machine.program_counter != Test::EffectInstruction::EXPECTED_PC or effect_machine.steps != Test::EffectInstruction::FIRST_STEP_COUNT
+    bare_effect_machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(effect_decoded.image, DebuggerEDIR::machine_new(), Test::EffectInstruction::FIRST_STEP_COUNT)
+    return 36 if not bare_effect_machine.faulted or not bare_effect_machine.halted or bare_effect_machine.steps != Test::EffectInstruction::INITIAL_STEP_COUNT
+    legacy_effect_image: mutable DebuggerEDIR::ProgramImage = effect_image
+    legacy_effect_image.program.version <- Test::EffectInstruction::INVALID_VERSION
+    return 37 if DebuggerEDIR::verify_image(legacy_effect_image).valid
+
     invalid: mutable DebuggerTraceBinary::ByteWriter = encoded
     invalid.bytes[Test::ENTRY_OPCODE_OFFSET] <- Test::INVALID_OPCODE_BYTE
     invalid_reader: mutable DebuggerTraceBinary::ByteReader = zeroed

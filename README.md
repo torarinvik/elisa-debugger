@@ -162,16 +162,21 @@ not an allocation profiler or proof of the cause of a memory spike.
 
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
 `pause`, `continue`, `step`, `reverseStep`, `seek`, `timeline`, `inspect`, `tasks`,
-`checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`). Session
+`checkpoint`, `compare`, `traceVerify`, `saveTrace`, `openTrace`, and `close`). Session
 commands share the dispatcher used by the headless service. `timeline` prints
 the current event and branch, retained/exact bounds, seek/reverse eligibility,
 and stop generation. Use `seek <event> [expected-stop-generation]` to move to
 an exact event; the optional generation rejects stale scripted seeks. Use
 `saveTrace <path>` to transactionally write an exact managed trace to a file;
-for example, `saveTrace build/session.trace`. The compact JSON process still
-cannot carry a destination path or return trace artifact bytes, so trace-file
-export is currently available through the interactive CLI and typed Elisa
-service API.
+for example, `saveTrace build/session.trace`. In a new CLI process, use
+`openTrace <event> <path>` to validate a saved trace against the CLI's default
+managed image and reconstruct a checkpointed event before inspecting its
+timeline; for example, `openTrace 1 build/session.trace`. The path is the
+remaining text after the event, so spaces are preserved. The compact JSON
+process still cannot carry a destination path or return trace artifact bytes,
+so trace-file export is currently available through the interactive CLI and
+typed Elisa service API. Trace-file restore is available through the
+interactive CLI and typed Elisa service API.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

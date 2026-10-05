@@ -12,6 +12,36 @@ const module Test:
     SEEK_WITH_GENERATION_VALUE: u64 = 12
     SEEK_WITH_GENERATION_OVERFLOW_LENGTH: usize = 27
 
+    OPEN_LINE_CAPACITY: usize = 128
+    PATH_CAPACITY: usize = 64
+    FIRST_BYTE: usize = 0
+    INCREMENT: usize = 1
+    NUL: u8 = 0
+    EXPECTED_TRACE_EVENT: u64 = 17
+
+const module TestText:
+    OPEN_LINE: cstr = "openTrace 17 build/cli trace restart.eltr"
+    TRACE_PATH: cstr = "build/cli trace restart.eltr"
+    MISSING_PATH_LINE: cstr = "openTrace 17   "
+    OVERFLOW_EVENT_LINE: cstr = "openTrace 18446744073709551616 trace.eltr"
+
+const module TestResult:
+    SUCCESS: i64 = 0
+    OPEN_TRACE_PARSE: i64 = 9
+    OPEN_TRACE_PATH: i64 = 10
+    OPEN_TRACE_MUTATING: i64 = 11
+    OPEN_TRACE_MISSING_PATH: i64 = 12
+    OPEN_TRACE_OVERFLOW: i64 = 13
+
+def copy_text(source: cstr, destination: mutable u8&, capacity: usize) -> usize:
+    length: mutable usize = Test::FIRST_BYTE
+    while length < capacity:
+        byte: u8 = source[length].u8()
+        break if byte == Test::NUL
+        destination[length] <- byte
+        length <- length + Test::INCREMENT
+    return length
+
 
 def main() -> i64:
     seek_line: mutable u8[Test::SEEK_LINE_LENGTH] = [115, 101, 101, 107, 32, 49, 55, 10]
@@ -45,4 +75,23 @@ def main() -> i64:
     missing_seek_target: mutable u8[Test::SEEK_LINE_LENGTH] = [115, 101, 101, 107, 32, 32, 32, 32]
     missing_seek: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse(missing_seek_target[0], Test::SEEK_LINE_LENGTH)
     return 7 if missing_seek.valid
-    return 0
+    open_line: mutable u8[Test::OPEN_LINE_CAPACITY] = zeroed
+    trace_path: mutable u8[Test::PATH_CAPACITY] = zeroed
+    open_length: usize = copy_text(TestText::OPEN_LINE, open_line[Test::FIRST_BYTE], Test::OPEN_LINE_CAPACITY)
+    path_length: usize = copy_text(TestText::TRACE_PATH, trace_path[Test::FIRST_BYTE], Test::PATH_CAPACITY)
+    open: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(open_line[Test::FIRST_BYTE], open_length, Test::EXPECTED_GENERATION)
+    return TestResult::OPEN_TRACE_PARSE if not open.valid or open.command != DebuggerCLI::Command.OpenTrace or not open.argument_present or open.argument != Test::EXPECTED_TRACE_EVENT or not open.text_argument_present or open.text_argument_length != path_length
+    return TestResult::OPEN_TRACE_MUTATING if not DebuggerCLI::command_is_mutating(open.command)
+    for index in Test::FIRST_BYTE..<path_length:
+        return TestResult::OPEN_TRACE_PATH if open.text_argument[index] != trace_path[index]
+
+    missing_path_line: mutable u8[Test::OPEN_LINE_CAPACITY] = zeroed
+    missing_path_length: usize = copy_text(TestText::MISSING_PATH_LINE, missing_path_line[Test::FIRST_BYTE], Test::OPEN_LINE_CAPACITY)
+    missing_path: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(missing_path_line[Test::FIRST_BYTE], missing_path_length, Test::EXPECTED_GENERATION)
+    return TestResult::OPEN_TRACE_MISSING_PATH if missing_path.valid
+
+    overflow_event_line: mutable u8[Test::OPEN_LINE_CAPACITY] = zeroed
+    overflow_event_length: usize = copy_text(TestText::OVERFLOW_EVENT_LINE, overflow_event_line[Test::FIRST_BYTE], Test::OPEN_LINE_CAPACITY)
+    overflow_event: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(overflow_event_line[Test::FIRST_BYTE], overflow_event_length, Test::EXPECTED_GENERATION)
+    return TestResult::OPEN_TRACE_OVERFLOW if overflow_event.valid
+    return TestResult::SUCCESS

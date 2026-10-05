@@ -32,6 +32,7 @@ module DebuggerCLI:
             NAME_RECORD: cstr = "record"
             NAME_REPLAY: cstr = "replay"
             NAME_SAVE_TRACE: cstr = "saveTrace"
+            NAME_OPEN_TRACE: cstr = "openTrace"
             NAME_TRACE_VERIFY: cstr = "traceVerify"
             NAME_COMPARE: cstr = "compare"
             NAME_CHECKPOINT: cstr = "checkpoint"
@@ -85,6 +86,7 @@ module DebuggerCLI:
             RECORD: u64 = 3360058449
             REPLAY: u64 = 3360442343
             SAVE_TRACE: u64 = 100858890921416
+            OPEN_TRACE: u64 = 97845186083099
             TRACE_VERIFY: u64 = 98176544592272926
             COMPARE: u64 = 91144797413
             COMMANDS_HASH_CHECKPOINT: u64 = 2709093068854664
@@ -116,6 +118,7 @@ module DebuggerCLI:
             Record
             Replay
             SaveTrace
+            OpenTrace
             TraceVerify
             Compare
             Checkpoint
@@ -182,6 +185,7 @@ module DebuggerCLI:
             return Command.Record if hash == Hash::RECORD and command_token_matches(payload, start, end, CommandName::NAME_RECORD)
             return Command.Replay if hash == Hash::REPLAY and command_token_matches(payload, start, end, CommandName::NAME_REPLAY)
             return Command.SaveTrace if hash == Hash::SAVE_TRACE and command_token_matches(payload, start, end, CommandName::NAME_SAVE_TRACE)
+            return Command.OpenTrace if hash == Hash::OPEN_TRACE and command_token_matches(payload, start, end, CommandName::NAME_OPEN_TRACE)
             return Command.TraceVerify if hash == Hash::TRACE_VERIFY and command_token_matches(payload, start, end, CommandName::NAME_TRACE_VERIFY)
             return Command.Compare if hash == Hash::COMPARE and command_token_matches(payload, start, end, CommandName::NAME_COMPARE)
             return Command.Checkpoint if hash == Hash::COMMANDS_HASH_CHECKPOINT and command_token_matches(payload, start, end, CommandName::NAME_CHECKPOINT)
@@ -197,7 +201,8 @@ module DebuggerCLI:
 
         # Parse one bounded command line. Seek accepts an event and an
         # optional expected stop generation. saveTrace accepts a bounded raw
-        # destination path; paths never pass through a shell.
+        # destination path; openTrace accepts an event followed by a raw path.
+        # Paths never pass through a shell.
         def command_parse_line(payload: u8&, length: usize, expected_generation: u64) -> ParsedCommand:
             result: mutable ParsedCommand = zeroed
             result.expected_generation <- expected_generation
@@ -218,6 +223,35 @@ module DebuggerCLI:
             while index < length and command_is_whitespace(payload[index]):
                 index <- index + 1
             return result if index == length and (result.command == Command.SaveTrace or result.command == Command.Seek)
+            if result.command == Command.OpenTrace:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::ARGUMENT)
+                digits: mutable usize = 0
+                while index < length and not command_is_whitespace(payload[index]):
+                    byte: u8 = payload[index]
+                    return result if byte < Encoding::COMMANDS_ENCODING_ASCII_ZERO or byte > Encoding::COMMANDS_ENCODING_ASCII_NINE
+                    return result if digits >= CommandName::MAX_ARGUMENT_DIGITS or result.argument > (Bounds::COMMANDS_BOUNDS_MAX_U64 - (byte - Encoding::COMMANDS_ENCODING_ASCII_ZERO).u64()) / Decimal::BASE
+                    result.argument <- result.argument * Decimal::BASE + (byte - Encoding::COMMANDS_ENCODING_ASCII_ZERO).u64()
+                    result.argument_present <- true
+                    digits <- digits + CommandLine::INCREMENT
+                    index <- index + CommandLine::INCREMENT
+                return result if digits == 0
+                while index < length and command_is_whitespace(payload[index]):
+                    index <- index + CommandLine::INCREMENT
+                path_start: usize = index
+                path_end: mutable usize = length
+                while path_end > path_start and command_is_whitespace(payload[path_end - CommandLine::INCREMENT]):
+                    path_end <- path_end - CommandLine::INCREMENT
+                return result if path_end == path_start or path_end - path_start > CommandLine::MAX_BYTES
+                for path_index in path_start..<path_end:
+                    byte: u8 = payload[path_index]
+                    return result if byte == CommandLine::ASCII_NUL
+                    result.text_argument[path_index - path_start] <- byte
+                result.text_argument_length <- path_end - path_start
+                result.text_argument_present <- true
+                result.consumed <- path_end
+                result.valid <- true
+                result.failure <- DebuggerErrors::no_error()
+                return result
             if index < length:
                 if result.command == Command.SaveTrace:
                     path_end: mutable usize = length
@@ -275,7 +309,7 @@ module DebuggerCLI:
             return command_parse_line(payload, length, Sentinel::EXPECTED_GENERATION)
 
         def command_is_mutating(command: Command) -> bool:
-            return command == Command.Run or command == Command.Launch or command == Command.Attach or command == Command.Pause or command == Command.Continue or command == Command.Step or command == Command.ReverseStep or command == Command.ReverseStepOver or command == Command.ReverseStepOut or command == Command.Seek or command == Command.Break or command == Command.Watch or command == Command.Record or command == Command.Replay or command == Command.SaveTrace or command == Command.Checkpoint or command == Command.Branch or command == Command.Quit
+            return command == Command.Run or command == Command.Launch or command == Command.Attach or command == Command.Pause or command == Command.Continue or command == Command.Step or command == Command.ReverseStep or command == Command.ReverseStepOver or command == Command.ReverseStepOut or command == Command.Seek or command == Command.Break or command == Command.Watch or command == Command.Record or command == Command.Replay or command == Command.SaveTrace or command == Command.OpenTrace or command == Command.Checkpoint or command == Command.Branch or command == Command.Quit
 
         def command_validate(request: CommandRequest, generation: u64) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, Detail::STALE_GENERATION) if request.expected_generation != Sentinel::EXPECTED_GENERATION and request.expected_generation != generation

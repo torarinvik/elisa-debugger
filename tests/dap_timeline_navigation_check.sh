@@ -16,9 +16,9 @@ readonly INVALID_SEEK_SEQUENCE=9
 readonly FINAL_TIMELINE_SEQUENCE=10
 readonly EXPECTED_TIMELINE_VERSION=1
 readonly FIRST_EVENT=0
-readonly SECOND_EVENT=1
 readonly OUT_OF_RANGE_EVENT=99
 readonly EXPECTED_STOP_EVENT_COUNT=3
+readonly EXPECTED_UNCHANGED_TIMELINE_COUNT=2
 
 frame() {
     payload=$1
@@ -65,9 +65,10 @@ input="$(frame "$initialize")$(frame "$launch")$(frame "$configuration_done")$(f
 output=$(printf '%s' "$input" | "$server")
 
 printf '%s\n' "$output" | grep -F '"supportsElisaTimelineNavigation":true,"elisaTimelineNavigationVersion":'"$EXPECTED_TIMELINE_VERSION" >/dev/null
-printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"currentEvent":1,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":true}' >/dev/null
+printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"currentEvent":1,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":true}' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$SEEK_SEQUENCE"',"command":"elisa/seek","success":true' >/dev/null
-printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"currentEvent":0,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":false}' >/dev/null
+printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"currentEvent":0,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":false}' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$INVALID_SEEK_SEQUENCE"',"command":"elisa/seek","success":false' >/dev/null
+test "$(printf '%s\n' "$output" | grep -F -c '"command":"elisa/getTimeline","success":true,"body":{"version":1,"currentEvent":0,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":false}')" -eq "$EXPECTED_UNCHANGED_TIMELINE_COUNT"
 test "$(printf '%s\n' "$output" | grep -o '"event":"stopped"' | wc -l | tr -d ' ')" -eq "$EXPECTED_STOP_EVENT_COUNT"
 assert_frame_lengths "$output"

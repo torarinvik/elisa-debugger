@@ -45,6 +45,16 @@ const module Test:
         INVOCATION_ID: u64 = 4003
         CLOCK_VALUE: u64 = 4002
 
+    const module ClockBridge:
+        CALL_SITE_ID: u64 = 6101
+        ADAPTER_SOURCE_ID: u64 = 6102
+        INVOCATION_ID: u64 = 6103
+        REQUEST_HASH: u64 = 6104
+        MISMATCH_REQUEST_HASH: u64 = 6105
+        RESULT_HASH: u64 = 6106
+        RESULT_VALUE: i64 = 6107
+        MISMATCH_ADAPTER_SOURCE_ID: u64 = 6108
+
     const module HistoryBarrier:
         FIRST_EVENT: usize = 1
         INITIAL_EVENT: usize = 0
@@ -89,6 +99,44 @@ const module Test:
         RECORDING_EFFECT_CURSOR_ACCEPTED: i64 = 19
         OVERFLOWED_REPLAY_NOT_ATOMIC: i64 = 20
         TIME_TRAVEL_BARRIER_NOT_DETECTED: i64 = 21
+        CLOCK_BRIDGE_NOT_ATOMIC: i64 = 22
+
+def managed_clock_effect_bridge_is_atomic() -> bool:
+    state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(state)
+    call_site: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ClockBridge::CALL_SITE_ID)
+    adapter_source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ClockBridge::ADAPTER_SOURCE_ID)
+    invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ClockBridge::INVOCATION_ID)
+    recorded: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(state, call_site, adapter_source, invocation, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    replay_started: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    replayed: DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(state, call_site, adapter_source, invocation, Test::ClockBridge::REQUEST_HASH)
+    return false if not replayed.accepted or replayed.result_hash != Test::ClockBridge::RESULT_HASH or replayed.result_value != Test::ClockBridge::RESULT_VALUE
+    return false if state.effects.cursor != Test::Bounds::ONE_COUNT or state.adapters.clock.cursor != Test::Bounds::ONE_COUNT
+
+    mismatch_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(mismatch_state)
+    recorded <- DebuggerManagedState::state_record_clock_effect(mismatch_state, call_site, adapter_source, invocation, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    replay_started <- DebuggerManagedState::state_begin_side_effect_replay(mismatch_state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    mismatch: DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(mismatch_state, call_site, adapter_source, invocation, Test::ClockBridge::MISMATCH_REQUEST_HASH)
+    return false if mismatch.accepted or mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
+    return false if mismatch_state.effects.cursor != Test::Bounds::FIRST_INDEX or mismatch_state.adapters.clock.cursor != Test::Bounds::FIRST_INDEX
+    return false if mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or mismatch_state.adapters.clock.exact
+
+    adapter_mismatch_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(adapter_mismatch_state)
+    recorded <- DebuggerManagedState::state_record_clock_effect(adapter_mismatch_state, call_site, adapter_source, invocation, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    replay_started <- DebuggerManagedState::state_begin_side_effect_replay(adapter_mismatch_state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    adapter_mismatch: DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(adapter_mismatch_state, call_site, DebuggerIdentity::debug_id(Test::ClockBridge::MISMATCH_ADAPTER_SOURCE_ID), invocation, Test::ClockBridge::REQUEST_HASH)
+    return false if adapter_mismatch.accepted or adapter_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
+    return false if adapter_mismatch_state.effects.cursor != Test::Bounds::FIRST_INDEX or adapter_mismatch_state.adapters.clock.cursor != Test::Bounds::FIRST_INDEX
+    return false if adapter_mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or adapter_mismatch_state.adapters.clock.exact
+    return true
 
 def managed_history_side_state_barriers_work(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
@@ -136,6 +184,7 @@ def main() -> i64:
     image.program <- DebuggerEDIR::Program{version: Test::Image::VERSION, instruction_count: Test::Image::INSTRUCTION_COUNT, local_count: Test::Image::LOCAL_COUNT, has_return: Test::Image::HAS_RETURN}
     image.instructions[Test::Image::FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::Image::CONSTANT_VALUE, b: Test::Image::UNUSED_OPERAND, source: zeroed}
     image.instructions[Test::Image::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::Image::UNUSED_OPERAND, b: Test::Image::UNUSED_OPERAND, source: zeroed}
+    return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))

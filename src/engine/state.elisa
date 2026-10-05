@@ -25,6 +25,14 @@ module DebuggerManagedState:
         const module StateDetail:
             REPLAY_STATE: u32 = 1
             RESOURCE_OVERFLOW: u32 = 2
+            CLOCK_EFFECT_ATOMICITY: u32 = 3
+
+        const module BridgeDefaults:
+            COUNT_INCREMENT: usize = 1
+            EMPTY_HASH: u64 = 0
+            EMPTY_VALUE: i64 = 0
+            NO_WRITE_SUPPRESSION: bool = false
+            INITIAL_ACCEPTED: bool = false
 
     public:
         struct State:
@@ -43,6 +51,16 @@ module DebuggerManagedState:
             return state.resources.mode == DebuggerVirtualResources::ResourceMode.Replaying and state.adapters.clock.mode == DebuggerReplayAdapters::AdapterMode.Replaying if state.effects.mode == DebuggerEffects::EffectMode.Replaying
             return state.resources.mode == DebuggerVirtualResources::ResourceMode.Branch and state.adapters.clock.mode == DebuggerReplayAdapters::AdapterMode.Branch if state.effects.mode == DebuggerEffects::EffectMode.Virtualized
             return false
+
+        def state_clock_effect_bridge_failure(state: mutable State&, failure: DebuggerErrors::DebuggerError) -> void:
+            state.effects.exactness <- DebuggerEffects::Exactness.Diverged if failure.code == DebuggerErrors::ErrorCode.Diverged
+            state.effects.exactness <- DebuggerEffects::Exactness.Incomplete if failure.code != DebuggerErrors::ErrorCode.Diverged
+            state.effects.last_error <- failure
+            state.adapters.clock.exact <- false
+            state.adapters.clock.last_error <- failure
+
+        def state_clock_effect_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::EffectReplay:
+            return DebuggerEffects::EffectReplay{accepted: BridgeDefaults::INITIAL_ACCEPTED, result_hash: BridgeDefaults::EMPTY_HASH, result_value: BridgeDefaults::EMPTY_VALUE, suppress_external_write: BridgeDefaults::NO_WRITE_SUPPRESSION, failure: failure}
 
     public:
         def state_initialize(state: mutable State&) -> void:
@@ -81,6 +99,57 @@ module DebuggerManagedState:
         def state_replay_is_exact(state: mutable State&) -> bool:
             return false if not state_is_valid(state) or not DebuggerVirtualResources::resources_is_exact(state.resources)
             return state_side_effect_modes_are_coherent(state)
+
+        # The managed state owns both records for a clock effect. Prepare both
+        # mutations on local copies so a capacity or validation failure cannot
+        # leave the effect oracle and adapter journal describing different calls.
+        def state_record_clock_effect(state: mutable State&, call_site: DebuggerIdentity::DebugId, adapter_source: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: i64) -> DebuggerErrors::DebuggerError:
+            if state.effects.mode != DebuggerEffects::EffectMode.Recording or state.resources.mode != DebuggerVirtualResources::ResourceMode.Recording or state.adapters.clock.mode != DebuggerReplayAdapters::AdapterMode.Recording:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, StateDetail::CLOCK_EFFECT_ATOMICITY)
+            effect_candidate: mutable DebuggerEffects::EffectOracle = state.effects
+            clock_candidate: mutable DebuggerReplayAdapters::Clock = state.adapters.clock
+            previous_effect_count: usize = effect_candidate.count
+            previous_clock_count: usize = clock_candidate.count
+            DebuggerEffects::effect_oracle_record_in_invocation(effect_candidate, DebuggerEffects::EffectKind.Clock, call_site, invocation, request_hash, result_hash, value)
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if effect_candidate.count != previous_effect_count + BridgeDefaults::COUNT_INCREMENT or effect_candidate.exactness != DebuggerEffects::Exactness.Exact or not DebuggerErrors::error_is_ok(effect_candidate.last_error):
+                failure <- effect_candidate.last_error if not DebuggerErrors::error_is_ok(effect_candidate.last_error)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, StateDetail::CLOCK_EFFECT_ATOMICITY) if DebuggerErrors::error_is_ok(failure)
+                state_clock_effect_bridge_failure(state, failure)
+                return failure
+            failure <- DebuggerReplayAdapters::clock_record_in_invocation(clock_candidate, adapter_source, invocation, value.u64())
+            if not DebuggerErrors::error_is_ok(failure) or clock_candidate.count != previous_clock_count + BridgeDefaults::COUNT_INCREMENT:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, StateDetail::CLOCK_EFFECT_ATOMICITY) if DebuggerErrors::error_is_ok(failure)
+                state_clock_effect_bridge_failure(state, failure)
+                return failure
+            state.effects <- effect_candidate
+            state.adapters.clock <- clock_candidate
+            return DebuggerErrors::no_error()
+
+        # Replay consumes the generic effect and typed clock sample as one
+        # transaction. A mismatched value or identity does not advance either
+        # durable cursor and permanently marks the managed recording inexact.
+        def state_replay_clock_effect(state: mutable State&, call_site: DebuggerIdentity::DebugId, adapter_source: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64) -> DebuggerEffects::EffectReplay:
+            if state.effects.mode != DebuggerEffects::EffectMode.Replaying or state.resources.mode != DebuggerVirtualResources::ResourceMode.Replaying or state.adapters.clock.mode != DebuggerReplayAdapters::AdapterMode.Replaying:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, StateDetail::CLOCK_EFFECT_ATOMICITY)
+                return state_clock_effect_replay_failure(failure)
+            effect_candidate: mutable DebuggerEffects::EffectOracle = state.effects
+            clock_candidate: mutable DebuggerReplayAdapters::Clock = state.adapters.clock
+            effect_reply: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result_in_invocation(effect_candidate, DebuggerEffects::EffectKind.Clock, call_site, invocation, request_hash)
+            if not effect_reply.accepted:
+                state_clock_effect_bridge_failure(state, effect_reply.failure)
+                return effect_reply
+            clock_reply: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read_in_invocation(clock_candidate, adapter_source, invocation)
+            if not clock_reply.accepted:
+                state_clock_effect_bridge_failure(state, clock_reply.failure)
+                return state_clock_effect_replay_failure(clock_reply.failure)
+            if effect_reply.result_value.u64() != clock_reply.value:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, StateDetail::CLOCK_EFFECT_ATOMICITY)
+                state_clock_effect_bridge_failure(state, failure)
+                return state_clock_effect_replay_failure(failure)
+            state.effects <- effect_candidate
+            state.adapters.clock <- clock_candidate
+            return effect_reply
 
         def state_begin_side_effect_replay(state: mutable State&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, StateDetail::RESOURCE_OVERFLOW) if state.resources.operation_overflowed

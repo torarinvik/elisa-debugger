@@ -322,29 +322,6 @@ def fresh_checkpoint_reverse_step_has_prefix(service: mutable DebuggerManagedSer
     historical: DebuggerCheckpoint::MachineSnapshot = service.controller.engine.history[service.controller.engine.event_count]
     return DebuggerCheckpoint::snapshot_matches_machine(historical, service.controller.engine.machine)
 
-def build_interior_checkpoint_bundle(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, bundle: mutable heap DebuggerTraceBundle::TraceBundle&?) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
-    interior_service: mutable DebuggerManagedService::Service
-    new_trace_service(interior_service, TraceServiceTestIdentity::INTERIOR_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
-    return false if not seed_recorded_adapter_state(interior_service) or not run_service_to_event(interior_service, TraceServiceTestTrace::INTERIOR_CHECKPOINT_EVENT)
-    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(interior_service.controller)
-    step_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: TraceServiceTestDispatch::STEP_REQUEST_ID, has_id: true, expected_generation: TraceServiceTestDispatch::NO_EXPECTED_GENERATION, target_event: TraceServiceTestDispatch::INITIAL_EVENT, valid: true}
-    stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(interior_service, step_request)
-    return false if not stepped.accepted or interior_service.controller.engine.event_count != TraceServiceTestTrace::EVENT_COUNT
-    recorder: mutable DebuggerTraceRecorder::TraceRecorder
-    DebuggerTraceRecorder::recorder_initialize(recorder, build, DebuggerIdentity::debug_id(TraceServiceTestIdentity::RECORDING_ID))
-    failure: mutable DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestRestore::NO_EVENTS])
-    return false if not DebuggerErrors::error_is_ok(failure)
-    failure <- DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestTrace::SECOND_EVENT_INDEX])
-    return false if not DebuggerErrors::error_is_ok(failure)
-    failure <- DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
-    return false if not DebuggerErrors::error_is_ok(failure)
-    failure <- DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestTrace::LAST_EVENT.usize()])
-    return false if not DebuggerErrors::error_is_ok(failure)
-    built: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
-    return false if not built.accepted
-    bundle <- DebuggerTracePipeline::bundle_build_result_bundle(built) can Abort.Panic
-    return true
-
 def build_mismatch_is_atomic(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage, reader: DebuggerTraceReader::TraceReader&) -> bool:
     mismatched_build: mutable DebuggerIdentity::BuildIdentity = build
     mismatched_build.source <- DebuggerIdentity::debug_id(build.source.value + TraceServiceTestRestore::BUILD_SOURCE_OFFSET)
@@ -384,7 +361,7 @@ def restore_rejects_future_image_mismatch(build: DebuggerIdentity::BuildIdentity
     new_trace_service(prefix_service, TraceServiceTestIdentity::FRESH_RESTORE_FUTURE_IMAGE_SESSION_ID, build, changed_image, TraceServiceTestIdentity::RECORDING_ID)
     return false if not run_service_to_event(prefix_service, checkpoint.event)
     return false if not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, prefix_service.controller.engine.machine)
-    return false if prefix_service.controller.state.adapters.clock.count == checkpoint.adapters.clock.count
+    return false if prefix_service.controller.state.adapters.clock.count != checkpoint.adapters.clock.count or prefix_service.controller.state.adapters.random.count != checkpoint.adapters.random.count or prefix_service.controller.state.adapters.console.count != checkpoint.adapters.console.count
     prefix_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(prefix_service.controller.engine)
     prefix_event: usize = prefix_service.controller.engine.event_count
     prefix_clock_count: usize = prefix_service.controller.state.adapters.clock.count
@@ -407,10 +384,27 @@ def restore_rejects_future_image_mismatch(build: DebuggerIdentity::BuildIdentity
     return service_remains_fresh(service, TraceServiceTestIdentity::RECORDING_ID, initial_hash)
 
 def interior_checkpoint_restore_preserves_exactness_barrier(build: DebuggerIdentity::BuildIdentity, image: DebuggerEDIR::ProgramImage) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
-    bundle: mutable heap DebuggerTraceBundle::TraceBundle&? = null
-    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not build_interior_checkpoint_bundle(build, image, bundle)
-    return TraceServiceTestFailure::CHECKPOINT_REOPEN if bundle == null
-    bundle_handle: mutable heap DebuggerTraceBundle::TraceBundle& = bundle
+    interior_service: mutable DebuggerManagedService::Service
+    new_trace_service(interior_service, TraceServiceTestIdentity::INTERIOR_SESSION_ID, build, image, TraceServiceTestIdentity::RECORDING_ID)
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not seed_recorded_adapter_state(interior_service)
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not run_service_to_event(interior_service, TraceServiceTestTrace::INTERIOR_CHECKPOINT_EVENT)
+    captured_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(interior_service.controller)
+    step_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: TraceServiceTestDispatch::STEP_REQUEST_ID, has_id: true, expected_generation: TraceServiceTestDispatch::NO_EXPECTED_GENERATION, target_event: TraceServiceTestDispatch::INITIAL_EVENT, valid: true}
+    stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(interior_service, step_request)
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not stepped.accepted or interior_service.controller.engine.event_count != TraceServiceTestTrace::EVENT_COUNT
+    recorder: mutable DebuggerTraceRecorder::TraceRecorder
+    DebuggerTraceRecorder::recorder_initialize(recorder, build, DebuggerIdentity::debug_id(TraceServiceTestIdentity::RECORDING_ID))
+    failure: mutable DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestRestore::NO_EVENTS])
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not DebuggerErrors::error_is_ok(failure)
+    failure <- DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestTrace::SECOND_EVENT_INDEX])
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not DebuggerErrors::error_is_ok(failure)
+    failure <- DebuggerTraceRecorder::recorder_append_checkpoint(recorder, captured_checkpoint)
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not DebuggerErrors::error_is_ok(failure)
+    failure <- DebuggerTraceRecorder::recorder_append(recorder, interior_service.controller.engine.events[TraceServiceTestTrace::LAST_EVENT.usize()])
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not DebuggerErrors::error_is_ok(failure)
+    built: DebuggerTracePipeline::BundleBuildResult = DebuggerTracePipeline::bundle_from_recorder(recorder)
+    return TraceServiceTestFailure::CHECKPOINT_REOPEN if not built.accepted
+    bundle_handle: mutable heap DebuggerTraceBundle::TraceBundle& = DebuggerTracePipeline::bundle_build_result_bundle(built) can Abort.Panic
     reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return TraceServiceTestFailure::CHECKPOINT_REOPEN if not reopen_bundle(reader, bundle_handle)
     DebuggerTraceBundle::bundle_destroy(bundle_handle) can Memory.Release, Unsafe.PointerCast

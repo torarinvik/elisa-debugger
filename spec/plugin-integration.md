@@ -90,12 +90,22 @@ and the ordinary DAP breakpoint, thread, frame, scope, and variable requests
 supported by that response. Do not invoke a shell to assemble a command line
 or treat DAP's `program` as an Elisa source file.
 
+If initialize advertises `supportsElisaTimelineNavigation` version 1, a VS
+Code extension can request `session.customRequest("elisa/getTimeline")` and
+seek with `session.customRequest("elisa/seek", { eventIndex })`. Use the
+reported exact bounds and eligibility to drive a timeline panel. After a
+successful seek, wait for the stopped event and request fresh stack, scopes,
+and variables. See the [version 1 contract](dap-timeline-navigation-v1.md).
+
 The DAP process does not return a cross-connection session identity. A second
-process cannot attach to or share the running DAP session. Timeline and branch
-controls that need more than the DAP operations must use an integration that
-already owns the same in-process managed service. The standalone headless
-session process exposes the compact `createSession` ownership handshake; it
-does not turn the DAP process into a shareable session.
+process cannot attach to or share the running DAP session. Timeline bounds and
+event seeking are available through the optional
+`supportsElisaTimelineNavigation` version 1 DAP extension on the existing
+connection. Branch controls and bookmark metadata are not exposed by that DAP
+extension. See the [timeline navigation contract](dap-timeline-navigation-v1.md)
+for request shapes and event-limit behavior. The standalone headless session
+process exposes the compact `createSession` ownership handshake; it does not
+turn the DAP process into a shareable session.
 
 For managed programs that use clock, random, console input, or console output,
 read the `supportsElisaHostEffects` and `elisaHostEffectsVersion` fields from
@@ -126,15 +136,23 @@ If initialize advertises `supportsElisaHostEffectCancellation`, the plugin can
 cancel a timed-out provider request on the same DAP session and retry from the
 effect boundary; the DAP process does not impose its own provider deadline.
 
+If initialize advertises `supportsElisaTimelineNavigation`, a JetBrains DAP
+bridge can issue `elisa/getTimeline` and `elisa/seek` through its custom
+request API on the existing adapter connection. Use the returned bounds to
+limit the timeline UI and refresh frame/value handles after a successful seek.
+The [wire contract](dap-timeline-navigation-v1.md) defines the response and
+the current event-index limit.
+
 Managed programs that read virtual files can use the optional
 `supportsElisaVirtualFiles` launch extension. Plugins should provide immutable
 read-only byte snapshots with explicit guest handles in `arguments` and honor
 the advertised version. See the
 [virtual-file contract](dap-virtual-files-v1.md) for limits and mapping rules.
 
-The DAP adapter uses standard DAP `initialize` capabilities. The headless
-process has a separate `discover`/`initialize` version handshake; its current
-`initialize` request requires numeric `protocolMajor` and `protocolMinor`.
+The DAP adapter uses standard DAP `initialize` capabilities plus the optional
+timeline extension described above. The headless process has a separate
+`discover`/`initialize` version handshake; its current `initialize` request
+requires numeric `protocolMajor` and `protocolMinor`.
 Clients may then send `createSession` and must preserve its returned
 `sessionId` and `ownerToken` according to the
 [`createSession` schema](../schemas/session-protocol-v1.create-session.schema.json).
@@ -158,19 +176,21 @@ clients in any language.
 Clients using the typed Elisa service must handle its cancellation, stale
 generation, capability, and bounded-history results. The current compact
 headless process does not emit progress/events or route cancellation. It does
-expose the read-only `timeline` snapshot, while other advanced result payloads
-remain typed-only. A client that only supports ordinary DAP debugging should
-use the advertised DAP capabilities and avoid assuming that a method name in
-the broader session protocol is wired to that process.
+expose the read-only `timeline` snapshot, while the DAP extension exposes
+bounds and seek eligibility but not bookmark or branch metadata. Other
+advanced result payloads remain typed-only. A client that only supports
+ordinary DAP debugging should use the advertised DAP capabilities and avoid
+assuming that a method name in the broader session protocol is wired to that
+process.
 
 An Elisa component built in-process can call typed service APIs without
-opening the interactive CLI. Those APIs do not extend the compact JSON process
-transport, and the current DAP process does not expose the advanced timeline
-snapshot. Where a transport actually supplies a session ownership token and stop
-generation, clients must preserve them and reject stale handles. When a trace
-is partial, show the last verified event and disable reverse actions beyond
-it. When a value is unavailable, render its availability state instead of
-displaying a numeric zero.
+opening the interactive CLI. Those APIs expose richer timeline, bookmark, and
+branch state than either process transport. The DAP extension supports bounds
+and event seeking on its own session. Where a transport supplies a session
+ownership token and stop generation, clients must preserve them and reject
+stale handles. When a trace is partial, show the last verified event and
+disable reverse actions beyond it. When a value is unavailable, render its
+availability state instead of displaying a numeric zero.
 
 The `timeline`, `memory`, and `events` surfaces have public Elisa contracts
 backed by `DebuggerTimeline`, `DebuggerMemory`, and `DebuggerProtocolEvents`.

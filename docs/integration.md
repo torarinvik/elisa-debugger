@@ -73,6 +73,15 @@ provider request on that same session and retry execution from the unchanged
 effect instruction. This repository provides the DAP backend; it does not
 include a VS Code or JetBrains plugin or a concrete host-effect provider.
 
+The initialize response also advertises
+`supportsElisaTimelineNavigation` version 1. Hosts can call
+`elisa/getTimeline` for retained/exact bounds and eligibility, then
+`elisa/seek` on the same adapter connection to jump to an event. A successful
+seek emits a stopped event; refresh stack and variable handles afterward. The
+[timeline navigation contract](../spec/dap-timeline-navigation-v1.md) includes
+request shapes, the current managed event limit, and guidance for VS Code,
+JetBrains, and other DAP clients.
+
 For managed EDIR programs that read virtual files, check
 `supportsElisaVirtualFiles` and `elisaVirtualFilesVersion` in `initialize`,
 then provide immutable byte snapshots in the launch request. Each snapshot
@@ -181,14 +190,17 @@ the compact process.
 
 | Host | Map host actions to | Current adapter guidance |
 | --- | --- | --- |
-| VS Code | DAP initialize/launch, source and function breakpoints, threads/frames/scopes/variables, expression evaluation, execution requests, and lifecycle | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. This repository supplies the backend, not the extension manifest or TypeScript host glue. |
-| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter; otherwise the compact JSON requests the host can support | No JetBrains plugin or platform-version qualification is included. A host-specific bridge translates UI/session requests and renders responses; attach and trace artifact transfer are not available through these process transports. |
-| Other editors and tools | DAP for standard debugger UI; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve decimal IDs/offsets as strings where the protocol says strings, and report unavailable operations from endpoint behavior rather than parsing messages. |
+| VS Code | DAP initialize/launch, breakpoints, inspection, execution requests, lifecycle, and optional `elisa/getTimeline` / `elisa/seek` | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. Timeline panels use `DebugSession.customRequest` on the existing session. |
+| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter, including the optional timeline custom requests if its bridge supports them | No JetBrains plugin or platform-version qualification is included. A host-specific bridge translates UI/session requests and renders responses; attach and trace artifact transfer are not available through these process transports. |
+| Other editors and tools | DAP for standard debugger UI and optional timeline custom requests; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve exact protocol IDs, and report unavailable operations from endpoint behavior rather than parsing messages. |
 
 For a DAP host, the mapping is direct: source-line breakpoints use
 `setBreakpoints`; call-stack and local panes use `threads`, `stackTrace`,
 `scopes`, and `variables`; controls use the supported execution requests; the
-host displays capability fields and protocol errors. For a compact JSON host,
+host displays capability fields and protocol errors. A timeline panel checks
+`supportsElisaTimelineNavigation`, queries `elisa/getTimeline`, and seeks with
+`elisa/seek` on the same DAP connection; it refreshes inspection after the
+stopped event. For a compact JSON host,
 map lifecycle controls and source breakpoints to the documented request
 names, refresh inspection handles on every stop-generation change, and keep
 the headless process private to that client. There is no supported way to
@@ -201,8 +213,9 @@ combine a DAP session with a second headless connection.
 - Preserve unknown optional fields and distinguish `UNSUPPORTED`,
   `UNAVAILABLE`, `STALE_GENERATION`, `CORRUPT`, `DIVERGED`, and
   `RESOURCE_LIMIT`; do not infer support from human-readable messages.
-- Treat the DAP and compact headless service as independent sessions. Do not
-  start a second process to add a timeline panel to an existing session.
+- Treat the DAP and compact headless service as independent sessions. A DAP
+  timeline panel must use the timeline custom requests on its existing adapter
+  connection instead of starting another process.
 - Do not parse CLI output or import private engine/storage modules into a
   plugin. The command-line interface is not the editor API.
 - Do not claim native attach, native replay, remote sessions, trace branching,

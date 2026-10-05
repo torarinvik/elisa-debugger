@@ -98,6 +98,10 @@ module DebuggerTraceStorage:
             chunk: mutable StoredChunk
             status: mutable StorageStatus
 
+        struct ChunkLength:
+            bytes: mutable usize
+            status: mutable StorageStatus
+
         struct CheckpointChunkEncoding:
             chunk: mutable StoredChunk
             status: mutable StorageStatus
@@ -235,6 +239,30 @@ module DebuggerTraceStorage:
             return false if event < first_event
             return true if event <= last_event
             return last_event != Sequence::STORAGE_SEQUENCE_MAX_EVENT and event == last_event + 1
+
+        # Read the declared size of one chunk without copying its payload. A
+        # subsequent storage_decode_chunk call must still validate the whole
+        # chunk, including its checksum and payload invariants.
+        def storage_chunk_encoded_length(bytes: u8&, available: usize) -> ChunkLength:
+            return ChunkLength{bytes: Index::FIRST_INDEX, status: StorageStatus.Truncated} if available < Layout::HEADER_BYTES
+            reader: mutable DebuggerTraceBinary::ByteReader
+            DebuggerTraceBinary::reader_initialize(reader, bytes[Index::FIRST_INDEX], Layout::HEADER_BYTES)
+            magic0: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            magic1: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            magic2: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            magic3: u8 = DebuggerTraceBinary::reader_take_byte(reader)
+            schema: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+            kind: u16 = DebuggerTraceBinary::reader_take_u16(reader)
+            _ = DebuggerTraceBinary::reader_take_u64(reader)
+            first_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            last_event: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            payload_length: u64 = DebuggerTraceBinary::reader_take_u64(reader)
+            _ = DebuggerTraceBinary::reader_take_u64(reader)
+            return ChunkLength{bytes: Index::FIRST_INDEX, status: StorageStatus.Invalid} if not DebuggerTraceBinary::reader_is_valid(reader) or magic0 != Magic::STORAGE_MAGIC_BYTE_0 or magic1 != Magic::STORAGE_MAGIC_BYTE_1 or magic2 != Magic::STORAGE_MAGIC_BYTE_2 or magic3 != Magic::STORAGE_MAGIC_BYTE_3 or schema != Layout::FORMAT_VERSION or kind > ChunkKind::STORAGE_CHUNKKIND_MAX_CHUNK_KIND or last_event < first_event
+            return ChunkLength{bytes: Index::FIRST_INDEX, status: StorageStatus.Oversized} if payload_length > Capacity::PAYLOAD_CAPACITY_BYTES.u64()
+            total_length: usize = Layout::HEADER_BYTES + payload_length.usize()
+            return ChunkLength{bytes: Index::FIRST_INDEX, status: StorageStatus.Truncated} if total_length > available
+            return ChunkLength{bytes: total_length, status: StorageStatus.Ready}
 
         def storage_decode_chunk(bytes: u8&, length: usize) -> ChunkDecode:
             result: mutable ChunkDecode = zeroed

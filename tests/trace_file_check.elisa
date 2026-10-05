@@ -5,6 +5,7 @@ include "../src/trace/binary.elisa"
 include "../src/trace/recorder.elisa"
 include "../src/trace/pipeline.elisa"
 include "../src/trace/export.elisa"
+include "../src/trace/file_reader.elisa"
 
 extern creat(path: cstr, mode: int) -> int can[Blocking.IO]
 extern close(fd: int) -> int can[Blocking.IO]
@@ -62,6 +63,8 @@ const module TestResult:
     COMMIT_INJECTION: i64 = 17
     COMMIT_PRESERVATION: i64 = 18
     PATH_TRAVERSAL: i64 = 19
+    FILE_READER: i64 = 20
+    TRUNCATED_FILE_READER: i64 = 21
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{
@@ -133,6 +136,12 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     for index in Test::FIRST_BYTE_INDEX..<loaded.bytes_read:
         return TestResult::ROUND_TRIP_BYTES if read_buffer[index] != exported.bytes.bytes[index]
 
+    imported: DebuggerTraceFileReader::LoadResult = DebuggerTraceFileReader::trace_file_reader_load(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::FILE_READER if not imported.accepted or imported.reader == null
+    imported_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceFileReader::trace_file_reader_result_reader(imported) can Abort.Panic
+    return TestResult::FILE_READER if not DebuggerTraceReader::reader_is_exact(imported_reader) or imported_reader.event_count != Test::EVENT_COUNT or imported_reader.recording.value != Test::RECORDING_ID
+    DebuggerTraceFileReader::trace_file_reader_result_destroy(imported) can Memory.Release, Unsafe.PointerCast
+
     too_small: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], exported.bytes.length - Test::BYTE_INCREMENT) can Blocking.IO, Unsafe.PointerCast
     return TestResult::SMALL_BUFFER if too_small.status != DebuggerTraceFile::FileStatus.TooLarge or too_small.bytes_read != exported.bytes.length - Test::BYTE_INCREMENT
 
@@ -142,6 +151,8 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     return TestResult::TRUNCATED_SETUP if truncated_length <= Test::MINIMUM_TRACE_BYTES or not write_truncated_fixture(truncated_path[Test::FIRST_BYTE_INDEX], truncated_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], truncated_length) can Blocking.IO, Unsafe.PointerCast
     truncated: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(truncated_path[Test::FIRST_BYTE_INDEX], truncated_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::TRUNCATED_READ if truncated.accepted or truncated.status != DebuggerTraceFile::FileStatus.TruncatedTrace or truncated.bytes_read != truncated_length or truncated.scan.verified_chunks == Test::FIRST_BYTE_INDEX or truncated.scan.footer_verified
+    truncated_import: DebuggerTraceFileReader::LoadResult = DebuggerTraceFileReader::trace_file_reader_load(truncated_path[Test::FIRST_BYTE_INDEX], truncated_path_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::TRUNCATED_FILE_READER if truncated_import.accepted or truncated_import.reader != null
 
     preflight: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], truncated_length) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PREFLIGHT if preflight.accepted or preflight.status != DebuggerTraceFile::FileStatus.TruncatedTrace

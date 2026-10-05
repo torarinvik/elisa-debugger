@@ -1,0 +1,95 @@
+# Reconstruct an owned exact event reader from one fully committed trace file.
+# File framing, footer, chunks, and reader invariants are all checked before the
+# caller can use the resulting history for replay.
+
+extern malloc(size: usize) -> mutable heap void&? can[Memory.Allocate]
+extern free(storage: heap void&) can[Memory.Release]
+
+include "./file.elisa"
+include "./reader.elisa"
+
+module DebuggerTraceFileReader:
+    private:
+        const module Detail:
+            ALLOCATE: u32 = 1
+            INVALID_CHUNK_LENGTH: u32 = 2
+            INVALID_READER: u32 = 3
+
+        const module Footer:
+            BYTES: usize = DebuggerTraceStorageLimits::FOOTER_BYTES
+
+        const module Offset:
+            FIRST_BYTE: usize = 0
+
+    public:
+        # Success transfers ownership of `reader` to the caller. The caller
+        # must release it with DebuggerTraceReader::reader_destroy.
+        struct LoadResult:
+            accepted: mutable bool
+            reader: mutable heap DebuggerTraceReader::TraceReader&?
+            failure: mutable DebuggerErrors::DebuggerError
+
+    private:
+        def reader_buffer_from_raw(storage: mutable heap void&) -> mutable heap u8& can Unsafe.PointerCast:
+            trusted Unsafe.PointerCast:
+                return storage.cast[mutable heap u8&]
+
+        def load_error(failure: DebuggerErrors::DebuggerError) -> LoadResult:
+            return LoadResult{accepted: false, reader: null, failure: failure}
+
+        def load_error_with_reader(storage: mutable heap void&, reader: mutable heap DebuggerTraceReader::TraceReader&, failure: DebuggerErrors::DebuggerError) -> LoadResult can[Memory.Release, Unsafe.PointerCast]:
+            DebuggerTraceReader::reader_destroy(reader) can Memory.Release, Unsafe.PointerCast
+            free(storage) can Memory.Release
+            return load_error(failure)
+
+        def load_chunk_failure(status: DebuggerTraceStorage::StorageStatus) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::INVALID_CHUNK_LENGTH) if status == DebuggerTraceStorage::StorageStatus.Oversized
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, Detail::INVALID_CHUNK_LENGTH) if status == DebuggerTraceStorage::StorageStatus.Truncated
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INVALID_CHUNK_LENGTH)
+
+    public:
+        def trace_file_reader_result_reader[@r](result: LoadResult& @r) -> mutable heap DebuggerTraceReader::TraceReader& @r can[Abort.Panic]:
+            if not result.accepted or result.reader == null:
+                panic("trace file reader result has no owned reader")
+            return result.reader
+
+        def trace_file_reader_result_destroy(result: mutable LoadResult&) -> void can[Memory.Release, Unsafe.PointerCast]:
+            if result.reader != null:
+                DebuggerTraceReader::reader_destroy(result.reader) can Memory.Release, Unsafe.PointerCast
+                result.reader <- null
+            result.accepted <- false
+
+        def trace_file_reader_load(path: u8&, path_length: usize) -> LoadResult can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            storage: mutable heap void&? = malloc(DebuggerTraceFileLimits::MAX_FILE_BYTES)
+            return load_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::ALLOCATE)) if storage == null
+            bytes: mutable heap u8& = reader_buffer_from_raw(storage)
+            loaded: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(path, path_length, bytes[Offset::FIRST_BYTE], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+            if not loaded.accepted:
+                failure: DebuggerErrors::DebuggerError = loaded.failure
+                free(storage) can Memory.Release
+                return load_error(failure)
+
+            reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            offset: mutable usize = Offset::FIRST_BYTE
+            for chunk_index in Offset::FIRST_BYTE..<loaded.scan.verified_chunks.usize():
+                if offset > loaded.bytes_read:
+                    failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INVALID_CHUNK_LENGTH)
+                    return load_error_with_reader(storage, reader, failure) can Memory.Release, Unsafe.PointerCast
+                remaining: usize = loaded.bytes_read - offset
+                length: DebuggerTraceStorage::ChunkLength = DebuggerTraceStorage::storage_chunk_encoded_length(bytes[offset], remaining)
+                if length.status != DebuggerTraceStorage::StorageStatus.Ready:
+                    failure: DebuggerErrors::DebuggerError = load_chunk_failure(length.status)
+                    return load_error_with_reader(storage, reader, failure) can Memory.Release, Unsafe.PointerCast
+                failure: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest_encoded(reader, bytes[offset], length.bytes)
+                if not DebuggerErrors::error_is_ok(failure):
+                    return load_error_with_reader(storage, reader, failure) can Memory.Release, Unsafe.PointerCast
+                offset <- offset + length.bytes
+
+            if offset > loaded.bytes_read or loaded.bytes_read - offset != Footer::BYTES:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::INVALID_CHUNK_LENGTH)
+                return load_error_with_reader(storage, reader, failure) can Memory.Release, Unsafe.PointerCast
+            if not DebuggerTraceReader::reader_is_exact(reader):
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, false, Detail::INVALID_READER)
+                return load_error_with_reader(storage, reader, failure) can Memory.Release, Unsafe.PointerCast
+            free(storage) can Memory.Release
+            return LoadResult{accepted: true, reader: reader, failure: DebuggerErrors::no_error()}

@@ -1,6 +1,6 @@
 # Compiler-produced host effects must reach managed providers as exact events.
 
-include "../src/engine/managed.elisa"
+include "../src/protocol/managed_service.elisa"
 include "../src/vm/edir_file.elisa"
 
 const module Test:
@@ -16,6 +16,9 @@ const module Test:
         RUNTIME_ID: u64 = 9104
         SOURCE_ID: u64 = 9105
         TARGET_ID: u64 = 9106
+        SERVICE_SESSION_ID: u64 = 9107
+        SERVICE_RECORDING_ID: u64 = 9108
+        NO_DEBUG_ID: u64 = 0
         METADATA_VERSION: u32 = 1
 
     const module Provider:
@@ -36,6 +39,7 @@ const module Test:
         MAX_RUN_TURNS: usize = 8
         MAX_CONTINUE_STEPS: u64 = 64
         NO_TARGET_EVENT: usize = 0
+        NO_REQUEST_HASH: u64 = 0
         EXPECTED_EFFECT_COUNT: usize = 3
         TWO_EFFECTS: usize = 2
         EXPECTED_ADAPTER_RECORD_COUNT: usize = 1
@@ -67,6 +71,26 @@ const module Test:
         REVERSE_CONSOLE_OUTPUT: i64 = 22
         CONSOLE_OUTPUT_NOT_RESTORED: i64 = 23
         REPLAY_CONSOLE_OUTPUT: i64 = 24
+        SERVICE_OUTCOME_SETUP: i64 = 25
+        SERVICE_CLOCK_OUTCOME: i64 = 26
+        SERVICE_OUTCOME_POSITION: i64 = 27
+
+
+def service_exposes_compiled_clock_request(image: DebuggerEDIR::ProgramImage&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::Identity::COMPILER_ID), runtime: DebuggerIdentity::debug_id(Test::Identity::RUNTIME_ID), source: DebuggerIdentity::debug_id(Test::Identity::SOURCE_ID), target: DebuggerIdentity::debug_id(Test::Identity::TARGET_ID), metadata_version: Test::Identity::METADATA_VERSION}
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::Identity::SERVICE_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    service: mutable DebuggerManagedService::Service = zeroed
+    DebuggerManagedService::service_initialize(service, session, image, DebuggerIdentity::debug_id(Test::Identity::SERVICE_RECORDING_ID))
+    launch: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_launch(service.controller)
+    return Test::Failure::SERVICE_OUTCOME_SETUP if not DebuggerErrors::error_is_ok(launch)
+    pause: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_pause(service.controller)
+    return Test::Failure::SERVICE_OUTCOME_SETUP if not DebuggerErrors::error_is_ok(pause)
+
+    outcome: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_continue_with_outcome(service, Test::Bounds::MAX_CONTINUE_STEPS)
+    return Test::Failure::SERVICE_CLOCK_OUTCOME if outcome.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or not outcome.host_effect.valid or outcome.host_effect.kind != DebuggerManagedEngine::HostEffectKind.ClockNow or outcome.host_effect.request_hash == Test::Bounds::NO_REQUEST_HASH
+    return Test::Failure::SERVICE_CLOCK_OUTCOME if outcome.host_effect.call_site.value == Test::Identity::NO_DEBUG_ID or outcome.host_effect.invocation.value == Test::Identity::NO_DEBUG_ID
+    return Test::Failure::SERVICE_OUTCOME_POSITION if service.controller.engine.event_count != Test::Bounds::NO_TARGET_EVENT or service.timeline.position.event != outcome.position.event or service.timeline.bounds.current != outcome.position.event
+    return Test::Failure::SUCCESS
 
 
 def replay_compiled_host_effects(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recorded_state: DebuggerManagedState::State&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
@@ -191,4 +215,6 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast, Memory.Allocate, Abort.Pa
     return Test::Failure::EXACTNESS if not DebuggerErrors::error_is_ok(final_seek) or not controller.engine.machine.halted or not DebuggerManagedEngine::managed_is_exact(controller)
     replay_result: i64 = replay_compiled_host_effects(session, loaded.image, controller.state)
     return replay_result if replay_result != Test::Failure::SUCCESS
+    service_result: i64 = service_exposes_compiled_clock_request(loaded.image)
+    return service_result if service_result != Test::Failure::SUCCESS
     return Test::Failure::SUCCESS

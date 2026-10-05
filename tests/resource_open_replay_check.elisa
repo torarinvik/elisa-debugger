@@ -58,6 +58,37 @@ const module Test:
         WRITE_OPERATION_INDEX: usize = 2
         OPERATION_COUNT: usize = 3
 
+    const module MountedInput:
+        PATH_ID: u64 = 4201
+        NEXT_PATH_ID: u64 = 4202
+        GENERATION: u64 = 19
+        FIRST_HANDLE: u64 = 1
+        FIRST_INDEX: usize = 0
+        BYTE_COUNT: usize = 1
+        REQUESTED_BYTES: usize = 1
+        FIRST_BYTE: u8 = 42
+        INITIAL_OPERATION_COUNT: usize = 0
+        FIRST_RECORDED_OPERATION_COUNT: usize = 1
+        TWO_RECORDED_OPERATIONS: usize = 2
+        FAILURE_MOUNT: i64 = 19
+        FAILURE_MOUNT_HANDLE: i64 = 26
+        FAILURE_MOUNT_COUNT: i64 = 27
+        FAILURE_MOUNT_OPERATIONS: i64 = 28
+        FAILURE_MOUNT_VALID: i64 = 29
+        FAILURE_READ: i64 = 20
+        FAILURE_EOF: i64 = 21
+        FAILURE_LATE_MOUNT: i64 = 22
+        FAILURE_RESTART: i64 = 23
+        FAILURE_REPLAY_READ: i64 = 24
+        FAILURE_REPLAY_EOF: i64 = 25
+        FAILURE_BRANCH: i64 = 26
+        FAILURE_BRANCH_SHAPE: i64 = 27
+        FAILURE_BRANCH_SEEK: i64 = 28
+        FAILURE_PARENT_CURSOR: i64 = 29
+        FAILURE_CHILD_CURSOR: i64 = 30
+        FAILURE_BRANCH_VALID: i64 = 31
+        FAILURE_PARENT_VALID: i64 = 32
+
 def main() -> i64:
     store: mutable DebuggerVirtualResources::ResourceStore = zeroed
     DebuggerVirtualResources::resources_initialize(store, DebuggerVirtualResources::ResourceMode.Recording)
@@ -166,4 +197,35 @@ def main() -> i64:
     return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_replay_seek)
     append_replay_write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(append_store, append_replay_open.handle, appended_byte[Test::AppendReplay::FIRST_INDEX], Test::AppendReplay::APPENDED_LENGTH)
     return Test::FAILURE_APPEND_REPLAY if not DebuggerErrors::error_is_ok(append_replay_write.failure) or append_store.files[Test::AppendReplay::FIRST_INDEX].length != Test::AppendReplay::INITIAL_LENGTH + Test::AppendReplay::APPENDED_LENGTH or append_store.files[Test::AppendReplay::FIRST_INDEX].bytes[Test::AppendReplay::APPEND_OFFSET] != Test::AppendReplay::APPENDED_BYTE or not DebuggerVirtualResources::resources_replay_complete(append_store) or append_store.operation_count != Test::AppendReplay::OPERATION_COUNT
+
+    mounted_store: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    DebuggerVirtualResources::resources_initialize(mounted_store, DebuggerVirtualResources::ResourceMode.Recording)
+    mounted_bytes: mutable u8[Test::MountedInput::BYTE_COUNT] = [Test::MountedInput::FIRST_BYTE]
+    mounted: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_mount(mounted_store, DebuggerIdentity::debug_id(Test::MountedInput::PATH_ID), false, Test::MountedInput::GENERATION, mounted_bytes[Test::MountedInput::FIRST_INDEX], Test::MountedInput::BYTE_COUNT)
+    return Test::MountedInput::FAILURE_MOUNT if not mounted.accepted
+    return Test::MountedInput::FAILURE_MOUNT_HANDLE if mounted.handle.value != Test::MountedInput::FIRST_HANDLE
+    return Test::MountedInput::FAILURE_MOUNT_COUNT if mounted_store.count != Test::ONE_FILE
+    return Test::MountedInput::FAILURE_MOUNT_OPERATIONS if mounted_store.operation_count != Test::MountedInput::INITIAL_OPERATION_COUNT
+    return Test::MountedInput::FAILURE_MOUNT_VALID if not DebuggerVirtualResources::resources_is_valid(mounted_store)
+    mounted_output: mutable u8[Test::MountedInput::REQUESTED_BYTES] = zeroed
+    mounted_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(mounted_store, mounted.handle, mounted_output[Test::MountedInput::FIRST_INDEX], Test::MountedInput::REQUESTED_BYTES)
+    return Test::MountedInput::FAILURE_READ if not DebuggerErrors::error_is_ok(mounted_read.failure) or mounted_read.transferred != Test::MountedInput::BYTE_COUNT or mounted_read.eof or mounted_output[Test::MountedInput::FIRST_INDEX] != Test::MountedInput::FIRST_BYTE
+    mounted_eof: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(mounted_store, mounted.handle, mounted_output[Test::MountedInput::FIRST_INDEX], Test::MountedInput::REQUESTED_BYTES)
+    return Test::MountedInput::FAILURE_EOF if not DebuggerErrors::error_is_ok(mounted_eof.failure) or mounted_eof.transferred != Test::MountedInput::INITIAL_OPERATION_COUNT or not mounted_eof.eof or mounted_store.operation_count != Test::MountedInput::TWO_RECORDED_OPERATIONS
+    late_mount: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_mount(mounted_store, DebuggerIdentity::debug_id(Test::MountedInput::NEXT_PATH_ID), false, Test::MountedInput::GENERATION, mounted_bytes[Test::MountedInput::FIRST_INDEX], Test::MountedInput::BYTE_COUNT)
+    return Test::MountedInput::FAILURE_LATE_MOUNT if late_mount.accepted or late_mount.failure.code != DebuggerErrors::ErrorCode.InvalidState or mounted_store.count != Test::ONE_FILE
+    mounted_branch: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_branch(mounted_store)
+    branch_seek: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(mounted_branch, mounted.handle, Test::MountedInput::INITIAL_OPERATION_COUNT)
+    return Test::MountedInput::FAILURE_BRANCH_SHAPE if mounted_branch.count != Test::ONE_FILE or not mounted_branch.files[Test::MountedInput::FIRST_INDEX].mounted
+    return Test::MountedInput::FAILURE_BRANCH_SEEK if not DebuggerErrors::error_is_ok(branch_seek)
+    return Test::MountedInput::FAILURE_PARENT_CURSOR if mounted_store.files[Test::MountedInput::FIRST_INDEX].cursor != Test::MountedInput::BYTE_COUNT
+    return Test::MountedInput::FAILURE_CHILD_CURSOR if mounted_branch.files[Test::MountedInput::FIRST_INDEX].cursor != Test::MountedInput::INITIAL_OPERATION_COUNT
+    return Test::MountedInput::FAILURE_BRANCH_VALID if not DebuggerVirtualResources::resources_is_valid(mounted_branch)
+    return Test::MountedInput::FAILURE_PARENT_VALID if not DebuggerVirtualResources::resources_is_valid(mounted_store)
+    mounted_restart: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_replay_restart(mounted_store)
+    return Test::MountedInput::FAILURE_RESTART if not DebuggerErrors::error_is_ok(mounted_restart)
+    replay_mounted_read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(mounted_store, mounted.handle, mounted_output[Test::MountedInput::FIRST_INDEX], Test::MountedInput::REQUESTED_BYTES)
+    replay_mounted_eof: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(mounted_store, mounted.handle, mounted_output[Test::MountedInput::FIRST_INDEX], Test::MountedInput::REQUESTED_BYTES)
+    return Test::MountedInput::FAILURE_REPLAY_READ if not DebuggerErrors::error_is_ok(replay_mounted_read.failure) or replay_mounted_read.transferred != Test::MountedInput::BYTE_COUNT or mounted_output[Test::MountedInput::FIRST_INDEX] != Test::MountedInput::FIRST_BYTE
+    return Test::MountedInput::FAILURE_REPLAY_EOF if not DebuggerErrors::error_is_ok(replay_mounted_eof.failure) or replay_mounted_eof.transferred != Test::MountedInput::INITIAL_OPERATION_COUNT or not replay_mounted_eof.eof or not DebuggerVirtualResources::resources_replay_complete(mounted_store)
     return Test::TEST_SUCCESS

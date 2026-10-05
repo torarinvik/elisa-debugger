@@ -45,7 +45,7 @@ const module Test:
     RESOURCE_READ_LENGTH: usize = 2
     RESOURCE_WRITE_LENGTH: usize = 1
     ONE: usize = 1
-    RESOURCE_OPERATION_COUNT: usize = 4
+    RESOURCE_OPERATION_COUNT: usize = 3
     RESOURCE_BYTE_0: u8 = 11
     RESOURCE_BYTE_1: u8 = 22
     RESOURCE_BYTE_2: u8 = 33
@@ -233,14 +233,14 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
 
     resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
     DebuggerVirtualResources::resources_initialize(resources, DebuggerVirtualResources::ResourceMode.Recording)
-    handle: DebuggerIdentity::DebugId = DebuggerVirtualResources::resources_open(resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), true, Test::RESOURCE_GENERATION)
     data: mutable u8[Test::RESOURCE_BYTES] = zeroed
     data[Test::RESOURCE_FIRST_INDEX] <- Test::RESOURCE_BYTE_0
     data[Test::RESOURCE_SECOND_INDEX] <- Test::RESOURCE_BYTE_1
     data[Test::RESOURCE_THIRD_INDEX] <- Test::RESOURCE_BYTE_2
     data[Test::RESOURCE_FOURTH_INDEX] <- Test::RESOURCE_BYTE_3
     data[Test::RESOURCE_FIFTH_INDEX] <- Test::RESOURCE_BYTE_4
-    _ = DebuggerVirtualResources::resources_seed(resources, handle, data[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_BYTES)
+    mounted_resource: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_mount(resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), true, Test::RESOURCE_GENERATION, data[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_BYTES)
+    handle: DebuggerIdentity::DebugId = mounted_resource.handle
     resource_read: mutable u8[Test::RESOURCE_READ_LENGTH] = zeroed
     _ = DebuggerVirtualResources::resources_read(resources, handle, resource_read[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_READ_LENGTH)
     resource_write: mutable u8[Test::RESOURCE_WRITE_LENGTH] = [Test::RESOURCE_MUTATED_BYTE]
@@ -540,7 +540,7 @@ def checkpoints_are_equal(left: DebuggerFullCheckpoint::ManagedCheckpoint, right
     for index in 0..<left.resources.count:
         lfile: DebuggerVirtualResources::VirtualFile = left.resources.files[index]
         rfile: DebuggerVirtualResources::VirtualFile = right.resources.files[index]
-        return false if lfile.handle.value != rfile.handle.value or lfile.path.value != rfile.path.value or lfile.length != rfile.length or lfile.cursor != rfile.cursor or lfile.initial_length != rfile.initial_length or lfile.writable != rfile.writable or lfile.generation != rfile.generation
+        return false if lfile.handle.value != rfile.handle.value or lfile.path.value != rfile.path.value or lfile.length != rfile.length or lfile.cursor != rfile.cursor or lfile.initial_length != rfile.initial_length or lfile.writable != rfile.writable or lfile.generation != rfile.generation or lfile.mounted != rfile.mounted
         for byte_index in 0..<lfile.length:
             return false if lfile.bytes[byte_index] != rfile.bytes[byte_index]
         for byte_index in 0..<lfile.initial_length:
@@ -557,15 +557,14 @@ def resource_operations_replay_after_checkpoint(checkpoint: DebuggerFullCheckpoi
     resources: mutable DebuggerVirtualResources::ResourceStore = checkpoint.resources
     return false if resources.operation_count != Test::RESOURCE_OPERATION_COUNT
     return false if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_replay_restart(resources))
-    opened: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(resources, DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID), true, Test::RESOURCE_GENERATION)
-    return false if not opened.accepted
+    handle: DebuggerIdentity::DebugId = resources.files[Test::RESOURCE_FIRST_INDEX].handle
     output: mutable u8[Test::RESOURCE_READ_LENGTH] = zeroed
-    read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, opened.handle, output[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_READ_LENGTH)
+    read_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(resources, handle, output[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_READ_LENGTH)
     return false if not DebuggerErrors::error_is_ok(read_result.failure) or read_result.transferred != Test::RESOURCE_READ_LENGTH or output[Test::RESOURCE_FIRST_INDEX] != Test::RESOURCE_BYTE_0 or output[Test::RESOURCE_SECOND_INDEX] != Test::RESOURCE_BYTE_1
     input: mutable u8[Test::RESOURCE_WRITE_LENGTH] = [Test::RESOURCE_MUTATED_BYTE]
-    write_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(resources, opened.handle, input[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_WRITE_LENGTH)
+    write_result: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(resources, handle, input[Test::RESOURCE_FIRST_INDEX], Test::RESOURCE_WRITE_LENGTH)
     return false if not DebuggerErrors::error_is_ok(write_result.failure) or write_result.transferred != Test::RESOURCE_WRITE_LENGTH
-    seek_result: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(resources, opened.handle, Test::RESOURCE_CURSOR)
+    seek_result: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(resources, handle, Test::RESOURCE_CURSOR)
     return false if not DebuggerErrors::error_is_ok(seek_result)
     return DebuggerVirtualResources::resources_replay_complete(resources) and resources.files[Test::RESOURCE_FIRST_INDEX].bytes[Test::RESOURCE_THIRD_INDEX] == Test::RESOURCE_MUTATED_BYTE
 

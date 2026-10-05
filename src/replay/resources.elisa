@@ -18,16 +18,19 @@ module DebuggerVirtualResources:
             OPERATION: u32 = 9
             OPERATION_MISMATCH: u32 = 10
             OPERATION_OVERFLOW: u32 = 11
+            MOUNT: u32 = 12
 
         const module Resource:
             FILE_CAPACITY: usize = 16
             DATA_CAPACITY: usize = 256
             OPERATION_CAPACITY: usize = 32
             FIRST_HANDLE: u64 = 1
+            NEXT_HANDLE_INCREMENT: u64 = 1
             FIRST_INDEX: usize = 0
             MAX_HANDLE: u64 = 18446744073709551615
             NO_HANDLE: u64 = 0
             EMPTY_FILE_COUNT: usize = 0
+            FILE_COUNT_INCREMENT: usize = 1
             EMPTY_OPERATION_COUNT: usize = 0
             EMPTY_OPERATION_CURSOR: usize = 0
             OPERATION_COUNT_INCREMENT: usize = 1
@@ -69,6 +72,7 @@ module DebuggerVirtualResources:
             cursor: mutable usize
             writable: mutable bool
             generation: mutable u64
+            mounted: mutable bool
 
         struct ResourceOperation:
             sequence: mutable u64
@@ -248,8 +252,8 @@ module DebuggerVirtualResources:
             store.files[index].path <- path
             store.files[index].writable <- writable
             store.files[index].generation <- generation
-            store.count <- store.count + 1
-            store.next_handle <- store.next_handle + Resource::FIRST_HANDLE
+            store.count <- store.count + Resource::FILE_COUNT_INCREMENT
+            store.next_handle <- store.next_handle + Resource::NEXT_HANDLE_INCREMENT
             result.handle <- store.files[index].handle
             result.accepted <- true
             return result
@@ -333,6 +337,53 @@ module DebuggerVirtualResources:
             store.files[index].cursor <- Resource::EMPTY_OPERATION_CURSOR
             return DebuggerErrors::no_error()
 
+        # Install one launch-time input snapshot before guest-visible resource
+        # operations begin. Mounting is part of initial state, so replay starts
+        # with the same bytes without expecting an artificial guest open event.
+        def resources_mount(store: mutable ResourceStore&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64, bytes: u8&, length: usize) -> ResourceOpenResult:
+            result: mutable ResourceOpenResult = zeroed
+            result.handle <- DebuggerIdentity::debug_id(Resource::NO_HANDLE)
+            result.failure <- DebuggerErrors::no_error()
+            if not resources_is_valid(store):
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+                return result
+            if store.mode != ResourceMode.Recording or store.operation_count != Resource::EMPTY_OPERATION_COUNT or store.operation_cursor != Resource::EMPTY_OPERATION_CURSOR or store.operation_overflowed:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::MOUNT)
+                return result
+            if path.value == Resource::NO_HANDLE or generation == Resource::NO_GENERATION:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HANDLE)
+                return result
+            if length > Resource::DATA_CAPACITY or store.count >= Resource::FILE_CAPACITY:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::CAPACITY)
+                return result
+            if store.next_handle == Resource::NO_HANDLE or store.next_handle == Resource::MAX_HANDLE:
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::CAPACITY)
+                return result
+            for index in Resource::FIRST_INDEX..<store.count:
+                if store.files[index].path.value == path.value and store.files[index].generation == generation:
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::MOUNT)
+                    return result
+                if store.files[index].handle.value == store.next_handle:
+                    result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::CORRUPT)
+                    return result
+            index: usize = store.count
+            store.files[index].handle <- DebuggerIdentity::debug_id(store.next_handle)
+            store.files[index].path <- path
+            store.files[index].writable <- writable
+            store.files[index].generation <- generation
+            store.files[index].mounted <- true
+            for byte_index in Resource::FIRST_INDEX..<length:
+                store.files[index].bytes[byte_index] <- bytes[byte_index]
+                store.files[index].initial_bytes[byte_index] <- bytes[byte_index]
+            store.files[index].length <- length
+            store.files[index].initial_length <- length
+            store.files[index].cursor <- Resource::EMPTY_OPERATION_CURSOR
+            store.count <- store.count + Resource::FILE_COUNT_INCREMENT
+            store.next_handle <- store.next_handle + Resource::NEXT_HANDLE_INCREMENT
+            result.handle <- store.files[index].handle
+            result.accepted <- true
+            return result
+
         def resources_clone_snapshot(store: ResourceStore&) -> ResourceStore:
             snapshot: mutable ResourceStore = zeroed
             snapshot.count <- store.count
@@ -347,6 +398,7 @@ module DebuggerVirtualResources:
                 snapshot.files[index].cursor <- store.files[index].cursor
                 snapshot.files[index].writable <- store.files[index].writable
                 snapshot.files[index].generation <- store.files[index].generation
+                snapshot.files[index].mounted <- store.files[index].mounted
                 for byte_index in Resource::FIRST_INDEX..<Resource::DATA_CAPACITY:
                     snapshot.files[index].bytes[byte_index] <- store.files[index].bytes[byte_index]
                     snapshot.files[index].initial_bytes[byte_index] <- store.files[index].initial_bytes[byte_index]
@@ -467,7 +519,7 @@ module DebuggerVirtualResources:
                     operation: ResourceOperation = branch.operations[operation_index]
                     if operation.kind == ResourceOperationKind.Open and operation.handle.value == store.files[source_index].handle.value:
                         file_was_opened <- true
-                if file_was_opened:
+                if file_was_opened or store.files[source_index].mounted:
                     target_index: usize = branch.count
                     branch.files[target_index].handle <- store.files[source_index].handle
                     branch.files[target_index].path <- store.files[source_index].path
@@ -476,6 +528,7 @@ module DebuggerVirtualResources:
                     branch.files[target_index].cursor <- store.files[source_index].cursor
                     branch.files[target_index].writable <- store.files[source_index].writable
                     branch.files[target_index].generation <- store.files[source_index].generation
+                    branch.files[target_index].mounted <- store.files[source_index].mounted
                     for byte_index in Resource::FIRST_INDEX..<Resource::DATA_CAPACITY:
                         branch.files[target_index].bytes[byte_index] <- store.files[source_index].bytes[byte_index]
                         branch.files[target_index].initial_bytes[byte_index] <- store.files[source_index].initial_bytes[byte_index]
@@ -516,12 +569,12 @@ module DebuggerVirtualResources:
                         prior_operation: ResourceOperation = store.operations[prior_operation_index]
                         if prior_operation.kind == ResourceOperationKind.Open and prior_operation.handle.value == operation.handle.value:
                             operation_has_prior_open <- true
-                    return false if not operation_has_prior_open
+                    return false if not operation_has_prior_open and not store.files[operation_file_index].mounted
                 file_was_opened[operation_file_index] <- true if operation.kind == ResourceOperationKind.Open
                 file: VirtualFile = store.files[operation_file_index]
                 return false if operation.kind == ResourceOperationKind.Write and not file.writable
             for file_index in Resource::FIRST_INDEX..<store.count:
-                return false if not file_was_opened[file_index]
+                return false if not file_was_opened[file_index] and not store.files[file_index].mounted
             return resources_history_matches_state(store)
 
         def resources_write(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, input: u8&, length: usize) -> IoResult:

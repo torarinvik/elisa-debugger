@@ -67,9 +67,11 @@ console-output requests through the response body of `continue`, `next`,
 `stepIn`, or `stepOut`. A host must inspect those responses and send the
 correlated `elisa/provideHostEffect` reply through the same session. The
 [versioned wire contract](../spec/dap-host-effects-v1.md) describes the
-message format and host integration path. This repository provides the DAP
-backend; it does not include a VS Code or JetBrains plugin or a concrete
-host-effect provider.
+message format and host integration path. If initialize also advertises
+`supportsElisaHostEffectCancellation` version 1, a host can cancel a timed-out
+provider request on that same session and retry execution from the unchanged
+effect instruction. This repository provides the DAP backend; it does not
+include a VS Code or JetBrains plugin or a concrete host-effect provider.
 
 The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. `stackTrace`
 supports the standard `startFrame` and `levels` paging arguments and reports

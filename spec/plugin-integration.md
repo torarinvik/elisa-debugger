@@ -116,6 +116,9 @@ does not claim a JetBrains version has been tested. To support host effects,
 the selected route must let the plugin inspect execution response bodies and
 send `elisa/provideHostEffect` through the same DAP session; see the
 [version 1 contract](dap-host-effects-v1.md).
+If initialize advertises `supportsElisaHostEffectCancellation`, the plugin can
+cancel a timed-out provider request on the same DAP session and retry from the
+effect boundary; the DAP process does not impose its own provider deadline.
 
 The DAP adapter uses standard DAP `initialize` capabilities. The headless
 process has a separate `discover`/`initialize` version handshake; its current

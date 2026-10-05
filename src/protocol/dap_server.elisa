@@ -127,6 +127,15 @@ module DebuggerDAPServer:
             SIMPLE_SUCCESS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"accepted\":true}}"
             SIMPLE_SUCCESS_SUFFIX_LENGTH: usize = 42
 
+        const module HostEffectCancellation:
+            VERSION: u64 = 1
+            COMMAND: cstr = "elisa/cancelHostEffect"
+            COMMAND_LENGTH: usize = 22
+            COMMAND_HASH: u64 = 14851843216748769586
+            SUCCESS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"accepted\":true,\"cancelled\":true}}"
+            SUCCESS_SUFFIX_LENGTH: usize = 59
+            NO_REQUEST_ID: u64 = 0
+
         const module VirtualFileExtension:
             VERSION: u64 = 1
 
@@ -154,6 +163,7 @@ module DebuggerDAPServer:
             COMMAND_HASH_DISCONNECT: u64 = 2736770871285916
             COMMAND_HASH_TERMINATE: u64 = 101818530709089
             COMMAND_HASH_HOST_EFFECT_REPLY: u64 = HostEffectExtension::REPLY_COMMAND_HASH
+            COMMAND_HASH_HOST_EFFECT_CANCEL: u64 = HostEffectCancellation::COMMAND_HASH
             DAP_HASH_MULTIPLIER: u64 = 31
             MAX_KNOWN_DAP_COMMAND_LENGTH: usize = HostEffectExtension::REPLY_COMMAND_LENGTH
 
@@ -179,6 +189,8 @@ module DebuggerDAPServer:
             DAP_HOST_EFFECT_DETAIL_STATE: u32 = 15
             DAP_LAUNCH_VIRTUAL_FILES_ARGUMENT: u32 = 16
             DAP_LAUNCH_VIRTUAL_FILES_HANDLE: u32 = 17
+            DAP_HOST_EFFECT_CANCEL_DETAIL_ARGUMENT: u32 = 18
+            DAP_HOST_EFFECT_CANCEL_DETAIL_STATE: u32 = 19
 
         const module Evaluate:
             DAP_EVALUATE_COMMAND: cstr = "evaluate"
@@ -312,8 +324,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 615
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaHostEffectCancellation\":true,\"elisaHostEffectCancellationVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 697
 
         const module JsonWire:
             JSON_FIRST_BYTE_INDEX: usize = 0
@@ -826,6 +838,7 @@ module DebuggerDAPServer:
             return CommandDispatch::COMMAND_HASH_DISCONNECT if candidate_hash == CommandDispatch::COMMAND_HASH_DISCONNECT and dap_json_string_matches_ascii(payload, start, end, Lifecycle::DAP_DISCONNECT_COMMAND, Lifecycle::DAP_DISCONNECT_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_TERMINATE if candidate_hash == CommandDispatch::COMMAND_HASH_TERMINATE and dap_json_string_matches_ascii(payload, start, end, Lifecycle::DAP_TERMINATE_COMMAND, Lifecycle::DAP_TERMINATE_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_HOST_EFFECT_REPLY if candidate_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_REPLY and dap_json_string_matches_ascii(payload, start, end, HostEffectExtension::REPLY_COMMAND, HostEffectExtension::REPLY_COMMAND_LENGTH)
+            return CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL if candidate_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL and dap_json_string_matches_ascii(payload, start, end, HostEffectCancellation::COMMAND, HostEffectCancellation::COMMAND_LENGTH)
             return CommandDispatch::DAP_UNKNOWN_COMMAND_HASH
 
         def json_primitive_literal_length(kind: u8) -> u8:
@@ -1941,6 +1954,24 @@ module DebuggerDAPServer:
             pending <- zeroed
             return DebuggerProtocolDispatcher::dispatch_ok(service.controller.session, method)
 
+        # Cancellation invalidates only the adapter request. The VM remains
+        # stopped at the host-effect instruction, so a later continue can ask
+        # the provider again without recording a partial effect.
+        def dispatch_host_effect_cancel(service: mutable DebuggerManagedService::Service&, payload: u8&, payload_length: usize, pending: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult:
+            method: DebuggerProtocolRequest::RequestMethod = DebuggerProtocolRequest::RequestMethod.Cancel
+            response: DebuggerDAPPayload::HostEffectResponse = DebuggerDAPPayload::host_effect_response_parse(payload, payload_length)
+            if not response.valid or response.has_value:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_HOST_EFFECT_CANCEL_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            if not pending.active:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_HOST_EFFECT_CANCEL_DETAIL_STATE)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            if response.request_id != pending.request_id or response.request_id == HostEffectCancellation::NO_REQUEST_ID:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_HOST_EFFECT_CANCEL_DETAIL_ARGUMENT)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            pending <- zeroed
+            return DebuggerProtocolDispatcher::dispatch_ok(service.controller.session, method)
+
         def dispatch_step_with_host_effects(service: mutable DebuggerManagedService::Service&, request_id: u64, context: mutable DAPRequestContext&, pending: mutable PendingHostEffect&, operation: HostEffectStepOperation) -> DebuggerProtocolDispatcher::DispatchResult:
             method: DebuggerProtocolRequest::RequestMethod = DebuggerProtocolRequest::RequestMethod.Step
             if pending.active:
@@ -2134,6 +2165,8 @@ module DebuggerDAPServer:
                 return dispatch_continue_with_host_effects(service, request_id, context, pending_host_effect)
             if command_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_REPLY:
                 return dispatch_host_effect_reply(service, payload, payload_length, pending_host_effect)
+            if command_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL:
+                return dispatch_host_effect_cancel(service, payload, payload_length, pending_host_effect)
             if command_hash == CommandDispatch::COMMAND_HASH_PAUSE:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Pause, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_NEXT:
@@ -2405,6 +2438,9 @@ module DebuggerDAPServer:
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_REPLY:
                 write_dynamic_response(response_sequence, request_sequence, HostEffectExtension::REPLY_COMMAND, HostEffectExtension::REPLY_COMMAND_LENGTH, HostEffectExtension::SIMPLE_SUCCESS_SUFFIX, HostEffectExtension::SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL:
+                write_dynamic_response(response_sequence, request_sequence, HostEffectCancellation::COMMAND, HostEffectCancellation::COMMAND_LENGTH, HostEffectCancellation::SUCCESS_SUFFIX, HostEffectCancellation::SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_NEXT:
                 write_dynamic_response(response_sequence, request_sequence, ExecutionControl::DAP_NEXT_COMMAND, ExecutionControl::DAP_NEXT_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast

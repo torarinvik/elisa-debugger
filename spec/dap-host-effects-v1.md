@@ -27,6 +27,9 @@ The capability is separate from standard DAP capabilities. A client that does
 not implement version 1 must not promise effectful EDIR programs can run to
 completion. The adapter does not call the host clock, random generator, or
 console itself; the IDE-side provider selects and performs those operations.
+Provider cancellation is a separately negotiated optional extension. A client
+may use it only when `supportsElisaHostEffectCancellation` is `true` and
+`elisaHostEffectCancellationVersion` is `1`.
 
 ## Yield and event ordering
 
@@ -156,6 +159,34 @@ a corrected reply. A reply when no request is pending also gets
 human-readable error message. A second execution request while a provider
 request is pending is rejected without changing the session.
 
+## Cancelling a provider request
+
+The cancellation extension adds the custom DAP request
+`elisa/cancelHostEffect`. Its `arguments.requestId` must match the pending
+host-effect object's `requestId`:
+
+```json
+{
+  "seq": 20,
+  "type": "request",
+  "command": "elisa/cancelHostEffect",
+  "arguments": { "requestId": 12 }
+}
+```
+
+A successful response has `body.accepted: true` and `body.cancelled: true`.
+Cancellation invalidates the provider request and rejects any later reply for
+that request ID. It does not advance the VM, add a history event, or record a
+host result. The VM remains stopped at the same effect instruction; a later
+`continue`, `next`, `stepIn`, or `stepOut` can yield a fresh provider request
+with a new request ID. A malformed or mismatched cancellation leaves the
+current provider request pending.
+
+The DAP process does not run a wall-clock timer. The host owns its provider
+deadline; when that deadline expires, it can send `elisa/cancelHostEffect` on
+the same DAP session if cancellation is advertised. Hosts without this
+extension must keep the session open until they can reply or terminate it.
+
 ## Recording and replay
 
 Accepted values are stored in the managed effect journal with the operation's
@@ -186,7 +217,10 @@ the same session. A bridge that hides execution responses must surface this
 extension itself. Do not open a second debugger process to answer a request:
 each process has an independent session and pending-request state.
 
-Version 1 has no cancellation, timeout, queue, or retry protocol. A host
-should keep one outstanding provider operation per session, send at most one
-reply, and terminate the DAP session if it cannot complete the pending request.
-The current process also does not provide a durable session-resume mechanism.
+The host-effects extension has no queue, automatic timeout, or automatic retry
+protocol. A host should keep one outstanding provider operation per session
+and send at most one reply for each request. Hosts that support cancellation
+may retry execution after cancelling the provider request; clients that do not
+support cancellation should terminate the DAP session if they cannot complete
+the pending request. The current process does not provide a durable
+session-resume mechanism.

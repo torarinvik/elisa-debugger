@@ -48,6 +48,18 @@ readonly INPUT_EOF_HIGH=4294967295
 readonly INPUT_EOF_LOW=4294967295
 readonly INPUT_BYTE_EXIT_CODE=65
 readonly INPUT_EOF_EXIT_CODE=-1
+readonly CANCEL_INITIALIZE_SEQUENCE=30
+readonly CANCEL_LAUNCH_SEQUENCE=31
+readonly CANCEL_CONFIGURATION_SEQUENCE=32
+readonly CANCEL_FIRST_CONTINUE_SEQUENCE=33
+readonly CANCEL_WRONG_SEQUENCE=34
+readonly CANCEL_ACCEPT_SEQUENCE=35
+readonly CANCEL_STALE_REPLY_SEQUENCE=36
+readonly CANCEL_RETRY_CONTINUE_SEQUENCE=37
+readonly CANCEL_RETRY_REPLY_SEQUENCE=38
+readonly CANCEL_CLOCK_VALUE_HIGH=0
+readonly CANCEL_CLOCK_VALUE_LOW=3
+readonly CANCEL_WRONG_REQUEST_ID=999
 
 frame() {
     payload=$1
@@ -145,6 +157,28 @@ check_console_input() {
     assert_frame_lengths "$input_output"
 }
 
+check_cancel_host_effect() {
+    initialize=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$CANCEL_INITIALIZE_SEQUENCE")
+    launch=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$CANCEL_LAUNCH_SEQUENCE" "$fixture")
+    configuration=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$CANCEL_CONFIGURATION_SEQUENCE")
+    first_continue=$(printf '{"seq":%s,"type":"request","command":"continue"}' "$CANCEL_FIRST_CONTINUE_SEQUENCE")
+    wrong_cancel=$(printf '{"seq":%s,"type":"request","command":"elisa/cancelHostEffect","arguments":{"requestId":%s}}' "$CANCEL_WRONG_SEQUENCE" "$CANCEL_WRONG_REQUEST_ID")
+    accept_cancel=$(printf '{"seq":%s,"type":"request","command":"elisa/cancelHostEffect","arguments":{"requestId":%s}}' "$CANCEL_ACCEPT_SEQUENCE" "$CANCEL_FIRST_CONTINUE_SEQUENCE")
+    stale_reply=$(printf '{"seq":%s,"type":"request","command":"elisa/provideHostEffect","arguments":{"requestId":%s,"valueHigh":%s,"valueLow":%s}}' "$CANCEL_STALE_REPLY_SEQUENCE" "$CANCEL_FIRST_CONTINUE_SEQUENCE" "$CANCEL_CLOCK_VALUE_HIGH" "$CANCEL_CLOCK_VALUE_LOW")
+    retry_continue=$(printf '{"seq":%s,"type":"request","command":"continue"}' "$CANCEL_RETRY_CONTINUE_SEQUENCE")
+    retry_reply=$(printf '{"seq":%s,"type":"request","command":"elisa/provideHostEffect","arguments":{"requestId":%s,"valueHigh":%s,"valueLow":%s}}' "$CANCEL_RETRY_REPLY_SEQUENCE" "$CANCEL_RETRY_CONTINUE_SEQUENCE" "$CANCEL_CLOCK_VALUE_HIGH" "$CANCEL_CLOCK_VALUE_LOW")
+    input_stream="$(frame "$initialize")$(frame "$launch")$(frame "$configuration")$(frame "$first_continue")$(frame "$wrong_cancel")$(frame "$accept_cancel")$(frame "$stale_reply")$(frame "$retry_continue")$(frame "$retry_reply")"
+    output=$(printf '%s' "$input_stream" | "$server")
+    printf '%s\n' "$output" | grep -F '"supportsElisaHostEffectCancellation":true,"elisaHostEffectCancellationVersion":1' >/dev/null
+    printf '%s\n' "$output" | grep -F "\"request_seq\":$CANCEL_FIRST_CONTINUE_SEQUENCE" | grep -F "\"requestId\":$CANCEL_FIRST_CONTINUE_SEQUENCE,\"kind\":\"clockNow\"" >/dev/null
+    printf '%s\n' "$output" | grep -F "\"request_seq\":$CANCEL_WRONG_SEQUENCE,\"command\":\"elisa/cancelHostEffect\",\"success\":false" >/dev/null
+    printf '%s\n' "$output" | grep -F "\"request_seq\":$CANCEL_ACCEPT_SEQUENCE,\"command\":\"elisa/cancelHostEffect\",\"success\":true,\"body\":{\"accepted\":true,\"cancelled\":true}" >/dev/null
+    printf '%s\n' "$output" | grep -F "\"request_seq\":$CANCEL_STALE_REPLY_SEQUENCE,\"command\":\"elisa/provideHostEffect\",\"success\":false" >/dev/null
+    printf '%s\n' "$output" | grep -F "\"request_seq\":$CANCEL_RETRY_CONTINUE_SEQUENCE" | grep -F "\"requestId\":$CANCEL_RETRY_CONTINUE_SEQUENCE,\"kind\":\"clockNow\"" >/dev/null
+    printf '%s\n' "$output" | grep -F "\"request_seq\":$CANCEL_RETRY_REPLY_SEQUENCE,\"command\":\"elisa/provideHostEffect\",\"success\":true" >/dev/null
+    assert_frame_lengths "$output"
+}
+
 initialize_payload=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$INITIALIZE_SEQUENCE")
 launch_payload=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$LAUNCH_SEQUENCE" "$fixture")
 configuration_done_payload=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$CONFIGURATION_DONE_SEQUENCE")
@@ -179,6 +213,7 @@ printf '%s\n' "$output" | grep -F '"command":"elisa/provideHostEffect","success"
 printf '%s\n' "$output" | grep -F '"event":"terminated"' >/dev/null
 printf '%s\n' "$output" | grep -F "\"event\":\"exited\",\"body\":{\"exitCode\":$EXPECTED_EXIT_CODE}" >/dev/null
 assert_frame_lengths "$output"
+check_cancel_host_effect
 check_step_host_effect "next"
 check_step_host_effect "stepIn"
 check_step_host_effect "stepOut"

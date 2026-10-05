@@ -55,6 +55,15 @@ const module Test:
         RESULT_VALUE: i64 = 6107
         MISMATCH_ADAPTER_SOURCE_ID: u64 = 6108
 
+    const module RandomBridge:
+        CALL_SITE_ID: u64 = 7101
+        ADAPTER_SOURCE_ID: u64 = 7102
+        INVOCATION_ID: u64 = 7103
+        REQUEST_HASH: u64 = 7104
+        RESULT_HASH: u64 = 7105
+        RANDOM_VALUE: u64 = 9223372036854775809
+        MISMATCH_ADAPTER_SOURCE_ID: u64 = 7106
+
     const module HistoryBarrier:
         FIRST_EVENT: usize = 1
         INITIAL_EVENT: usize = 0
@@ -100,6 +109,7 @@ const module Test:
         OVERFLOWED_REPLAY_NOT_ATOMIC: i64 = 20
         TIME_TRAVEL_BARRIER_NOT_DETECTED: i64 = 21
         CLOCK_BRIDGE_NOT_ATOMIC: i64 = 22
+        RANDOM_BRIDGE_NOT_ATOMIC: i64 = 23
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -136,6 +146,32 @@ def managed_clock_effect_bridge_is_atomic() -> bool:
     return false if adapter_mismatch.accepted or adapter_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
     return false if adapter_mismatch_state.effects.cursor != Test::Bounds::FIRST_INDEX or adapter_mismatch_state.adapters.clock.cursor != Test::Bounds::FIRST_INDEX
     return false if adapter_mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or adapter_mismatch_state.adapters.clock.exact
+    return true
+
+def managed_random_effect_bridge_is_atomic() -> bool:
+    state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(state)
+    call_site: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::RandomBridge::CALL_SITE_ID)
+    adapter_source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::RandomBridge::ADAPTER_SOURCE_ID)
+    invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::RandomBridge::INVOCATION_ID)
+    recorded: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_random_effect(state, call_site, adapter_source, invocation, Test::RandomBridge::REQUEST_HASH, Test::RandomBridge::RESULT_HASH, Test::RandomBridge::RANDOM_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    replay_started: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    replayed: DebuggerEffects::RandomEffectReplay = DebuggerManagedState::state_replay_random_effect(state, call_site, adapter_source, invocation, Test::RandomBridge::REQUEST_HASH)
+    return false if not replayed.accepted or replayed.result_hash != Test::RandomBridge::RESULT_HASH or replayed.value != Test::RandomBridge::RANDOM_VALUE
+    return false if state.effects.cursor != Test::Bounds::ONE_COUNT or state.adapters.random.cursor != Test::Bounds::ONE_COUNT
+
+    mismatch_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(mismatch_state)
+    recorded <- DebuggerManagedState::state_record_random_effect(mismatch_state, call_site, adapter_source, invocation, Test::RandomBridge::REQUEST_HASH, Test::RandomBridge::RESULT_HASH, Test::RandomBridge::RANDOM_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded)
+    replay_started <- DebuggerManagedState::state_begin_side_effect_replay(mismatch_state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    adapter_mismatch: DebuggerEffects::RandomEffectReplay = DebuggerManagedState::state_replay_random_effect(mismatch_state, call_site, DebuggerIdentity::debug_id(Test::RandomBridge::MISMATCH_ADAPTER_SOURCE_ID), invocation, Test::RandomBridge::REQUEST_HASH)
+    return false if adapter_mismatch.accepted or adapter_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged
+    return false if mismatch_state.effects.cursor != Test::Bounds::FIRST_INDEX or mismatch_state.adapters.random.cursor != Test::Bounds::FIRST_INDEX
+    return false if mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or mismatch_state.adapters.random.exact
     return true
 
 def managed_history_side_state_barriers_work(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
@@ -185,6 +221,7 @@ def main() -> i64:
     image.instructions[Test::Image::FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::Image::CONSTANT_VALUE, b: Test::Image::UNUSED_OPERAND, source: zeroed}
     image.instructions[Test::Image::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::Image::UNUSED_OPERAND, b: Test::Image::UNUSED_OPERAND, source: zeroed}
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()
+    return Test::Failure::RANDOM_BRIDGE_NOT_ATOMIC if not managed_random_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))

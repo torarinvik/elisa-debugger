@@ -56,6 +56,8 @@ const module TestResult:
     EARLIER_RESTORE: i64 = 11
     RESTORED_HISTORY: i64 = 12
     FORWARD_SEEK: i64 = 13
+    LIVE_REPLACEMENT: i64 = 14
+    CREATED_REPLACEMENT_REJECTED: i64 = 15
 
 def copy_path(source: cstr, output: mutable u8&) -> usize:
     length: mutable usize = Test::PATH_FIRST_BYTE
@@ -109,6 +111,7 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     return TestResult::ORIGINAL_LAUNCH if not launched.accepted
     paused: DebuggerManagedService::Result = dispatch(original, DebuggerProtocolRequest::RequestMethod.Pause, Test::SECOND_REQUEST_ID)
     return TestResult::ORIGINAL_PAUSE if not paused.accepted
+    initial_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(original.controller.engine)
     stepped: DebuggerManagedService::Result = dispatch(original, DebuggerProtocolRequest::RequestMethod.Step, Test::THIRD_REQUEST_ID)
     return TestResult::ORIGINAL_STEP if not stepped.accepted
     return TestResult::ORIGINAL_POSITION if original.controller.engine.event_count.u64() != Test::EXPECTED_EVENT
@@ -122,6 +125,8 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     failed_initial_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(failed.controller.engine)
     out_of_range: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(failed, path[Test::PATH_FIRST_BYTE], path_length, Test::EVENT_AFTER_TRACE_END) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     return TestResult::OUT_OF_RANGE_REJECTED_ATOMICALLY if out_of_range.accepted or failed.controller.session.state != DebuggerSession::SessionState.Created or failed.controller.session.id.value != Test::FAILED_SESSION_ID or failed.controller.engine.recording.value != Test::FAILED_RECORDING_ID or failed.controller.engine.event_count.u64() != Test::INITIAL_EVENT or DebuggerReplayEngine::replay_engine_state_hash(failed.controller.engine) != failed_initial_hash
+    created_replacement: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_replace_from_file(failed, path[Test::PATH_FIRST_BYTE], path_length, Test::EXPECTED_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::CREATED_REPLACEMENT_REJECTED if created_replacement.accepted or failed.controller.session.state != DebuggerSession::SessionState.Created or failed.controller.session.id.value != Test::FAILED_SESSION_ID or failed.controller.engine.recording.value != Test::FAILED_RECORDING_ID or DebuggerReplayEngine::replay_engine_state_hash(failed.controller.engine) != failed_initial_hash
 
     fresh_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::FRESH_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
     fresh: mutable DebuggerManagedService::Service
@@ -135,6 +140,13 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
 
     rejected: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(fresh, path[Test::PATH_FIRST_BYTE], path_length, Test::EXPECTED_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     return TestResult::REPLAY_REJECTED_ATOMICALLY if rejected.accepted or fresh.controller.engine.event_count.u64() != Test::EXPECTED_EVENT or DebuggerReplayEngine::replay_engine_state_hash(fresh.controller.engine) != original_hash
+
+    replaced: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_replace_from_file(fresh, path[Test::PATH_FIRST_BYTE], path_length, Test::INITIAL_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::LIVE_REPLACEMENT if not replaced.accepted or fresh.controller.session.id.value != Test::FRESH_SESSION_ID or fresh.controller.engine.event_count.u64() != Test::INITIAL_EVENT or fresh.controller.session.state != DebuggerSession::SessionState.Stopped or DebuggerReplayEngine::replay_engine_state_hash(fresh.controller.engine) != initial_hash
+    replacement_timeline: DebuggerTimeline::Timeline = DebuggerManagedService::service_timeline(fresh)
+    return TestResult::LIVE_REPLACEMENT if not replacement_timeline.bounds.has_exact or replacement_timeline.bounds.exact_first != Test::INITIAL_EVENT or replacement_timeline.bounds.exact_last != Test::EXPECTED_EVENT
+    replacement_advanced: DebuggerManagedService::Result = seek_to(fresh, Test::FOURTH_REQUEST_ID, Test::EXPECTED_EVENT)
+    return TestResult::LIVE_REPLACEMENT if not replacement_advanced.accepted or DebuggerReplayEngine::replay_engine_state_hash(fresh.controller.engine) != original_hash
 
     earlier_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::EARLIER_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
     earlier: mutable DebuggerManagedService::Service

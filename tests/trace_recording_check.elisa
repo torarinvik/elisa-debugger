@@ -82,11 +82,13 @@ const module Test:
 
     const module PayloadFixture:
         LENGTH: usize = 4
-        CAPACITY: usize = 64
+        MAX_LENGTH: usize = 256
+        CAPACITY: usize = 256
         FIRST: u8 = 17
         SECOND: u8 = 34
         THIRD: u8 = 51
         FOURTH: u8 = 68
+        LAST: u8 = 85
         CORRUPTION_DELTA: u8 = 1
         PADDING_CORRUPTION_BYTE: u8 = 127
         KIND_OFFSET: usize = 84
@@ -97,6 +99,9 @@ const module Test:
         PAYLOAD_FAILURE: i64 = 62
         TRUNCATED_FAILURE: i64 = 63
         INVALID_LENGTH_FAILURE: i64 = 64
+        LEGACY_FIXED_PAYLOAD_BYTES: usize = 64
+        LEGACY_SCHEMA: u32 = 2
+        LEGACY_VERSION_OFFSET: usize = 0
         PAYLOAD_LENGTH: usize = 3
         INVALID_PAYLOAD_LENGTH: u8 = 65
         PAYLOAD_LENGTH_OFFSET: usize = 86
@@ -352,6 +357,24 @@ def check_variable_event_codec() -> i64:
     return Test::VariableCodec::NO_PAYLOAD_FAILURE if reader.offset != reader.length
     return Test::VariableCodec::NO_PAYLOAD_FAILURE if not DebuggerEvents::event_envelopes_equal(event, decoded.event)
 
+    legacy_expected: DebuggerEvents::EventEnvelope = make_event(Test::RECORDING, Test::VariableCodec::LEGACY_SCHEMA, Test::FIRST_EVENT)
+    legacy_bytes: mutable DebuggerTraceBinary::ByteWriter = encoded
+    legacy_bytes.bytes[Test::VariableCodec::LEGACY_VERSION_OFFSET] <- Test::VariableCodec::LEGACY_SCHEMA.u8()
+    legacy_bytes.bytes[Test::VariableCodec::LEGACY_VERSION_OFFSET + 1] <- 0
+    legacy_bytes.bytes[Test::VariableCodec::LEGACY_VERSION_OFFSET + 2] <- 0
+    legacy_bytes.bytes[Test::VariableCodec::LEGACY_VERSION_OFFSET + 3] <- 0
+    for index in 0..<Test::VariableCodec::LEGACY_FIXED_PAYLOAD_BYTES:
+        DebuggerTraceBinary::writer_put_byte(legacy_bytes, 0)
+    DebuggerTraceBinary::reader_initialize(reader, legacy_bytes.bytes[0], legacy_bytes.length)
+    decoded <- DebuggerTraceEventCodec::event_record_decode(reader)
+    return Test::VariableCodec::INVALID_LENGTH_FAILURE if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Ready or reader.offset != DebuggerTraceEventCodec::event_record_fixed_size() + Test::VariableCodec::LEGACY_FIXED_PAYLOAD_BYTES or not DebuggerEvents::event_envelopes_equal(legacy_expected, decoded.event)
+
+    invalid_legacy_length: mutable DebuggerTraceBinary::ByteWriter = legacy_bytes
+    invalid_legacy_length.bytes[Test::VariableCodec::PAYLOAD_LENGTH_OFFSET] <- Test::VariableCodec::INVALID_PAYLOAD_LENGTH
+    DebuggerTraceBinary::reader_initialize(reader, invalid_legacy_length.bytes[0], invalid_legacy_length.length)
+    decoded <- DebuggerTraceEventCodec::event_record_decode(reader)
+    return Test::VariableCodec::INVALID_LENGTH_FAILURE if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Invalid or DebuggerTraceBinary::reader_is_valid(reader)
+
     payload: mutable u8[Test::VariableCodec::PAYLOAD_LENGTH] = [Test::VariableCodec::FIRST, Test::VariableCodec::SECOND, Test::VariableCodec::THIRD]
     return Test::VariableCodec::PAYLOAD_FAILURE if not DebuggerEvents::event_envelope_set_payload(event, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::VariableCodec::PAYLOAD_LENGTH)
     DebuggerTraceBinary::writer_initialize(encoded)
@@ -378,18 +401,24 @@ def check_payload_round_trip() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.P
     recorder: mutable DebuggerTraceRecorder::TraceRecorder
     DebuggerTraceRecorder::recorder_initialize(recorder, build_identity(), DebuggerIdentity::debug_id(Test::RECORDING))
     event: mutable DebuggerEvents::EventEnvelope = make_event(Test::RECORDING, Test::EVENT_SCHEMA, Test::FIRST_EVENT)
-    payload: mutable u8[Test::PayloadFixture::LENGTH] = [Test::PayloadFixture::FIRST, Test::PayloadFixture::SECOND, Test::PayloadFixture::THIRD, Test::PayloadFixture::FOURTH]
-    return Test::RESULT_PAYLOAD_VALIDATION if not DebuggerEvents::event_envelope_set_payload(event, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::PayloadFixture::LENGTH)
+    payload: mutable u8[Test::PayloadFixture::MAX_LENGTH] = zeroed
+    payload[0] <- Test::PayloadFixture::FIRST
+    payload[1] <- Test::PayloadFixture::SECOND
+    payload[2] <- Test::PayloadFixture::THIRD
+    payload[3] <- Test::PayloadFixture::FOURTH
+    payload[Test::PayloadFixture::MAX_LENGTH - 1] <- Test::PayloadFixture::LAST
+    return Test::RESULT_PAYLOAD_VALIDATION if not DebuggerEvents::event_envelope_set_payload(event, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::PayloadFixture::MAX_LENGTH)
     event.kind <- DebuggerEvents::EventKind.Input
-    return Test::RESULT_PAYLOAD_VALIDATION if event.payload_kind != DebuggerEvents::EventPayloadKind.Bytes or event.payload_length.usize() != Test::PayloadFixture::LENGTH or not DebuggerEvents::event_envelope_is_well_formed(event)
+    return Test::RESULT_PAYLOAD_VALIDATION if event.payload_kind != DebuggerEvents::EventPayloadKind.Bytes or event.payload_length.usize() != Test::PayloadFixture::MAX_LENGTH or not DebuggerEvents::event_envelope_is_well_formed(event)
     aliased_payload: mutable DebuggerEvents::EventEnvelope = event
-    return Test::RESULT_PAYLOAD_VALIDATION if not DebuggerEvents::event_envelope_set_payload(aliased_payload, DebuggerEvents::EventPayloadKind.Bytes, aliased_payload.payload[0], Test::PayloadFixture::LENGTH) or aliased_payload.payload[0] != Test::PayloadFixture::FIRST or aliased_payload.payload[1] != Test::PayloadFixture::SECOND or aliased_payload.payload[2] != Test::PayloadFixture::THIRD or aliased_payload.payload[3] != Test::PayloadFixture::FOURTH
+    return Test::RESULT_PAYLOAD_VALIDATION if not DebuggerEvents::event_envelope_set_payload(aliased_payload, DebuggerEvents::EventPayloadKind.Bytes, aliased_payload.payload[0], Test::PayloadFixture::MAX_LENGTH) or aliased_payload.payload[0] != Test::PayloadFixture::FIRST or aliased_payload.payload[1] != Test::PayloadFixture::SECOND or aliased_payload.payload[2] != Test::PayloadFixture::THIRD or aliased_payload.payload[3] != Test::PayloadFixture::FOURTH or aliased_payload.payload[Test::PayloadFixture::MAX_LENGTH - 1] != Test::PayloadFixture::LAST
     invalid_scalar: mutable DebuggerEvents::EventEnvelope = event
-    return Test::RESULT_PAYLOAD_VALIDATION if DebuggerEvents::event_envelope_set_payload(invalid_scalar, DebuggerEvents::EventPayloadKind.SignedScalar, payload[0], Test::PayloadFixture::LENGTH)
+    return Test::RESULT_PAYLOAD_VALIDATION if DebuggerEvents::event_envelope_set_payload(invalid_scalar, DebuggerEvents::EventPayloadKind.SignedScalar, payload[0], Test::PayloadFixture::MAX_LENGTH)
     corrupted: mutable DebuggerEvents::EventEnvelope = event
     corrupted.payload[0] <- corrupted.payload[0] + Test::PayloadFixture::CORRUPTION_DELTA
     return Test::RESULT_PAYLOAD_VALIDATION if DebuggerEvents::event_envelope_is_well_formed(corrupted) or DebuggerEvents::event_envelopes_equal(event, corrupted)
-    noncanonical_padding: mutable DebuggerEvents::EventEnvelope = event
+    noncanonical_padding: mutable DebuggerEvents::EventEnvelope = make_event(Test::RECORDING, Test::EVENT_SCHEMA, Test::FIRST_EVENT)
+    return Test::RESULT_PAYLOAD_VALIDATION if not DebuggerEvents::event_envelope_set_payload(noncanonical_padding, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::PayloadFixture::LENGTH)
     noncanonical_padding.payload[Test::PayloadFixture::LENGTH] <- Test::PayloadFixture::PADDING_CORRUPTION_BYTE
     return Test::RESULT_PAYLOAD_VALIDATION if DebuggerEvents::event_envelope_is_well_formed(noncanonical_padding)
     invalid_output: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Test::EVENT_SCHEMA, Test::FIRST_EVENT, event.position, DebuggerEvents::EventKind.Output, DebuggerEvents::EventQuality.Exact, Test::EVENT_HASH)
@@ -413,14 +442,14 @@ def check_payload_round_trip() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.P
     return Test::RESULT_PAYLOAD_MANIFEST_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(reader, manifest_chunk))
     event_chunk: mutable DebuggerTraceStorage::StoredChunk = recorder.chunks[0]
     event_chunk.header.sequence <- 1
-    return Test::RESULT_PAYLOAD_WIRE_LENGTH if event_chunk.payload_length != DebuggerTraceEventCodec::event_record_fixed_size() + Test::PayloadFixture::LENGTH + DebuggerTraceEventCodec::event_record_fixed_size()
-    return Test::RESULT_PAYLOAD_WIRE_FIELDS if event_chunk.payload[Test::PayloadFixture::KIND_OFFSET] != DebuggerEvents::EventPayloadKind.Bytes.u16().u8() or event_chunk.payload[Test::PayloadFixture::LENGTH_OFFSET] != Test::PayloadFixture::LENGTH.u8() or event_chunk.payload[DebuggerTraceEventCodec::event_record_fixed_size()] != Test::PayloadFixture::FIRST
+    return Test::RESULT_PAYLOAD_WIRE_LENGTH if event_chunk.payload_length != DebuggerTraceEventCodec::event_record_fixed_size() + Test::PayloadFixture::MAX_LENGTH + DebuggerTraceEventCodec::event_record_fixed_size()
+    return Test::RESULT_PAYLOAD_WIRE_FIELDS if event_chunk.payload[Test::PayloadFixture::KIND_OFFSET] != DebuggerEvents::EventPayloadKind.Bytes.u16().u8() or event_chunk.payload[Test::PayloadFixture::LENGTH_OFFSET] != Test::PayloadFixture::MAX_LENGTH.u8() or event_chunk.payload[DebuggerTraceEventCodec::event_record_fixed_size()] != Test::PayloadFixture::FIRST
     return Test::RESULT_PAYLOAD_STORAGE_REJECTED if not DebuggerTraceStorage::storage_event_payload_is_valid(event_chunk.payload[0], 0, event_chunk.payload_length, Test::TRACE_SCHEMA, Test::FIRST_EVENT, Test::CHECKPOINT_EVENT)
     event_ingest_failure: DebuggerErrors::DebuggerError = DebuggerTraceReader::reader_ingest(reader, event_chunk)
     return Test::RESULT_PAYLOAD_EVENT_INGEST_FAILED if not DebuggerErrors::error_is_ok(event_ingest_failure)
     return Test::RESULT_PAYLOAD_READER_NOT_EXACT if not DebuggerTraceReader::reader_is_exact(reader)
     decoded: DebuggerEvents::EventEnvelope = reader.events[0]
-    return Test::RESULT_PAYLOAD_DATA_MISMATCH if reader.event_count != Test::RECORDED_EVENT_COUNT or decoded.state_hash != event.state_hash or decoded.payload_kind != event.payload_kind or decoded.payload_length != event.payload_length or decoded.payload_hash != event.payload_hash or decoded.payload[0] != Test::PayloadFixture::FIRST or decoded.payload[1] != Test::PayloadFixture::SECOND or decoded.payload[2] != Test::PayloadFixture::THIRD or decoded.payload[3] != Test::PayloadFixture::FOURTH or reader.events[1].ordinal != Test::CHECKPOINT_EVENT or reader.events[1].payload_length != 0
+    return Test::RESULT_PAYLOAD_DATA_MISMATCH if reader.event_count != Test::RECORDED_EVENT_COUNT or decoded.state_hash != event.state_hash or decoded.payload_kind != event.payload_kind or decoded.payload_length != event.payload_length or decoded.payload_hash != event.payload_hash or decoded.payload[0] != Test::PayloadFixture::FIRST or decoded.payload[1] != Test::PayloadFixture::SECOND or decoded.payload[2] != Test::PayloadFixture::THIRD or decoded.payload[3] != Test::PayloadFixture::FOURTH or decoded.payload[Test::PayloadFixture::MAX_LENGTH - 1] != Test::PayloadFixture::LAST or reader.events[1].ordinal != Test::CHECKPOINT_EVENT or reader.events[1].payload_length != 0
     corrupt_reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceReader::reader_new() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
     return Test::RESULT_PAYLOAD_MANIFEST_FAILED if not DebuggerErrors::error_is_ok(DebuggerTraceReader::reader_ingest(corrupt_reader, manifest_chunk))
     corrupted_event_chunk: mutable DebuggerTraceStorage::StoredChunk = event_chunk

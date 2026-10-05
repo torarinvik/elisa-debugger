@@ -23,6 +23,7 @@ module DebuggerTraceEventCodec:
 
         const module Version:
             LEGACY_FIXED_PAYLOAD: u32 = 2
+            LEGACY_FIXED_PAYLOAD_BYTES: usize = 64
             VARIABLE_PAYLOAD: u32 = 3
 
         const module Index:
@@ -124,14 +125,15 @@ module DebuggerTraceEventCodec:
             event.payload_length <- DebuggerTraceBinary::reader_take_u16(reader)
             event.payload_hash <- DebuggerTraceBinary::reader_take_u64(reader)
             return result if not DebuggerTraceBinary::reader_is_valid(reader)
-            if not event_record_schema_is_supported(event.schema) or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality > DebuggerEvents::EventQuality.Corrupt.u16() or payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or event.payload_length.usize() > DebuggerEvents::event_payload_capacity():
+            legacy_length_invalid: bool = event.schema == Version::LEGACY_FIXED_PAYLOAD and event.payload_length.usize() > Version::LEGACY_FIXED_PAYLOAD_BYTES
+            if not event_record_schema_is_supported(event.schema) or kind > DebuggerEvents::EventKind.TraceHealth.u16() or quality > DebuggerEvents::EventQuality.Corrupt.u16() or payload_kind > DebuggerEvents::EventPayloadKind.Error.u16() or event.payload_length.usize() > DebuggerEvents::event_payload_capacity() or legacy_length_invalid:
                 reader.failed <- true
                 return result
             event.position <- DebuggerIdentity::Position{recording: recording, branch: branch, event: position_event, task: position_task, invocation: invocation, statement: statement, microstep: microstep}
             event.kind <- event_kind_from_code(kind)
             event.quality <- event_quality_from_code(quality)
             event.payload_kind <- DebuggerEvents::event_payload_kind_from_code(payload_kind)
-            stored_payload_length: usize = DebuggerEvents::event_payload_capacity() if event.schema == Version::LEGACY_FIXED_PAYLOAD else event.payload_length.usize()
+            stored_payload_length: usize = Version::LEGACY_FIXED_PAYLOAD_BYTES if event.schema == Version::LEGACY_FIXED_PAYLOAD else event.payload_length.usize()
             for index in Index::FIRST_PAYLOAD_BYTE..<stored_payload_length:
                 event.payload[index] <- DebuggerTraceBinary::reader_take_byte(reader)
             if DebuggerTraceBinary::reader_is_valid(reader) and DebuggerEvents::event_envelope_is_well_formed(event):

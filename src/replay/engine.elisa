@@ -309,6 +309,23 @@ module DebuggerReplayEngine:
                 engine.history[engine.event_count] <- DebuggerCheckpoint::snapshot_capture(engine.machine, DebuggerIdentity::debug_id(engine.event_count.u64() + Event::REPLAY_ENGINE_CHECKPOINT_ID_OFFSET), engine.event_count.u64(), replay_engine_state_hash(engine))
             return true
 
+        # Validate a forward destination without writing retained snapshots or
+        # event envelopes. Managed replay uses this when the corresponding
+        # side-state boundary is absent, so a rejected seek stays fully atomic.
+        def replay_engine_seek_preview(engine: ReplayEngine&, target: usize) -> EngineError:
+            return EngineError.HistoryUnavailable if target > Capacity::HISTORY_CAPACITY or engine.event_count > Capacity::HISTORY_CAPACITY or target < engine.event_count
+            speculative_machine: mutable DebuggerEDIR::Machine = engine.machine
+            speculative_event: mutable usize = engine.event_count
+            while speculative_event < target and not speculative_machine.halted and not speculative_machine.faulted:
+                previous_event: usize = speculative_event
+                failure: EngineError = replay_engine_speculative_step(engine, speculative_machine, speculative_event)
+                return failure if failure != EngineError.None
+                return EngineError.HistoryUnavailable if speculative_event == previous_event
+            return EngineError.HistoryUnavailable if speculative_event != target
+            return EngineError.HistoryUnavailable if not replay_engine_apply_interventions_to_machine(engine, speculative_machine, target.u64())
+            return EngineError.ExecutionFault if speculative_machine.faulted
+            return EngineError.None
+
         def replay_engine_seek(engine: mutable ReplayEngine&, target: usize) -> void:
             original_machine: DebuggerEDIR::Machine = engine.machine
             original_count: usize = engine.event_count

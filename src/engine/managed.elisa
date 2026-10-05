@@ -793,7 +793,7 @@ module DebuggerManagedEngine:
 
         def managed_seek(controller: mutable ManagedController&, event: usize) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if event != controller.engine.event_count and managed_history_has_unaligned_side_state(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if managed_history_has_unaligned_side_state(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if event.u64() != controller.session.position.event and controller.session.capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             original_machine: DebuggerEDIR::Machine = controller.engine.machine
             original_event_count: usize = controller.engine.event_count
@@ -804,6 +804,11 @@ module DebuggerManagedEngine:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if next_session.last_error != DebuggerSession::SessionError.None
+            if event != original_event_count and not managed_side_checkpoint_is_valid(controller, event):
+                if event > original_event_count:
+                    preview_error: DebuggerReplayEngine::EngineError = DebuggerReplayEngine::replay_engine_seek_preview(controller.engine, event)
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT) if preview_error == DebuggerReplayEngine::EngineError.ExecutionFault
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
             DebuggerReplayEngine::replay_engine_seek(controller.engine, event)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
                 # Restore the caller-visible engine state before surfacing the

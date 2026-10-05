@@ -138,6 +138,7 @@ const module Test:
         MIXED_BRIDGE_MODE_ACCEPTED: i64 = 25
         CAPACITY_BRIDGE_PARTIALLY_RECORDED: i64 = 26
         EFFECT_HISTORY_RESTORE_FAILED: i64 = 27
+        MISSING_TARGET_SEEK_NOT_ATOMIC: i64 = 28
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -353,6 +354,20 @@ def managed_history_side_state_barriers_work(session: DebuggerSession::Session, 
         return false if seek_failure.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != event_before or DebuggerReplayEngine::replay_engine_state_hash(controller.engine) != machine_hash_before
     return true
 
+def managed_seek_without_side_checkpoint_is_atomic(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    machine_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(controller.engine)
+    engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
+    retained_snapshot_id: u64 = controller.engine.history[Test::Bounds::FIRST_INDEX].id.value
+    failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::HistoryBarrier::FIRST_EVENT)
+    return false if failure.code != DebuggerErrors::ErrorCode.Unavailable
+    return false if controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.session.position.event != Test::HistoryBarrier::INITIAL_EVENT.u64()
+    return false if DebuggerReplayEngine::replay_engine_state_hash(controller.engine) != machine_hash or controller.engine.engine_error != engine_error
+    return controller.engine.history[Test::Bounds::FIRST_INDEX].id.value == retained_snapshot_id and controller.side_history_count == Test::Bounds::ONE_COUNT
+
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
         compiler: DebuggerIdentity::debug_id(Test::Identity::BUILD_COMPILER_ID),
@@ -393,6 +408,7 @@ def main() -> i64:
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()
     return Test::Failure::RANDOM_BRIDGE_NOT_ATOMIC if not managed_random_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)
+    return Test::Failure::MISSING_TARGET_SEEK_NOT_ATOMIC if not managed_seek_without_side_checkpoint_is_atomic(session, image)
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return Test::Failure::INITIAL_STATE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)

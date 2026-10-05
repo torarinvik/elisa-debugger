@@ -195,9 +195,9 @@ module DebuggerCLI:
             MAX_LINE_BYTES: usize = CommandLine::MAX_BYTES
             FIRST_TEXT_ARGUMENT_BYTE_INDEX: usize = 0
 
-        # Parse one bounded command line. The parser deliberately accepts only
-        # an unsigned numeric argument, except saveTrace which accepts a
-        # bounded raw destination path. Paths never pass through a shell.
+        # Parse one bounded command line. Seek accepts an event and an
+        # optional expected stop generation. saveTrace accepts a bounded raw
+        # destination path; paths never pass through a shell.
         def command_parse_line(payload: u8&, length: usize, expected_generation: u64) -> ParsedCommand:
             result: mutable ParsedCommand = zeroed
             result.expected_generation <- expected_generation
@@ -217,7 +217,7 @@ module DebuggerCLI:
             return result if result.command == Command.Unknown
             while index < length and command_is_whitespace(payload[index]):
                 index <- index + 1
-            return result if index == length and result.command == Command.SaveTrace
+            return result if index == length and (result.command == Command.SaveTrace or result.command == Command.Seek)
             if index < length:
                 if result.command == Command.SaveTrace:
                     path_end: mutable usize = length
@@ -247,7 +247,21 @@ module DebuggerCLI:
                 return result if digits == 0
                 while index < length and command_is_whitespace(payload[index]):
                     index <- index + 1
-                return result if index < length
+                if index < length:
+                    return result if result.command != Command.Seek
+                    result.expected_generation <- Sentinel::EXPECTED_GENERATION
+                    expected_digits: mutable usize = 0
+                    while index < length and not command_is_whitespace(payload[index]):
+                        byte: u8 = payload[index]
+                        return result if byte < Encoding::COMMANDS_ENCODING_ASCII_ZERO or byte > Encoding::COMMANDS_ENCODING_ASCII_NINE
+                        return result if expected_digits >= CommandName::MAX_ARGUMENT_DIGITS or result.expected_generation > (Bounds::COMMANDS_BOUNDS_MAX_U64 - (byte - Encoding::COMMANDS_ENCODING_ASCII_ZERO).u64()) / Decimal::BASE
+                        result.expected_generation <- result.expected_generation * Decimal::BASE + (byte - Encoding::COMMANDS_ENCODING_ASCII_ZERO).u64()
+                        expected_digits <- expected_digits + CommandLine::INCREMENT
+                        index <- index + CommandLine::INCREMENT
+                    return result if expected_digits == 0
+                    while index < length and command_is_whitespace(payload[index]):
+                        index <- index + CommandLine::INCREMENT
+                    return result if index < length
                 # Only seek consumes the numeric operand. Accepting an
                 # operand on other commands would silently discard it in
                 # both the terminal and structured CLI runners.

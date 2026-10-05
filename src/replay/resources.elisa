@@ -36,6 +36,11 @@ module DebuggerVirtualResources:
             MODE_MAX: u16 = 2
             OPERATION_KIND_MAX: u16 = 3
 
+        struct ReplayFileState:
+            bytes: mutable u8[Resource::DATA_CAPACITY]
+            length: mutable usize
+            cursor: mutable usize
+
 
     public:
         const module Limits:
@@ -249,11 +254,66 @@ module DebuggerVirtualResources:
             result.accepted <- true
             return result
 
-        def resources_find(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId) -> usize:
+        def resources_find(store: ResourceStore&, handle: DebuggerIdentity::DebugId) -> usize:
             return Resource::FILE_CAPACITY if store.count > Resource::FILE_CAPACITY
             for index in Resource::FIRST_INDEX..<store.count:
                 return index if store.files[index].handle.value == handle.value
             return Resource::FILE_CAPACITY
+
+    private:
+        def resources_history_matches_state(store: ResourceStore&) -> bool:
+            history: mutable ReplayFileState[Resource::FILE_CAPACITY] = zeroed
+            for file_index in Resource::FIRST_INDEX..<store.count:
+                history[file_index].length <- store.files[file_index].initial_length
+                for byte_index in Resource::FIRST_INDEX..<store.files[file_index].initial_length:
+                    history[file_index].bytes[byte_index] <- store.files[file_index].initial_bytes[byte_index]
+
+            expected_cursor: mutable usize = store.operation_count
+            expected_cursor <- store.operation_cursor if store.mode == ResourceMode.Replaying
+            if expected_cursor == Resource::EMPTY_OPERATION_CURSOR:
+                for file_index in Resource::FIRST_INDEX..<store.count:
+                    return false if store.files[file_index].length != history[file_index].length or store.files[file_index].cursor != history[file_index].cursor
+                    for byte_index in Resource::FIRST_INDEX..<history[file_index].length:
+                        return false if store.files[file_index].bytes[byte_index] != history[file_index].bytes[byte_index]
+
+            for operation_index in Resource::FIRST_INDEX..<store.operation_count:
+                if operation_index == expected_cursor:
+                    for file_index in Resource::FIRST_INDEX..<store.count:
+                        return false if store.files[file_index].length != history[file_index].length or store.files[file_index].cursor != history[file_index].cursor
+                        for byte_index in Resource::FIRST_INDEX..<history[file_index].length:
+                            return false if store.files[file_index].bytes[byte_index] != history[file_index].bytes[byte_index]
+
+                operation: ResourceOperation = store.operations[operation_index]
+                file_index: usize = resources_find(store, operation.handle)
+                return false if file_index >= Resource::FILE_CAPACITY
+                if operation.kind == ResourceOperationKind.Read:
+                    return false if operation.offset != history[file_index].cursor or history[file_index].cursor > history[file_index].length
+                    available: usize = history[file_index].length - history[file_index].cursor
+                    expected_transferred: usize = available if available < operation.requested else operation.requested
+                    expected_eof: bool = operation.requested > Resource::EMPTY_OPERATION_COUNT and expected_transferred < operation.requested
+                    return false if operation.transferred != expected_transferred or operation.eof != expected_eof
+                    for byte_index in Resource::FIRST_INDEX..<operation.transferred:
+                        return false if operation.bytes[byte_index] != history[file_index].bytes[history[file_index].cursor + byte_index]
+                    history[file_index].cursor <- history[file_index].cursor + operation.transferred
+                elif operation.kind == ResourceOperationKind.Write:
+                    return false if not store.files[file_index].writable or operation.offset != history[file_index].cursor or history[file_index].cursor > history[file_index].length
+                    return false if operation.requested > Resource::DATA_CAPACITY - history[file_index].cursor
+                    for byte_index in Resource::FIRST_INDEX..<operation.transferred:
+                        history[file_index].bytes[history[file_index].cursor + byte_index] <- operation.bytes[byte_index]
+                    history[file_index].cursor <- history[file_index].cursor + operation.transferred
+                    history[file_index].length <- history[file_index].cursor if history[file_index].length < history[file_index].cursor
+                elif operation.kind == ResourceOperationKind.Seek:
+                    return false if operation.offset > history[file_index].length
+                    history[file_index].cursor <- operation.offset
+
+            if expected_cursor == store.operation_count:
+                for file_index in Resource::FIRST_INDEX..<store.count:
+                    return false if store.files[file_index].length != history[file_index].length or store.files[file_index].cursor != history[file_index].cursor
+                    for byte_index in Resource::FIRST_INDEX..<history[file_index].length:
+                        return false if store.files[file_index].bytes[byte_index] != history[file_index].bytes[byte_index]
+            return true
+
+    public:
 
         # Install captured initial bytes while recording. Replay must read the
         def resources_seed(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, bytes: u8&, length: usize) -> DebuggerErrors::DebuggerError:
@@ -458,12 +518,7 @@ module DebuggerVirtualResources:
                     return false if not operation_has_prior_open
                 file: VirtualFile = store.files[operation_file_index]
                 return false if operation.kind == ResourceOperationKind.Write and not file.writable
-                # The journal can contain future operations while replay is at a
-                # prefix, and replay restart restores the initial file length.
-                # Validate each operation against its live cursor/length when it
-                # executes; comparing every historical offset with the current
-                # length rejects valid writes that extend the initial file.
-            return true
+            return resources_history_matches_state(store)
 
         def resources_write(store: mutable ResourceStore&, handle: DebuggerIdentity::DebugId, input: u8&, length: usize) -> IoResult:
             result: mutable IoResult = zeroed

@@ -102,6 +102,11 @@ const module Test:
     TRACE_SCHEMA: u32 = 1
     TRACE_EVENT_HASH: u64 = 9901
     RESOURCE_SNAPSHOT_ISOLATION_FAILURE: i64 = 44
+    LARGE_TASK_STATE_INVALID: i64 = 45
+    LARGE_EFFECT_STATE_INVALID: i64 = 46
+    LARGE_RESOURCE_STATE_INVALID: i64 = 47
+    LARGE_ADAPTER_STATE_INVALID: i64 = 48
+    LARGE_CHECKPOINT_STATE_INVALID: i64 = 49
     TRACE_EVENT_SEQUENCE: u64 = 2
     TRACE_FOOTER_SEQUENCE: u64 = 3
     TRACE_CHUNK_COUNT: u64 = 3
@@ -141,7 +146,7 @@ const module Test:
     LARGE_CHECKPOINT_FIRST_HANDLE: u64 = 1
     LARGE_CHECKPOINT_NEXT_HANDLE: u64 = Test::RESOURCE_CAPACITY.u64() + Test::LARGE_CHECKPOINT_FIRST_HANDLE
     LARGE_CHECKPOINT_FILE_LENGTH: usize = 256
-    LARGE_CHECKPOINT_FILE_CURSOR: usize = 0
+    LARGE_CHECKPOINT_FILE_CURSOR: usize = Test::RESOURCE_CURSOR
     LARGE_CHECKPOINT_OS_THREAD: u64 = 0
     REMAPPED_OS_THREAD: u64 = 99
     PORTABLE_TASK_CHECKPOINT_FAILURE: i64 = 45
@@ -394,7 +399,8 @@ def make_large_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
         checkpoint.resources.files[index].handle <- DebuggerIdentity::debug_id(Test::LARGE_CHECKPOINT_FIRST_HANDLE + index.u64())
         checkpoint.resources.files[index].path <- DebuggerIdentity::debug_id(Test::RESOURCE_PATH_ID + index.u64())
         checkpoint.resources.files[index].length <- Test::LARGE_CHECKPOINT_FILE_LENGTH
-        checkpoint.resources.files[index].cursor <- Test::LARGE_CHECKPOINT_FILE_CURSOR
+        checkpoint.resources.files[index].initial_length <- Test::LARGE_CHECKPOINT_FILE_LENGTH
+        checkpoint.resources.files[index].cursor <- Test::LARGE_CHECKPOINT_FILE_CURSOR if index == Test::RESOURCE_FIRST_INDEX
         checkpoint.resources.files[index].writable <- true
         checkpoint.resources.files[index].generation <- Test::RESOURCE_GENERATION
 
@@ -418,7 +424,11 @@ def make_large_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
 
 def check_large_trace_capacity() -> i64:
     checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = make_large_checkpoint()
-    return Test::LARGE_TRACE_CAPACITY_FAILURE if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+    return Test::LARGE_TASK_STATE_INVALID if not DebuggerConcurrencyCheckpoint::task_snapshot_is_valid(checkpoint.tasks)
+    return Test::LARGE_EFFECT_STATE_INVALID if not DebuggerEffects::effect_oracle_is_exact(checkpoint.effects)
+    return Test::LARGE_RESOURCE_STATE_INVALID if not DebuggerVirtualResources::resources_is_valid(checkpoint.resources)
+    return Test::LARGE_ADAPTER_STATE_INVALID if not DebuggerReplayAdapters::adapter_snapshot_is_valid(checkpoint.adapters)
+    return Test::LARGE_CHECKPOINT_STATE_INVALID if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
     encoded: DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
     return Test::LARGE_TRACE_CAPACITY_FAILURE if encoded.failed or encoded.length <= Test::ORIGINAL_TRACE_BINARY_CAPACITY
     chunk: mutable DebuggerTraceStorage::CheckpointChunkEncoding = zeroed

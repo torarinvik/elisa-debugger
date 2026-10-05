@@ -748,6 +748,94 @@ module DebuggerManagedEngine:
             failure: DebuggerErrors::DebuggerError = managed_step(controller)
             return managed_execution_outcome(controller, failure)
 
+        def managed_step_into_with_outcome(controller: mutable ManagedController&) -> ExecutionOutcome:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
+            controller.last_error <- DebuggerErrors::no_error()
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if not DebuggerSession::session_can_inspect(controller.session):
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+                return managed_execution_outcome(controller, failure)
+            initial_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+            initial_depth: usize = controller.engine.machine.return_stack_pointer
+            initial_event: usize = controller.engine.event_count
+            reached_boundary: mutable bool = false
+            failure <- managed_step(controller)
+            return managed_execution_outcome(controller, failure) if not DebuggerErrors::error_is_ok(failure)
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < Step::COMPOUND_LIMIT:
+                current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+                entered_callee: bool = controller.engine.machine.return_stack_pointer > initial_depth
+                source_changed: bool = not managed_source_position_matches(initial_source, current_source)
+                if entered_callee or source_changed:
+                    reached_boundary <- true
+                    _ = managed_breakpoint_should_stop(controller)
+                    break
+                failure <- managed_step(controller)
+                return managed_execution_outcome(controller, failure) if not DebuggerErrors::error_is_ok(failure)
+            if not reached_boundary and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            failure <- controller.last_error if DebuggerErrors::error_is_ok(failure) and not DebuggerErrors::error_is_ok(controller.last_error)
+            return managed_execution_outcome(controller, failure)
+
+        def managed_step_over_with_outcome(controller: mutable ManagedController&) -> ExecutionOutcome:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
+            controller.last_error <- DebuggerErrors::no_error()
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if not DebuggerSession::session_can_inspect(controller.session):
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+                return managed_execution_outcome(controller, failure)
+            if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count:
+                failure <- managed_step(controller)
+                return managed_execution_outcome(controller, failure)
+            initial_instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
+            initial_source: DebuggerIdentity::SourceSpan = initial_instruction.source
+            initial_depth: usize = controller.engine.machine.return_stack_pointer
+            initial_event: usize = controller.engine.event_count
+            hit_breakpoint: mutable bool = false
+            failure <- managed_step(controller)
+            return managed_execution_outcome(controller, failure) if not DebuggerErrors::error_is_ok(failure)
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < Step::COMPOUND_LIMIT:
+                current_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+                call_is_active: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
+                same_source_position: bool = managed_source_position_matches(initial_source, current_source)
+                if managed_compound_breakpoint_should_stop(controller, initial_source):
+                    hit_breakpoint <- true
+                    break
+                break if not call_is_active and not same_source_position
+                failure <- managed_step(controller)
+                return managed_execution_outcome(controller, failure) if not DebuggerErrors::error_is_ok(failure)
+            call_is_active_after_limit: bool = initial_instruction.opcode == DebuggerEDIR::Opcode.Call and controller.engine.machine.return_stack_pointer > initial_depth
+            source_position_unchanged_after_limit: bool = managed_source_position_matches(initial_source, managed_current_source(controller))
+            if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT and (call_is_active_after_limit or source_position_unchanged_after_limit):
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            failure <- controller.last_error if DebuggerErrors::error_is_ok(failure) and not DebuggerErrors::error_is_ok(controller.last_error)
+            return managed_execution_outcome(controller, failure)
+
+        def managed_step_out_with_outcome(controller: mutable ManagedController&) -> ExecutionOutcome:
+            controller.log_output_length <- Logpoint::FIRST_INDEX
+            controller.last_error <- DebuggerErrors::no_error()
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if not DebuggerSession::session_can_inspect(controller.session):
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+                return managed_execution_outcome(controller, failure)
+            initial_depth: usize = controller.engine.machine.return_stack_pointer
+            initial_event: usize = controller.engine.event_count
+            initial_source: DebuggerIdentity::SourceSpan = managed_current_source(controller)
+            hit_breakpoint: mutable bool = false
+            failure <- managed_step(controller)
+            return managed_execution_outcome(controller, failure) if not DebuggerErrors::error_is_ok(failure)
+            while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count - initial_event < Step::COMPOUND_LIMIT:
+                if managed_compound_breakpoint_should_stop(controller, initial_source):
+                    hit_breakpoint <- true
+                    break
+                break if initial_depth > 0 and controller.engine.machine.return_stack_pointer < initial_depth
+                failure <- managed_step(controller)
+                return managed_execution_outcome(controller, failure) if not DebuggerErrors::error_is_ok(failure)
+            frame_has_not_returned: bool = initial_depth == 0 or controller.engine.machine.return_stack_pointer >= initial_depth
+            if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and frame_has_not_returned and controller.engine.event_count - initial_event >= Step::COMPOUND_LIMIT:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            failure <- controller.last_error if DebuggerErrors::error_is_ok(failure) and not DebuggerErrors::error_is_ok(controller.last_error)
+            return managed_execution_outcome(controller, failure)
+
         def managed_step_into(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             controller.log_output_length <- Logpoint::FIRST_INDEX
             controller.last_error <- DebuggerErrors::no_error()

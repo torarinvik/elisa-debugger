@@ -23,11 +23,67 @@ readonly UNMATCHED_PROVIDER_REQUEST_ID=99
 readonly CONSOLE_OUTPUT_BYTE=67
 readonly EXPECTED_EXIT_CODE=1
 readonly HOST_EFFECT_EXTENSION_VERSION=1
+readonly STEP_INITIALIZE_SEQUENCE=1
+readonly STEP_LAUNCH_SEQUENCE=2
+readonly STEP_CONFIGURATION_DONE_SEQUENCE=3
+readonly STEP_PAUSE_SEQUENCE=4
+readonly STEP_EFFECT_SEQUENCE=5
+readonly STEP_REPLY_SEQUENCE=6
+readonly STEP_CLOCK_VALUE_HIGH=0
+readonly STEP_CLOCK_VALUE_LOW=3
 
 frame() {
     payload=$1
     payload_length=$(printf '%s' "$payload" | wc -c | tr -d ' ')
     printf 'Content-Length: %s\r\n\r\n%s' "$payload_length" "$payload"
+}
+
+assert_frame_lengths() {
+    frame_output=$1
+    if ! printf '%s' "$frame_output" |
+        sed 's/}Content-Length:/}\
+Content-Length:/g' |
+        tr '\015' '\012' |
+        awk '
+            /^Content-Length: / { expected_bytes = $2; next }
+            /^\{/ {
+                if (expected_bytes == "" || length($0) != expected_bytes) {
+                    print "DAP frame Content-Length does not match its response body: expected " expected_bytes ", received " length($0) > "/dev/stderr"
+                    exit 1
+                }
+                frame_count++
+                expected_bytes = ""
+            }
+            END {
+                if (frame_count == 0 || expected_bytes != "") {
+                    print "DAP host-effect response stream contains an incomplete frame" > "/dev/stderr"
+                    exit 1
+                }
+            }
+        '; then
+        printf '%s\n' "$frame_output" >&2
+        exit 1
+    fi
+}
+
+check_step_host_effect() {
+    step_command=$1
+    step_initialize_payload=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$STEP_INITIALIZE_SEQUENCE")
+    step_launch_payload=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$STEP_LAUNCH_SEQUENCE" "$fixture")
+    step_configuration_payload=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$STEP_CONFIGURATION_DONE_SEQUENCE")
+    step_pause_payload=$(printf '{"seq":%s,"type":"request","command":"pause"}' "$STEP_PAUSE_SEQUENCE")
+    step_effect_payload=$(printf '{"seq":%s,"type":"request","command":"%s"}' "$STEP_EFFECT_SEQUENCE" "$step_command")
+    step_reply_payload=$(printf '{"seq":%s,"type":"request","command":"elisa/provideHostEffect","arguments":{"requestId":%s,"valueHigh":%s,"valueLow":%s}}' "$STEP_REPLY_SEQUENCE" "$STEP_EFFECT_SEQUENCE" "$STEP_CLOCK_VALUE_HIGH" "$STEP_CLOCK_VALUE_LOW")
+    step_input="$(frame "$step_initialize_payload")"
+    step_input="${step_input}$(frame "$step_launch_payload")"
+    step_input="${step_input}$(frame "$step_configuration_payload")"
+    step_input="${step_input}$(frame "$step_pause_payload")"
+    step_input="${step_input}$(frame "$step_effect_payload")"
+    step_input="${step_input}$(frame "$step_reply_payload")"
+    step_output=$(printf '%s' "$step_input" | "$server")
+    printf '%s\n' "$step_output" | grep -F "\"request_seq\":$STEP_EFFECT_SEQUENCE,\"command\":\"$step_command\",\"success\":true,\"body\":{\"allThreadsContinued\":false" | grep -F "\"requestId\":$STEP_EFFECT_SEQUENCE,\"kind\":\"clockNow\"" >/dev/null
+    printf '%s\n' "$step_output" | grep -F '"command":"elisa/provideHostEffect","success":true' >/dev/null
+    assert_frame_lengths "$step_output"
 }
 
 initialize_payload=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$INITIALIZE_SEQUENCE")
@@ -63,28 +119,7 @@ printf '%s\n' "$output" | grep -F '"command":"elisa/provideHostEffect","success"
 printf '%s\n' "$output" | grep -F '"command":"elisa/provideHostEffect","success":false,"message":"host-effect reply does not match the pending request"' >/dev/null
 printf '%s\n' "$output" | grep -F '"event":"terminated"' >/dev/null
 printf '%s\n' "$output" | grep -F "\"event\":\"exited\",\"body\":{\"exitCode\":$EXPECTED_EXIT_CODE}" >/dev/null
-
-if ! printf '%s' "$output" |
-    sed 's/}Content-Length:/}\
-Content-Length:/g' |
-    tr '\015' '\012' |
-    awk '
-        /^Content-Length: / { expected_bytes = $2; next }
-        /^\{/ {
-            if (expected_bytes == "" || length($0) != expected_bytes) {
-                print "DAP frame Content-Length does not match its response body: expected " expected_bytes ", received " length($0) > "/dev/stderr"
-                exit 1
-            }
-            frame_count++
-            expected_bytes = ""
-        }
-        END {
-            if (frame_count == 0 || expected_bytes != "") {
-                print "DAP host-effect response stream contains an incomplete frame" > "/dev/stderr"
-                exit 1
-            }
-        }
-    '; then
-    printf '%s\n' "$output" >&2
-    exit 1
-fi
+assert_frame_lengths "$output"
+check_step_host_effect "next"
+check_step_host_effect "stepIn"
+check_step_host_effect "stepOut"

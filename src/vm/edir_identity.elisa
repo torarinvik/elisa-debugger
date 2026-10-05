@@ -14,6 +14,11 @@ module DebuggerEDIRIdentity:
 
         const module Domain:
             EFFECT_CALL_SITE: u64 = 1162101074
+            EFFECT_INVOCATION: u64 = 1162696514
+
+        const module CallStack:
+            RETURN_ADDRESS_INCREMENT: u64 = 1
+            EMPTY_DEPTH: usize = 0
 
         const module Sentinel:
             NO_SOURCE_FILE: u64 = 0
@@ -73,5 +78,27 @@ module DebuggerEDIRIdentity:
             hash <- hash_u64(hash, source.start_byte)
             hash <- hash_u64(hash, source.end_byte)
             hash <- hash_u32(hash, source.discriminator)
+            return invalid_identity() if hash == Sentinel::NO_IDENTITY
+            return StableIdentity{value: DebuggerIdentity::debug_id(hash), valid: true}
+
+        # The active invocation is the ordered chain of source call sites and
+        # their EDIR targets. Repeated recursive sites therefore produce a
+        # different identity at each stack depth.
+        def effect_invocation_identity(image: DebuggerEDIR::ProgramImage&, machine: DebuggerEDIR::Machine&) -> StableIdentity:
+            return invalid_identity() if image.program.instruction_count > DebuggerEDIR::instruction_capacity().u64()
+            return invalid_identity() if machine.program_counter >= image.program.instruction_count
+            return invalid_identity() if machine.return_stack_pointer > DebuggerEDIR::call_depth_capacity()
+            hash: mutable u64 = Hash::OFFSET_BASIS
+            hash <- hash_u64(hash, Domain::EFFECT_INVOCATION)
+            for depth in CallStack::EMPTY_DEPTH..<machine.return_stack_pointer:
+                return_address: u64 = machine.return_stack[depth]
+                return invalid_identity() if return_address < CallStack::RETURN_ADDRESS_INCREMENT or return_address > image.program.instruction_count
+                call_index: usize = (return_address - CallStack::RETURN_ADDRESS_INCREMENT).usize()
+                call: DebuggerEDIR::Instruction = image.instructions[call_index]
+                return invalid_identity() if call.opcode != DebuggerEDIR::Opcode.Call or call.a < 0 or call.a >= image.program.instruction_count.i64()
+                call_site: StableIdentity = effect_call_site_identity(image, call_index)
+                return invalid_identity() if not call_site.valid
+                hash <- hash_u64(hash, call_site.value.value)
+                hash <- hash_u64(hash, call.a.u64())
             return invalid_identity() if hash == Sentinel::NO_IDENTITY
             return StableIdentity{value: DebuggerIdentity::debug_id(hash), valid: true}

@@ -161,9 +161,11 @@ sensitive process data. This primitive is a foundation for attach inspection,
 not an allocation profiler or proof of the cause of a memory spike.
 
 `build/elisa-debugger-cli` accepts one command per line (`launch`, `attach`,
-`pause`, `continue`, `step`, `reverseStep`, `seek`, `inspect`, `tasks`,
+`pause`, `continue`, `step`, `reverseStep`, `seek`, `timeline`, `inspect`, `tasks`,
 `checkpoint`, `compare`, `traceVerify`, `saveTrace`, and `close`). Session
-commands share the dispatcher used by the headless service. Use
+commands share the dispatcher used by the headless service. `timeline` prints
+the current event and branch, retained/exact bounds, seek/reverse eligibility,
+and stop generation. Use
 `saveTrace <path>` to transactionally write an exact managed trace to a file;
 for example, `saveTrace build/session.trace`. The compact JSON process still
 cannot carry a destination path or return trace artifact bytes, so trace-file

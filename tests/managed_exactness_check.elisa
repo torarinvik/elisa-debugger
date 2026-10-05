@@ -39,6 +39,21 @@ const module Test:
         MAX_CONTINUE_STEPS: u64 = 32
         MAX_RUN_TURNS: usize = 3
 
+    const module ConsoleInputProgram:
+        VERSION: u32 = 4
+        INSTRUCTION_COUNT: u64 = 2
+        INPUT_INSTRUCTION: usize = 0
+        RETURN_INSTRUCTION: usize = 1
+        REQUESTED_BYTES: usize = 1
+        BYTE_VALUE: i64 = 65
+        EOF_VALUE: i64 = -1
+        MAX_CONTINUE_STEPS: u64 = 32
+        INPUT_EVENT: usize = 1
+        FINAL_EVENT: usize = 2
+        BYTE_LENGTH: usize = 1
+        EOF_LENGTH: usize = 0
+        FIRST_RECORD: usize = 0
+
     const module HostResult:
         CLOCK_VALUE: i64 = -42
         CLOCK_RESULT_HASH: u64 = 8201
@@ -179,6 +194,7 @@ const module Test:
         HOST_EFFECT_TIME_TRAVEL_FAILED: i64 = 30
         HOST_EFFECT_REPLAY_FAILED: i64 = 31
         HOST_CONSOLE_OUTPUT_FAILED: i64 = 32
+        HOST_CONSOLE_INPUT_FAILED: i64 = 33
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -546,6 +562,53 @@ def managed_console_output_records_and_replays(session: DebuggerSession::Session
     return false if replay_completed.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed or not replay_controller.engine.machine.halted
     return DebuggerReplayAdapters::console_replay_complete(replay_controller.state.adapters.console) and DebuggerEffects::effect_oracle_replay_complete(replay_controller.state.effects) and DebuggerManagedEngine::managed_is_exact(replay_controller)
 
+def managed_console_input_case(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, value: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    console_image: mutable DebuggerEDIR::ProgramImage = image
+    console_image.program.version <- Test::ConsoleInputProgram::VERSION
+    console_image.program.instruction_count <- Test::ConsoleInputProgram::INSTRUCTION_COUNT
+    console_image.program.local_count <- Test::Image::LOCAL_COUNT
+    console_image.instructions[Test::ConsoleInputProgram::INPUT_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.ConsoleReadByte, a: Test::ConsoleProgram::UNUSED_OPERAND, b: Test::ConsoleProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::FIRST_INSTRUCTION].source}
+    console_image.instructions[Test::ConsoleInputProgram::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::ConsoleProgram::UNUSED_OPERAND, b: Test::ConsoleProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::RETURN_INSTRUCTION].source}
+
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, console_image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    pending: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(controller, Test::ConsoleInputProgram::MAX_CONTINUE_STEPS)
+    return false if pending.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or not pending.host_effect.valid or pending.host_effect.kind != DebuggerManagedEngine::HostEffectKind.ConsoleInput or pending.host_effect.payload != Test::ConsoleInputProgram::REQUESTED_BYTES.u64()
+    expected_request_hash: u64 = DebuggerManagedState::console_input_request_hash(Test::ConsoleInputProgram::REQUESTED_BYTES)
+    return false if pending.host_effect.request_hash != expected_request_hash
+    result_hash: u64 = DebuggerManagedState::state_effect_result_hash(value.u64())
+    recorded: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_console_input(controller, pending.host_effect.request_hash, result_hash, value)
+    return false if not DebuggerErrors::error_is_ok(recorded) or controller.engine.event_count != Test::ConsoleInputProgram::INPUT_EVENT or controller.engine.machine.accumulator != value
+    is_eof: bool = value == Test::ConsoleInputProgram::EOF_VALUE
+    expected_length: usize = Test::ConsoleInputProgram::EOF_LENGTH if is_eof else Test::ConsoleInputProgram::BYTE_LENGTH
+    input_record: DebuggerReplayAdapters::ConsoleRecord = controller.state.adapters.console.records[Test::ConsoleInputProgram::FIRST_RECORD]
+    return false if input_record.kind != DebuggerReplayAdapters::ConsoleRecordKind.Input or input_record.channel != DebuggerReplayAdapters::ConsoleChannel.Stdin or input_record.requested != Test::ConsoleInputProgram::REQUESTED_BYTES or input_record.length != expected_length or input_record.eof != is_eof
+    return false if not is_eof and input_record.bytes[Test::ConsoleInputProgram::FIRST_RECORD] != value.u8()
+    return false if controller.state.effects.count != Test::Bounds::ONE_COUNT or controller.state.effects.records[Test::ConsoleInputProgram::FIRST_RECORD].kind != DebuggerEffects::EffectKind.ConsoleInput
+
+    completed: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(controller, Test::ConsoleInputProgram::MAX_CONTINUE_STEPS)
+    return false if completed.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed or not controller.engine.machine.halted or controller.engine.event_count != Test::ConsoleInputProgram::FINAL_EVENT or not DebuggerManagedEngine::managed_is_exact(controller)
+    recorded_state: mutable DebuggerManagedState::State = controller.state
+    rewound: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::Bounds::FIRST_INDEX.u64())
+    return false if not DebuggerErrors::error_is_ok(rewound) or controller.state.effects.count != Test::Bounds::FIRST_INDEX or controller.state.adapters.console.count != Test::Bounds::FIRST_INDEX
+    restored: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::ConsoleInputProgram::INPUT_EVENT.u64())
+    return false if not DebuggerErrors::error_is_ok(restored) or controller.state.effects.count != Test::Bounds::ONE_COUNT or controller.state.adapters.console.records[Test::ConsoleInputProgram::FIRST_RECORD].eof != is_eof
+
+    replay_controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(replay_controller, session, console_image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(replay_controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(replay_controller))
+    replay_controller.state <- recorded_state
+    replay_started: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_begin_side_effect_replay(replay_controller)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    replay_pending: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(replay_controller, Test::ConsoleInputProgram::MAX_CONTINUE_STEPS)
+    return false if replay_pending.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or replay_pending.host_effect.kind != DebuggerManagedEngine::HostEffectKind.ConsoleInput
+    replay: DebuggerEffects::EffectReplay = DebuggerManagedEngine::managed_replay_console_input(replay_controller, replay_pending.host_effect.request_hash)
+    return false if not replay.accepted or replay.suppress_external_write or replay.result_value != value or replay_controller.engine.event_count != Test::ConsoleInputProgram::INPUT_EVENT or replay_controller.engine.machine.accumulator != value
+    replay_completed: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(replay_controller, Test::ConsoleInputProgram::MAX_CONTINUE_STEPS)
+    return false if replay_completed.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed or not replay_controller.engine.machine.halted or replay_controller.engine.machine.result != value
+    return DebuggerReplayAdapters::console_replay_complete(replay_controller.state.adapters.console) and DebuggerEffects::effect_oracle_replay_complete(replay_controller.state.effects) and DebuggerManagedEngine::managed_is_exact(replay_controller)
+
 
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
@@ -592,6 +655,8 @@ def main() -> i64:
     return Test::Failure::HOST_EFFECT_TIME_TRAVEL_FAILED if not managed_host_effect_time_travel_is_exact(session, image)
     return Test::Failure::HOST_EFFECT_REPLAY_FAILED if not managed_host_effect_replay_commits_vm_results(session, image)
     return Test::Failure::HOST_CONSOLE_OUTPUT_FAILED if not managed_console_output_records_and_replays(session, image)
+    return Test::Failure::HOST_CONSOLE_INPUT_FAILED if not managed_console_input_case(session, image, Test::ConsoleInputProgram::BYTE_VALUE)
+    return Test::Failure::HOST_CONSOLE_INPUT_FAILED if not managed_console_input_case(session, image, Test::ConsoleInputProgram::EOF_VALUE)
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return Test::Failure::INITIAL_STATE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)

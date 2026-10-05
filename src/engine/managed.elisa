@@ -180,6 +180,9 @@ module DebuggerManagedEngine:
             CONSOLE_OUTPUT_RESULT_HASH: u64 = 12802676217615765313
             CONSOLE_OUTPUT_TRANSFERRED_BITS: u64 = 1
 
+        const module HostEffectInput:
+            CONSOLE_INPUT_REQUESTED_BYTES: u64 = 1
+
         const module HostEffectReplayDefaults:
             NO_RESULT_HASH: u64 = 0
             NO_CLOCK_VALUE: i64 = 0
@@ -258,6 +261,7 @@ module DebuggerManagedEngine:
             None
             ClockNow
             RandomU64
+            ConsoleInput
             ConsoleOutput
 
         struct HostEffectRequest:
@@ -295,6 +299,10 @@ module DebuggerManagedEngine:
                 request.kind <- HostEffectKind.ConsoleOutput
                 request.payload <- instruction.a.u64()
                 request.request_hash <- DebuggerManagedState::console_output_request_hash(instruction.a.u8())
+            elif instruction.opcode == DebuggerEDIR::Opcode.ConsoleReadByte:
+                request.kind <- HostEffectKind.ConsoleInput
+                request.payload <- HostEffectInput::CONSOLE_INPUT_REQUESTED_BYTES
+                request.request_hash <- DebuggerManagedState::console_input_request_hash(HostEffectInput::CONSOLE_INPUT_REQUESTED_BYTES.usize())
             else:
                 return request
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
@@ -423,6 +431,35 @@ module DebuggerManagedEngine:
                 return managed_console_output_replay_failure(failure) if not DebuggerErrors::error_is_ok(failure)
                 return replay
             return managed_console_output_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST))
+
+        def managed_record_console_input(controller: mutable ManagedController&, request_hash: u64, result_hash: u64, value: i64) -> DebuggerErrors::DebuggerError:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            if request.kind != HostEffectKind.None:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if request.kind != HostEffectKind.ConsoleInput or request.request_hash != request_hash
+                preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.ConsoleInput)
+                return preflight if not DebuggerErrors::error_is_ok(preflight)
+                candidate_state: mutable DebuggerManagedState::State = controller.state
+                failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_console_input(candidate_state, request.call_site, request.invocation, request_hash, result_hash, request.payload.usize(), value)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                return managed_commit_host_effect(controller, candidate_state, value.u64(), HostEffectKind.ConsoleInput)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST)
+
+        def managed_replay_console_input(controller: mutable ManagedController&, request_hash: u64) -> DebuggerEffects::EffectReplay:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            if request.kind != HostEffectKind.None:
+                return managed_console_input_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST)) if not request.valid or request.kind != HostEffectKind.ConsoleInput or request.request_hash != request_hash
+                preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.ConsoleInput)
+                return managed_console_input_replay_failure(preflight) if not DebuggerErrors::error_is_ok(preflight)
+                candidate_state: mutable DebuggerManagedState::State = controller.state
+                replay: DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_console_input(candidate_state, request.call_site, request.invocation, request_hash, request.payload.usize())
+                if not replay.accepted:
+                    controller.state <- candidate_state
+                    return replay
+                failure: DebuggerErrors::DebuggerError = managed_commit_host_effect(controller, candidate_state, replay.result_value.u64(), HostEffectKind.ConsoleInput)
+                return managed_console_input_replay_failure(failure) if not DebuggerErrors::error_is_ok(failure)
+                return replay
+            return managed_console_input_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST))
 
         def managed_initialize(controller: mutable ManagedController&, session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recording: DebuggerIdentity::DebugId) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             if not controller.side_history_initialized:
@@ -931,6 +968,9 @@ module DebuggerManagedEngine:
             return DebuggerEffects::RandomEffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, value: HostEffectReplayDefaults::NO_RANDOM_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
 
         def managed_console_output_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::EffectReplay:
+            return DebuggerEffects::EffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, result_value: HostEffectReplayDefaults::NO_CLOCK_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
+
+        def managed_console_input_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::EffectReplay:
             return DebuggerEffects::EffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, result_value: HostEffectReplayDefaults::NO_CLOCK_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
 
         def managed_host_effect_preflight(controller: mutable ManagedController&, kind: HostEffectKind) -> DebuggerErrors::DebuggerError:

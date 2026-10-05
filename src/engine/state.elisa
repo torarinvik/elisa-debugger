@@ -29,6 +29,9 @@ module DebuggerManagedState:
 
         const module BridgeDefaults:
             COUNT_INCREMENT: usize = 1
+            CONSOLE_OUTPUT_BYTE_LENGTH: usize = 1
+            CONSOLE_OUTPUT_REQUEST_HASH_BASE: u64 = 13809278000000000000
+            CONSOLE_OUTPUT_RESULT_VALUE: i64 = 1
             EMPTY_HASH: u64 = 0
             EMPTY_VALUE: i64 = 0
             NO_WRITE_SUPPRESSION: bool = false
@@ -72,7 +75,21 @@ module DebuggerManagedState:
         def state_random_effect_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::RandomEffectReplay:
             return DebuggerEffects::RandomEffectReplay{accepted: BridgeDefaults::INITIAL_ACCEPTED, result_hash: BridgeDefaults::EMPTY_HASH, value: BridgeDefaults::EMPTY_HASH, suppress_external_write: BridgeDefaults::NO_WRITE_SUPPRESSION, failure: failure}
 
+        def state_console_output_bridge_failure(state: mutable State&, failure: DebuggerErrors::DebuggerError) -> void:
+            state.effects.exactness <- DebuggerEffects::Exactness.Diverged if failure.code == DebuggerErrors::ErrorCode.Diverged
+            state.effects.exactness <- DebuggerEffects::Exactness.Incomplete if failure.code != DebuggerErrors::ErrorCode.Diverged
+            state.effects.last_error <- failure
+            state.adapters.console.exact <- false
+            state.adapters.console.last_error <- failure
+
+        def state_console_output_replay_failure(state: mutable State&, failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::EffectReplay:
+            state_console_output_bridge_failure(state, failure)
+            return DebuggerEffects::EffectReplay{accepted: BridgeDefaults::INITIAL_ACCEPTED, result_hash: BridgeDefaults::EMPTY_HASH, result_value: BridgeDefaults::EMPTY_VALUE, suppress_external_write: BridgeDefaults::NO_WRITE_SUPPRESSION, failure: failure}
+
     public:
+        def console_output_request_hash(byte: u8) -> u64:
+            return BridgeDefaults::CONSOLE_OUTPUT_REQUEST_HASH_BASE + byte.u64()
+
         def state_initialize(state: mutable State&) -> void:
             DebuggerConcurrencyRuntime::runtime_initialize(state.tasks, false)
             DebuggerEffects::effect_oracle_initialize(state.effects, DebuggerEffects::EffectMode.Recording)
@@ -207,6 +224,58 @@ module DebuggerManagedState:
             state.effects <- effect_candidate
             state.adapters.random <- random_candidate
             return DebuggerEffects::RandomEffectReplay{accepted: true, result_hash: effect_reply.result_hash, value: random_reply.value, suppress_external_write: effect_reply.suppress_external_write, failure: DebuggerErrors::no_error()}
+
+        # Console output stores its bounded byte payload in the adapter journal
+        # and its call identity/result in the effect oracle as one state change.
+        def state_record_console_output(state: mutable State&, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, byte: u8) -> DebuggerErrors::DebuggerError:
+            if not state_replay_is_exact(state) or state.effects.mode != DebuggerEffects::EffectMode.Recording or state.resources.mode != DebuggerVirtualResources::ResourceMode.Recording or state.adapters.console.mode != DebuggerReplayAdapters::AdapterMode.Recording:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, StateDetail::SIDE_EFFECT_BRIDGE_ATOMICITY)
+            effect_candidate: mutable DebuggerEffects::EffectOracle = state.effects
+            console_candidate: mutable DebuggerReplayAdapters::Console = state.adapters.console
+            previous_effect_count: usize = effect_candidate.count
+            previous_console_count: usize = console_candidate.count
+            DebuggerEffects::effect_oracle_record_in_invocation(effect_candidate, DebuggerEffects::EffectKind.ConsoleOutput, call_site, invocation, request_hash, result_hash, BridgeDefaults::CONSOLE_OUTPUT_RESULT_VALUE)
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+            if effect_candidate.count != previous_effect_count + BridgeDefaults::COUNT_INCREMENT or effect_candidate.exactness != DebuggerEffects::Exactness.Exact or not DebuggerErrors::error_is_ok(effect_candidate.last_error):
+                failure <- effect_candidate.last_error if not DebuggerErrors::error_is_ok(effect_candidate.last_error)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, StateDetail::SIDE_EFFECT_BRIDGE_ATOMICITY) if DebuggerErrors::error_is_ok(failure)
+                state_console_output_bridge_failure(state, failure)
+                return failure
+            output: mutable u8[BridgeDefaults::CONSOLE_OUTPUT_BYTE_LENGTH] = [byte]
+            write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console_candidate, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], BridgeDefaults::CONSOLE_OUTPUT_BYTE_LENGTH)
+            if not write.accepted or write.transferred != BridgeDefaults::CONSOLE_OUTPUT_BYTE_LENGTH:
+                failure <- write.failure if not DebuggerErrors::error_is_ok(write.failure)
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, StateDetail::SIDE_EFFECT_BRIDGE_ATOMICITY) if DebuggerErrors::error_is_ok(failure)
+                state_console_output_bridge_failure(state, failure)
+                return failure
+            if console_candidate.count != previous_console_count + BridgeDefaults::COUNT_INCREMENT:
+                failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, StateDetail::SIDE_EFFECT_BRIDGE_ATOMICITY)
+                state_console_output_bridge_failure(state, failure)
+                return failure
+            state.effects <- effect_candidate
+            state.adapters.console <- console_candidate
+            return DebuggerErrors::no_error()
+
+        def state_replay_console_output(state: mutable State&, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64, byte: u8) -> DebuggerEffects::EffectReplay:
+            if not state_replay_is_exact(state) or state.effects.mode != DebuggerEffects::EffectMode.Replaying or state.resources.mode != DebuggerVirtualResources::ResourceMode.Replaying or state.adapters.console.mode != DebuggerReplayAdapters::AdapterMode.Replaying:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, StateDetail::SIDE_EFFECT_BRIDGE_ATOMICITY)
+                return state_console_output_replay_failure(state, failure)
+            effect_candidate: mutable DebuggerEffects::EffectOracle = state.effects
+            console_candidate: mutable DebuggerReplayAdapters::Console = state.adapters.console
+            effect_reply: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result_in_invocation(effect_candidate, DebuggerEffects::EffectKind.ConsoleOutput, call_site, invocation, request_hash)
+            if not effect_reply.accepted:
+                state.effects <- effect_candidate
+                return state_console_output_replay_failure(state, effect_reply.failure)
+            output: mutable u8[BridgeDefaults::CONSOLE_OUTPUT_BYTE_LENGTH] = [byte]
+            write: DebuggerReplayAdapters::ConsoleWrite = DebuggerReplayAdapters::console_write(console_candidate, DebuggerReplayAdapters::ConsoleChannel.Stdout, output[0], BridgeDefaults::CONSOLE_OUTPUT_BYTE_LENGTH)
+            if not write.accepted:
+                return state_console_output_replay_failure(state, write.failure)
+            if effect_reply.result_value != write.transferred.i64() or write.transferred != BridgeDefaults::CONSOLE_OUTPUT_BYTE_LENGTH:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, StateDetail::SIDE_EFFECT_BRIDGE_ATOMICITY)
+                return state_console_output_replay_failure(state, failure)
+            state.effects <- effect_candidate
+            state.adapters.console <- console_candidate
+            return effect_reply
 
         def state_begin_side_effect_replay(state: mutable State&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, StateDetail::RESOURCE_OVERFLOW) if state.resources.operation_overflowed

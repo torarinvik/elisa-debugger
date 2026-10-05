@@ -90,7 +90,7 @@ printf '%s\n' "$output" | grep -F '"request_seq":'"$CURRENT_STACK_SEQUENCE"',"co
 printf '%s\n' "$output" | grep -F '"request_seq":'"$STALE_SCOPES_SEQUENCE"',"command":"scopes","success":false' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$CURRENT_SCOPES_SEQUENCE"',"command":"scopes","success":true' >/dev/null
 printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"stopGeneration":'"$CURRENT_STOP_GENERATION"',"currentEvent":0,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":false}' >/dev/null
-printf '%s\n' "$output" | grep -F '"request_seq":'"$STALE_SEEK_SEQUENCE"',"command":"elisa/seek","success":false' >/dev/null
+printf '%s\n' "$output" | grep -F '"request_seq":'"$STALE_SEEK_SEQUENCE"',"command":"elisa/seek","success":false,"message":"timeline snapshot is stale; query the timeline again"' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$INVALID_SEEK_SEQUENCE"',"command":"elisa/seek","success":false' >/dev/null
 test "$(printf '%s\n' "$output" | grep -F -c '"command":"elisa/getTimeline","success":true,"body":{"version":1,"stopGeneration":'"$CURRENT_STOP_GENERATION"',"currentEvent":0,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":false}')" -eq "$EXPECTED_UNCHANGED_TIMELINE_COUNT"
 test "$(printf '%s\n' "$output" | grep -o '"event":"stopped"' | wc -l | tr -d ' ')" -eq "$EXPECTED_STOP_EVENT_COUNT"

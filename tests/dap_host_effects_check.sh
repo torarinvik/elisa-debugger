@@ -32,6 +32,8 @@ readonly STEP_EFFECT_SEQUENCE=5
 readonly STEP_REPLY_SEQUENCE=6
 readonly STEP_CLOCK_VALUE_HIGH=0
 readonly STEP_CLOCK_VALUE_LOW=3
+readonly STEP_INPUT_VALUE_HIGH=0
+readonly STEP_INPUT_VALUE_LOW=66
 readonly INPUT_INITIALIZE_SEQUENCE=20
 readonly INPUT_LAUNCH_SEQUENCE=21
 readonly INPUT_CONFIGURATION_SEQUENCE=22
@@ -101,6 +103,21 @@ check_step_host_effect() {
     assert_frame_lengths "$step_output"
 }
 
+check_step_console_input() {
+    step_command=$1
+    step_initialize=$(printf '{"seq":%s,"type":"request","command":"initialize"}' "$STEP_INITIALIZE_SEQUENCE")
+    step_launch=$(printf '{"seq":%s,"type":"request","command":"launch","arguments":{"program":"%s"}}' "$STEP_LAUNCH_SEQUENCE" "$input_fixture")
+    step_configuration=$(printf '{"seq":%s,"type":"request","command":"configurationDone"}' "$STEP_CONFIGURATION_DONE_SEQUENCE")
+    step_pause=$(printf '{"seq":%s,"type":"request","command":"pause"}' "$STEP_PAUSE_SEQUENCE")
+    step_effect=$(printf '{"seq":%s,"type":"request","command":"%s"}' "$STEP_EFFECT_SEQUENCE" "$step_command")
+    step_reply=$(printf '{"seq":%s,"type":"request","command":"elisa/provideHostEffect","arguments":{"requestId":%s,"valueHigh":%s,"valueLow":%s}}' "$STEP_REPLY_SEQUENCE" "$STEP_EFFECT_SEQUENCE" "$STEP_INPUT_VALUE_HIGH" "$STEP_INPUT_VALUE_LOW")
+    step_input="$(frame "$step_initialize")$(frame "$step_launch")$(frame "$step_configuration")$(frame "$step_pause")$(frame "$step_effect")$(frame "$step_reply")"
+    step_output=$(printf '%s' "$step_input" | "$server")
+    printf '%s\n' "$step_output" | grep -F "\"request_seq\":$STEP_EFFECT_SEQUENCE,\"command\":\"$step_command\",\"success\":true,\"body\":{\"allThreadsContinued\":false" | grep -F "\"requestId\":$STEP_EFFECT_SEQUENCE,\"kind\":\"consoleInput\"" | grep -F '"requested":1' >/dev/null
+    printf '%s\n' "$step_output" | grep -F '"command":"elisa/provideHostEffect","success":true' >/dev/null
+    assert_frame_lengths "$step_output"
+}
+
 check_console_input() {
     input_high=$1
     input_low=$2
@@ -165,5 +182,8 @@ assert_frame_lengths "$output"
 check_step_host_effect "next"
 check_step_host_effect "stepIn"
 check_step_host_effect "stepOut"
+check_step_console_input "next"
+check_step_console_input "stepIn"
+check_step_console_input "stepOut"
 check_console_input "$INPUT_BYTE_HIGH" "$INPUT_BYTE_LOW" "$INPUT_BYTE_EXIT_CODE" true
 check_console_input "$INPUT_EOF_HIGH" "$INPUT_EOF_LOW" "$INPUT_EOF_EXIT_CODE" false

@@ -134,6 +134,7 @@ const module Test:
         RANDOM_BRIDGE_NOT_ATOMIC: i64 = 23
         ACTIVE_IDENTITY_BRIDGE_FAILED: i64 = 24
         MIXED_BRIDGE_MODE_ACCEPTED: i64 = 25
+        CAPACITY_BRIDGE_PARTIALLY_RECORDED: i64 = 26
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -239,6 +240,30 @@ def managed_effect_bridges_reject_mixed_modes() -> bool:
     return false if replay_failure.accepted or replay_failure.failure.code != DebuggerErrors::ErrorCode.InvalidState
     return replay_state.effects.cursor == Test::Bounds::FIRST_INDEX and replay_state.adapters.clock.cursor == Test::Bounds::FIRST_INDEX
 
+def managed_effect_record_capacity_is_atomic() -> bool:
+    source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ClockBridge::ADAPTER_SOURCE_ID)
+    invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ClockBridge::INVOCATION_ID)
+    clock_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(clock_state)
+    adapter_recorded: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
+    while clock_state.adapters.clock.count < DebuggerReplayAdapters::Limits::SAMPLE_CAPACITY:
+        adapter_recorded <- DebuggerReplayAdapters::clock_record_in_invocation(clock_state.adapters.clock, source, invocation, Test::ClockBridge::RESULT_VALUE.u64())
+        return false if not DebuggerErrors::error_is_ok(adapter_recorded)
+    clock_failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(clock_state, DebuggerIdentity::debug_id(Test::ClockBridge::CALL_SITE_ID), source, invocation, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if clock_failure.code != DebuggerErrors::ErrorCode.ResourceLimit or clock_state.effects.count != Test::Bounds::FIRST_INDEX or clock_state.adapters.clock.count != DebuggerReplayAdapters::Limits::SAMPLE_CAPACITY
+    return false if clock_state.effects.exactness != DebuggerEffects::Exactness.Incomplete or clock_state.adapters.clock.exact
+
+    random_source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::RandomBridge::ADAPTER_SOURCE_ID)
+    random_invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::RandomBridge::INVOCATION_ID)
+    random_state: mutable DebuggerManagedState::State = zeroed
+    DebuggerManagedState::state_initialize(random_state)
+    while random_state.adapters.random.count < DebuggerReplayAdapters::Limits::SAMPLE_CAPACITY:
+        adapter_recorded <- DebuggerReplayAdapters::random_record_in_invocation(random_state.adapters.random, random_source, random_invocation, Test::RandomBridge::RANDOM_VALUE)
+        return false if not DebuggerErrors::error_is_ok(adapter_recorded)
+    random_failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_random_effect(random_state, DebuggerIdentity::debug_id(Test::RandomBridge::CALL_SITE_ID), random_source, random_invocation, Test::RandomBridge::REQUEST_HASH, Test::RandomBridge::RESULT_HASH, Test::RandomBridge::RANDOM_VALUE)
+    return false if random_failure.code != DebuggerErrors::ErrorCode.ResourceLimit or random_state.effects.count != Test::Bounds::FIRST_INDEX or random_state.adapters.random.count != DebuggerReplayAdapters::Limits::SAMPLE_CAPACITY
+    return random_state.effects.exactness == DebuggerEffects::Exactness.Incomplete and not random_state.adapters.random.exact
+
 def managed_history_side_state_barriers_work(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
@@ -314,6 +339,7 @@ def main() -> i64:
     image.instructions[Test::Image::RETURN_INSTRUCTION].source <- source_span
     return Test::Failure::ACTIVE_IDENTITY_BRIDGE_FAILED if not managed_effect_bridges_use_active_identity(session, image)
     return Test::Failure::MIXED_BRIDGE_MODE_ACCEPTED if not managed_effect_bridges_reject_mixed_modes()
+    return Test::Failure::CAPACITY_BRIDGE_PARTIALLY_RECORDED if not managed_effect_record_capacity_is_atomic()
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()
     return Test::Failure::RANDOM_BRIDGE_NOT_ATOMIC if not managed_random_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)

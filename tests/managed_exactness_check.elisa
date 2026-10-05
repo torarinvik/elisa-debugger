@@ -137,6 +137,7 @@ const module Test:
         ACTIVE_IDENTITY_BRIDGE_FAILED: i64 = 24
         MIXED_BRIDGE_MODE_ACCEPTED: i64 = 25
         CAPACITY_BRIDGE_PARTIALLY_RECORDED: i64 = 26
+        EFFECT_HISTORY_RESTORE_FAILED: i64 = 27
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -248,6 +249,27 @@ def managed_effect_bridges_use_active_identity(session: DebuggerSession::Session
     return false if not replayed_random.accepted or replayed_random.value != Test::RandomBridge::RANDOM_VALUE
     return controller.state.effects.cursor == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.cursor == Test::Bounds::ONE_COUNT and controller.state.adapters.random.cursor == Test::Bounds::ONE_COUNT
 
+def managed_effect_time_travel_restores_state(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    recorded_clock: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_clock_effect(controller, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded_clock)
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller))
+    recorded_random: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_random_effect(controller, Test::RandomBridge::REQUEST_HASH, Test::RandomBridge::RESULT_HASH, Test::RandomBridge::RANDOM_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded_random)
+    return false if controller.engine.event_count != Test::HistoryBarrier::FIRST_EVENT or controller.state.effects.count != Test::Bounds::TWO_COUNT or controller.state.adapters.clock.count != Test::Bounds::ONE_COUNT or controller.state.adapters.random.count != Test::Bounds::ONE_COUNT
+
+    reverse_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step(controller)
+    return false if not DebuggerErrors::error_is_ok(reverse_failure) or controller.engine.event_count != Test::Bounds::FIRST_INDEX
+    return false if controller.state.effects.count != Test::Bounds::ONE_COUNT or controller.state.adapters.clock.count != Test::Bounds::ONE_COUNT or controller.state.adapters.random.count != Test::Bounds::FIRST_INDEX
+    navigation: DebuggerTimeline::HistoryEligibility = DebuggerManagedEngine::managed_history_eligibility(controller)
+    return false if not navigation.can_seek or navigation.reason != DebuggerTimeline::HistoryEligibilityReason.Ready
+
+    seek_failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::HistoryBarrier::FIRST_EVENT)
+    return false if not DebuggerErrors::error_is_ok(seek_failure) or controller.engine.event_count != Test::HistoryBarrier::FIRST_EVENT
+    return controller.state.effects.count == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.count == Test::Bounds::ONE_COUNT and controller.state.adapters.random.count == Test::Bounds::ONE_COUNT
+
 def managed_effect_bridges_reject_mixed_modes() -> bool:
     recording_state: mutable DebuggerManagedState::State = zeroed
     DebuggerManagedState::state_initialize(recording_state)
@@ -295,6 +317,7 @@ def managed_history_side_state_barriers_work(session: DebuggerSession::Session, 
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
     return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller)) or controller.engine.event_count != Test::HistoryBarrier::FIRST_EVENT
+    return false if controller.side_history_count != Test::Bounds::TWO_COUNT
     available: DebuggerTimeline::HistoryEligibility = DebuggerManagedEngine::managed_history_eligibility(controller)
     return false if not available.can_reverse or not available.can_seek or available.reason != DebuggerTimeline::HistoryEligibilityReason.Ready
 
@@ -364,6 +387,7 @@ def main() -> i64:
     image.instructions[Test::Image::FIRST_INSTRUCTION].source <- source_span
     image.instructions[Test::Image::RETURN_INSTRUCTION].source <- source_span
     return Test::Failure::ACTIVE_IDENTITY_BRIDGE_FAILED if not managed_effect_bridges_use_active_identity(session, image)
+    return Test::Failure::EFFECT_HISTORY_RESTORE_FAILED if not managed_effect_time_travel_restores_state(session, image)
     return Test::Failure::MIXED_BRIDGE_MODE_ACCEPTED if not managed_effect_bridges_reject_mixed_modes()
     return Test::Failure::CAPACITY_BRIDGE_PARTIALLY_RECORDED if not managed_effect_record_capacity_is_atomic()
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()

@@ -19,10 +19,11 @@ const module Test:
         METADATA_VERSION: u32 = 1
 
     const module Provider:
-        CLOCK_VALUE: i64 = 29
+        CLOCK_VALUE: i64 = 3
         CLOCK_RESULT_HASH: u64 = 9201
         RANDOM_VALUE: u64 = 13
         RANDOM_RESULT_HASH: u64 = 9202
+        EXPECTED_RESULT: i64 = 42
 
     const module Bounds:
         FIRST_INDEX: usize = 0
@@ -30,6 +31,7 @@ const module Test:
         MAX_RUN_TURNS: usize = 8
         MAX_CONTINUE_STEPS: u64 = 64
         NO_TARGET_EVENT: usize = 0
+        EXPECTED_MAX_CALL_DEPTH: usize = 4
 
     const module Failure:
         SUCCESS: i64 = 0
@@ -80,7 +82,7 @@ def replay_compiled_host_effects(session: DebuggerSession::Session, image: Debug
         turns <- turns + Test::Bounds::EVENT_INCREMENT
 
     return Test::Failure::REPLAY_EXECUTION if not replay_controller.engine.machine.halted
-    return Test::Failure::REPLAY_RESULT if replay_controller.engine.machine.result != Test::Provider::RANDOM_VALUE.i64()
+    return Test::Failure::REPLAY_RESULT if replay_controller.engine.machine.result != Test::Provider::EXPECTED_RESULT
     return Test::Failure::REPLAY_RESULT if replay_controller.state.effects.cursor != Test::Bounds::EVENT_INCREMENT + Test::Bounds::EVENT_INCREMENT or replay_controller.state.adapters.clock.cursor != Test::Bounds::EVENT_INCREMENT or replay_controller.state.adapters.random.cursor != Test::Bounds::EVENT_INCREMENT
     return Test::Failure::REPLAY_RESULT if not DebuggerManagedEngine::managed_is_exact(replay_controller)
     return Test::Failure::SUCCESS
@@ -112,8 +114,10 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast, Memory.Allocate, Abort.Pa
     clock_event: mutable usize = Test::Bounds::NO_TARGET_EVENT
     random_event: mutable usize = Test::Bounds::NO_TARGET_EVENT
     turns: mutable usize = Test::Bounds::FIRST_INDEX
+    maximum_call_depth: mutable usize = Test::Bounds::FIRST_INDEX
     while turns < Test::Bounds::MAX_RUN_TURNS and not controller.engine.machine.halted:
         outcome: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(controller, Test::Bounds::MAX_CONTINUE_STEPS)
+        maximum_call_depth <- controller.engine.machine.return_stack_pointer if controller.engine.machine.return_stack_pointer > maximum_call_depth
         if outcome.kind == DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect:
             return Test::Failure::HOST_REQUEST if not outcome.host_effect.valid
             if outcome.host_effect.kind == DebuggerManagedEngine::HostEffectKind.ClockNow:
@@ -129,7 +133,8 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast, Memory.Allocate, Abort.Pa
         turns <- turns + Test::Bounds::EVENT_INCREMENT
 
     return Test::Failure::EXECUTION if not controller.engine.machine.halted or clock_event == Test::Bounds::NO_TARGET_EVENT or random_event == Test::Bounds::NO_TARGET_EVENT
-    return Test::Failure::RESULT if controller.engine.machine.result != Test::Provider::RANDOM_VALUE.i64()
+    return Test::Failure::RESULT if controller.engine.machine.result != Test::Provider::EXPECTED_RESULT
+    return Test::Failure::RESULT if maximum_call_depth != Test::Bounds::EXPECTED_MAX_CALL_DEPTH
     return Test::Failure::EXACTNESS if controller.state.effects.count != Test::Bounds::EVENT_INCREMENT + Test::Bounds::EVENT_INCREMENT or controller.state.adapters.clock.count != Test::Bounds::EVENT_INCREMENT or controller.state.adapters.random.count != Test::Bounds::EVENT_INCREMENT or not DebuggerManagedEngine::managed_is_exact(controller)
 
     final_event: usize = controller.engine.event_count

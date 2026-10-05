@@ -39,6 +39,7 @@ module DebuggerManagedService:
             DETAIL_BREAKPOINT_POLICY: u32 = 14
             DETAIL_BREAKPOINT_CONDITION: u32 = 15
             DETAIL_BREAKPOINT_LOG_MESSAGE: u32 = 16
+            DETAIL_HOST_EFFECT_REQUEST: u32 = 17
 
         const module EventCapture:
             SERVICE_EVENT_CAPTURE_CAPACITY: usize = 64
@@ -168,6 +169,15 @@ module DebuggerManagedService:
         def service_main_thread_is_available(session: DebuggerSession::Session) -> bool:
             return true if session.state == DebuggerSession::SessionState.Running or session.state == DebuggerSession::SessionState.Pausing or session.state == DebuggerSession::SessionState.Stopped or session.state == DebuggerSession::SessionState.Recording or session.state == DebuggerSession::SessionState.Replaying
             return false
+
+        def service_pending_host_effect_matches(service: Service&, supplied: DebuggerManagedEngine::HostEffectRequest, expected_kind: DebuggerManagedEngine::HostEffectKind) -> bool:
+            current: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(service.controller)
+            return false if not supplied.valid or not current.valid or supplied.kind != expected_kind or current.kind != expected_kind
+            return false if supplied.call_site.value != current.call_site.value or supplied.invocation.value != current.invocation.value
+            return supplied.request_hash == current.request_hash and supplied.payload == current.payload
+
+        def service_host_effect_request_error() -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DETAIL_HOST_EFFECT_REQUEST)
 
     public:
 
@@ -714,6 +724,36 @@ module DebuggerManagedService:
             service.last_error <- outcome.failure
             service_sync_timeline(service)
             return outcome
+
+        # Provider replies must match the complete pending request. In
+        # particular, a repeated operation with the same request hash cannot
+        # accept a delayed reply from an earlier invocation.
+        def service_record_clock_effect(service: mutable Service&, request: DebuggerManagedEngine::HostEffectRequest, result_hash: u64, value: i64) -> Result:
+            failure: mutable DebuggerErrors::DebuggerError = service_host_effect_request_error()
+            if service_pending_host_effect_matches(service, request, DebuggerManagedEngine::HostEffectKind.ClockNow):
+                failure <- DebuggerManagedEngine::managed_record_clock_effect(service.controller, request.request_hash, result_hash, value)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            service_sync_timeline(service)
+            return result_ok()
+
+        def service_record_random_effect(service: mutable Service&, request: DebuggerManagedEngine::HostEffectRequest, result_hash: u64, value: u64) -> Result:
+            failure: mutable DebuggerErrors::DebuggerError = service_host_effect_request_error()
+            if service_pending_host_effect_matches(service, request, DebuggerManagedEngine::HostEffectKind.RandomU64):
+                failure <- DebuggerManagedEngine::managed_record_random_effect(service.controller, request.request_hash, result_hash, value)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            service_sync_timeline(service)
+            return result_ok()
+
+        def service_record_console_output(service: mutable Service&, request: DebuggerManagedEngine::HostEffectRequest) -> Result:
+            failure: mutable DebuggerErrors::DebuggerError = service_host_effect_request_error()
+            if service_pending_host_effect_matches(service, request, DebuggerManagedEngine::HostEffectKind.ConsoleOutput):
+                failure <- DebuggerManagedEngine::managed_record_console_output(service.controller, request.request_hash)
+            service.last_error <- failure
+            return result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            service_sync_timeline(service)
+            return result_ok()
 
         def service_step_into(service: mutable Service&) -> Result:
             failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step_into(service.controller)

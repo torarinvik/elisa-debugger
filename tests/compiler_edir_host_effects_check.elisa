@@ -74,6 +74,14 @@ const module Test:
         SERVICE_OUTCOME_SETUP: i64 = 25
         SERVICE_CLOCK_OUTCOME: i64 = 26
         SERVICE_OUTCOME_POSITION: i64 = 27
+        SERVICE_STALE_RESPONSE: i64 = 28
+        SERVICE_CLOCK_SUPPLY: i64 = 29
+        SERVICE_RANDOM_OUTCOME: i64 = 30
+        SERVICE_RANDOM_SUPPLY: i64 = 31
+        SERVICE_OUTPUT_OUTCOME: i64 = 32
+        SERVICE_OUTPUT_SUPPLY: i64 = 33
+        SERVICE_COMPLETION: i64 = 34
+        SERVICE_FINAL_STATE: i64 = 35
 
 
 def service_exposes_compiled_clock_request(image: DebuggerEDIR::ProgramImage&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
@@ -90,6 +98,29 @@ def service_exposes_compiled_clock_request(image: DebuggerEDIR::ProgramImage&) -
     return Test::Failure::SERVICE_CLOCK_OUTCOME if outcome.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or not outcome.host_effect.valid or outcome.host_effect.kind != DebuggerManagedEngine::HostEffectKind.ClockNow or outcome.host_effect.request_hash == Test::Bounds::NO_REQUEST_HASH
     return Test::Failure::SERVICE_CLOCK_OUTCOME if outcome.host_effect.call_site.value == Test::Identity::NO_DEBUG_ID or outcome.host_effect.invocation.value == Test::Identity::NO_DEBUG_ID
     return Test::Failure::SERVICE_OUTCOME_POSITION if service.controller.engine.event_count != Test::Bounds::NO_TARGET_EVENT or service.timeline.position.event != outcome.position.event or service.timeline.bounds.current != outcome.position.event
+
+    stale_request: mutable DebuggerManagedEngine::HostEffectRequest = outcome.host_effect
+    stale_request.invocation <- DebuggerIdentity::debug_id(Test::Identity::NO_DEBUG_ID)
+    stale_reply: DebuggerManagedService::Result = DebuggerManagedService::service_record_clock_effect(service, stale_request, Test::Provider::CLOCK_RESULT_HASH, Test::Provider::CLOCK_VALUE)
+    return Test::Failure::SERVICE_STALE_RESPONSE if stale_reply.accepted or service.controller.engine.event_count != Test::Bounds::NO_TARGET_EVENT or service.timeline.bounds.current != outcome.position.event
+    clock_reply: DebuggerManagedService::Result = DebuggerManagedService::service_record_clock_effect(service, outcome.host_effect, Test::Provider::CLOCK_RESULT_HASH, Test::Provider::CLOCK_VALUE)
+    return Test::Failure::SERVICE_CLOCK_SUPPLY if not clock_reply.accepted or service.controller.engine.event_count != Test::Bounds::EVENT_INCREMENT or service.timeline.bounds.current != service.controller.engine.event_count.u64()
+
+    random_outcome: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_continue_with_outcome(service, Test::Bounds::MAX_CONTINUE_STEPS)
+    return Test::Failure::SERVICE_RANDOM_OUTCOME if random_outcome.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or not random_outcome.host_effect.valid or random_outcome.host_effect.kind != DebuggerManagedEngine::HostEffectKind.RandomU64
+    random_reply: DebuggerManagedService::Result = DebuggerManagedService::service_record_random_effect(service, random_outcome.host_effect, Test::Provider::RANDOM_RESULT_HASH, Test::Provider::RANDOM_VALUE)
+    return Test::Failure::SERVICE_RANDOM_SUPPLY if not random_reply.accepted
+
+    output_outcome: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_continue_with_outcome(service, Test::Bounds::MAX_CONTINUE_STEPS)
+    return Test::Failure::SERVICE_OUTPUT_OUTCOME if output_outcome.kind != DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect or not output_outcome.host_effect.valid or output_outcome.host_effect.kind != DebuggerManagedEngine::HostEffectKind.ConsoleOutput or output_outcome.host_effect.payload != Test::ConsoleOutput::BYTE
+    output_reply: DebuggerManagedService::Result = DebuggerManagedService::service_record_console_output(service, output_outcome.host_effect)
+    return Test::Failure::SERVICE_OUTPUT_SUPPLY if not output_reply.accepted
+
+    completed: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_continue_with_outcome(service, Test::Bounds::MAX_CONTINUE_STEPS)
+    return Test::Failure::SERVICE_COMPLETION if completed.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed or not service.controller.engine.machine.halted
+    return Test::Failure::SERVICE_FINAL_STATE if service.controller.engine.machine.result != Test::Provider::EXPECTED_RESULT or service.controller.state.effects.count != Test::Bounds::EXPECTED_EFFECT_COUNT
+    return Test::Failure::SERVICE_FINAL_STATE if service.controller.state.adapters.clock.count != Test::Bounds::EXPECTED_ADAPTER_RECORD_COUNT or service.controller.state.adapters.random.count != Test::Bounds::EXPECTED_ADAPTER_RECORD_COUNT or service.controller.state.adapters.console.count != Test::Bounds::EXPECTED_ADAPTER_RECORD_COUNT
+    return Test::Failure::SERVICE_FINAL_STATE if service.recorded_event_count != service.controller.engine.event_count or service.timeline.bounds.current != service.controller.engine.event_count.u64() or not DebuggerManagedEngine::managed_is_exact(service.controller)
     return Test::Failure::SUCCESS
 
 

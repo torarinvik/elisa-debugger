@@ -141,11 +141,13 @@ module DebuggerDAPPayload:
             VIRTUAL_FILE_CONTENTS_HEX: u8 = 34
             VIRTUAL_FILE_WRITABLE: u8 = 35
             VIRTUAL_FILE_HANDLE: u8 = 36
+            EVENT_INDEX: u8 = 37
             ELISA_VIRTUAL_FILES_LENGTH: usize = 17
             VIRTUAL_FILE_PATH_LENGTH: usize = 4
             VIRTUAL_FILE_CONTENTS_HEX_LENGTH: usize = 11
             VIRTUAL_FILE_WRITABLE_LENGTH: usize = 8
             VIRTUAL_FILE_HANDLE_LENGTH: usize = 6
+            EVENT_INDEX_LENGTH: usize = 10
 
         const module StackTraceParsing:
             FIRST_PROPERTY_OCCURRENCE: usize = 0
@@ -229,6 +231,11 @@ module DebuggerDAPPayload:
             FIRST_HANDLE: u64 = 1
             HANDLE_INCREMENT: u64 = 1
             NO_HANDLE: u64 = 0
+
+        const module TimelineNavigation:
+            FIRST_PROPERTY: usize = 0
+            DUPLICATE_PROPERTY: usize = 1
+            MAX_EVENT_INDEX: u64 = NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64
 
         const module SourcePaths:
             NO_SOURCE_REFERENCE: u64 = 0
@@ -331,6 +338,7 @@ module DebuggerDAPPayload:
             return byte == Character::DAP_PAYLOAD_CHARACTER_ASCII_SPACE or byte == Character::DAP_PAYLOAD_CHARACTER_ASCII_TAB or byte == Character::DAP_PAYLOAD_CHARACTER_ASCII_LINE_FEED or byte == Character::DAP_PAYLOAD_CHARACTER_ASCII_CARRIAGE_RETURN
 
         def field_length(field: u8) -> usize:
+            return DapFields::EVENT_INDEX_LENGTH if field == DapFields::EVENT_INDEX
             return DapFields::SOURCE_REFERENCE_LENGTH if field == DapFields::SOURCE_REFERENCE
             return DapFields::BREAKPOINTS_LENGTH if field == DapFields::BREAKPOINTS
             return DapFields::SOURCE_LENGTH if field == DapFields::SOURCE
@@ -419,7 +427,20 @@ module DebuggerDAPPayload:
             return Character::DAP_PAYLOAD_CHARACTER_ASCII_L if position == FieldBytePosition::POSITION_SIX
             return Character::DAP_PAYLOAD_CHARACTER_ASCII_E
 
+        def timeline_navigation_field_byte(position: usize) -> u8:
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_ZERO
+            return Character::ASCII_LOWER_V if position == FieldBytePosition::POSITION_ONE
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_TWO
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_N if position == FieldBytePosition::POSITION_THREE
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_T if position == FieldBytePosition::POSITION_FOUR
+            return Character::ASCII_UPPER_I if position == FieldBytePosition::POSITION_FIVE
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_N if position == FieldBytePosition::POSITION_SIX
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_D if position == FieldBytePosition::POSITION_SEVEN
+            return Character::DAP_PAYLOAD_CHARACTER_ASCII_E if position == FieldBytePosition::POSITION_EIGHT
+            return Character::ASCII_LOWER_X
+
         def field_byte(field: u8, position: usize) -> u8:
+            return timeline_navigation_field_byte(position) if field == DapFields::EVENT_INDEX
             return virtual_file_field_byte(field, position) if field == DapFields::ELISA_VIRTUAL_FILES or field == DapFields::VIRTUAL_FILE_PATH or field == DapFields::VIRTUAL_FILE_CONTENTS_HEX or field == DapFields::VIRTUAL_FILE_WRITABLE or field == DapFields::VIRTUAL_FILE_HANDLE
             if field == DapFields::HOST_EFFECT_REQUEST_ID:
                 return Character::DAP_PAYLOAD_CHARACTER_ASCII_R if position == FieldBytePosition::POSITION_ZERO
@@ -1244,6 +1265,10 @@ module DebuggerDAPPayload:
             snapshots: mutable VirtualFileSnapshot[VirtualFileSnapshots::MAX_SNAPSHOT_COUNT]
             count: mutable usize
 
+        struct TimelineSeekRequest:
+            valid: mutable bool
+            event_index: mutable u64
+
     private:
         def virtual_file_path_id(path: ProgramPath) -> u64:
             hash: mutable u64 = VirtualFileSnapshots::HASH_OFFSET_BASIS
@@ -1337,6 +1362,22 @@ module DebuggerDAPPayload:
             return request if object_field_value_start(payload, length, arguments, DapFields::ELISA_VIRTUAL_FILES, VirtualFileSnapshots::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
             return request if not virtual_file_snapshots_parse_array(payload, length, files, request)
             request.valid <- true
+            return request
+
+        def timeline_seek_request_parse(payload: u8&, length: usize) -> TimelineSeekRequest:
+            request: mutable TimelineSeekRequest = zeroed
+            root_start: mutable usize = RequestParsing::FIRST_JSON_BYTE_INDEX
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + RequestParsing::JSON_WHITESPACE_INCREMENT
+            arguments: usize = object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, TimelineNavigation::FIRST_PROPERTY)
+            return request if arguments == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, TimelineNavigation::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            return request if arguments >= length or payload[arguments] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
+            event_start: usize = object_field_value_start(payload, length, arguments, DapFields::EVENT_INDEX, TimelineNavigation::FIRST_PROPERTY)
+            return request if event_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::EVENT_INDEX, TimelineNavigation::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            event_index: ParsedValue = parse_unsigned_bounded(payload, length, event_start, TimelineNavigation::MAX_EVENT_INDEX)
+            return request if not event_index.valid
+            request.valid <- true
+            request.event_index <- event_index.value
             return request
 
         def thread_id_request_parse(payload: u8&, length: usize) -> ReferenceRequest:

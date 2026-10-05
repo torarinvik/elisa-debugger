@@ -160,6 +160,7 @@ module DebuggerManagedEngine:
             log_output_length: mutable usize
             side_history: mutable heap void&?
             side_history_initialized: mutable bool
+            side_history_first_event: mutable usize
             side_history_count: mutable usize
 
     private:
@@ -193,7 +194,7 @@ module DebuggerManagedEngine:
 
         def managed_side_checkpoint_capture_current(controller: mutable ManagedController&) -> bool:
             event_index: usize = controller.engine.event_count
-            return false if event_index >= DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY or event_index > controller.side_history_count
+            return false if event_index < controller.side_history_first_event or event_index >= DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY or event_index > controller.side_history_count
             checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = managed_full_checkpoint(controller)
             return false if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint))
             if event_index < controller.side_history_count and (managed_side_checkpoint_at(controller, event_index).side_state_hash != checkpoint.side_state_hash or managed_side_checkpoint_at(controller, event_index).state_hash != checkpoint.state_hash):
@@ -204,7 +205,7 @@ module DebuggerManagedEngine:
             return true
 
         def managed_side_checkpoint_is_valid(controller: mutable ManagedController&, event: usize) -> bool:
-            return false if event >= controller.side_history_count or event >= DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY
+            return false if event < controller.side_history_first_event or event >= controller.side_history_count or event >= DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY
             checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = managed_side_checkpoint_at(controller, event)
             return false if checkpoint.event != event.u64() or checkpoint.recording.value != controller.engine.recording.value
             return false if checkpoint.branch.value != DebuggerReplayEngine::replay_engine_branch_at(controller.engine, event.u64()).value
@@ -277,6 +278,7 @@ module DebuggerManagedEngine:
             # Configuration created before launch must already carry the
             # recording identity, not the unrelated editor session identity.
             controller.side_history_count <- Event::INITIAL_INDEX
+            controller.side_history_first_event <- Event::INITIAL_INDEX
             DebuggerManagedState::state_initialize(controller.state)
             controller.last_error <- DebuggerErrors::no_error()
             # These fixed buffers are read only below their active lengths.
@@ -1146,6 +1148,7 @@ module DebuggerManagedEngine:
             if restored_session.last_error == DebuggerSession::SessionError.Unsupported:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::HISTORY) if restored_session.last_error != DebuggerSession::SessionError.None
+            preserve_side_history_prefix: bool = managed_side_checkpoint_is_valid(controller, checkpoint.event.usize()) and managed_side_checkpoint_at(controller, checkpoint.event.usize()).side_state_hash == checkpoint.side_state_hash
             failure <- DebuggerManagedState::state_restore(controller.state, checkpoint)
             return failure if not DebuggerErrors::error_is_ok(failure)
             restored: DebuggerEDIR::Machine = DebuggerFullCheckpoint::full_checkpoint_restore_machine(checkpoint)
@@ -1153,6 +1156,9 @@ module DebuggerManagedEngine:
             controller.engine.event_count <- checkpoint.event.usize()
             controller.engine.engine_error <- DebuggerReplayEngine::EngineError.None
             controller.session <- restored_session
+            if not preserve_side_history_prefix:
+                controller.side_history_first_event <- checkpoint.event.usize()
+                controller.side_history_count <- checkpoint.event.usize()
             managed_sync_position(controller)
             managed_refresh_values(controller)
             return DebuggerErrors::no_error()

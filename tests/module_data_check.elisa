@@ -156,6 +156,8 @@ const module Test:
     ADAPTER_REPLAY_RESULT_FAILURE: i64 = 140
     ADAPTER_SOURCE_ID: u64 = 700
     ADAPTER_WRONG_SOURCE_ID: u64 = 701
+    ADAPTER_INVOCATION_ID: u64 = 702
+    ADAPTER_WRONG_INVOCATION_ID: u64 = 703
     ADAPTER_CLOCK_VALUE: u64 = 123
     ADAPTER_RANDOM_VALUE: u64 = 987
     ADAPTER_INPUT_LENGTH: usize = 2
@@ -168,6 +170,10 @@ const module Test:
     ADAPTER_OUTPUT_SECOND: u8 = 89
     ADAPTER_OUTPUT_THIRD: u8 = 90
     ADAPTER_FIRST_RECORD_INDEX: usize = 0
+    ADAPTER_SOURCE_ONLY_NOT_REJECTED: i64 = 39
+    ADAPTER_MISSING_INVOCATION_ACCEPTED: i64 = 40
+    ADAPTER_INVOCATION_MISMATCH_ACCEPTED: i64 = 41
+    RANDOM_INVOCATION_MISMATCH_ACCEPTED: i64 = 42
     ADAPTER_FIRST_SEQUENCE: u64 = 0
     ADAPTER_EMPTY_TRANSFERRED: usize = 0
     ADAPTER_NO_ID: u64 = 0
@@ -248,38 +254,59 @@ def check_corrupt_runtime() -> i64:
 def check_managed_adapters() -> i64:
     source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_SOURCE_ID)
     wrong_source: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_WRONG_SOURCE_ID)
+    invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_INVOCATION_ID)
+    wrong_invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_WRONG_INVOCATION_ID)
+    missing_invocation: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(Test::ADAPTER_NO_ID)
+    source_only_clock: mutable DebuggerReplayAdapters::Clock = zeroed
+    DebuggerReplayAdapters::clock_initialize(source_only_clock, DebuggerReplayAdapters::AdapterMode.Recording)
+    legacy_clock_failure: DebuggerErrors::DebuggerError = DebuggerReplayAdapters::clock_record(source_only_clock, source, Test::ADAPTER_CLOCK_VALUE)
+    return Test::ADAPTER_SOURCE_ONLY_NOT_REJECTED if legacy_clock_failure.code != DebuggerErrors::ErrorCode.Unsupported or source_only_clock.exact
+    missing_clock: mutable DebuggerReplayAdapters::Clock = zeroed
+    DebuggerReplayAdapters::clock_initialize(missing_clock, DebuggerReplayAdapters::AdapterMode.Recording)
+    missing_clock_failure: DebuggerErrors::DebuggerError = DebuggerReplayAdapters::clock_record_in_invocation(missing_clock, source, missing_invocation, Test::ADAPTER_CLOCK_VALUE)
+    return Test::ADAPTER_MISSING_INVOCATION_ACCEPTED if missing_clock_failure.code != DebuggerErrors::ErrorCode.InvalidArgument or missing_clock.exact
     clock_recording: mutable DebuggerReplayAdapters::Clock = zeroed
     DebuggerReplayAdapters::clock_initialize(clock_recording, DebuggerReplayAdapters::AdapterMode.Recording)
-    return Test::ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::clock_record(clock_recording, source, Test::ADAPTER_CLOCK_VALUE))
+    return Test::ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::clock_record_in_invocation(clock_recording, source, invocation, Test::ADAPTER_CLOCK_VALUE))
     clock_recording.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
-    clock_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(clock_recording, source)
+    clock_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read_in_invocation(clock_recording, source, invocation)
     return Test::ADAPTER_REPLAY_RESULT_FAILURE if not clock_read.accepted or clock_read.value != Test::ADAPTER_CLOCK_VALUE or not DebuggerReplayAdapters::clock_is_exact(clock_recording)
-    clock_recording.samples[Test::ADAPTER_FIRST_RECORD_INDEX] <- DebuggerReplayAdapters::AdapterSample{sequence: Test::ADAPTER_INVALID_SEQUENCE, source: source, value: Test::ADAPTER_CLOCK_VALUE}
+    clock_recording.samples[Test::ADAPTER_FIRST_RECORD_INDEX] <- DebuggerReplayAdapters::AdapterSample{sequence: Test::ADAPTER_INVALID_SEQUENCE, source: source, invocation: invocation, value: Test::ADAPTER_CLOCK_VALUE}
     return Test::ADAPTER_SEQUENCE_FAILURE if DebuggerReplayAdapters::clock_is_exact(clock_recording)
     return Test::ADAPTER_METADATA_FAILURE if DebuggerReplayAdapters::adapter_mode_code_is_valid(Test::INVALID_ADAPTER_MODE)
     DebuggerReplayAdapters::clock_initialize(clock_recording, DebuggerReplayAdapters::AdapterMode.Recording)
-    _ = DebuggerReplayAdapters::clock_record(clock_recording, source, Test::ADAPTER_CLOCK_VALUE)
+    _ = DebuggerReplayAdapters::clock_record_in_invocation(clock_recording, source, invocation, Test::ADAPTER_CLOCK_VALUE)
     clock_recording.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
-    clock_mismatch_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(clock_recording, wrong_source)
+    clock_mismatch_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read_in_invocation(clock_recording, wrong_source, invocation)
     return Test::ADAPTER_REPLAY_RESULT_FAILURE if clock_mismatch_read.accepted or clock_mismatch_read.failure.code != DebuggerErrors::ErrorCode.Diverged or DebuggerReplayAdapters::clock_is_exact(clock_recording)
     DebuggerReplayAdapters::clock_initialize(clock_recording, DebuggerReplayAdapters::AdapterMode.Recording)
-    _ = DebuggerReplayAdapters::clock_record(clock_recording, source, Test::ADAPTER_CLOCK_VALUE)
+    _ = DebuggerReplayAdapters::clock_record_in_invocation(clock_recording, source, invocation, Test::ADAPTER_CLOCK_VALUE)
+    clock_recording.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    clock_invocation_mismatch: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read_in_invocation(clock_recording, source, wrong_invocation)
+    return Test::ADAPTER_INVOCATION_MISMATCH_ACCEPTED if clock_invocation_mismatch.accepted or clock_invocation_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged or clock_recording.cursor != Test::ADAPTER_FIRST_RECORD_INDEX
+    DebuggerReplayAdapters::clock_initialize(clock_recording, DebuggerReplayAdapters::AdapterMode.Recording)
+    _ = DebuggerReplayAdapters::clock_record_in_invocation(clock_recording, source, invocation, Test::ADAPTER_CLOCK_VALUE)
     clock_recording.mode <- DebuggerReplayAdapters::AdapterMode.Branch
-    branch_clock_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read(clock_recording, source)
+    branch_clock_read: DebuggerReplayAdapters::ClockRead = DebuggerReplayAdapters::clock_read_in_invocation(clock_recording, source, invocation)
     return Test::ADAPTER_REPLAY_RESULT_FAILURE if not branch_clock_read.accepted or branch_clock_read.value != Test::ADAPTER_CLOCK_VALUE or not DebuggerReplayAdapters::clock_is_exact(clock_recording)
 
     random_recording: mutable DebuggerReplayAdapters::Random = zeroed
     DebuggerReplayAdapters::random_initialize(random_recording, DebuggerReplayAdapters::AdapterMode.Recording)
-    return Test::ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::random_record(random_recording, source, Test::ADAPTER_RANDOM_VALUE))
+    return Test::ADAPTER_REPLAY_RESULT_FAILURE if not DebuggerErrors::error_is_ok(DebuggerReplayAdapters::random_record_in_invocation(random_recording, source, invocation, Test::ADAPTER_RANDOM_VALUE))
     random_recording.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
-    random_read: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read(random_recording, source)
+    random_read: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read_in_invocation(random_recording, source, invocation)
     return Test::ADAPTER_REPLAY_RESULT_FAILURE if not random_read.accepted or random_read.value != Test::ADAPTER_RANDOM_VALUE or not DebuggerReplayAdapters::random_is_exact(random_recording)
-    random_recording.samples[Test::ADAPTER_FIRST_RECORD_INDEX] <- DebuggerReplayAdapters::AdapterSample{sequence: Test::ADAPTER_FIRST_SEQUENCE, source: DebuggerIdentity::debug_id(Test::ADAPTER_NO_ID), value: Test::ADAPTER_RANDOM_VALUE}
+    DebuggerReplayAdapters::random_initialize(random_recording, DebuggerReplayAdapters::AdapterMode.Recording)
+    _ = DebuggerReplayAdapters::random_record_in_invocation(random_recording, source, invocation, Test::ADAPTER_RANDOM_VALUE)
+    random_recording.mode <- DebuggerReplayAdapters::AdapterMode.Replaying
+    random_invocation_mismatch: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read_in_invocation(random_recording, source, wrong_invocation)
+    return Test::RANDOM_INVOCATION_MISMATCH_ACCEPTED if random_invocation_mismatch.accepted or random_invocation_mismatch.failure.code != DebuggerErrors::ErrorCode.Diverged or random_recording.cursor != Test::ADAPTER_FIRST_RECORD_INDEX
+    random_recording.samples[Test::ADAPTER_FIRST_RECORD_INDEX] <- DebuggerReplayAdapters::AdapterSample{sequence: Test::ADAPTER_FIRST_SEQUENCE, source: DebuggerIdentity::debug_id(Test::ADAPTER_NO_ID), invocation: invocation, value: Test::ADAPTER_RANDOM_VALUE}
     return Test::ADAPTER_METADATA_FAILURE if DebuggerReplayAdapters::random_is_exact(random_recording)
     DebuggerReplayAdapters::random_initialize(random_recording, DebuggerReplayAdapters::AdapterMode.Recording)
-    _ = DebuggerReplayAdapters::random_record(random_recording, source, Test::ADAPTER_RANDOM_VALUE)
+    _ = DebuggerReplayAdapters::random_record_in_invocation(random_recording, source, invocation, Test::ADAPTER_RANDOM_VALUE)
     random_recording.mode <- DebuggerReplayAdapters::AdapterMode.Branch
-    branch_random_read: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read(random_recording, source)
+    branch_random_read: DebuggerReplayAdapters::RandomRead = DebuggerReplayAdapters::random_read_in_invocation(random_recording, source, invocation)
     return Test::ADAPTER_REPLAY_RESULT_FAILURE if not branch_random_read.accepted or branch_random_read.value != Test::ADAPTER_RANDOM_VALUE or not DebuggerReplayAdapters::random_is_exact(random_recording)
 
     input_bytes: mutable u8[Test::ADAPTER_INPUT_LENGTH] = [Test::ADAPTER_INPUT_FIRST, Test::ADAPTER_INPUT_SECOND]

@@ -31,6 +31,7 @@ module DebuggerReplayAdapters:
             OUTPUT: u32 = 6
             INPUT: u32 = 7
             BYTES: u32 = 8
+            MISSING_INVOCATION: u32 = 9
 
 
     public:
@@ -55,6 +56,7 @@ module DebuggerReplayAdapters:
         struct AdapterSample:
             sequence: mutable u64
             source: mutable DebuggerIdentity::DebugId
+            invocation: mutable DebuggerIdentity::DebugId
             value: mutable u64
 
         struct Clock:
@@ -146,7 +148,7 @@ module DebuggerReplayAdapters:
             clock.last_error <- DebuggerErrors::no_error()
             clock.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MODE, false) if not adapter_mode_code_is_valid(mode.u16())
 
-        def clock_record(clock: mutable Clock&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
+        def clock_record_in_invocation(clock: mutable Clock&, source: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
             return clock.last_error if not DebuggerErrors::error_is_ok(clock.last_error)
             if not adapter_mode_code_is_valid(clock.mode.u16()):
                 failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MODE, false)
@@ -159,17 +161,28 @@ module DebuggerReplayAdapters:
                 clock.exact <- false
                 clock.last_error <- failure
                 return failure
+            if invocation.value == Adapter::NO_ID:
+                failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MISSING_INVOCATION, false)
+                clock.exact <- false
+                clock.last_error <- failure
+                return failure
             if clock.count >= Adapter::SAMPLE_CAPACITY:
                 failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.ResourceLimit, Detail::CAPACITY, false)
                 clock.exact <- false
                 clock.last_error <- failure
                 return failure
-            clock.samples[clock.count] <- AdapterSample{sequence: clock.count.u64(), source: source, value: value}
+            clock.samples[clock.count] <- AdapterSample{sequence: clock.count.u64(), source: source, invocation: invocation, value: value}
             clock.count <- clock.count + 1
             clock.exact <- true
             return DebuggerErrors::no_error()
 
-        def clock_read(clock: mutable Clock&, source: DebuggerIdentity::DebugId) -> ClockRead:
+        def clock_record(clock: mutable Clock&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
+            failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.Unsupported, Detail::MISSING_INVOCATION, false)
+            clock.exact <- false
+            clock.last_error <- failure
+            return failure
+
+        def clock_read_in_invocation(clock: mutable Clock&, source: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId) -> ClockRead:
             result: mutable ClockRead = zeroed
             result.failure <- DebuggerErrors::no_error()
             if (clock.mode != AdapterMode.Replaying and clock.mode != AdapterMode.Branch) or not clock.exact or not DebuggerErrors::error_is_ok(clock.last_error):
@@ -177,6 +190,9 @@ module DebuggerReplayAdapters:
                 return result
             if source.value == Adapter::NO_ID:
                 result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::ID, false)
+                return result
+            if invocation.value == Adapter::NO_ID:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MISSING_INVOCATION, false)
                 return result
             if clock.count > Adapter::SAMPLE_CAPACITY or clock.cursor > clock.count:
                 result.failure <- adapter_error(DebuggerErrors::ErrorCode.Corrupt, Detail::CAPACITY, false)
@@ -189,7 +205,7 @@ module DebuggerReplayAdapters:
                 clock.last_error <- result.failure
                 return result
             sample: AdapterSample = clock.samples[clock.cursor]
-            if sample.sequence != clock.cursor.u64() or sample.source.value != source.value:
+            if sample.sequence != clock.cursor.u64() or sample.source.value != source.value or sample.invocation.value != invocation.value:
                 result.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, Detail::REQUEST, false)
                 clock.exact <- false
                 clock.last_error <- result.failure
@@ -199,10 +215,17 @@ module DebuggerReplayAdapters:
             clock.cursor <- clock.cursor + 1
             return result
 
+        def clock_read(clock: mutable Clock&, source: DebuggerIdentity::DebugId) -> ClockRead:
+            result: mutable ClockRead = zeroed
+            result.failure <- adapter_error(DebuggerErrors::ErrorCode.Unsupported, Detail::MISSING_INVOCATION, false)
+            clock.exact <- false
+            clock.last_error <- result.failure
+            return result
+
         def clock_is_exact(clock: Clock&) -> bool:
             return false if not clock.exact or not DebuggerErrors::error_is_ok(clock.last_error) or clock.count > Adapter::SAMPLE_CAPACITY or clock.cursor > clock.count or (clock.mode != AdapterMode.Replaying and clock.mode != AdapterMode.Branch)
             for index in 0..<clock.count:
-                return false if clock.samples[index].sequence != index.u64() or clock.samples[index].source.value == Adapter::NO_ID
+                return false if clock.samples[index].sequence != index.u64() or clock.samples[index].source.value == Adapter::NO_ID or clock.samples[index].invocation.value == Adapter::NO_ID
             return true
 
         def random_initialize(random: mutable Random&, mode: AdapterMode) -> void:
@@ -213,7 +236,7 @@ module DebuggerReplayAdapters:
             random.last_error <- DebuggerErrors::no_error()
             random.last_error <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MODE, false) if not adapter_mode_code_is_valid(mode.u16())
 
-        def random_record(random: mutable Random&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
+        def random_record_in_invocation(random: mutable Random&, source: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
             return random.last_error if not DebuggerErrors::error_is_ok(random.last_error)
             if not adapter_mode_code_is_valid(random.mode.u16()):
                 failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MODE, false)
@@ -226,17 +249,28 @@ module DebuggerReplayAdapters:
                 random.exact <- false
                 random.last_error <- failure
                 return failure
+            if invocation.value == Adapter::NO_ID:
+                failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MISSING_INVOCATION, false)
+                random.exact <- false
+                random.last_error <- failure
+                return failure
             if random.count >= Adapter::SAMPLE_CAPACITY:
                 failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.ResourceLimit, Detail::CAPACITY, false)
                 random.exact <- false
                 random.last_error <- failure
                 return failure
-            random.samples[random.count] <- AdapterSample{sequence: random.count.u64(), source: source, value: value}
+            random.samples[random.count] <- AdapterSample{sequence: random.count.u64(), source: source, invocation: invocation, value: value}
             random.count <- random.count + 1
             random.exact <- true
             return DebuggerErrors::no_error()
 
-        def random_read(random: mutable Random&, source: DebuggerIdentity::DebugId) -> RandomRead:
+        def random_record(random: mutable Random&, source: DebuggerIdentity::DebugId, value: u64) -> DebuggerErrors::DebuggerError:
+            failure: DebuggerErrors::DebuggerError = adapter_error(DebuggerErrors::ErrorCode.Unsupported, Detail::MISSING_INVOCATION, false)
+            random.exact <- false
+            random.last_error <- failure
+            return failure
+
+        def random_read_in_invocation(random: mutable Random&, source: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId) -> RandomRead:
             result: mutable RandomRead = zeroed
             result.failure <- DebuggerErrors::no_error()
             if (random.mode != AdapterMode.Replaying and random.mode != AdapterMode.Branch) or not random.exact or not DebuggerErrors::error_is_ok(random.last_error):
@@ -244,6 +278,9 @@ module DebuggerReplayAdapters:
                 return result
             if source.value == Adapter::NO_ID:
                 result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::ID, false)
+                return result
+            if invocation.value == Adapter::NO_ID:
+                result.failure <- adapter_error(DebuggerErrors::ErrorCode.InvalidArgument, Detail::MISSING_INVOCATION, false)
                 return result
             if random.count > Adapter::SAMPLE_CAPACITY or random.cursor > random.count:
                 result.failure <- adapter_error(DebuggerErrors::ErrorCode.Corrupt, Detail::CAPACITY, false)
@@ -256,7 +293,7 @@ module DebuggerReplayAdapters:
                 random.last_error <- result.failure
                 return result
             sample: AdapterSample = random.samples[random.cursor]
-            if sample.sequence != random.cursor.u64() or sample.source.value != source.value:
+            if sample.sequence != random.cursor.u64() or sample.source.value != source.value or sample.invocation.value != invocation.value:
                 result.failure <- adapter_error(DebuggerErrors::ErrorCode.Diverged, Detail::REQUEST, false)
                 random.exact <- false
                 random.last_error <- result.failure
@@ -266,10 +303,17 @@ module DebuggerReplayAdapters:
             random.cursor <- random.cursor + 1
             return result
 
+        def random_read(random: mutable Random&, source: DebuggerIdentity::DebugId) -> RandomRead:
+            result: mutable RandomRead = zeroed
+            result.failure <- adapter_error(DebuggerErrors::ErrorCode.Unsupported, Detail::MISSING_INVOCATION, false)
+            random.exact <- false
+            random.last_error <- result.failure
+            return result
+
         def random_is_exact(random: Random&) -> bool:
             return false if not random.exact or not DebuggerErrors::error_is_ok(random.last_error) or random.count > Adapter::SAMPLE_CAPACITY or random.cursor > random.count or (random.mode != AdapterMode.Replaying and random.mode != AdapterMode.Branch)
             for index in 0..<random.count:
-                return false if random.samples[index].sequence != index.u64() or random.samples[index].source.value == Adapter::NO_ID
+                return false if random.samples[index].sequence != index.u64() or random.samples[index].source.value == Adapter::NO_ID or random.samples[index].invocation.value == Adapter::NO_ID
             return true
 
         def console_initialize(console: mutable Console&, mode: AdapterMode) -> void:
@@ -447,7 +491,7 @@ module DebuggerReplayAdapters:
             return false if clock.mode == AdapterMode.Recording and clock.cursor != 0
             return false if clock.mode != AdapterMode.Recording and clock.mode != AdapterMode.Replaying and clock.mode != AdapterMode.Branch
             for index in 0..<clock.count:
-                return false if clock.samples[index].sequence != index.u64() or clock.samples[index].source.value == Adapter::NO_ID
+                return false if clock.samples[index].sequence != index.u64() or clock.samples[index].source.value == Adapter::NO_ID or clock.samples[index].invocation.value == Adapter::NO_ID
             return true
 
         def random_checkpoint_state_is_valid(random: Random&) -> bool:
@@ -455,7 +499,7 @@ module DebuggerReplayAdapters:
             return false if random.mode == AdapterMode.Recording and random.cursor != 0
             return false if random.mode != AdapterMode.Recording and random.mode != AdapterMode.Replaying and random.mode != AdapterMode.Branch
             for index in 0..<random.count:
-                return false if random.samples[index].sequence != index.u64() or random.samples[index].source.value == Adapter::NO_ID
+                return false if random.samples[index].sequence != index.u64() or random.samples[index].source.value == Adapter::NO_ID or random.samples[index].invocation.value == Adapter::NO_ID
             return true
 
         def console_checkpoint_state_is_valid(console: Console&) -> bool:

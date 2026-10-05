@@ -154,6 +154,7 @@ ELISA_BUILD_INPUTS := $(ELISA_SOURCE_FILES) $(ELISA_COMPILER_BUILD_INPUTS)
 .PHONY: replay-seek-atomicity-check
 .PHONY: dap-continue-partial-check
 .PHONY: dap-stack-frames-check dap-stack-frame-check
+.PHONY: dap-host-effects-check
 .PHONY: metadata-names-check
 .PHONY: managed-allocations-check managed-exactness-check concurrency-races-check expression-parser-check timeline-capability-check type-metadata-check
 .PHONY: build-runner-check
@@ -192,6 +193,9 @@ server-evaluate-check: $(BUILD)/elisa-debugger-server edir-file-loader-check
 	set -e; server_evaluate_input=$$(for payload in '$(SERVER_INITIALIZE_PAYLOAD)' '{"method":"launch","id":1,"arguments":{"program":"$(BUILD)/edir-fixture.edir"}}' '{"method":"pause","id":2}' '{"method":"step","id":3}' '{"method":"step","id":4}' '{"method":"step","id":5}' '{"method":"step","id":6}' '{"method":"evaluate","id":7,"arguments":{"expression":"local0 + local1","frameIndex":0}}' '{"method":"evaluate","id":8,"expectedStopGeneration":"$(SERVER_TEST_STALE_GENERATION)","arguments":{"expression":"local0 + local1"}}' '{"method":"evaluate","id":9,"arguments":{"expression":"1 / 0"}}'; do frame_length=$$(printf %s "$$payload" | wc -c | tr -d ' '); printf '%s %s\n' "$$frame_length" "$$payload"; done); server_evaluate_output=$$(printf '%s\n' "$$server_evaluate_input" | "$(BUILD)/elisa-debugger-server"); echo "$$server_evaluate_output" | grep -F '"id":"7","ok":true' | grep -F '"evaluation":{"type":"i64","value":"$(SERVER_TEST_EVALUATE_VALUE)","consumed":$(SERVER_TEST_EVALUATE_CONSUMED_BYTES)}'; echo "$$server_evaluate_output" | grep -F '"id":"8","ok":false' | grep -F '"code":"STALE_GENERATION"'; echo "$$server_evaluate_output" | grep -F '"id":"9","ok":false' | grep -F '"code":"INVALID_ARGUMENT"'
 
 dap-server: $(BUILD)/elisa-debugger-dap-server
+
+dap-host-effects-check: $(BUILD)/elisa-debugger-dap-server compiler-edir-host-effects-check
+	sh tests/dap_host_effects_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(COMPILER_EDIR_HOST_EFFECT_ARTIFACT)"
 
 dap-logpoints-check: edir-file-loader-check $(BUILD)/elisa-debugger-dap-server
 	sh tests/dap_logpoints_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/edir-fixture.edir" "$(SERVER_TEST_LOGPOINT_LINE)"

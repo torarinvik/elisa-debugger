@@ -8,6 +8,8 @@ module DebuggerDAP:
 
         const module EventHistory:
             EVENT_BATCH_CAPACITY: usize = 3
+            PROVIDER_YIELD_MINIMUM_EVENT_COUNT: usize = 2
+            EVENT_COUNT_TO_INDEX_OFFSET: usize = 1
 
         const module ProcessExit:
             NO_EXIT_CODE: i64 = 0
@@ -134,4 +136,15 @@ module DebuggerDAP:
                 else:
                     reason: StopReason = StopReason.Step if request == RequestKind.Step else StopReason.Breakpoint
                     event_batch_add(batch, EventKind.Stopped, reason, ProcessExit::NO_EXIT_CODE)
+            return batch
+
+        # A provider yield is a visible stop after continue has run up to the
+        # effect boundary. Keep the DAP stop reason as pause; the Elisa
+        # extension body carries the typed provider request.
+        def events_after_host_effect_request(state_committed: bool, session_state: DebuggerSession::SessionState, machine_halted: bool, machine_faulted: bool, exit_code: i64) -> EventBatch:
+            batch: mutable EventBatch = events_after_request(RequestKind.Continue, true, state_committed, session_state, machine_halted, machine_faulted, exit_code)
+            return batch if target_has_exited(session_state, machine_halted, machine_faulted) or batch.count < EventHistory::PROVIDER_YIELD_MINIMUM_EVENT_COUNT
+            stopped_index: usize = batch.count - EventHistory::EVENT_COUNT_TO_INDEX_OFFSET
+            return batch if batch.events[stopped_index].kind != EventKind.Stopped
+            batch.events[stopped_index].reason <- StopReason.Pause
             return batch

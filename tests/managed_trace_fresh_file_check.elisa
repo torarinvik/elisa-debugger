@@ -10,6 +10,7 @@ include "../src/protocol/request.elisa"
 include "../src/protocol/managed_trace.elisa"
 include "../src/protocol/managed_trace_file.elisa"
 include "../src/replay/engine.elisa"
+include "../src/query/timeline.elisa"
 
 const module Test:
     COMPILER_ID: u64 = 701
@@ -23,9 +24,12 @@ const module Test:
     FRESH_RECORDING_ID: u64 = 708
     FAILED_SESSION_ID: u64 = 709
     FAILED_RECORDING_ID: u64 = 710
+    EARLIER_SESSION_ID: u64 = 711
+    EARLIER_RECORDING_ID: u64 = 712
     FIRST_REQUEST_ID: u64 = 1
     SECOND_REQUEST_ID: u64 = 2
     THIRD_REQUEST_ID: u64 = 3
+    FOURTH_REQUEST_ID: u64 = 4
     INITIAL_EVENT: u64 = 0
     EXPECTED_EVENT: u64 = 1
     EVENT_AFTER_TRACE_END: u64 = 2
@@ -49,6 +53,9 @@ const module TestResult:
     FRESH_STATE: i64 = 8
     REPLAY_REJECTED_ATOMICALLY: i64 = 9
     OUT_OF_RANGE_REJECTED_ATOMICALLY: i64 = 10
+    EARLIER_RESTORE: i64 = 11
+    RESTORED_HISTORY: i64 = 12
+    FORWARD_SEEK: i64 = 13
 
 def copy_path(source: cstr, output: mutable u8&) -> usize:
     length: mutable usize = Test::PATH_FIRST_BYTE
@@ -75,6 +82,17 @@ def dispatch(service: mutable DebuggerManagedService::Service&, method: Debugger
         has_id: true,
         expected_generation: Test::INITIAL_EVENT,
         target_event: Test::INITIAL_EVENT,
+        valid: true
+    }
+    return DebuggerManagedService::service_dispatch(service, request)
+
+def seek_to(service: mutable DebuggerManagedService::Service&, request_id: u64, target_event: u64) -> DebuggerManagedService::Result:
+    request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{
+        method: DebuggerProtocolRequest::RequestMethod.Seek,
+        id: request_id,
+        has_id: true,
+        expected_generation: Test::INITIAL_EVENT,
+        target_event: target_event,
         valid: true
     }
     return DebuggerManagedService::service_dispatch(service, request)
@@ -117,4 +135,14 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
 
     rejected: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(fresh, path[Test::PATH_FIRST_BYTE], path_length, Test::EXPECTED_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     return TestResult::REPLAY_REJECTED_ATOMICALLY if rejected.accepted or fresh.controller.engine.event_count.u64() != Test::EXPECTED_EVENT or DebuggerReplayEngine::replay_engine_state_hash(fresh.controller.engine) != original_hash
+
+    earlier_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::EARLIER_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    earlier: mutable DebuggerManagedService::Service
+    DebuggerManagedService::service_initialize(earlier, earlier_session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Test::EARLIER_RECORDING_ID))
+    earlier_restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(earlier, path[Test::PATH_FIRST_BYTE], path_length, Test::INITIAL_EVENT) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::EARLIER_RESTORE if not earlier_restored.accepted or earlier.controller.engine.event_count.u64() != Test::INITIAL_EVENT or earlier.controller.session.state != DebuggerSession::SessionState.Stopped
+    earlier_timeline: DebuggerTimeline::Timeline = DebuggerManagedService::service_timeline(earlier)
+    return TestResult::RESTORED_HISTORY if not earlier_timeline.bounds.has_exact or earlier_timeline.bounds.exact_first != Test::INITIAL_EVENT or earlier_timeline.bounds.exact_last != Test::EXPECTED_EVENT
+    advanced: DebuggerManagedService::Result = seek_to(earlier, Test::FOURTH_REQUEST_ID, Test::EXPECTED_EVENT)
+    return TestResult::FORWARD_SEEK if not advanced.accepted or earlier.controller.engine.event_count.u64() != Test::EXPECTED_EVENT or DebuggerReplayEngine::replay_engine_state_hash(earlier.controller.engine) != original_hash
     return TestResult::OK

@@ -105,6 +105,10 @@ const module Test:
         PAYLOAD_LENGTH: usize = 3
         INVALID_PAYLOAD_LENGTH: u8 = 65
         PAYLOAD_LENGTH_OFFSET: usize = 86
+        PAYLOAD_LENGTH_HIGH_BYTE_OFFSET: usize = 87
+        OVERSIZED_PAYLOAD_LENGTH_LOW_BYTE: u8 = 1
+        OVERSIZED_PAYLOAD_LENGTH_HIGH_BYTE: u8 = 1
+        OVERSIZED_LENGTH_FAILURE: i64 = 65
         FIRST: u8 = 17
         SECOND: u8 = 34
         THIRD: u8 = 51
@@ -357,6 +361,13 @@ def check_variable_event_codec() -> i64:
     return Test::VariableCodec::NO_PAYLOAD_FAILURE if reader.offset != reader.length
     return Test::VariableCodec::NO_PAYLOAD_FAILURE if not DebuggerEvents::event_envelopes_equal(event, decoded.event)
 
+    oversized_wire_length: mutable DebuggerTraceBinary::ByteWriter = encoded
+    oversized_wire_length.bytes[Test::VariableCodec::PAYLOAD_LENGTH_OFFSET] <- Test::VariableCodec::OVERSIZED_PAYLOAD_LENGTH_LOW_BYTE
+    oversized_wire_length.bytes[Test::VariableCodec::PAYLOAD_LENGTH_HIGH_BYTE_OFFSET] <- Test::VariableCodec::OVERSIZED_PAYLOAD_LENGTH_HIGH_BYTE
+    DebuggerTraceBinary::reader_initialize(reader, oversized_wire_length.bytes[0], oversized_wire_length.length)
+    decoded <- DebuggerTraceEventCodec::event_record_decode(reader)
+    return Test::VariableCodec::OVERSIZED_LENGTH_FAILURE if decoded.status != DebuggerTraceEventCodec::DecodeStatus.Invalid or DebuggerTraceBinary::reader_is_valid(reader)
+
     legacy_expected: DebuggerEvents::EventEnvelope = make_event(Test::RECORDING, Test::VariableCodec::LEGACY_SCHEMA, Test::FIRST_EVENT)
     legacy_bytes: mutable DebuggerTraceBinary::ByteWriter = encoded
     legacy_bytes.bytes[Test::VariableCodec::LEGACY_VERSION_OFFSET] <- Test::VariableCodec::LEGACY_SCHEMA.u8()
@@ -408,6 +419,8 @@ def check_payload_round_trip() -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.P
     payload[3] <- Test::PayloadFixture::FOURTH
     payload[Test::PayloadFixture::MAX_LENGTH - 1] <- Test::PayloadFixture::LAST
     return Test::RESULT_PAYLOAD_VALIDATION if not DebuggerEvents::event_envelope_set_payload(event, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::PayloadFixture::MAX_LENGTH)
+    oversized_event: mutable DebuggerEvents::EventEnvelope = event
+    return Test::RESULT_PAYLOAD_VALIDATION if DebuggerEvents::event_envelope_set_payload(oversized_event, DebuggerEvents::EventPayloadKind.Bytes, payload[0], Test::PayloadFixture::MAX_LENGTH + 1)
     event.kind <- DebuggerEvents::EventKind.Input
     return Test::RESULT_PAYLOAD_VALIDATION if event.payload_kind != DebuggerEvents::EventPayloadKind.Bytes or event.payload_length.usize() != Test::PayloadFixture::MAX_LENGTH or not DebuggerEvents::event_envelope_is_well_formed(event)
     aliased_payload: mutable DebuggerEvents::EventEnvelope = event

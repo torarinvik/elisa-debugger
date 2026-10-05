@@ -10,6 +10,7 @@ include "../breakpoint/breakpoint.elisa"
 include "../breakpoint/manager.elisa"
 include "../breakpoint/resolver.elisa"
 include "../metadata/source.elisa"
+include "../query/timeline.elisa"
 include "../inspect/store.elisa"
 include "../inspect/expression_parser.elisa"
 include "../vm/edir_codec.elisa"
@@ -1042,6 +1043,29 @@ module DebuggerManagedEngine:
         def managed_is_exact(controller: mutable ManagedController&) -> bool:
             return false if not DebuggerReplayEngine::replay_engine_is_exact(controller.engine)
             return DebuggerManagedState::state_replay_is_exact(controller.state)
+
+        # Report what the managed engine can safely navigate from this stop.
+        # Machine history alone is insufficient while effect, resource,
+        # adapter, or scheduler state has no matching historical snapshot.
+        def managed_history_eligibility(controller: mutable ManagedController&) -> DebuggerTimeline::HistoryEligibility:
+            eligibility: mutable DebuggerTimeline::HistoryEligibility = DebuggerTimeline::history_eligibility_for_capabilities(controller.session.capabilities)
+            return eligibility if eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.UnsupportedHistory
+            if not DebuggerSession::session_can_inspect(controller.session):
+                eligibility.reason <- DebuggerTimeline::HistoryEligibilityReason.SessionNotStopped
+                return eligibility
+            if managed_history_has_unaligned_side_state(controller):
+                eligibility.reason <- DebuggerTimeline::HistoryEligibilityReason.SideStateUnaligned
+                return eligibility
+            if not managed_is_exact(controller):
+                eligibility.reason <- DebuggerTimeline::HistoryEligibilityReason.StateNotExact
+                return eligibility
+            current_event: u64 = controller.engine.event_count.u64()
+            retained_first: u64 = controller.session.retained_first
+            retained_last: u64 = controller.session.retained_last
+            eligibility.can_reverse <- current_event > retained_first and managed_reverse_snapshot_is_valid(controller, controller.engine.event_count - Reverse::PREVIOUS_EVENT_INCREMENT)
+            eligibility.can_seek <- eligibility.can_reverse or (controller.session.has_retained_history and current_event < retained_last)
+            eligibility.reason <- DebuggerTimeline::HistoryEligibilityReason.Ready if eligibility.can_reverse or eligibility.can_seek
+            return eligibility
 
         def managed_fork(controller: mutable ManagedController&, branch: DebuggerIdentity::DebugId) -> DebuggerReplayEngine::ReplayEngine:
             return DebuggerReplayEngine::replay_engine_fork(controller.engine, branch)

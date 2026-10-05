@@ -254,18 +254,28 @@ module DebuggerManagedService:
         def service_sync_timeline(service: mutable Service&) -> void:
             service_capture_recording(service)
             position: DebuggerIdentity::Position = service.controller.session.position
+            eligibility: DebuggerTimeline::HistoryEligibility = DebuggerManagedEngine::managed_history_eligibility(service.controller)
             bounds: mutable DebuggerTimeline::HistoryBounds = service.timeline.bounds
             if not bounds.has_retained:
                 bounds <- DebuggerTimeline::history_bounds_new(position.event)
             bounds.retained_first <- position.event if position.event < bounds.retained_first
             bounds.retained_last <- position.event if position.event > bounds.retained_last
             if service.controller.session.capabilities.history == DebuggerCapabilities::HistoryKind.Exact:
-                had_exact: mutable bool = bounds.has_exact
-                bounds.has_exact <- true
-                bounds.exact_first <- position.event if not had_exact or position.event < bounds.exact_first
-                bounds.exact_last <- position.event if not had_exact or position.event > bounds.exact_last
-                bounds.exact_first <- bounds.retained_first if bounds.exact_first < bounds.retained_first
-                bounds.exact_last <- bounds.retained_last if bounds.exact_last > bounds.retained_last
+                if eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.SideStateUnaligned:
+                    bounds.has_exact <- true
+                    bounds.exact_first <- position.event
+                    bounds.exact_last <- position.event
+                elif eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.StateNotExact:
+                    bounds.has_exact <- false
+                    bounds.exact_first <- position.event
+                    bounds.exact_last <- position.event
+                else:
+                    had_exact: mutable bool = bounds.has_exact
+                    bounds.has_exact <- true
+                    bounds.exact_first <- position.event if not had_exact or position.event < bounds.exact_first
+                    bounds.exact_last <- position.event if not had_exact or position.event > bounds.exact_last
+                    bounds.exact_first <- bounds.retained_first if bounds.exact_first < bounds.retained_first
+                    bounds.exact_last <- bounds.retained_last if bounds.exact_last > bounds.retained_last
             else:
                 bounds.has_exact <- false
                 bounds.exact_first <- position.event
@@ -273,6 +283,7 @@ module DebuggerManagedService:
             service.timeline.bounds <- bounds
             service.timeline.position <- position
             service.timeline.bounds.current <- position.event
+            service.timeline.eligibility <- eligibility
 
         def service_dispatch(service: mutable Service&, request: DebuggerProtocolRequest::Request) -> Result:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()

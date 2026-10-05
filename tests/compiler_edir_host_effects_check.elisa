@@ -47,6 +47,43 @@ const module Test:
         RANDOM_NOT_RESTORED: i64 = 12
         REVERSE_CLOCK: i64 = 13
         CLOCK_NOT_RESTORED: i64 = 14
+        REPLAY_SETUP: i64 = 15
+        REPLAY_CLOCK: i64 = 16
+        REPLAY_RANDOM: i64 = 17
+        REPLAY_EXECUTION: i64 = 18
+        REPLAY_RESULT: i64 = 19
+
+
+def replay_compiled_host_effects(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recorded_state: DebuggerManagedState::State&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    replay_controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(replay_controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return Test::Failure::REPLAY_SETUP if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(replay_controller))
+    return Test::Failure::REPLAY_SETUP if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(replay_controller))
+    replay_controller.state <- recorded_state
+    return Test::Failure::REPLAY_SETUP if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_begin_side_effect_replay(replay_controller))
+
+    turns: mutable usize = Test::Bounds::FIRST_INDEX
+    while turns < Test::Bounds::MAX_RUN_TURNS and not replay_controller.engine.machine.halted:
+        outcome: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedEngine::managed_continue_with_outcome(replay_controller, Test::Bounds::MAX_CONTINUE_STEPS)
+        if outcome.kind == DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect:
+            return Test::Failure::HOST_REQUEST if not outcome.host_effect.valid
+            if outcome.host_effect.kind == DebuggerManagedEngine::HostEffectKind.ClockNow:
+                clock_replay: DebuggerEffects::EffectReplay = DebuggerManagedEngine::managed_replay_clock_effect(replay_controller, outcome.host_effect.request_hash)
+                return Test::Failure::REPLAY_CLOCK if not clock_replay.accepted or clock_replay.result_value != Test::Provider::CLOCK_VALUE.u64()
+            elif outcome.host_effect.kind == DebuggerManagedEngine::HostEffectKind.RandomU64:
+                random_replay: DebuggerEffects::RandomEffectReplay = DebuggerManagedEngine::managed_replay_random_effect(replay_controller, outcome.host_effect.request_hash)
+                return Test::Failure::REPLAY_RANDOM if not random_replay.accepted or random_replay.value != Test::Provider::RANDOM_VALUE
+            else:
+                return Test::Failure::HOST_REQUEST
+        elif outcome.kind == DebuggerManagedEngine::ExecutionOutcomeKind.Failed:
+            return Test::Failure::REPLAY_EXECUTION
+        turns <- turns + Test::Bounds::EVENT_INCREMENT
+
+    return Test::Failure::REPLAY_EXECUTION if not replay_controller.engine.machine.halted
+    return Test::Failure::REPLAY_RESULT if replay_controller.engine.machine.result != Test::Provider::RANDOM_VALUE.i64()
+    return Test::Failure::REPLAY_RESULT if replay_controller.state.effects.cursor != Test::Bounds::EVENT_INCREMENT + Test::Bounds::EVENT_INCREMENT or replay_controller.state.adapters.clock.cursor != Test::Bounds::EVENT_INCREMENT or replay_controller.state.adapters.random.cursor != Test::Bounds::EVENT_INCREMENT
+    return Test::Failure::REPLAY_RESULT if not DebuggerManagedEngine::managed_is_exact(replay_controller)
+    return Test::Failure::SUCCESS
 
 
 def main() -> i64 can[Blocking.IO, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
@@ -112,4 +149,6 @@ def main() -> i64 can[Blocking.IO, Unsafe.PointerCast, Memory.Allocate, Abort.Pa
     return Test::Failure::RANDOM_NOT_RESTORED if controller.state.adapters.random.count != Test::Bounds::EVENT_INCREMENT or controller.engine.effect_result_bits[random_event - Test::Bounds::EVENT_INCREMENT] != Test::Provider::RANDOM_VALUE
     final_seek: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, final_event)
     return Test::Failure::EXACTNESS if not DebuggerErrors::error_is_ok(final_seek) or not controller.engine.machine.halted or not DebuggerManagedEngine::managed_is_exact(controller)
+    replay_result: i64 = replay_compiled_host_effects(session, loaded.image, controller.state)
+    return replay_result if replay_result != Test::Failure::SUCCESS
     return Test::Failure::SUCCESS

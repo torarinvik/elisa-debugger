@@ -25,6 +25,7 @@ module DebuggerManagedEngine:
             ENGINE_FAULT: u32 = 1
             HISTORY: u32 = 2
             ENGINE_MANAGED_DETAIL_UNSUPPORTED: u32 = 3
+            HOST_EFFECT_REQUEST: u32 = 7
 
         const module RestoreIdentityDetail:
             BUILD_MISMATCH: u32 = 4
@@ -140,6 +141,9 @@ module DebuggerManagedEngine:
         const module HistoryStorage:
             SIDE_HISTORY_INITIALIZED: bool = true
 
+        const module ManagedEffectStep:
+            NO_RESULT_BITS: u64 = 0
+
 
         def managed_build_identity_matches(left: DebuggerIdentity::BuildIdentity, right: DebuggerIdentity::BuildIdentity) -> bool:
             return left.compiler.value == right.compiler.value and left.runtime.value == right.runtime.value and left.source.value == right.source.value and left.target.value == right.target.value and left.metadata_version == right.metadata_version
@@ -163,9 +167,20 @@ module DebuggerManagedEngine:
             side_history_first_event: mutable usize
             side_history_count: mutable usize
 
-    private:
+        private:
         const module ManagedEffectIdentityDefaults:
             NO_ID: u64 = 0
+
+        const module HostEffectRequestHash:
+            NO_REQUEST: u64 = 0
+            CLOCK_NOW: u64 = 7570744269544461322
+            RANDOM_U64: u64 = 14060235569520077978
+
+        const module HostEffectReplayDefaults:
+            NO_RESULT_HASH: u64 = 0
+            NO_CLOCK_VALUE: i64 = 0
+            NO_RANDOM_VALUE: u64 = 0
+            DO_NOT_SUPPRESS_EXTERNAL_WRITE: bool = false
 
         struct ManagedEffectIdentity:
             call_site: mutable DebuggerIdentity::DebugId
@@ -235,9 +250,65 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
     public:
+        enum HostEffectKind:
+            None
+            ClockNow
+            RandomU64
+
+        struct HostEffectRequest:
+            kind: mutable HostEffectKind
+            call_site: mutable DebuggerIdentity::DebugId
+            invocation: mutable DebuggerIdentity::DebugId
+            request_hash: mutable u64
+            valid: mutable bool
+
         # Host effect providers use the current EDIR source and active call
         # stack directly, keeping editor adapters out of identity derivation.
+        def managed_host_effect_request(controller: ManagedController&) -> HostEffectRequest:
+            request: mutable HostEffectRequest = HostEffectRequest{kind: HostEffectKind.None, call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), request_hash: HostEffectRequestHash::NO_REQUEST, valid: false}
+            return request if controller.engine.machine.halted or controller.engine.machine.faulted or controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
+            instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
+            if instruction.opcode == DebuggerEDIR::Opcode.ClockNow:
+                request.kind <- HostEffectKind.ClockNow
+                request.request_hash <- HostEffectRequestHash::CLOCK_NOW
+            elif instruction.opcode == DebuggerEDIR::Opcode.RandomU64:
+                request.kind <- HostEffectKind.RandomU64
+                request.request_hash <- HostEffectRequestHash::RANDOM_U64
+            else:
+                return request
+            identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
+            return request if not identity.valid
+            request.call_site <- identity.call_site
+            request.invocation <- identity.invocation
+            request.valid <- true
+            return request
+
+        def managed_host_effect_is_pending(controller: ManagedController&) -> bool:
+            return managed_host_effect_request(controller).kind != HostEffectKind.None
+
+        def managed_begin_side_effect_replay(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            candidate_state: mutable DebuggerManagedState::State = controller.state
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(candidate_state)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            previous_state: DebuggerManagedState::State = controller.state
+            controller.state <- candidate_state
+            if not managed_side_checkpoint_capture_current(controller):
+                controller.state <- previous_state
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            return DebuggerErrors::no_error()
+
         def managed_record_clock_effect(controller: mutable ManagedController&, request_hash: u64, result_hash: u64, value: i64) -> DebuggerErrors::DebuggerError:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            if request.kind != HostEffectKind.None:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if request.kind != HostEffectKind.ClockNow or request.request_hash != request_hash
+                preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.ClockNow)
+                return preflight if not DebuggerErrors::error_is_ok(preflight)
+                candidate_state: mutable DebuggerManagedState::State = controller.state
+                failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(candidate_state, request.call_site, request.call_site, request.invocation, request_hash, result_hash, value)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                return managed_commit_host_effect(controller, candidate_state, value.u64(), HostEffectKind.ClockNow)
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
             failure: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash, result_hash, value)
             if DebuggerErrors::error_is_ok(failure):
@@ -245,6 +316,20 @@ module DebuggerManagedEngine:
             return failure
 
         def managed_replay_clock_effect(controller: mutable ManagedController&, request_hash: u64) -> DebuggerEffects::EffectReplay:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            if request.kind != HostEffectKind.None:
+                return managed_clock_effect_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST)) if not request.valid
+                return managed_clock_effect_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST)) if request.kind != HostEffectKind.ClockNow
+                preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.ClockNow)
+                return managed_clock_effect_replay_failure(preflight) if not DebuggerErrors::error_is_ok(preflight)
+                candidate_state: mutable DebuggerManagedState::State = controller.state
+                replay: mutable DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(candidate_state, request.call_site, request.call_site, request.invocation, request_hash)
+                if not replay.accepted:
+                    controller.state <- candidate_state
+                    return replay
+                failure: DebuggerErrors::DebuggerError = managed_commit_host_effect(controller, candidate_state, replay.result_value.u64(), HostEffectKind.ClockNow)
+                return managed_clock_effect_replay_failure(failure) if not DebuggerErrors::error_is_ok(failure)
+                return replay
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
             replay: mutable DebuggerEffects::EffectReplay = DebuggerManagedState::state_replay_clock_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash)
             if replay.accepted:
@@ -252,6 +337,16 @@ module DebuggerManagedEngine:
             return replay
 
         def managed_record_random_effect(controller: mutable ManagedController&, request_hash: u64, result_hash: u64, value: u64) -> DebuggerErrors::DebuggerError:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            if request.kind != HostEffectKind.None:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if request.kind != HostEffectKind.RandomU64 or request.request_hash != request_hash
+                preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.RandomU64)
+                return preflight if not DebuggerErrors::error_is_ok(preflight)
+                candidate_state: mutable DebuggerManagedState::State = controller.state
+                failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_random_effect(candidate_state, request.call_site, request.call_site, request.invocation, request_hash, result_hash, value)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                return managed_commit_host_effect(controller, candidate_state, value, HostEffectKind.RandomU64)
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
             failure: mutable DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_random_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash, result_hash, value)
             if DebuggerErrors::error_is_ok(failure):
@@ -259,6 +354,20 @@ module DebuggerManagedEngine:
             return failure
 
         def managed_replay_random_effect(controller: mutable ManagedController&, request_hash: u64) -> DebuggerEffects::RandomEffectReplay:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            if request.kind != HostEffectKind.None:
+                return managed_random_effect_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST)) if not request.valid
+                return managed_random_effect_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST)) if request.kind != HostEffectKind.RandomU64
+                preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.RandomU64)
+                return managed_random_effect_replay_failure(preflight) if not DebuggerErrors::error_is_ok(preflight)
+                candidate_state: mutable DebuggerManagedState::State = controller.state
+                replay: mutable DebuggerEffects::RandomEffectReplay = DebuggerManagedState::state_replay_random_effect(candidate_state, request.call_site, request.call_site, request.invocation, request_hash)
+                if not replay.accepted:
+                    controller.state <- candidate_state
+                    return replay
+                failure: DebuggerErrors::DebuggerError = managed_commit_host_effect(controller, candidate_state, replay.value, HostEffectKind.RandomU64)
+                return managed_random_effect_replay_failure(failure) if not DebuggerErrors::error_is_ok(failure)
+                return replay
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
             replay: mutable DebuggerEffects::RandomEffectReplay = DebuggerManagedState::state_replay_random_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash)
             if replay.accepted:
@@ -506,12 +615,16 @@ module DebuggerManagedEngine:
             controller.engine.engine_error <- DebuggerReplayEngine::EngineError.None if not controller.engine.machine.faulted
             start: u64 = controller.engine.event_count.u64()
             hit_breakpoint: mutable bool = false
+            host_effect_pending: mutable bool = false
             first_iteration: mutable bool = true
             while not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count.u64() - start < max_steps:
                 # Skip the exact position already reported as a breakpoint,
                 # but allow breakpoints after reverse navigation to be found.
                 if (not first_iteration or not repeat_breakpoint_position) and managed_breakpoint_should_stop(controller):
                     hit_breakpoint <- true
+                    break
+                if managed_host_effect_is_pending(controller):
+                    host_effect_pending <- true
                     break
                 DebuggerReplayEngine::replay_engine_step(controller.engine)
                 _ = managed_side_checkpoint_capture_current(controller)
@@ -524,8 +637,12 @@ module DebuggerManagedEngine:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if controller.session.last_error != DebuggerSession::SessionError.None
             managed_sync_position(controller)
             managed_refresh_values(controller)
+            pending_request: HostEffectRequest = managed_host_effect_request(controller) if not hit_breakpoint else HostEffectRequest{kind: HostEffectKind.None, call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), request_hash: HostEffectRequestHash::NO_REQUEST, valid: false}
+            host_effect_pending <- pending_request.kind != HostEffectKind.None
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull or (controller.engine.engine_error == DebuggerReplayEngine::EngineError.StepLimit and controller.engine.event_count >= DebuggerReplayEngine::replay_engine_history_capacity()):
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if host_effect_pending and not pending_request.valid
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HOST_EFFECT_REQUEST) if host_effect_pending
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable or controller.engine.engine_error == DebuggerReplayEngine::EngineError.StepLimit
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT) if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault
             return controller.last_error if not DebuggerErrors::error_is_ok(controller.last_error)
@@ -541,6 +658,10 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            pending_request: HostEffectRequest = managed_host_effect_request(controller)
+            if pending_request.kind != HostEffectKind.None:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not pending_request.valid
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HOST_EFFECT_REQUEST)
             DebuggerReplayEngine::replay_engine_step(controller.engine)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
                 # A faulting EDIR instruction is still recorded as an event.
@@ -646,6 +767,71 @@ module DebuggerManagedEngine:
             return DebuggerErrors::no_error()
 
     private:
+        def managed_clock_effect_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::EffectReplay:
+            return DebuggerEffects::EffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, result_value: HostEffectReplayDefaults::NO_CLOCK_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
+
+        def managed_random_effect_replay_failure(failure: DebuggerErrors::DebuggerError) -> DebuggerEffects::RandomEffectReplay:
+            return DebuggerEffects::RandomEffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, value: HostEffectReplayDefaults::NO_RANDOM_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
+
+        def managed_host_effect_preflight(controller: mutable ManagedController&, kind: HostEffectKind) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid or request.kind != kind
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY) if controller.engine.event_count >= DebuggerReplayEngine::replay_engine_history_capacity()
+            verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image(controller.engine.image)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT) if not verification.valid
+            instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
+            candidate_machine: mutable DebuggerEDIR::Machine = controller.engine.machine
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerEDIR::machine_step_effect_result(candidate_machine, instruction, ManagedEffectStep::NO_RESULT_BITS)
+            next_session: DebuggerSession::Session = DebuggerSession::session_step(controller.session)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if next_session.last_error != DebuggerSession::SessionError.None
+            return DebuggerErrors::no_error()
+
+        def managed_restore_host_effect_engine_boundary(controller: mutable ManagedController&, event: usize, machine: DebuggerEDIR::Machine, engine_error: DebuggerReplayEngine::EngineError, snapshot: DebuggerCheckpoint::MachineSnapshot, envelope: DebuggerEvents::EventEnvelope, result_bits: u64, result_recorded: bool) -> void:
+            controller.engine.machine <- machine
+            controller.engine.event_count <- event
+            controller.engine.engine_error <- engine_error
+            controller.engine.history[event] <- snapshot
+            controller.engine.events[event] <- envelope
+            controller.engine.effect_result_bits[event] <- result_bits
+            controller.engine.effect_result_recorded[event] <- result_recorded
+
+        def managed_commit_host_effect(controller: mutable ManagedController&, candidate_state: DebuggerManagedState::State, result_bits: u64, kind: HostEffectKind) -> DebuggerErrors::DebuggerError:
+            preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, kind)
+            return preflight if not DebuggerErrors::error_is_ok(preflight)
+            original_state: DebuggerManagedState::State = controller.state
+            original_session: DebuggerSession::Session = controller.session
+            original_machine: DebuggerEDIR::Machine = controller.engine.machine
+            original_event_count: usize = controller.engine.event_count
+            original_engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
+            original_snapshot: DebuggerCheckpoint::MachineSnapshot = controller.engine.history[original_event_count]
+            original_event: DebuggerEvents::EventEnvelope = controller.engine.events[original_event_count]
+            original_result_bits: u64 = controller.engine.effect_result_bits[original_event_count]
+            original_result_recorded: bool = controller.engine.effect_result_recorded[original_event_count]
+            engine_error: DebuggerReplayEngine::EngineError = DebuggerReplayEngine::replay_engine_step_effect_result(controller.engine, result_bits)
+            if engine_error != DebuggerReplayEngine::EngineError.None:
+                managed_restore_host_effect_engine_boundary(controller, original_event_count, original_machine, original_engine_error, original_snapshot, original_event, original_result_bits, original_result_recorded)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY) if engine_error == DebuggerReplayEngine::EngineError.HistoryFull
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT)
+            next_session: DebuggerSession::Session = DebuggerSession::session_step(controller.session)
+            if next_session.last_error != DebuggerSession::SessionError.None:
+                managed_restore_host_effect_engine_boundary(controller, original_event_count, original_machine, original_engine_error, original_snapshot, original_event, original_result_bits, original_result_recorded)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            controller.state <- candidate_state
+            controller.session <- next_session
+            controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
+            controller.session.retained_last <- controller.session.position.event if controller.session.position.event > controller.session.retained_last
+            managed_refresh_values(controller)
+            if not managed_side_checkpoint_capture_current(controller):
+                controller.state <- original_state
+                controller.session <- original_session
+                managed_restore_host_effect_engine_boundary(controller, original_event_count, original_machine, original_engine_error, original_snapshot, original_event, original_result_bits, original_result_recorded)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            return DebuggerErrors::no_error()
+
         # Engine history stores VM snapshots only. Until side-effect state is
         # restored at the same event boundary, moving the VM alone would
         # expose a mixed historical state to clients.
@@ -1144,7 +1330,13 @@ module DebuggerManagedEngine:
                     expected_machine <- DebuggerCheckpoint::snapshot_restore(previous_snapshot)
                     return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if expected_machine.program_counter >= controller.engine.image.program.instruction_count
                     return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_apply_interventions_to_machine(controller.engine, expected_machine, previous_index.u64())
-                    DebuggerEDIR::machine_step_in_place(expected_machine, controller.engine.image.instructions[expected_machine.program_counter.usize()])
+                    previous_instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[expected_machine.program_counter.usize()]
+                    if previous_instruction.opcode == DebuggerEDIR::Opcode.ClockNow or previous_instruction.opcode == DebuggerEDIR::Opcode.RandomU64:
+                        return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not controller.engine.effect_result_recorded[previous_index]
+                        return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerEDIR::machine_step_effect_result(expected_machine, previous_instruction, controller.engine.effect_result_bits[previous_index])
+                    else:
+                        return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if controller.engine.effect_result_recorded[previous_index]
+                        DebuggerEDIR::machine_step_in_place(expected_machine, previous_instruction)
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::HISTORY) if not DebuggerReplayEngine::replay_engine_apply_interventions_to_machine(controller.engine, expected_machine, checkpoint.event)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::HISTORY) if not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, expected_machine)
             restored_session: DebuggerSession::Session = DebuggerSession::session_seek(controller.session, checkpoint.event)

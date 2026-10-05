@@ -18,6 +18,21 @@ const module Test:
         CONSTANT_VALUE: i64 = 7
         UNUSED_OPERAND: i64 = 0
 
+    const module HostProgram:
+        VERSION: u32 = 2
+        INSTRUCTION_COUNT: u64 = 3
+        CLOCK_INSTRUCTION: usize = 0
+        RANDOM_INSTRUCTION: usize = 1
+        RETURN_INSTRUCTION: usize = 2
+        UNUSED_OPERAND: i64 = 0
+
+    const module HostResult:
+        CLOCK_VALUE: i64 = -42
+        CLOCK_RESULT_HASH: u64 = 8201
+        RANDOM_REQUEST_HASH: u64 = 14060235569520077978
+        RANDOM_VALUE: u64 = 9223372036854775817
+        RANDOM_RESULT_HASH: u64 = 8202
+
     const module Identity:
         SESSION_ID: u64 = 100
         RECORDING_ID: u64 = 101
@@ -148,6 +163,8 @@ const module Test:
         EFFECT_HISTORY_RESTORE_FAILED: i64 = 27
         MISSING_TARGET_SEEK_NOT_ATOMIC: i64 = 28
         CONSOLE_HISTORY_RESTORE_FAILED: i64 = 29
+        HOST_EFFECT_TIME_TRAVEL_FAILED: i64 = 30
+        HOST_EFFECT_REPLAY_FAILED: i64 = 31
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -395,6 +412,77 @@ def managed_seek_without_side_checkpoint_is_atomic(session: DebuggerSession::Ses
     return false if DebuggerReplayEngine::replay_engine_state_hash(controller.engine) != machine_hash or controller.engine.engine_error != engine_error
     return controller.engine.history[Test::Bounds::FIRST_INDEX].id.value == retained_snapshot_id and controller.side_history_count == Test::Bounds::ONE_COUNT
 
+def managed_host_effect_time_travel_is_exact(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    host_image: mutable DebuggerEDIR::ProgramImage = image
+    host_image.program.version <- Test::HostProgram::VERSION
+    host_image.program.instruction_count <- Test::HostProgram::INSTRUCTION_COUNT
+    host_image.instructions[Test::HostProgram::CLOCK_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.ClockNow, a: Test::HostProgram::UNUSED_OPERAND, b: Test::HostProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::FIRST_INSTRUCTION].source}
+    host_image.instructions[Test::HostProgram::RANDOM_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.RandomU64, a: Test::HostProgram::UNUSED_OPERAND, b: Test::HostProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::FIRST_INSTRUCTION].source}
+    host_image.instructions[Test::HostProgram::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::HostProgram::UNUSED_OPERAND, b: Test::HostProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::RETURN_INSTRUCTION].source}
+    return false if not DebuggerEDIR::verify_image_with_source_table(host_image).valid
+
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, host_image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    clock_request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(controller)
+    return false if not clock_request.valid or clock_request.kind != DebuggerManagedEngine::HostEffectKind.ClockNow or clock_request.request_hash == 0 or clock_request.call_site.value == 0 or clock_request.invocation.value == 0
+    pending_step: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_step(controller)
+    return false if pending_step.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.engine.machine.program_counter != Test::HistoryBarrier::INITIAL_EVENT.u64() or controller.engine.machine.faulted
+    pending_continue: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_continue(controller, DebuggerReplayEngine::Limits::HISTORY_CAPACITY.u64())
+    return false if pending_continue.code != DebuggerErrors::ErrorCode.Unavailable or controller.engine.event_count != Test::HistoryBarrier::INITIAL_EVENT or controller.engine.machine.faulted
+
+    clock_recorded: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_clock_effect(controller, clock_request.request_hash, Test::HostResult::CLOCK_RESULT_HASH, Test::HostResult::CLOCK_VALUE)
+    return false if not DebuggerErrors::error_is_ok(clock_recorded) or controller.engine.event_count != Test::Bounds::ONE_COUNT or controller.engine.machine.program_counter != Test::HostProgram::RANDOM_INSTRUCTION.u64() or controller.engine.machine.accumulator != Test::HostResult::CLOCK_VALUE
+    random_request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(controller)
+    return false if not random_request.valid or random_request.kind != DebuggerManagedEngine::HostEffectKind.RandomU64 or random_request.request_hash == 0
+    random_recorded: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_random_effect(controller, random_request.request_hash, Test::HostResult::RANDOM_RESULT_HASH, Test::HostResult::RANDOM_VALUE)
+    return false if not DebuggerErrors::error_is_ok(random_recorded) or controller.engine.event_count != Test::Bounds::TWO_COUNT or controller.engine.machine.program_counter != Test::HostProgram::RETURN_INSTRUCTION.u64() or controller.engine.machine.accumulator.u64() != Test::HostResult::RANDOM_VALUE
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_step(controller)) or not controller.engine.machine.halted or controller.engine.event_count != Test::Bounds::TWO_COUNT + Test::Bounds::ONE_COUNT
+    return false if not DebuggerManagedEngine::managed_is_exact(controller)
+
+    reverse_return: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step(controller)
+    return false if not DebuggerErrors::error_is_ok(reverse_return) or controller.engine.event_count != Test::Bounds::TWO_COUNT or controller.engine.machine.program_counter != Test::HostProgram::RETURN_INSTRUCTION.u64()
+    reverse_random: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_reverse_step(controller)
+    return false if not DebuggerErrors::error_is_ok(reverse_random) or controller.engine.event_count != Test::Bounds::ONE_COUNT or controller.engine.machine.program_counter != Test::HostProgram::RANDOM_INSTRUCTION.u64()
+    return false if controller.state.effects.count != Test::Bounds::ONE_COUNT or controller.state.adapters.clock.count != Test::Bounds::ONE_COUNT or controller.state.adapters.random.count != Test::Bounds::FIRST_INDEX
+    return false if not controller.engine.effect_result_recorded[Test::Bounds::ONE_COUNT] or controller.engine.effect_result_bits[Test::Bounds::ONE_COUNT] != Test::HostResult::RANDOM_VALUE
+
+    forward_seek: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_seek(controller, Test::Bounds::TWO_COUNT + Test::Bounds::ONE_COUNT)
+    return false if not DebuggerErrors::error_is_ok(forward_seek) or not controller.engine.machine.halted or controller.engine.event_count != Test::Bounds::TWO_COUNT + Test::Bounds::ONE_COUNT
+    return controller.state.effects.count == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.count == Test::Bounds::ONE_COUNT and controller.state.adapters.random.count == Test::Bounds::ONE_COUNT and DebuggerManagedEngine::managed_is_exact(controller)
+
+def managed_host_effect_replay_commits_vm_results(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    host_image: mutable DebuggerEDIR::ProgramImage = image
+    host_image.program.version <- Test::HostProgram::VERSION
+    host_image.program.instruction_count <- Test::HostProgram::INSTRUCTION_COUNT
+    host_image.instructions[Test::HostProgram::CLOCK_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.ClockNow, a: Test::HostProgram::UNUSED_OPERAND, b: Test::HostProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::FIRST_INSTRUCTION].source}
+    host_image.instructions[Test::HostProgram::RANDOM_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.RandomU64, a: Test::HostProgram::UNUSED_OPERAND, b: Test::HostProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::FIRST_INSTRUCTION].source}
+    host_image.instructions[Test::HostProgram::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::HostProgram::UNUSED_OPERAND, b: Test::HostProgram::UNUSED_OPERAND, source: image.instructions[Test::Image::RETURN_INSTRUCTION].source}
+
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, host_image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(controller))
+    clock_request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(controller)
+    random_identity: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(host_image, Test::HostProgram::RANDOM_INSTRUCTION)
+    random_invocation: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_invocation_identity(host_image, controller.engine.machine)
+    return false if not clock_request.valid or not random_identity.valid or not random_invocation.valid
+
+    recorded_state: mutable DebuggerManagedState::State = controller.state
+    clock_seeded: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_clock_effect(recorded_state, clock_request.call_site, clock_request.call_site, clock_request.invocation, clock_request.request_hash, Test::HostResult::CLOCK_RESULT_HASH, Test::HostResult::CLOCK_VALUE)
+    return false if not DebuggerErrors::error_is_ok(clock_seeded)
+    random_seeded: DebuggerErrors::DebuggerError = DebuggerManagedState::state_record_random_effect(recorded_state, random_identity.value, random_identity.value, random_invocation.value, Test::HostResult::RANDOM_REQUEST_HASH, Test::HostResult::RANDOM_RESULT_HASH, Test::HostResult::RANDOM_VALUE)
+    return false if not DebuggerErrors::error_is_ok(random_seeded)
+    controller.state <- recorded_state
+    replay_started: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_begin_side_effect_replay(controller)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+
+    clock_replay: DebuggerEffects::EffectReplay = DebuggerManagedEngine::managed_replay_clock_effect(controller, clock_request.request_hash)
+    return false if not clock_replay.accepted or clock_replay.result_value != Test::HostResult::CLOCK_VALUE or controller.engine.event_count != Test::Bounds::ONE_COUNT or controller.engine.machine.accumulator != Test::HostResult::CLOCK_VALUE
+    random_request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(controller)
+    random_replay: DebuggerEffects::RandomEffectReplay = DebuggerManagedEngine::managed_replay_random_effect(controller, random_request.request_hash)
+    return false if not random_request.valid or not random_replay.accepted or random_replay.value != Test::HostResult::RANDOM_VALUE or controller.engine.event_count != Test::Bounds::TWO_COUNT or controller.engine.machine.accumulator.u64() != Test::HostResult::RANDOM_VALUE
+    return controller.state.effects.cursor == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.cursor == Test::Bounds::ONE_COUNT and controller.state.adapters.random.cursor == Test::Bounds::ONE_COUNT and DebuggerManagedEngine::managed_is_exact(controller)
+
 def main() -> i64:
     build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
         compiler: DebuggerIdentity::debug_id(Test::Identity::BUILD_COMPILER_ID),
@@ -437,6 +525,8 @@ def main() -> i64:
     return Test::Failure::RANDOM_BRIDGE_NOT_ATOMIC if not managed_random_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)
     return Test::Failure::MISSING_TARGET_SEEK_NOT_ATOMIC if not managed_seek_without_side_checkpoint_is_atomic(session, image)
+    return Test::Failure::HOST_EFFECT_TIME_TRAVEL_FAILED if not managed_host_effect_time_travel_is_exact(session, image)
+    return Test::Failure::HOST_EFFECT_REPLAY_FAILED if not managed_host_effect_replay_commits_vm_results(session, image)
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
     return Test::Failure::INITIAL_STATE_NOT_EXACT if not DebuggerManagedEngine::managed_is_exact(controller)

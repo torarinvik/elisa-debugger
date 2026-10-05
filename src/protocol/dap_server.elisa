@@ -127,6 +127,9 @@ module DebuggerDAPServer:
             SIMPLE_SUCCESS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"accepted\":true}}"
             SIMPLE_SUCCESS_SUFFIX_LENGTH: usize = 42
 
+        const module VirtualFileExtension:
+            VERSION: u64 = 1
+
         const module CommandDispatch:
             DAP_UNKNOWN_COMMAND_HASH: u64 = 0
             COMMAND_HASH_INITIALIZE: u64 = 2872973214862224
@@ -174,6 +177,7 @@ module DebuggerDAPServer:
             DAP_EVALUATE_DETAIL_ARGUMENT: u32 = 13
             DAP_HOST_EFFECT_DETAIL_ARGUMENT: u32 = 14
             DAP_HOST_EFFECT_DETAIL_STATE: u32 = 15
+            DAP_LAUNCH_VIRTUAL_FILES_ARGUMENT: u32 = 16
 
         const module Evaluate:
             DAP_EVALUATE_COMMAND: cstr = "evaluate"
@@ -307,8 +311,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 553
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 615
 
         const module JsonWire:
             JSON_FIRST_BYTE_INDEX: usize = 0
@@ -2084,6 +2088,10 @@ module DebuggerDAPServer:
             if not source_root.valid:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_MEMORY_DETAIL_ARGUMENT)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            virtual_files: DebuggerDAPPayload::VirtualFileSnapshotsRequest = DebuggerDAPPayload::virtual_file_snapshots_request_parse(payload, payload_length)
+            if not virtual_files.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_LAUNCH_VIRTUAL_FILES_ARGUMENT)
+                return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(path.bytes[0], path.length) can Blocking.IO, Unsafe.PointerCast
             if not loaded.valid:
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: loaded.failure}
@@ -2100,6 +2108,15 @@ module DebuggerDAPServer:
             if source_root.has_root and not DebuggerManagedEngine::managed_set_source_path_root(service.controller, source_root.root.bytes[0], source_root.root.length):
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_MEMORY_DETAIL_ARGUMENT)
                 return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
+            for resource_index in 0..<virtual_files.count:
+                snapshot: DebuggerDAPPayload::VirtualFileSnapshot = virtual_files.snapshots[resource_index]
+                mounted: DebuggerManagedService::ResourceMountResult = DebuggerManagedService::service_mount_resource(service, DebuggerIdentity::debug_id(snapshot.path_id), snapshot.writable, snapshot.generation, snapshot.bytes[0], snapshot.length)
+                if not mounted.accepted:
+                    failure: DebuggerErrors::DebuggerError = mounted.failure
+                    # A failed launch must not leave a partial input mapping
+                    # visible to a retry on the same DAP session.
+                    DebuggerManagedService::service_initialize(service, session, DebuggerDefaultImage::image_new(), recording)
+                    return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
 
         def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_options: mutable DebuggerDAPPayload::ClientOptions&, context: mutable DAPRequestContext&, pending_host_effect: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:

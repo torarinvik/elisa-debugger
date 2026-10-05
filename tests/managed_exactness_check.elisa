@@ -6,6 +6,7 @@ const module Test:
     const module Bounds:
         FIRST_INDEX: usize = 0
         ONE_COUNT: usize = 1
+        TWO_COUNT: usize = 2
 
     const module Image:
         VERSION: u32 = 1
@@ -64,6 +65,20 @@ const module Test:
         RANDOM_VALUE: u64 = 9223372036854775809
         MISMATCH_ADAPTER_SOURCE_ID: u64 = 7106
 
+    const module EffectSource:
+        FILE_ID: u64 = 8101
+        LOGICAL_PATH_ID: u64 = 8102
+        CONTENT_ID: u64 = 8103
+        PATH_LENGTH: usize = 1
+        PATH_BYTE: u8 = 120
+        LINE_COUNT: u64 = 1
+        START_BYTE: u64 = 1
+        END_BYTE: u64 = 2
+        LINE: u32 = 1
+        START_COLUMN: u32 = 1
+        END_COLUMN: u32 = 2
+        DISCRIMINATOR: u32 = 0
+
     const module HistoryBarrier:
         FIRST_EVENT: usize = 1
         INITIAL_EVENT: usize = 0
@@ -114,6 +129,7 @@ const module Test:
         TIME_TRAVEL_BARRIER_NOT_DETECTED: i64 = 21
         CLOCK_BRIDGE_NOT_ATOMIC: i64 = 22
         RANDOM_BRIDGE_NOT_ATOMIC: i64 = 23
+        ACTIVE_IDENTITY_BRIDGE_FAILED: i64 = 24
 
 def managed_clock_effect_bridge_is_atomic() -> bool:
     state: mutable DebuggerManagedState::State = zeroed
@@ -178,6 +194,29 @@ def managed_random_effect_bridge_is_atomic() -> bool:
     return false if mismatch_state.effects.exactness != DebuggerEffects::Exactness.Diverged or mismatch_state.adapters.random.exact
     return true
 
+def managed_effect_bridges_use_active_identity(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
+    controller: mutable DebuggerManagedEngine::ManagedController = zeroed
+    DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
+    recorded_clock: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_clock_effect(controller, Test::ClockBridge::REQUEST_HASH, Test::ClockBridge::RESULT_HASH, Test::ClockBridge::RESULT_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded_clock)
+    recorded_random: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_random_effect(controller, Test::RandomBridge::REQUEST_HASH, Test::RandomBridge::RESULT_HASH, Test::RandomBridge::RANDOM_VALUE)
+    return false if not DebuggerErrors::error_is_ok(recorded_random)
+    return false if controller.state.effects.count != Test::Bounds::TWO_COUNT or controller.state.adapters.clock.count != Test::Bounds::ONE_COUNT or controller.state.adapters.random.count != Test::Bounds::ONE_COUNT
+    effect_site: u64 = controller.state.effects.records[Test::Bounds::FIRST_INDEX].call_site.value
+    effect_invocation: u64 = controller.state.effects.records[Test::Bounds::FIRST_INDEX].invocation.value
+    return false if effect_site == 0 or effect_invocation == 0
+    return false if controller.state.effects.records[Test::Bounds::ONE_COUNT].call_site.value != effect_site or controller.state.effects.records[Test::Bounds::ONE_COUNT].invocation.value != effect_invocation
+    return false if controller.state.adapters.clock.samples[Test::Bounds::FIRST_INDEX].source.value != effect_site or controller.state.adapters.clock.samples[Test::Bounds::FIRST_INDEX].invocation.value != effect_invocation
+    return false if controller.state.adapters.random.samples[Test::Bounds::FIRST_INDEX].source.value != effect_site or controller.state.adapters.random.samples[Test::Bounds::FIRST_INDEX].invocation.value != effect_invocation
+
+    replay_started: DebuggerErrors::DebuggerError = DebuggerManagedState::state_begin_side_effect_replay(controller.state)
+    return false if not DebuggerErrors::error_is_ok(replay_started)
+    replayed_clock: DebuggerEffects::EffectReplay = DebuggerManagedEngine::managed_replay_clock_effect(controller, Test::ClockBridge::REQUEST_HASH)
+    return false if not replayed_clock.accepted or replayed_clock.result_value != Test::ClockBridge::RESULT_VALUE
+    replayed_random: DebuggerEffects::RandomEffectReplay = DebuggerManagedEngine::managed_replay_random_effect(controller, Test::RandomBridge::REQUEST_HASH)
+    return false if not replayed_random.accepted or replayed_random.value != Test::RandomBridge::RANDOM_VALUE
+    return controller.state.effects.cursor == Test::Bounds::TWO_COUNT and controller.state.adapters.clock.cursor == Test::Bounds::ONE_COUNT and controller.state.adapters.random.cursor == Test::Bounds::ONE_COUNT
+
 def managed_history_side_state_barriers_work(session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&) -> bool:
     controller: mutable DebuggerManagedEngine::ManagedController = zeroed
     DebuggerManagedEngine::managed_initialize(controller, session, image, DebuggerIdentity::debug_id(Test::Identity::RECORDING_ID))
@@ -227,6 +266,27 @@ def main() -> i64:
     image.program <- DebuggerEDIR::Program{version: Test::Image::VERSION, instruction_count: Test::Image::INSTRUCTION_COUNT, local_count: Test::Image::LOCAL_COUNT, has_return: Test::Image::HAS_RETURN}
     image.instructions[Test::Image::FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::Image::CONSTANT_VALUE, b: Test::Image::UNUSED_OPERAND, source: zeroed}
     image.instructions[Test::Image::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::Image::UNUSED_OPERAND, b: Test::Image::UNUSED_OPERAND, source: zeroed}
+    image.source_file_count <- Test::Bounds::ONE_COUNT
+    source_file: mutable DebuggerMetadata::SourceFile = zeroed
+    source_file.id <- DebuggerIdentity::debug_id(Test::EffectSource::FILE_ID)
+    source_file.logical_path <- DebuggerIdentity::debug_id(Test::EffectSource::LOGICAL_PATH_ID)
+    source_file.content <- DebuggerIdentity::debug_id(Test::EffectSource::CONTENT_ID)
+    source_file.line_count <- Test::EffectSource::LINE_COUNT
+    source_file.path_bytes[Test::Bounds::FIRST_INDEX] <- Test::EffectSource::PATH_BYTE
+    source_file.path_length <- Test::EffectSource::PATH_LENGTH
+    image.source_files[Test::Bounds::FIRST_INDEX] <- source_file
+    source_span: mutable DebuggerIdentity::SourceSpan = zeroed
+    source_span.file <- DebuggerIdentity::debug_id(Test::EffectSource::FILE_ID)
+    source_span.start_byte <- Test::EffectSource::START_BYTE
+    source_span.end_byte <- Test::EffectSource::END_BYTE
+    source_span.start_line <- Test::EffectSource::LINE
+    source_span.start_column <- Test::EffectSource::START_COLUMN
+    source_span.end_line <- Test::EffectSource::LINE
+    source_span.end_column <- Test::EffectSource::END_COLUMN
+    source_span.discriminator <- Test::EffectSource::DISCRIMINATOR
+    image.instructions[Test::Image::FIRST_INSTRUCTION].source <- source_span
+    image.instructions[Test::Image::RETURN_INSTRUCTION].source <- source_span
+    return Test::Failure::ACTIVE_IDENTITY_BRIDGE_FAILED if not managed_effect_bridges_use_active_identity(session, image)
     return Test::Failure::CLOCK_BRIDGE_NOT_ATOMIC if not managed_clock_effect_bridge_is_atomic()
     return Test::Failure::RANDOM_BRIDGE_NOT_ATOMIC if not managed_random_effect_bridge_is_atomic()
     return Test::Failure::TIME_TRAVEL_BARRIER_NOT_DETECTED if not managed_history_side_state_barriers_work(session, image)

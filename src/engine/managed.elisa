@@ -14,6 +14,7 @@ include "../query/timeline.elisa"
 include "../inspect/store.elisa"
 include "../inspect/expression_parser.elisa"
 include "../vm/edir_codec.elisa"
+include "../vm/edir_identity.elisa"
 include "./state.elisa"
 
 module DebuggerManagedEngine:
@@ -155,6 +156,42 @@ module DebuggerManagedEngine:
             last_breakpoint_branch: mutable DebuggerIdentity::DebugId
             log_output: mutable u8[Logpoint::OUTPUT_CAPACITY]
             log_output_length: mutable usize
+
+    private:
+        const module ManagedEffectIdentityDefaults:
+            NO_ID: u64 = 0
+
+        struct ManagedEffectIdentity:
+            call_site: mutable DebuggerIdentity::DebugId
+            invocation: mutable DebuggerIdentity::DebugId
+            valid: mutable bool
+
+        def managed_active_effect_identity(controller: ManagedController&) -> ManagedEffectIdentity:
+            return ManagedEffectIdentity{call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), valid: false} if controller.engine.machine.program_counter >= controller.engine.image.program.instruction_count
+            call_site: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_call_site_identity(controller.engine.image, controller.engine.machine.program_counter.usize())
+            return ManagedEffectIdentity{call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), valid: false} if not call_site.valid
+            invocation: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_invocation_identity(controller.engine.image, controller.engine.machine)
+            return ManagedEffectIdentity{call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), valid: false} if not invocation.valid
+            return ManagedEffectIdentity{call_site: call_site.value, invocation: invocation.value, valid: true}
+
+    public:
+        # Host effect providers use the current EDIR source and active call
+        # stack directly, keeping editor adapters out of identity derivation.
+        def managed_record_clock_effect(controller: mutable ManagedController&, request_hash: u64, result_hash: u64, value: i64) -> DebuggerErrors::DebuggerError:
+            identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
+            return DebuggerManagedState::state_record_clock_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash, result_hash, value)
+
+        def managed_replay_clock_effect(controller: mutable ManagedController&, request_hash: u64) -> DebuggerEffects::EffectReplay:
+            identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
+            return DebuggerManagedState::state_replay_clock_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash)
+
+        def managed_record_random_effect(controller: mutable ManagedController&, request_hash: u64, result_hash: u64, value: u64) -> DebuggerErrors::DebuggerError:
+            identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
+            return DebuggerManagedState::state_record_random_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash, result_hash, value)
+
+        def managed_replay_random_effect(controller: mutable ManagedController&, request_hash: u64) -> DebuggerEffects::RandomEffectReplay:
+            identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
+            return DebuggerManagedState::state_replay_random_effect(controller.state, identity.call_site, identity.call_site, identity.invocation, request_hash)
 
         def managed_initialize(controller: mutable ManagedController&, session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recording: DebuggerIdentity::DebugId) -> void:
             controller.session <- session

@@ -82,7 +82,9 @@ rejected. A successful seek emits a stopped event; refresh stack and variable
 handles afterward. The
 [timeline navigation contract](../spec/dap-timeline-navigation-v1.md) includes
 request shapes, the current managed event limit, and guidance for VS Code,
-JetBrains, and other DAP clients.
+JetBrains, and other DAP clients. Its companion
+[JSON Schema](../schemas/dap-timeline-navigation-v1.schema.json) can validate
+the custom request and response payloads in plugin tests.
 
 For managed EDIR programs that read virtual files, check
 `supportsElisaVirtualFiles` and `elisaVirtualFilesVersion` in `initialize`,

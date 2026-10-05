@@ -4,6 +4,8 @@ The DAP adapter exposes a versioned extension for editor timeline panels and
 other hosts that need to inspect retained history or seek to a specific event.
 It uses the same DAP process and managed session as ordinary stepping; hosts
 must not start a second adapter process for timeline navigation.
+The [JSON Schema](../schemas/dap-timeline-navigation-v1.schema.json) describes
+the v1 custom requests and response payloads for plugin-side validation.
 
 ## Negotiation
 

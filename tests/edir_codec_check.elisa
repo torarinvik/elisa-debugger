@@ -22,6 +22,20 @@ const module Test:
         FIRST_STEP_COUNT: u64 = 1
         INITIAL_STEP_COUNT: u64 = 0
         NO_OPERAND: i64 = 0
+    const module ConsoleInput:
+        PROGRAM_VERSION: u32 = 4
+        PREVIOUS_PROGRAM_VERSION: u32 = 3
+        FIRST_INSTRUCTION_INDEX: usize = 0
+        RESULT_BITS: u64 = 255
+        NO_OPERAND: i64 = 0
+        FIRST_PC: u64 = 1
+        FIRST_STEP_COUNT: u64 = 1
+        INITIAL_STEP_COUNT: u64 = 0
+        CHECK_VERIFICATION: i64 = 54
+        CHECK_ROUND_TRIP: i64 = 55
+        CHECK_EFFECT_COMMIT: i64 = 56
+        CHECK_BARE_VM_GUARD: i64 = 57
+        CHECK_VERSION_GUARD: i64 = 58
     const module ReaderValidation:
         EMPTY_OFFSET: usize = 0
         MAX_ARTIFACT_STATE_RESULT: i64 = 53
@@ -218,6 +232,28 @@ def main() -> i64:
     return 52 if DebuggerEDIR::verify_image(old_console_image).valid
     invalid_console_image: mutable DebuggerEDIR::ProgramImage = console_image
     invalid_console_image.instructions[Test::ConsoleOutput::FIRST_INSTRUCTION_INDEX].a <- Test::ConsoleOutput::INVALID_OUTPUT_BYTE
+
+    console_input_image: mutable DebuggerEDIR::ProgramImage = image
+    console_input_image.program.version <- Test::ConsoleInput::PROGRAM_VERSION
+    console_input_image.instructions[Test::ConsoleInput::FIRST_INSTRUCTION_INDEX].opcode <- DebuggerEDIR::Opcode.ConsoleReadByte
+    console_input_image.instructions[Test::ConsoleInput::FIRST_INSTRUCTION_INDEX].a <- Test::ConsoleInput::NO_OPERAND
+    console_input_image.instructions[Test::ConsoleInput::FIRST_INSTRUCTION_INDEX].b <- Test::ConsoleInput::NO_OPERAND
+    console_input_verification: DebuggerEDIR::Verification = DebuggerEDIR::verify_image_with_source_table(console_input_image)
+    return Test::ConsoleInput::CHECK_VERIFICATION if not console_input_verification.valid
+    console_input_encoded: DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(console_input_image)
+    return Test::ConsoleInput::CHECK_ROUND_TRIP if not DebuggerTraceBinary::writer_is_valid(console_input_encoded)
+    console_input_reader: mutable DebuggerTraceBinary::ByteReader = zeroed
+    DebuggerTraceBinary::reader_initialize(console_input_reader, console_input_encoded.bytes[0], console_input_encoded.length)
+    console_input_decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(console_input_reader)
+    return Test::ConsoleInput::CHECK_ROUND_TRIP if not console_input_decoded.valid or console_input_decoded.image.program.version != Test::ConsoleInput::PROGRAM_VERSION or console_input_decoded.image.instructions[Test::ConsoleInput::FIRST_INSTRUCTION_INDEX].opcode != DebuggerEDIR::Opcode.ConsoleReadByte
+    console_input_machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
+    console_input_committed: bool = DebuggerEDIR::machine_step_effect_result(console_input_machine, console_input_decoded.image.instructions[Test::ConsoleInput::FIRST_INSTRUCTION_INDEX], Test::ConsoleInput::RESULT_BITS)
+    return Test::ConsoleInput::CHECK_EFFECT_COMMIT if not console_input_committed or console_input_machine.accumulator != Test::ConsoleInput::RESULT_BITS.i64() or console_input_machine.program_counter != Test::ConsoleInput::FIRST_PC or console_input_machine.steps != Test::ConsoleInput::FIRST_STEP_COUNT
+    bare_console_input_machine: DebuggerEDIR::Machine = DebuggerEDIR::machine_run(console_input_decoded.image, DebuggerEDIR::machine_new(), Test::ConsoleInput::FIRST_STEP_COUNT)
+    return Test::ConsoleInput::CHECK_BARE_VM_GUARD if not bare_console_input_machine.faulted or not bare_console_input_machine.halted or bare_console_input_machine.steps != Test::ConsoleInput::INITIAL_STEP_COUNT
+    old_console_input_image: mutable DebuggerEDIR::ProgramImage = console_input_image
+    old_console_input_image.program.version <- Test::ConsoleInput::PREVIOUS_PROGRAM_VERSION
+    return Test::ConsoleInput::CHECK_VERSION_GUARD if DebuggerEDIR::verify_image(old_console_input_image).valid
     return 53 if DebuggerEDIR::verify_image(invalid_console_image).valid
 
     invalid: mutable DebuggerTraceBinary::ByteWriter = encoded

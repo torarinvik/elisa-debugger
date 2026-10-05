@@ -20,8 +20,9 @@ module DebuggerEDIR:
             LEGACY_PROGRAM_VERSION: u32 = 1
             CLOCK_RANDOM_PROGRAM_VERSION: u32 = 2
             CONSOLE_OUTPUT_PROGRAM_VERSION: u32 = 3
-            PROGRAM_VERSION: u32 = 3
-            MAX_OPCODE: u16 = 22
+            CONSOLE_INPUT_PROGRAM_VERSION: u32 = 4
+            PROGRAM_VERSION: u32 = 4
+            MAX_OPCODE: u16 = 23
 
         const module HostEffect:
             CONSOLE_OUTPUT_BYTE_MAX: i64 = 255
@@ -168,6 +169,7 @@ module DebuggerEDIR:
             ClockNow
             RandomU64
             ConsoleWriteByte
+            ConsoleReadByte
 
         enum VerificationError:
             None
@@ -299,7 +301,7 @@ module DebuggerEDIR:
             verification.valid <- true
             verification.verification_error <- VerificationError.None
             verification.instruction <- 0
-            if program.version != Format::LEGACY_PROGRAM_VERSION and program.version != Format::CLOCK_RANDOM_PROGRAM_VERSION and program.version != Format::CONSOLE_OUTPUT_PROGRAM_VERSION:
+            if program.version != Format::LEGACY_PROGRAM_VERSION and program.version != Format::CLOCK_RANDOM_PROGRAM_VERSION and program.version != Format::CONSOLE_OUTPUT_PROGRAM_VERSION and program.version != Format::CONSOLE_INPUT_PROGRAM_VERSION:
                 verification.valid <- false
                 verification.verification_error <- VerificationError.UnknownVersion
                 return verification
@@ -322,7 +324,7 @@ module DebuggerEDIR:
 
         def verify_instruction_operands(instruction: Instruction, index: u64) -> Verification:
             return verification_failure(VerificationError.InvalidOpcode, index) if instruction.opcode.u16() > Format::MAX_OPCODE
-            if instruction.opcode == Opcode.Nop or instruction.opcode == Opcode.Return or instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64:
+            if instruction.opcode == Opcode.Nop or instruction.opcode == Opcode.Return or instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64 or instruction.opcode == Opcode.ConsoleReadByte:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.a != 0 or instruction.b != 0
             if instruction.opcode == Opcode.ConsoleWriteByte:
                 return verification_failure(VerificationError.InvalidOperand, index) if instruction.a < 0 or instruction.a > HostEffect::CONSOLE_OUTPUT_BYTE_MAX or instruction.b != 0
@@ -343,6 +345,8 @@ module DebuggerEDIR:
                 if instruction.opcode == Opcode.RandomU64:
                     return verification_failure(VerificationError.UnknownVersion, index)
             if program_version < Format::CONSOLE_OUTPUT_PROGRAM_VERSION and instruction.opcode == Opcode.ConsoleWriteByte:
+                return verification_failure(VerificationError.UnknownVersion, index)
+            if program_version < Format::CONSOLE_INPUT_PROGRAM_VERSION and instruction.opcode == Opcode.ConsoleReadByte:
                 return verification_failure(VerificationError.UnknownVersion, index)
             return Verification{valid: true, verification_error: VerificationError.None, instruction: 0}
 
@@ -510,7 +514,7 @@ module DebuggerEDIR:
                 machine.faulted <- true
                 machine.halted <- true
                 return
-            if instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64 or instruction.opcode == Opcode.ConsoleWriteByte:
+            if instruction.opcode == Opcode.ClockNow or instruction.opcode == Opcode.RandomU64 or instruction.opcode == Opcode.ConsoleWriteByte or instruction.opcode == Opcode.ConsoleReadByte:
                 # Bare VM stepping has no host provider. Managed execution must
                 # resolve this request and use machine_step_effect_result.
                 machine.faulted <- true
@@ -674,7 +678,7 @@ module DebuggerEDIR:
         # machine transition, so the event and VM value can commit together.
         def machine_step_effect_result(machine: mutable Machine&, instruction: Instruction, result_bits: u64) -> bool:
             return false if machine.halted or machine.faulted or machine.steps >= Step::MAX_COUNT
-            return false if instruction.opcode != Opcode.ClockNow and instruction.opcode != Opcode.RandomU64 and instruction.opcode != Opcode.ConsoleWriteByte
+            return false if instruction.opcode != Opcode.ClockNow and instruction.opcode != Opcode.RandomU64 and instruction.opcode != Opcode.ConsoleWriteByte and instruction.opcode != Opcode.ConsoleReadByte
             return false if not verify_instruction_operands(instruction, machine.program_counter).valid
             return false if machine.program_counter >= Limit::INSTRUCTIONS.u64() or machine.return_stack_pointer > MachineCapacity::VM_EDIR_MAX_CALL_DEPTH or machine.heap_next > MachineCapacity::VM_EDIR_MAX_MEMORY
             machine.accumulator <- result_bits.i64()
@@ -683,7 +687,7 @@ module DebuggerEDIR:
             return true
 
         def opcode_is_host_effect(opcode: Opcode) -> bool:
-            return opcode == Opcode.ClockNow or opcode == Opcode.RandomU64 or opcode == Opcode.ConsoleWriteByte
+            return opcode == Opcode.ClockNow or opcode == Opcode.RandomU64 or opcode == Opcode.ConsoleWriteByte or opcode == Opcode.ConsoleReadByte
 
         def machine_run(image: mutable ProgramImage&, machine: Machine, max_steps: u64) -> Machine:
             updated: mutable Machine = machine

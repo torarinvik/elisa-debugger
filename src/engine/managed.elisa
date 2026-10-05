@@ -175,6 +175,7 @@ module DebuggerManagedEngine:
             NO_REQUEST: u64 = 0
             CLOCK_NOW: u64 = 7570744269544461322
             RANDOM_U64: u64 = 14060235569520077978
+            VIRTUAL_FILE_READ_BYTE_BASE: u64 = 13809278000000001024
 
         const module HostEffectOutput:
             CONSOLE_OUTPUT_RESULT_HASH: u64 = 12802676217615765313
@@ -182,6 +183,11 @@ module DebuggerManagedEngine:
 
         const module HostEffectInput:
             CONSOLE_INPUT_REQUESTED_BYTES: u64 = 1
+
+        const module VirtualFileInput:
+            REQUESTED_BYTES: usize = 1
+            FIRST_BYTE_INDEX: usize = 0
+            EOF_RESULT_BITS: u64 = 18446744073709551615
 
         const module HostEffectReplayDefaults:
             NO_RESULT_HASH: u64 = 0
@@ -263,6 +269,7 @@ module DebuggerManagedEngine:
             RandomU64
             ConsoleInput
             ConsoleOutput
+            VirtualFileReadByte
 
         struct HostEffectRequest:
             kind: mutable HostEffectKind
@@ -303,6 +310,10 @@ module DebuggerManagedEngine:
                 request.kind <- HostEffectKind.ConsoleInput
                 request.payload <- HostEffectInput::CONSOLE_INPUT_REQUESTED_BYTES
                 request.request_hash <- DebuggerManagedState::console_input_request_hash(HostEffectInput::CONSOLE_INPUT_REQUESTED_BYTES.usize())
+            elif instruction.opcode == DebuggerEDIR::Opcode.VirtualFileReadByte:
+                request.kind <- HostEffectKind.VirtualFileReadByte
+                request.payload <- instruction.a.u64()
+                request.request_hash <- HostEffectRequestHash::VIRTUAL_FILE_READ_BYTE_BASE + request.payload
             else:
                 return request
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
@@ -312,8 +323,11 @@ module DebuggerManagedEngine:
             request.valid <- true
             return request
 
+        def managed_host_effect_requires_provider(kind: HostEffectKind) -> bool:
+            return kind == HostEffectKind.ClockNow or kind == HostEffectKind.RandomU64 or kind == HostEffectKind.ConsoleInput or kind == HostEffectKind.ConsoleOutput
+
         def managed_host_effect_is_pending(controller: ManagedController&) -> bool:
-            return managed_host_effect_request(controller).kind != HostEffectKind.None
+            return managed_host_effect_requires_provider(managed_host_effect_request(controller).kind)
 
         def managed_begin_side_effect_replay(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
@@ -461,6 +475,19 @@ module DebuggerManagedEngine:
                 return replay
             return managed_console_input_replay_failure(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST))
 
+        def managed_record_virtual_file_read(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid or request.kind != HostEffectKind.VirtualFileReadByte
+            preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, HostEffectKind.VirtualFileReadByte)
+            return preflight if not DebuggerErrors::error_is_ok(preflight)
+            candidate_state: mutable DebuggerManagedState::State = controller.state
+            output: mutable u8[VirtualFileInput::REQUESTED_BYTES] = zeroed
+            read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(candidate_state.resources, DebuggerIdentity::debug_id(request.payload), output[VirtualFileInput::FIRST_BYTE_INDEX], VirtualFileInput::REQUESTED_BYTES)
+            return read.failure if not DebuggerErrors::error_is_ok(read.failure)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENGINE_FAULT) if (read.eof and read.transferred != 0) or (not read.eof and read.transferred != VirtualFileInput::REQUESTED_BYTES)
+            result_bits: u64 = VirtualFileInput::EOF_RESULT_BITS if read.eof else output[VirtualFileInput::FIRST_BYTE_INDEX].u64()
+            return managed_commit_host_effect(controller, candidate_state, result_bits, HostEffectKind.VirtualFileReadByte)
+
         def managed_initialize(controller: mutable ManagedController&, session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recording: DebuggerIdentity::DebugId) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             if not controller.side_history_initialized:
                 storage: mutable heap void&? = malloc(size_of(DebuggerFullCheckpoint::ManagedCheckpoint) * DebuggerReplayEngine::Limits::HISTORY_BOUNDARY_CAPACITY)
@@ -487,6 +514,42 @@ module DebuggerManagedEngine:
             controller.last_breakpoint_branch <- DebuggerIdentity::debug_id(Identity::NO_BRANCH)
             controller.log_output_length <- Event::INITIAL_INDEX
             managed_sync_position(controller)
+
+        # Mount immutable launch inputs before the first guest instruction.
+        # Updating boundary zero keeps reverse/seek and replay aligned with the
+        # exact bytes the editor adapter supplied for this recording.
+        def managed_resource_mount(controller: mutable ManagedController&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64, bytes: u8&, length: usize) -> DebuggerVirtualResources::ResourceOpenResult:
+            result: mutable DebuggerVirtualResources::ResourceOpenResult = zeroed
+            result.handle <- DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID)
+            result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            session_snapshot: DebuggerSession::Session = controller.session
+            machine_snapshot: DebuggerEDIR::Machine = controller.engine.machine
+            event_count: usize = controller.engine.event_count
+            session_state: DebuggerSession::SessionState = session_snapshot.state
+            program_counter: u64 = machine_snapshot.program_counter
+            machine_steps: u64 = machine_snapshot.steps
+            machine_halted: bool = machine_snapshot.halted
+            machine_faulted: bool = machine_snapshot.faulted
+            return result if session_state != DebuggerSession::SessionState.Created and session_state != DebuggerSession::SessionState.Configuring
+            return result if event_count != Event::INITIAL_INDEX
+            return result if program_counter != Event::INITIAL_INDEX.u64()
+            return result if machine_steps != Event::INITIAL_INDEX.u64()
+            return result if machine_halted or machine_faulted
+            candidate_state: mutable DebuggerManagedState::State = controller.state
+            result <- DebuggerVirtualResources::resources_mount(candidate_state.resources, path, writable, generation, bytes, length)
+            return result if not result.accepted
+            original_state: DebuggerManagedState::State = controller.state
+            original_history_count: usize = controller.side_history_count
+            original_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = managed_side_checkpoint_at(controller, Event::INITIAL_INDEX)
+            controller.state <- candidate_state
+            if not managed_side_checkpoint_capture_current(controller):
+                controller.state <- original_state
+                controller.side_history_count <- original_history_count
+                managed_side_checkpoint_store(controller, Event::INITIAL_INDEX, original_checkpoint)
+                result.accepted <- false
+                result.handle <- DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID)
+                result.failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            return result
 
         def managed_sync_position(controller: mutable ManagedController&) -> void:
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)
@@ -713,8 +776,15 @@ module DebuggerManagedEngine:
                 if managed_host_effect_is_pending(controller):
                     host_effect_pending <- true
                     break
-                DebuggerReplayEngine::replay_engine_step(controller.engine)
-                _ = managed_side_checkpoint_capture_current(controller)
+                pending_request: HostEffectRequest = managed_host_effect_request(controller)
+                if pending_request.kind == HostEffectKind.VirtualFileReadByte:
+                    resource_failure: DebuggerErrors::DebuggerError = managed_record_virtual_file_read(controller)
+                    if not DebuggerErrors::error_is_ok(resource_failure):
+                        controller.last_error <- resource_failure
+                        break
+                else:
+                    DebuggerReplayEngine::replay_engine_step(controller.engine)
+                    _ = managed_side_checkpoint_capture_current(controller)
                 first_iteration <- false
                 break if controller.engine.engine_error != DebuggerReplayEngine::EngineError.None
             if not hit_breakpoint and not controller.engine.machine.halted and not controller.engine.machine.faulted and controller.engine.event_count.u64() - start >= max_steps:
@@ -725,7 +795,7 @@ module DebuggerManagedEngine:
             managed_sync_position(controller)
             managed_refresh_values(controller)
             pending_request: HostEffectRequest = managed_host_effect_request(controller) if not hit_breakpoint else HostEffectRequest{kind: HostEffectKind.None, call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), request_hash: HostEffectRequestHash::NO_REQUEST, payload: ManagedEffectIdentityDefaults::NO_ID, valid: false}
-            host_effect_pending <- pending_request.kind != HostEffectKind.None
+            host_effect_pending <- managed_host_effect_requires_provider(pending_request.kind)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull or (controller.engine.engine_error == DebuggerReplayEngine::EngineError.StepLimit and controller.engine.event_count >= DebuggerReplayEngine::replay_engine_history_capacity()):
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if host_effect_pending and not pending_request.valid
@@ -746,10 +816,15 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
             pending_request: HostEffectRequest = managed_host_effect_request(controller)
-            if pending_request.kind != HostEffectKind.None:
+            if pending_request.kind == HostEffectKind.VirtualFileReadByte:
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not pending_request.valid
+                resource_failure: DebuggerErrors::DebuggerError = managed_record_virtual_file_read(controller)
+                return resource_failure if not DebuggerErrors::error_is_ok(resource_failure)
+            elif pending_request.kind != HostEffectKind.None:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not pending_request.valid
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HOST_EFFECT_REQUEST)
-            DebuggerReplayEngine::replay_engine_step(controller.engine)
+            else:
+                DebuggerReplayEngine::replay_engine_step(controller.engine)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
                 # A faulting EDIR instruction is still recorded as an event.
                 # Keep the session coordinate and generation-scoped handles in
@@ -957,7 +1032,7 @@ module DebuggerManagedEngine:
             current_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
             breakpoint_reported_here: bool = controller.has_last_breakpoint_stop and controller.last_breakpoint_event == controller.engine.event_count.u64() and controller.last_breakpoint_instruction == controller.engine.machine.program_counter and controller.last_breakpoint_branch.value == current_branch.value
             kind: mutable ExecutionOutcomeKind = ExecutionOutcomeKind.Completed
-            kind <- ExecutionOutcomeKind.AwaitingHostEffect if request.valid and (failure.detail == Detail::HOST_EFFECT_REQUEST or not breakpoint_reported_here)
+            kind <- ExecutionOutcomeKind.AwaitingHostEffect if request.valid and managed_host_effect_requires_provider(request.kind) and (failure.detail == Detail::HOST_EFFECT_REQUEST or not breakpoint_reported_here)
             kind <- ExecutionOutcomeKind.Failed if not DebuggerErrors::error_is_ok(failure) and kind != ExecutionOutcomeKind.AwaitingHostEffect
             return ExecutionOutcome{kind: kind, position: DebuggerReplayEngine::replay_engine_position(controller.engine), host_effect: request, failure: failure}
 
@@ -974,7 +1049,8 @@ module DebuggerManagedEngine:
             return DebuggerEffects::EffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, result_value: HostEffectReplayDefaults::NO_CLOCK_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
 
         def managed_host_effect_preflight(controller: mutable ManagedController&, kind: HostEffectKind) -> DebuggerErrors::DebuggerError:
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            running_virtual_read: bool = kind == HostEffectKind.VirtualFileReadByte and controller.session.state == DebuggerSession::SessionState.Running
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session) and not running_virtual_read
             request: HostEffectRequest = managed_host_effect_request(controller)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid or request.kind != kind
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY) if controller.engine.event_count >= DebuggerReplayEngine::replay_engine_history_capacity()
@@ -983,10 +1059,11 @@ module DebuggerManagedEngine:
             instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
             candidate_machine: mutable DebuggerEDIR::Machine = controller.engine.machine
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerEDIR::machine_step_effect_result(candidate_machine, instruction, ManagedEffectStep::NO_RESULT_BITS)
-            next_session: DebuggerSession::Session = DebuggerSession::session_step(controller.session)
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
-            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if next_session.last_error != DebuggerSession::SessionError.None
+            if not running_virtual_read:
+                next_session: DebuggerSession::Session = DebuggerSession::session_step(controller.session)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if next_session.last_error == DebuggerSession::SessionError.HistoryUnavailable
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::ENGINE_MANAGED_DETAIL_UNSUPPORTED) if next_session.last_error == DebuggerSession::SessionError.Unsupported
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if next_session.last_error != DebuggerSession::SessionError.None
             return DebuggerErrors::no_error()
 
         def managed_restore_host_effect_engine_boundary(controller: mutable ManagedController&, event: usize, machine: DebuggerEDIR::Machine, engine_error: DebuggerReplayEngine::EngineError, snapshot: DebuggerCheckpoint::MachineSnapshot, envelope: DebuggerEvents::EventEnvelope, result_bits: u64, result_recorded: bool) -> void:
@@ -1016,10 +1093,13 @@ module DebuggerManagedEngine:
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY) if engine_error == DebuggerReplayEngine::EngineError.HistoryFull
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if engine_error == DebuggerReplayEngine::EngineError.HistoryUnavailable
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT)
-            next_session: DebuggerSession::Session = DebuggerSession::session_step(controller.session)
-            if next_session.last_error != DebuggerSession::SessionError.None:
-                managed_restore_host_effect_engine_boundary(controller, original_event_count, original_machine, original_engine_error, original_snapshot, original_event, original_result_bits, original_result_recorded)
-                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
+            running_virtual_read: bool = kind == HostEffectKind.VirtualFileReadByte and controller.session.state == DebuggerSession::SessionState.Running
+            next_session: mutable DebuggerSession::Session = controller.session
+            if not running_virtual_read:
+                next_session <- DebuggerSession::session_step(controller.session)
+                if next_session.last_error != DebuggerSession::SessionError.None:
+                    managed_restore_host_effect_engine_boundary(controller, original_event_count, original_machine, original_engine_error, original_snapshot, original_event, original_result_bits, original_result_recorded)
+                    return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT)
             controller.state <- candidate_state
             controller.session <- next_session
             controller.session.position <- DebuggerReplayEngine::replay_engine_position(controller.engine)

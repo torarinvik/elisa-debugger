@@ -11,6 +11,7 @@ module DebuggerEffects:
             REPLAY_EFFECTS_DETAIL_ENUM: u32 = 2
             UNSUPPORTED_EFFECT: u32 = 3
             MISSING_CALL_SITE: u32 = 4
+            MISSING_INVOCATION: u32 = 5
 
         const module Effect:
             ORACLE_CAPACITY: usize = 256
@@ -21,6 +22,7 @@ module DebuggerEffects:
             PREVIOUS_RECORD_OFFSET: usize = 1
             SEQUENCE_START: u64 = 0
             NO_CALL_SITE: u64 = 0
+            NO_INVOCATION: u64 = 0
             INITIAL_OVERFLOWED: bool = false
             EMPTY_HASH: u64 = 0
             EMPTY_VALUE: i64 = 0
@@ -61,6 +63,7 @@ module DebuggerEffects:
             sequence: mutable u64
             kind: mutable EffectKind
             call_site: mutable DebuggerIdentity::DebugId
+            invocation: mutable DebuggerIdentity::DebugId
             request_hash: mutable u64
             result_hash: mutable u64
             result_value: mutable i64
@@ -118,9 +121,9 @@ module DebuggerEffects:
             return kind == EffectKind.Clock or kind == EffectKind.Random
 
         def effect_record_is_fully_captured(record: EffectRecord) -> bool:
-            return effect_kind_is_fully_captured(record.kind) and not DebuggerIdentity::debug_id_is_zero(record.call_site)
+            return effect_kind_is_fully_captured(record.kind) and not DebuggerIdentity::debug_id_is_zero(record.call_site) and not DebuggerIdentity::debug_id_is_zero(record.invocation)
 
-        def effect_oracle_record_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: i64) -> void:
+        def effect_oracle_record_in_invocation(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: i64) -> void:
             return if oracle.exactness == Exactness.Diverged or (not DebuggerErrors::error_is_ok(oracle.last_error) and oracle.last_error.code != DebuggerErrors::ErrorCode.Unsupported)
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
                 oracle.exactness <- Exactness.Diverged
@@ -139,7 +142,7 @@ module DebuggerEffects:
                 oracle.exactness <- Exactness.Incomplete
                 oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Effect::ORACLE_CAPACITY.u32())
                 return
-            oracle.records[oracle.count] <- EffectRecord{sequence: oracle.count.u64(), kind: kind, call_site: call_site, request_hash: request_hash, result_hash: result_hash, result_value: value, suppress_external_write: effect_is_external_write(kind)}
+            oracle.records[oracle.count] <- EffectRecord{sequence: oracle.count.u64(), kind: kind, call_site: call_site, invocation: invocation, request_hash: request_hash, result_hash: result_hash, result_value: value, suppress_external_write: effect_is_external_write(kind)}
             oracle.count <- oracle.count + Effect::COUNT_INCREMENT
             oracle.exactness <- Exactness.Observational if oracle.mode == EffectMode.Live or oracle.mode == EffectMode.Barrier
             if oracle.mode != EffectMode.Live and oracle.mode != EffectMode.Barrier:
@@ -150,9 +153,18 @@ module DebuggerEffects:
                     if DebuggerIdentity::debug_id_is_zero(call_site):
                         oracle.exactness <- Exactness.Incomplete
                         oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::MISSING_CALL_SITE) if DebuggerErrors::error_is_ok(oracle.last_error)
+                    else:
+                        if DebuggerIdentity::debug_id_is_zero(invocation):
+                            oracle.exactness <- Exactness.Incomplete
+                            oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::MISSING_INVOCATION) if DebuggerErrors::error_is_ok(oracle.last_error)
 
-        # Keep the original call shape for observational callers. A zero source
-        # identity deliberately makes a recorded Clock/Random stream inexact.
+        # Site-only calls stay Incomplete because they cannot distinguish
+        # recursive or re-entrant invocations of the same instruction.
+        def effect_oracle_record_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: i64) -> void:
+            effect_oracle_record_in_invocation(oracle, kind, call_site, DebuggerIdentity::debug_id(Effect::NO_INVOCATION), request_hash, result_hash, value)
+
+        # Keep the original call shape for observational callers. Exact
+        # Clock/Random replay requires both source and invocation identities.
         def effect_oracle_record(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64, result_hash: u64, value: i64) -> void:
             effect_oracle_record_at(oracle, kind, DebuggerIdentity::debug_id(Effect::NO_CALL_SITE), request_hash, result_hash, value)
 
@@ -162,10 +174,13 @@ module DebuggerEffects:
         def effect_oracle_record_random_at(oracle: mutable EffectOracle&, call_site: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: u64) -> void:
             effect_oracle_record_at(oracle, EffectKind.Random, call_site, request_hash, result_hash, value.i64())
 
+        def effect_oracle_record_random_in_invocation(oracle: mutable EffectOracle&, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64, result_hash: u64, value: u64) -> void:
+            effect_oracle_record_in_invocation(oracle, EffectKind.Random, call_site, invocation, request_hash, result_hash, value.i64())
+
         def effect_oracle_record_random(oracle: mutable EffectOracle&, request_hash: u64, result_hash: u64, value: u64) -> void:
             effect_oracle_record_random_at(oracle, DebuggerIdentity::debug_id(Effect::NO_CALL_SITE), request_hash, result_hash, value)
 
-        def effect_oracle_replay_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64) -> void:
+        def effect_oracle_replay_in_invocation(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64) -> void:
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
                 oracle.exactness <- Exactness.Diverged
                 oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
@@ -199,11 +214,14 @@ module DebuggerEffects:
                 oracle.exactness <- Exactness.Diverged
                 oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
                 return
-            if record.sequence != oracle.cursor.u64() or record.kind != kind or record.call_site.value != call_site.value or record.request_hash != request_hash:
+            if record.sequence != oracle.cursor.u64() or record.kind != kind or record.call_site.value != call_site.value or record.invocation.value != invocation.value or record.request_hash != request_hash:
                 oracle.exactness <- Exactness.Diverged
                 oracle.last_error <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
                 return
             oracle.cursor <- oracle.cursor + Effect::CURSOR_INCREMENT
+
+        def effect_oracle_replay_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64) -> void:
+            effect_oracle_replay_in_invocation(oracle, kind, call_site, DebuggerIdentity::debug_id(Effect::NO_INVOCATION), request_hash)
 
         def effect_oracle_replay(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64) -> void:
             effect_oracle_replay_at(oracle, kind, DebuggerIdentity::debug_id(Effect::NO_CALL_SITE), request_hash)
@@ -221,7 +239,7 @@ module DebuggerEffects:
         # together with the value.  Replay callers must use this API instead
         # of reading records directly, so mismatched requests stop at the
         # first divergence and cannot accidentally send a real write.
-        def effect_oracle_replay_result_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64) -> EffectReplay:
+        def effect_oracle_replay_result_in_invocation(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64) -> EffectReplay:
             initial_failure: mutable DebuggerErrors::DebuggerError = DebuggerErrors::no_error()
             if oracle.mode.u16() > Effect::REPLAY_EFFECTS_EFFECT_MODE_MAX:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::REPLAY_EFFECTS_DETAIL_ENUM)
@@ -255,17 +273,24 @@ module DebuggerEffects:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
                 return effect_replay_failure(oracle, initial_failure)
             record: EffectRecord = oracle.records[oracle.cursor]
-            if record.suppress_external_write != effect_is_external_write(record.kind) or record.sequence != oracle.cursor.u64() or record.kind != kind or record.call_site.value != call_site.value or record.request_hash != request_hash:
+            if record.suppress_external_write != effect_is_external_write(record.kind) or record.sequence != oracle.cursor.u64() or record.kind != kind or record.call_site.value != call_site.value or record.invocation.value != invocation.value or record.request_hash != request_hash:
                 initial_failure <- DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, oracle.cursor.u32())
                 return effect_replay_failure(oracle, initial_failure)
             oracle.cursor <- oracle.cursor + Effect::CURSOR_INCREMENT
             return EffectReplay{accepted: true, result_hash: record.result_hash, result_value: record.result_value, suppress_external_write: record.suppress_external_write, failure: DebuggerErrors::no_error()}
+
+        def effect_oracle_replay_result_at(oracle: mutable EffectOracle&, kind: EffectKind, call_site: DebuggerIdentity::DebugId, request_hash: u64) -> EffectReplay:
+            return effect_oracle_replay_result_in_invocation(oracle, kind, call_site, DebuggerIdentity::debug_id(Effect::NO_INVOCATION), request_hash)
 
         def effect_oracle_replay_result(oracle: mutable EffectOracle&, kind: EffectKind, request_hash: u64) -> EffectReplay:
             return effect_oracle_replay_result_at(oracle, kind, DebuggerIdentity::debug_id(Effect::NO_CALL_SITE), request_hash)
 
         def effect_oracle_replay_random_result_at(oracle: mutable EffectOracle&, call_site: DebuggerIdentity::DebugId, request_hash: u64) -> RandomEffectReplay:
             replay: EffectReplay = effect_oracle_replay_result_at(oracle, EffectKind.Random, call_site, request_hash)
+            return RandomEffectReplay{accepted: replay.accepted, result_hash: replay.result_hash, value: replay.result_value.u64(), suppress_external_write: replay.suppress_external_write, failure: replay.failure}
+
+        def effect_oracle_replay_random_result_in_invocation(oracle: mutable EffectOracle&, call_site: DebuggerIdentity::DebugId, invocation: DebuggerIdentity::DebugId, request_hash: u64) -> RandomEffectReplay:
+            replay: EffectReplay = effect_oracle_replay_result_in_invocation(oracle, EffectKind.Random, call_site, invocation, request_hash)
             return RandomEffectReplay{accepted: replay.accepted, result_hash: replay.result_hash, value: replay.result_value.u64(), suppress_external_write: replay.suppress_external_write, failure: replay.failure}
 
         def effect_oracle_replay_random_result(oracle: mutable EffectOracle&, request_hash: u64) -> RandomEffectReplay:

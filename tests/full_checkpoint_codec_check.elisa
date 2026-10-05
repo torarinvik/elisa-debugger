@@ -17,8 +17,11 @@ const module Test:
     EFFECT_RESULT_HASH: u64 = 3002
     EFFECT_RESULT_VALUE: i64 = 3003
     EFFECT_CALL_SITE_BASE: u64 = 8100
+    EFFECT_INVOCATION_BASE: u64 = 8300
     EFFECT_CLOCK_CALL_SITE_ID: u64 = 8201
     EFFECT_RANDOM_CALL_SITE_ID: u64 = 8202
+    EFFECT_CLOCK_INVOCATION_ID: u64 = 8401
+    EFFECT_RANDOM_INVOCATION_ID: u64 = 8402
     SECOND_EFFECT_OFFSET: u64 = 1
     MACHINE_PC: u64 = 5
     MACHINE_RETURN_PC: u64 = 9
@@ -220,8 +223,8 @@ def make_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
 
     effects: mutable DebuggerEffects::EffectOracle = zeroed
     DebuggerEffects::effect_oracle_initialize(effects, DebuggerEffects::EffectMode.Recording)
-    DebuggerEffects::effect_oracle_record_at(effects, DebuggerEffects::EffectKind.Clock, DebuggerIdentity::debug_id(Test::EFFECT_CLOCK_CALL_SITE_ID), Test::EFFECT_REQUEST_HASH, Test::EFFECT_RESULT_HASH, Test::EFFECT_RESULT_VALUE)
-    DebuggerEffects::effect_oracle_record_random_at(effects, DebuggerIdentity::debug_id(Test::EFFECT_RANDOM_CALL_SITE_ID), Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET, Test::EFFECT_RESULT_HASH + Test::SECOND_EFFECT_OFFSET, Test::ADAPTER_RANDOM_SECOND)
+    DebuggerEffects::effect_oracle_record_in_invocation(effects, DebuggerEffects::EffectKind.Clock, DebuggerIdentity::debug_id(Test::EFFECT_CLOCK_CALL_SITE_ID), DebuggerIdentity::debug_id(Test::EFFECT_CLOCK_INVOCATION_ID), Test::EFFECT_REQUEST_HASH, Test::EFFECT_RESULT_HASH, Test::EFFECT_RESULT_VALUE)
+    DebuggerEffects::effect_oracle_record_random_in_invocation(effects, DebuggerIdentity::debug_id(Test::EFFECT_RANDOM_CALL_SITE_ID), DebuggerIdentity::debug_id(Test::EFFECT_RANDOM_INVOCATION_ID), Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET, Test::EFFECT_RESULT_HASH + Test::SECOND_EFFECT_OFFSET, Test::ADAPTER_RANDOM_SECOND)
 
     resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
     DebuggerVirtualResources::resources_initialize(resources, DebuggerVirtualResources::ResourceMode.Recording)
@@ -401,7 +404,7 @@ def make_large_checkpoint() -> DebuggerFullCheckpoint::ManagedCheckpoint:
     checkpoint.effects.count <- Test::EFFECT_CAPACITY
     checkpoint.effects.cursor <- Test::LARGE_CHECKPOINT_EFFECT_CURSOR
     for index in 0..<Test::EFFECT_CAPACITY:
-        checkpoint.effects.records[index] <- DebuggerEffects::EffectRecord{sequence: index.u64(), kind: DebuggerEffects::EffectKind.Clock, call_site: DebuggerIdentity::debug_id(Test::EFFECT_CALL_SITE_BASE + index.u64()), request_hash: Test::EFFECT_REQUEST_HASH, result_hash: Test::EFFECT_RESULT_HASH, result_value: Test::EFFECT_RESULT_VALUE, suppress_external_write: false}
+        checkpoint.effects.records[index] <- DebuggerEffects::EffectRecord{sequence: index.u64(), kind: DebuggerEffects::EffectKind.Clock, call_site: DebuggerIdentity::debug_id(Test::EFFECT_CALL_SITE_BASE + index.u64()), invocation: DebuggerIdentity::debug_id(Test::EFFECT_INVOCATION_BASE + index.u64()), request_hash: Test::EFFECT_REQUEST_HASH, result_hash: Test::EFFECT_RESULT_HASH, result_value: Test::EFFECT_RESULT_VALUE, suppress_external_write: false}
 
     checkpoint.resources.count <- Test::RESOURCE_CAPACITY
     checkpoint.resources.next_handle <- Test::LARGE_CHECKPOINT_NEXT_HANDLE
@@ -525,7 +528,7 @@ def checkpoints_are_equal(left: DebuggerFullCheckpoint::ManagedCheckpoint, right
     for index in 0..<left.effects.count:
         lrecord: DebuggerEffects::EffectRecord = left.effects.records[index]
         rrecord: DebuggerEffects::EffectRecord = right.effects.records[index]
-        return false if lrecord.sequence != rrecord.sequence or lrecord.kind != rrecord.kind or lrecord.call_site.value != rrecord.call_site.value or lrecord.request_hash != rrecord.request_hash or lrecord.result_hash != rrecord.result_hash or lrecord.result_value != rrecord.result_value or lrecord.suppress_external_write != rrecord.suppress_external_write
+        return false if lrecord.sequence != rrecord.sequence or lrecord.kind != rrecord.kind or lrecord.call_site.value != rrecord.call_site.value or lrecord.invocation.value != rrecord.invocation.value or lrecord.request_hash != rrecord.request_hash or lrecord.result_hash != rrecord.result_hash or lrecord.result_value != rrecord.result_value or lrecord.suppress_external_write != rrecord.suppress_external_write
     return false if left.resources.count != right.resources.count or left.resources.next_handle != right.resources.next_handle or left.resources.mode != right.resources.mode or left.resources.count > Test::RESOURCE_CAPACITY
     return false if left.resources.operation_count != right.resources.operation_count or left.resources.operation_cursor != right.resources.operation_cursor or left.resources.operation_overflowed != right.resources.operation_overflowed or left.resources.operation_count > Test::RESOURCE_OPERATION_CAPACITY
     for index in 0..<left.resources.count:
@@ -582,8 +585,8 @@ def check_round_trip() -> i64:
     return Test::RESOURCE_ROUND_TRIP_FAILURE if not resource_operations_replay_after_checkpoint(decoded.checkpoint)
     restored_effects: mutable DebuggerEffects::EffectOracle = decoded.checkpoint.effects
     restored_effects.mode <- DebuggerEffects::EffectMode.Replaying
-    restored_clock: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result_at(restored_effects, DebuggerEffects::EffectKind.Clock, DebuggerIdentity::debug_id(Test::EFFECT_CLOCK_CALL_SITE_ID), Test::EFFECT_REQUEST_HASH)
-    restored_random: DebuggerEffects::RandomEffectReplay = DebuggerEffects::effect_oracle_replay_random_result_at(restored_effects, DebuggerIdentity::debug_id(Test::EFFECT_RANDOM_CALL_SITE_ID), Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET)
+    restored_clock: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result_in_invocation(restored_effects, DebuggerEffects::EffectKind.Clock, DebuggerIdentity::debug_id(Test::EFFECT_CLOCK_CALL_SITE_ID), DebuggerIdentity::debug_id(Test::EFFECT_CLOCK_INVOCATION_ID), Test::EFFECT_REQUEST_HASH)
+    restored_random: DebuggerEffects::RandomEffectReplay = DebuggerEffects::effect_oracle_replay_random_result_in_invocation(restored_effects, DebuggerIdentity::debug_id(Test::EFFECT_RANDOM_CALL_SITE_ID), DebuggerIdentity::debug_id(Test::EFFECT_RANDOM_INVOCATION_ID), Test::EFFECT_REQUEST_HASH + Test::SECOND_EFFECT_OFFSET)
     return Test::EFFECT_ROUND_TRIP_FAILURE if not restored_clock.accepted or restored_clock.result_value != Test::EFFECT_RESULT_VALUE or not restored_random.accepted or restored_random.value != Test::ADAPTER_RANDOM_SECOND or not DebuggerEffects::effect_oracle_replay_complete(restored_effects)
     restored_adapters: mutable DebuggerReplayAdapters::AdapterSnapshot = zeroed
     return Test::ADAPTER_RESTORE_FAILURE if not DebuggerErrors::error_is_ok(DebuggerFullCheckpoint::full_checkpoint_restore_adapters(restored_adapters, decoded.checkpoint)) or not adapter_snapshot_is_equal(checkpoint.adapters, restored_adapters)

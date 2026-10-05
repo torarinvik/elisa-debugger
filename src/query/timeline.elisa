@@ -54,10 +54,27 @@ module DebuggerTimeline:
             note: mutable DebuggerIdentity::DebugId
             pinned: mutable bool
 
+        enum HistoryEligibilityReason:
+            Ready
+            UnsupportedHistory
+            SessionNotStopped
+            StateNotExact
+            SideStateUnaligned
+            AtBoundary
+
+        # This is a point-in-time capability snapshot. `reason` describes why
+        # reverse navigation is currently unavailable; `can_seek` can still
+        # be true at the beginning when retained history exists ahead.
+        struct HistoryEligibility:
+            can_reverse: mutable bool
+            can_seek: mutable bool
+            reason: mutable HistoryEligibilityReason
+
         struct Timeline:
             position: mutable DebuggerIdentity::Position
             bounds: mutable HistoryBounds
             capabilities: mutable DebuggerCapabilities::CapabilitySet
+            eligibility: mutable HistoryEligibility
             bookmarks: mutable Bookmark[BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY]
             bookmark_count: mutable usize
             next_bookmark_id: mutable u64
@@ -69,6 +86,10 @@ module DebuggerTimeline:
 
         def history_bounds_new(current: u64) -> HistoryBounds:
             return HistoryBounds{has_retained: true, retained_first: current, retained_last: current, has_exact: true, exact_first: current, exact_last: current, current: current}
+
+        def history_eligibility_for_capabilities(capabilities: DebuggerCapabilities::CapabilitySet) -> HistoryEligibility:
+            return HistoryEligibility{can_reverse: false, can_seek: false, reason: HistoryEligibilityReason.UnsupportedHistory} if capabilities.history != DebuggerCapabilities::HistoryKind.Exact or not capabilities.reverse_execution
+            return HistoryEligibility{can_reverse: false, can_seek: false, reason: HistoryEligibilityReason.AtBoundary}
 
         def history_bounds_is_valid(bounds: HistoryBounds) -> bool:
             return false if bounds.has_retained and bounds.retained_last < bounds.retained_first
@@ -83,7 +104,7 @@ module DebuggerTimeline:
             bounds.has_exact <- capabilities.history == DebuggerCapabilities::HistoryKind.Exact
             bounds.exact_first <- position.event
             bounds.exact_last <- position.event
-            return Timeline{position: position, bounds: bounds, capabilities: capabilities, bookmarks: zeroed, bookmark_count: Count::EMPTY_BOOKMARK_COUNT, next_bookmark_id: First::QUERY_TIMELINE_FIRST_BOOKMARK_ID}
+            return Timeline{position: position, bounds: bounds, capabilities: capabilities, eligibility: history_eligibility_for_capabilities(capabilities), bookmarks: zeroed, bookmark_count: Count::EMPTY_BOOKMARK_COUNT, next_bookmark_id: First::QUERY_TIMELINE_FIRST_BOOKMARK_ID}
 
         def timeline_bookmark_capacity() -> usize:
             return BookmarkLimits::QUERY_TIMELINE_BOOKMARK_LIMITS_CAPACITY

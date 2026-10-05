@@ -179,6 +179,16 @@ module DebuggerProtocolEncoding:
             TIMELINE_BRANCH_PREFIX: cstr = ",\"branch\":"
             TIMELINE_HISTORY_PREFIX: cstr = "},\"history\":{\"retained\":{\"available\":"
             TIMELINE_HISTORY_EXACT_PREFIX: cstr = "},\"exact\":{\"available\":"
+            TIMELINE_NAVIGATION_PREFIX: cstr = "},\"navigation\":{\"canReverse\":"
+            TIMELINE_NAVIGATION_SEEK_PREFIX: cstr = ",\"canSeek\":"
+            TIMELINE_NAVIGATION_REASON_PREFIX: cstr = ",\"reason\":\""
+            TIMELINE_NAVIGATION_SUFFIX: cstr = "\"}"
+            TIMELINE_REASON_READY: cstr = "ready"
+            TIMELINE_REASON_UNSUPPORTED_HISTORY: cstr = "unsupportedHistory"
+            TIMELINE_REASON_SESSION_NOT_STOPPED: cstr = "sessionNotStopped"
+            TIMELINE_REASON_STATE_NOT_EXACT: cstr = "stateNotExact"
+            TIMELINE_REASON_SIDE_STATE_UNALIGNED: cstr = "sideStateUnaligned"
+            TIMELINE_REASON_AT_BOUNDARY: cstr = "atBoundary"
             TIMELINE_BOOKMARKS_PREFIX: cstr = "}},\"bookmarks\":["
             TIMELINE_BOOKMARK_PREFIX: cstr = "{\"id\":"
             TIMELINE_BOOKMARK_EVENT_PREFIX: cstr = ",\"event\":"
@@ -997,7 +1007,7 @@ module DebuggerProtocolEncoding:
         # request.
         def managed_timeline_response_encode(request_id: u64, generation: u64, timeline: DebuggerTimeline::Timeline&, has_checkpoint: bool, checkpoint_event: u64, checkpoint_hash: u64) -> JsonBuffer:
             buffer: mutable JsonBuffer = json_buffer_new()
-            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or timeline.bookmark_count > DebuggerTimeline::timeline_bookmark_capacity() or not DebuggerTimeline::history_bounds_is_valid(timeline.bounds):
+            if request_id == Sentinels::PROTOCOL_ENCODING_SENTINELS_NO_REQUEST_ID or timeline.bookmark_count > DebuggerTimeline::timeline_bookmark_capacity() or not DebuggerTimeline::history_bounds_is_valid(timeline.bounds) or not DebuggerTimeline::history_eligibility_is_valid(timeline.eligibility):
                 buffer.failed <- true
                 return buffer
             managed_result_prefix(buffer, request_id, generation)
@@ -1019,6 +1029,24 @@ module DebuggerProtocolEncoding:
                 buffer_put_id_string(buffer, timeline.bounds.exact_first)
                 buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_AVAILABLE_LAST_EVENT_PREFIX)
                 buffer_put_id_string(buffer, timeline.bounds.exact_last)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_NAVIGATION_PREFIX)
+            buffer_put_bool(buffer, timeline.eligibility.can_reverse)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_NAVIGATION_SEEK_PREFIX)
+            buffer_put_bool(buffer, timeline.eligibility.can_seek)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_NAVIGATION_REASON_PREFIX)
+            if timeline.eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.Ready:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_REASON_READY)
+            elif timeline.eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.UnsupportedHistory:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_REASON_UNSUPPORTED_HISTORY)
+            elif timeline.eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.SessionNotStopped:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_REASON_SESSION_NOT_STOPPED)
+            elif timeline.eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.StateNotExact:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_REASON_STATE_NOT_EXACT)
+            elif timeline.eligibility.reason == DebuggerTimeline::HistoryEligibilityReason.SideStateUnaligned:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_REASON_SIDE_STATE_UNALIGNED)
+            else:
+                buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_REASON_AT_BOUNDARY)
+            buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_NAVIGATION_SUFFIX)
             buffer_put_cstr(buffer, TimelineEncoding::TIMELINE_BOOKMARKS_PREFIX)
             for index in Index::FIRST..<timeline.bookmark_count:
                 bookmark: DebuggerTimeline::Bookmark = timeline.bookmarks[index]

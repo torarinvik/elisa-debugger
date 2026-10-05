@@ -60,6 +60,13 @@ const module Test:
     BREAKPOINT_LINE: u32 = 2
     SOURCE_BREAKPOINT_SET_COUNT: usize = 2
     UNRESOLVED_BREAKPOINT_LINE: u32 = Test::BREAKPOINT_LINE + 1
+    const module HistoryEligibility:
+        EFFECT_CALL_SITE_ID: u64 = 9901
+        EFFECT_INVOCATION_ID: u64 = 9902
+        EFFECT_REQUEST_HASH: u64 = 9903
+        EFFECT_RESULT_HASH: u64 = 9904
+        EFFECT_RESULT_VALUE: i64 = 9905
+        SERVICE_STATUS_FAILURE: i64 = 35
     BOOKMARK_LABEL_ID: u64 = 700
     BOOKMARK_NOTE_ID: u64 = 701
     MANAGED_REGRESSION_BUILD_COMPILER_ID: u64 = 801
@@ -898,6 +905,8 @@ def main() -> i64:
     step_request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: Test::STEP_REQUEST_ID, has_id: true, expected_generation: 0, target_event: 0, valid: true}
     stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, step_request)
     return 3 if not stepped.accepted
+    ready_timeline: DebuggerTimeline::Timeline = DebuggerManagedService::service_timeline(service)
+    return Test::HistoryEligibility::SERVICE_STATUS_FAILURE if not ready_timeline.eligibility.can_reverse or not ready_timeline.eligibility.can_seek or ready_timeline.eligibility.reason != DebuggerTimeline::HistoryEligibilityReason.Ready
     frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
     return 4 if frame.accumulator != Test::EXPECTED_RESULT or frame.event != Test::TARGET_EVENT or frame.instruction.value != Test::TARGET_EVENT
     evaluation_session: DebuggerSession::Session = session
@@ -1066,6 +1075,14 @@ def main() -> i64:
     running_reverse: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, reverse_request)
     running_frame: DebuggerManagedInspection::FrameSnapshot = DebuggerManagedService::service_frame(service)
     return 11 if running_seek.accepted or running_reverse.accepted or running_frame.event != Test::INSTRUCTION_COUNT
+    paused_again: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, pause_request)
+    return Test::HistoryEligibility::SERVICE_STATUS_FAILURE if not paused_again.accepted
+    DebuggerEffects::effect_oracle_record_in_invocation(service.controller.state.effects, DebuggerEffects::EffectKind.Clock, DebuggerIdentity::debug_id(Test::HistoryEligibility::EFFECT_CALL_SITE_ID), DebuggerIdentity::debug_id(Test::HistoryEligibility::EFFECT_INVOCATION_ID), Test::HistoryEligibility::EFFECT_REQUEST_HASH, Test::HistoryEligibility::EFFECT_RESULT_HASH, Test::HistoryEligibility::EFFECT_RESULT_VALUE)
+    timeline_request: mutable DebuggerProtocolRequest::Request = seek_request
+    timeline_request.method <- DebuggerProtocolRequest::RequestMethod.Timeline
+    side_state_timeline: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, timeline_request)
+    unsafe_timeline: DebuggerTimeline::Timeline = DebuggerManagedService::service_timeline(service)
+    return Test::HistoryEligibility::SERVICE_STATUS_FAILURE if not side_state_timeline.accepted or unsafe_timeline.eligibility.can_reverse or unsafe_timeline.eligibility.can_seek or unsafe_timeline.eligibility.reason != DebuggerTimeline::HistoryEligibilityReason.SideStateUnaligned or unsafe_timeline.bounds.exact_first != unsafe_timeline.bounds.current or unsafe_timeline.bounds.exact_last != unsafe_timeline.bounds.current
     limited_session: DebuggerSession::Session = session
     limited_session.state <- DebuggerSession::SessionState.Stopped
     limited_session.capabilities <- DebuggerCapabilities::native_attach_capabilities()

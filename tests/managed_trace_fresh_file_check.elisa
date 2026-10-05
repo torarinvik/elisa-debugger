@@ -21,11 +21,14 @@ const module Test:
     FRESH_SESSION_ID: u64 = 706
     ORIGINAL_RECORDING_ID: u64 = 707
     FRESH_RECORDING_ID: u64 = 708
+    FAILED_SESSION_ID: u64 = 709
+    FAILED_RECORDING_ID: u64 = 710
     FIRST_REQUEST_ID: u64 = 1
     SECOND_REQUEST_ID: u64 = 2
     THIRD_REQUEST_ID: u64 = 3
     INITIAL_EVENT: u64 = 0
     EXPECTED_EVENT: u64 = 1
+    EVENT_AFTER_TRACE_END: u64 = 2
     PATH_CAPACITY: usize = 64
     PATH_FIRST_BYTE: usize = 0
     PATH_INCREMENT: usize = 1
@@ -45,6 +48,7 @@ const module TestResult:
     FRESH_IDENTITY: i64 = 7
     FRESH_STATE: i64 = 8
     REPLAY_REJECTED_ATOMICALLY: i64 = 9
+    OUT_OF_RANGE_REJECTED_ATOMICALLY: i64 = 10
 
 def copy_path(source: cstr, output: mutable u8&) -> usize:
     length: mutable usize = Test::PATH_FIRST_BYTE
@@ -93,6 +97,13 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
 
     exported: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(original, path[Test::PATH_FIRST_BYTE], path_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     return TestResult::EXPORT if not exported.accepted
+
+    failed_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::FAILED_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    failed: mutable DebuggerManagedService::Service
+    DebuggerManagedService::service_initialize(failed, failed_session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(Test::FAILED_RECORDING_ID))
+    failed_initial_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(failed.controller.engine)
+    out_of_range: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(failed, path[Test::PATH_FIRST_BYTE], path_length, Test::EVENT_AFTER_TRACE_END) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return TestResult::OUT_OF_RANGE_REJECTED_ATOMICALLY if out_of_range.accepted or failed.controller.session.state != DebuggerSession::SessionState.Created or failed.controller.session.id.value != Test::FAILED_SESSION_ID or failed.controller.engine.recording.value != Test::FAILED_RECORDING_ID or failed.controller.engine.event_count.u64() != Test::INITIAL_EVENT or DebuggerReplayEngine::replay_engine_state_hash(failed.controller.engine) != failed_initial_hash
 
     fresh_session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::FRESH_SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
     fresh: mutable DebuggerManagedService::Service

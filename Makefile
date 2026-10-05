@@ -573,7 +573,7 @@ $(COMPILER_EDIR_HOST_EFFECT_CHECK): tests/compiler_edir_host_effects_check.elisa
 	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
 
 # Compile one real program that obtains clock and random values through EDIR,
-# then let the managed provider journal them and verify exact reverse/seek.
+# branches into a console write, then verify managed journal replay and seek.
 compiler-edir-host-effects-check: $(COMPILER_EDIR_HOST_EFFECT_CHECK)
 	mkdir -p $(BUILD)
 	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(COMPILER_EDIR_HOST_EFFECT_ARTIFACT)" "$(COMPILER_EDIR_HOST_EFFECT_FIXTURE)"

@@ -61,6 +61,16 @@ Data breakpoints, variable assignment, restart, and disassembly remain
 unavailable. The initialize response advertises the relevant DAP capabilities;
 clients should honor that response.
 
+The initialize response also advertises the optional
+`supportsElisaHostEffects` version 1 extension. It yields clock, random, and
+console-output requests through the response body of `continue`, `next`,
+`stepIn`, or `stepOut`. A host must inspect those responses and send the
+correlated `elisa/provideHostEffect` reply through the same session. The
+[versioned wire contract](../spec/dap-host-effects-v1.md) describes the
+message format and host integration path. This repository provides the DAP
+backend; it does not include a VS Code or JetBrains plugin or a concrete
+host-effect provider.
+
 The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. `stackTrace`
 supports the standard `startFrame` and `levels` paging arguments and reports
 `totalFrames`; initialization advertises

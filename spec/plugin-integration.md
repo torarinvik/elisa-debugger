@@ -91,6 +91,17 @@ already owns the same in-process managed service. The standalone headless
 session process exposes the compact `createSession` ownership handshake; it
 does not turn the DAP process into a shareable session.
 
+For managed programs that use clock, random, or console output, read the
+`supportsElisaHostEffects` and `elisaHostEffectsVersion` fields from
+`initialize`. Version 1 returns a typed request in the response body for
+`continue`, `next`, `stepIn`, and `stepOut`; the client must provide the result
+through `elisa/provideHostEffect` on that same session. See the
+[host-effects wire contract](dap-host-effects-v1.md) for message examples,
+exact value encoding, event ordering, and failure behavior. A VS Code extension
+can observe adapter responses with a `DebugAdapterTracker` and send the custom
+reply with `DebugSession.customRequest`; the DAP server does not call the
+extension directly.
+
 ## JetBrains
 
 Use the same DAP executable and launch fields when the selected JetBrains
@@ -101,7 +112,10 @@ only the operations exposed by a process transport. The public Elisa modules
 are source-level APIs for Elisa callers, not a stable cross-language ABI; a
 Kotlin or Java plugin cannot directly call them as a supported integration
 route. Do not parse human CLI output or reimplement debugger policy. This guide
-does not claim a JetBrains version has been tested.
+does not claim a JetBrains version has been tested. To support host effects,
+the selected route must let the plugin inspect execution response bodies and
+send `elisa/provideHostEffect` through the same DAP session; see the
+[version 1 contract](dap-host-effects-v1.md).
 
 The DAP adapter uses standard DAP `initialize` capabilities. The headless
 process has a separate `discover`/`initialize` version handshake; its current

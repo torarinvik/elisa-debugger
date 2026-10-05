@@ -76,8 +76,10 @@ include a VS Code or JetBrains plugin or a concrete host-effect provider.
 The initialize response also advertises
 `supportsElisaTimelineNavigation` version 1. Hosts can call
 `elisa/getTimeline` for retained/exact bounds and eligibility, then
-`elisa/seek` on the same adapter connection to jump to an event. A successful
-seek emits a stopped event; refresh stack and variable handles afterward. The
+`elisa/seek` on the same adapter connection to jump to an event. Include the
+snapshot's `stopGeneration` with each seek so stale slider requests are
+rejected. A successful seek emits a stopped event; refresh stack and variable
+handles afterward. The
 [timeline navigation contract](../spec/dap-timeline-navigation-v1.md) includes
 request shapes, the current managed event limit, and guidance for VS Code,
 JetBrains, and other DAP clients.

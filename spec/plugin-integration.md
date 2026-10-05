@@ -92,8 +92,9 @@ or treat DAP's `program` as an Elisa source file.
 
 If initialize advertises `supportsElisaTimelineNavigation` version 1, a VS
 Code extension can request `session.customRequest("elisa/getTimeline")` and
-seek with `session.customRequest("elisa/seek", { eventIndex })`. Use the
-reported exact bounds and eligibility to drive a timeline panel. After a
+seek with `elisa/seek`, passing `eventIndex` and the returned
+`stopGeneration` as `expectedStopGeneration`. Use the reported exact bounds
+and eligibility to drive a timeline panel. After a
 successful seek, wait for the stopped event and request fresh stack, scopes,
 and variables. See the [version 1 contract](dap-timeline-navigation-v1.md).
 
@@ -138,8 +139,10 @@ effect boundary; the DAP process does not impose its own provider deadline.
 
 If initialize advertises `supportsElisaTimelineNavigation`, a JetBrains DAP
 bridge can issue `elisa/getTimeline` and `elisa/seek` through its custom
-request API on the existing adapter connection. Use the returned bounds to
-limit the timeline UI and refresh frame/value handles after a successful seek.
+request API on the existing adapter connection. Send the returned
+`stopGeneration` with each seek to reject controls that have become stale. Use
+the returned bounds to limit the timeline UI and refresh frame/value handles
+after a successful seek.
 The [wire contract](dap-timeline-navigation-v1.md) defines the response and
 the current event-index limit.
 

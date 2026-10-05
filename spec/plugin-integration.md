@@ -120,6 +120,12 @@ If initialize advertises `supportsElisaHostEffectCancellation`, the plugin can
 cancel a timed-out provider request on the same DAP session and retry from the
 effect boundary; the DAP process does not impose its own provider deadline.
 
+Managed programs that read virtual files can use the optional
+`supportsElisaVirtualFiles` launch extension. Plugins should provide immutable
+read-only byte snapshots with explicit guest handles in `arguments` and honor
+the advertised version. See the
+[virtual-file contract](dap-virtual-files-v1.md) for limits and mapping rules.
+
 The DAP adapter uses standard DAP `initialize` capabilities. The headless
 process has a separate `discover`/`initialize` version handshake; its current
 `initialize` request requires numeric `protocolMajor` and `protocolMinor`.

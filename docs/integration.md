@@ -73,6 +73,14 @@ provider request on that same session and retry execution from the unchanged
 effect instruction. This repository provides the DAP backend; it does not
 include a VS Code or JetBrains plugin or a concrete host-effect provider.
 
+For managed EDIR programs that read virtual files, check
+`supportsElisaVirtualFiles` and `elisaVirtualFilesVersion` in `initialize`,
+then provide immutable byte snapshots in the launch request. Each snapshot
+maps an explicit guest handle to a logical path and hex-encoded bytes; version
+1 supports read-only contents. The
+[virtual-file contract](../spec/dap-virtual-files-v1.md) defines bounds,
+handle ordering, and replay behavior.
+
 The DAP adapter honors `linesStartAt1` and `columnsStartAt1`. `stackTrace`
 supports the standard `startFrame` and `levels` paging arguments and reports
 `totalFrames`; initialization advertises

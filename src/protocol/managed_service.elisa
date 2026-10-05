@@ -64,6 +64,9 @@ module DebuggerManagedService:
         const module RecordingState:
             ROOT_RECORDING_BRANCH: u64 = 0
 
+        const module ResourceMountDefaults:
+            NO_HANDLE: u64 = 0
+
         const module Initialization:
             NO_RECORDED_EVENTS: usize = 0
             NO_CHECKPOINT_EVENT: u64 = 0
@@ -185,6 +188,11 @@ module DebuggerManagedService:
             accepted: mutable bool
             failure: mutable DebuggerErrors::DebuggerError
 
+        struct ResourceMountResult:
+            accepted: mutable bool
+            handle: mutable DebuggerIdentity::DebugId
+            failure: mutable DebuggerErrors::DebuggerError
+
         struct EvaluateResult:
             accepted: mutable bool
             value: mutable i64
@@ -232,6 +240,20 @@ module DebuggerManagedService:
             service.has_checkpoint <- false
             service.last_branch <- DebuggerIdentity::debug_id(RecordingState::ROOT_RECORDING_BRANCH)
             service.timeline <- DebuggerTimeline::timeline_new(service.controller.session.position, service.controller.session.capabilities)
+
+        # Editor adapters mount launch inputs through the service boundary so
+        # they do not depend on the controller's internal resource store.
+        def service_mount_resource(service: mutable Service&, path: DebuggerIdentity::DebugId, writable: bool, generation: u64, bytes: u8&, length: usize) -> ResourceMountResult:
+            if service.controller.session.capabilities.engine != DebuggerCapabilities::EngineKind.Managed:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, ErrorDetail::DETAIL_UNSUPPORTED)
+                service.last_error <- failure
+                return ResourceMountResult{accepted: false, handle: DebuggerIdentity::debug_id(ResourceMountDefaults::NO_HANDLE), failure: failure}
+            mounted: DebuggerVirtualResources::ResourceOpenResult = DebuggerManagedEngine::managed_resource_mount(service.controller, path, writable, generation, bytes, length)
+            service.last_error <- mounted.failure if not mounted.accepted
+            return ResourceMountResult{accepted: false, handle: mounted.handle, failure: mounted.failure} if not mounted.accepted
+            service.last_error <- DebuggerErrors::no_error()
+            service_sync_timeline(service)
+            return ResourceMountResult{accepted: true, handle: mounted.handle, failure: DebuggerErrors::no_error()}
 
         def service_recording_capacity() -> usize:
             return EventCapture::SERVICE_EVENT_CAPTURE_CAPACITY

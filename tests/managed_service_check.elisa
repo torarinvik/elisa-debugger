@@ -4,6 +4,31 @@ include "../src/core/identity.elisa"
 include "../src/core/capabilities.elisa"
 
 const module Test:
+    const module ResourceMount:
+        BUILD_COMPILER_ID: u64 = 9201
+        BUILD_RUNTIME_ID: u64 = 9202
+        BUILD_SOURCE_ID: u64 = 9203
+        BUILD_TARGET_ID: u64 = 9204
+        METADATA_VERSION: u32 = 1
+        SESSION_ID: u64 = 9205
+        RECORDING_ID: u64 = 9206
+        RESOURCE_PATH_ID: u64 = 9207
+        RESOURCE_GENERATION: u64 = 1
+        RESOURCE_BYTE: u8 = 67
+        RESOURCE_LENGTH: usize = 1
+        PROGRAM_VERSION: u32 = 1
+        INSTRUCTION_COUNT: u64 = 2
+        LOCAL_COUNT: u64 = 0
+        FIRST_INSTRUCTION: usize = 0
+        RETURN_INSTRUCTION: usize = 1
+        PROGRAM_RESULT: i64 = 9
+        UNUSED_OPERAND: i64 = 0
+        FIRST_INDEX: usize = 0
+        ONE_COUNT: usize = 1
+        FIRST_HANDLE: u64 = 1
+        INITIAL_EVENT: u64 = 0
+        FAILURE: i64 = 61
+
     PROGRAM_VERSION: u32 = 1
     INSTRUCTION_COUNT: u64 = 2
     STEP_REQUEST_ID: u64 = 1
@@ -841,7 +866,39 @@ def check_continue_history_limit_error() -> i64:
     return 2 if failure.code != DebuggerErrors::ErrorCode.ResourceLimit or failure.retryable or controller.engine.event_count != history_capacity or controller.session.state != DebuggerSession::SessionState.Stopped or controller.engine.machine.halted or controller.engine.machine.faulted
     return 0
 
+def check_service_resource_mount() -> bool:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{
+        compiler: DebuggerIdentity::debug_id(Test::ResourceMount::BUILD_COMPILER_ID),
+        runtime: DebuggerIdentity::debug_id(Test::ResourceMount::BUILD_RUNTIME_ID),
+        source: DebuggerIdentity::debug_id(Test::ResourceMount::BUILD_SOURCE_ID),
+        target: DebuggerIdentity::debug_id(Test::ResourceMount::BUILD_TARGET_ID),
+        metadata_version: Test::ResourceMount::METADATA_VERSION
+    }
+    session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::ResourceMount::SESSION_ID), build, DebuggerCapabilities::managed_capabilities())
+    image: mutable DebuggerEDIR::ProgramImage = zeroed
+    image.program <- DebuggerEDIR::Program{version: Test::ResourceMount::PROGRAM_VERSION, instruction_count: Test::ResourceMount::INSTRUCTION_COUNT, local_count: Test::ResourceMount::LOCAL_COUNT, has_return: true}
+    image.instructions[Test::ResourceMount::FIRST_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Constant, a: Test::ResourceMount::PROGRAM_RESULT, b: Test::ResourceMount::UNUSED_OPERAND, source: zeroed}
+    image.instructions[Test::ResourceMount::RETURN_INSTRUCTION] <- DebuggerEDIR::Instruction{opcode: DebuggerEDIR::Opcode.Return, a: Test::ResourceMount::UNUSED_OPERAND, b: Test::ResourceMount::UNUSED_OPERAND, source: zeroed}
+    service: mutable DebuggerManagedService::Service = zeroed
+    DebuggerManagedService::service_initialize(service, session, image, DebuggerIdentity::debug_id(Test::ResourceMount::RECORDING_ID))
+    bytes: mutable u8[Test::ResourceMount::RESOURCE_LENGTH] = [Test::ResourceMount::RESOURCE_BYTE]
+    mounted: DebuggerManagedService::ResourceMountResult = DebuggerManagedService::service_mount_resource(service, DebuggerIdentity::debug_id(Test::ResourceMount::RESOURCE_PATH_ID), false, Test::ResourceMount::RESOURCE_GENERATION, bytes[Test::ResourceMount::FIRST_INDEX], Test::ResourceMount::RESOURCE_LENGTH)
+    return false if not mounted.accepted or mounted.handle.value != Test::ResourceMount::FIRST_HANDLE or not DebuggerManagedService::service_is_exact(service)
+    return false if not service.controller.state.resources.files[Test::ResourceMount::FIRST_INDEX].mounted or service.controller.state.resources.files[Test::ResourceMount::FIRST_INDEX].bytes[Test::ResourceMount::FIRST_INDEX] != Test::ResourceMount::RESOURCE_BYTE
+    return false if service.timeline.position.event != Test::ResourceMount::INITIAL_EVENT or service.timeline.bounds.current != Test::ResourceMount::INITIAL_EVENT
+    launched: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_launch(service.controller)
+    return false if not DebuggerErrors::error_is_ok(launched)
+    late_mount: DebuggerManagedService::ResourceMountResult = DebuggerManagedService::service_mount_resource(service, DebuggerIdentity::debug_id(Test::ResourceMount::RESOURCE_PATH_ID + Test::ResourceMount::ONE_COUNT.u64()), false, Test::ResourceMount::RESOURCE_GENERATION, bytes[Test::ResourceMount::FIRST_INDEX], Test::ResourceMount::RESOURCE_LENGTH)
+    return false if late_mount.accepted or late_mount.failure.code != DebuggerErrors::ErrorCode.InvalidState or service.controller.state.resources.count != Test::ResourceMount::ONE_COUNT
+
+    native_session: mutable DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::ResourceMount::SESSION_ID + Test::ResourceMount::ONE_COUNT.u64()), build, DebuggerCapabilities::native_attach_capabilities())
+    native_service: mutable DebuggerManagedService::Service = zeroed
+    DebuggerManagedService::service_initialize(native_service, native_session, image, DebuggerIdentity::debug_id(Test::ResourceMount::RECORDING_ID + Test::ResourceMount::ONE_COUNT.u64()))
+    unsupported: DebuggerManagedService::ResourceMountResult = DebuggerManagedService::service_mount_resource(native_service, DebuggerIdentity::debug_id(Test::ResourceMount::RESOURCE_PATH_ID), false, Test::ResourceMount::RESOURCE_GENERATION, bytes[Test::ResourceMount::FIRST_INDEX], Test::ResourceMount::RESOURCE_LENGTH)
+    return not unsupported.accepted and unsupported.failure.code == DebuggerErrors::ErrorCode.Unsupported
+
 def main() -> i64:
+    return Test::ResourceMount::FAILURE if not check_service_resource_mount()
     source_step_over_status: i64 = check_managed_source_step_over()
     return Test::MANAGED_SOURCE_STEP_CHECK_RESULT if source_step_over_status != 0
     destination_breakpoint_status: i64 = check_managed_step_over_destination_breakpoint()

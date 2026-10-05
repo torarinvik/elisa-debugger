@@ -101,6 +101,21 @@ module DebuggerTimeline:
             return false if eligibility.reason != HistoryEligibilityReason.Ready and (eligibility.can_reverse or eligibility.can_seek)
             return true
 
+        def history_eligibility_is_provider_blocked(reason: HistoryEligibilityReason) -> bool:
+            return reason == HistoryEligibilityReason.SessionNotStopped or reason == HistoryEligibilityReason.StateNotExact or reason == HistoryEligibilityReason.SideStateUnaligned
+
+        def history_eligibility_for_bounds(eligibility: HistoryEligibility, capabilities: DebuggerCapabilities::CapabilitySet, bounds: HistoryBounds) -> HistoryEligibility:
+            return eligibility if history_eligibility_is_provider_blocked(eligibility.reason)
+            refreshed: mutable HistoryEligibility = history_eligibility_for_capabilities(capabilities)
+            return refreshed if refreshed.reason == HistoryEligibilityReason.UnsupportedHistory
+            if not bounds.has_exact:
+                refreshed.reason <- HistoryEligibilityReason.StateNotExact
+                return refreshed
+            refreshed.can_reverse <- bounds.current > bounds.exact_first
+            refreshed.can_seek <- bounds.exact_first < bounds.exact_last
+            refreshed.reason <- HistoryEligibilityReason.Ready if refreshed.can_reverse or refreshed.can_seek
+            return refreshed
+
         def history_bounds_is_valid(bounds: HistoryBounds) -> bool:
             return false if bounds.has_retained and bounds.retained_last < bounds.retained_first
             return false if bounds.has_exact and (not bounds.has_retained or bounds.exact_last < bounds.exact_first)
@@ -127,6 +142,7 @@ module DebuggerTimeline:
                 return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unsupported, false, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)}
             updated.bounds <- bounds
             updated.position.event <- bounds.current
+            updated.eligibility <- history_eligibility_for_bounds(timeline.eligibility, timeline.capabilities, bounds)
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_set_capabilities(timeline: Timeline, capabilities: DebuggerCapabilities::CapabilitySet) -> TimelineResult:
@@ -141,6 +157,7 @@ module DebuggerTimeline:
             updated.bounds.has_exact <- false if capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             updated.bounds.exact_first <- updated.bounds.current if capabilities.history != DebuggerCapabilities::HistoryKind.Exact
             updated.bounds.exact_last <- updated.bounds.current if capabilities.history != DebuggerCapabilities::HistoryKind.Exact
+            updated.eligibility <- history_eligibility_for_bounds(timeline.eligibility, capabilities, updated.bounds)
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_position_is_retained(timeline: Timeline&, event: u64) -> bool:
@@ -151,15 +168,18 @@ module DebuggerTimeline:
 
         def timeline_seek(timeline: Timeline, event: u64) -> TimelineResult:
             updated: mutable Timeline = timeline
-            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds) or not history_eligibility_is_valid(timeline.eligibility)
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not timeline_position_is_retained(timeline, event)
+            return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)} if event != timeline.bounds.current and not timeline.eligibility.can_seek
             return TimelineResult{timeline: updated, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)} if event != timeline.bounds.current and not timeline_position_is_exact(timeline, event)
             updated.bounds.current <- event
             updated.position.event <- event
+            updated.eligibility <- history_eligibility_for_bounds(timeline.eligibility, timeline.capabilities, updated.bounds)
             return TimelineResult{timeline: updated, accepted: true, failure: DebuggerErrors::no_error()}
 
         def timeline_reverse(timeline: Timeline) -> TimelineResult:
-            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds)
+            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if not history_bounds_is_valid(timeline.bounds) or not history_eligibility_is_valid(timeline.eligibility)
+            return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_CAPABILITY)} if not timeline.eligibility.can_reverse
             return TimelineResult{timeline: timeline, accepted: false, failure: DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::QUERY_TIMELINE_DETAIL_RANGE)} if timeline.bounds.current == Sentinel::QUERY_TIMELINE_SENTINEL_EVENT
             return timeline_seek(timeline, timeline.bounds.current - Event::PREVIOUS_EVENT_DISTANCE)
 

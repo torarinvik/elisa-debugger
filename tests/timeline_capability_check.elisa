@@ -22,6 +22,10 @@ const module TimelineTest:
     REQUEST_FAILURE: i64 = 4
     METHOD_NAME_FAILURE: i64 = 5
     SUPPORT_FAILURE: i64 = 6
+    const module Navigation:
+        FIRST_EVENT: u64 = 0
+        MIDDLE_EVENT: u64 = 1
+        LAST_EVENT: u64 = 2
 
 const module TimelineWire:
     REQUEST: cstr = "{\"method\":\"timeline\",\"id\":7}"
@@ -43,6 +47,20 @@ def check_capability_state() -> i64:
     return TimelineTest::CAPABILITY_FAILURE if not observational.accepted or observational.timeline.bounds.has_exact
     upgraded: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_set_capabilities(observational.timeline, DebuggerCapabilities::managed_capabilities())
     return TimelineTest::CAPABILITY_FAILURE if not upgraded.accepted or not upgraded.timeline.bounds.has_exact or upgraded.timeline.bounds.exact_first != upgraded.timeline.bounds.current or upgraded.timeline.bounds.exact_last != upgraded.timeline.bounds.current
+    navigable_bounds: mutable DebuggerTimeline::HistoryBounds = upgraded.timeline.bounds
+    navigable_bounds.retained_last <- TimelineTest::Navigation::LAST_EVENT
+    navigable_bounds.exact_last <- TimelineTest::Navigation::LAST_EVENT
+    navigable_bounds.current <- TimelineTest::Navigation::MIDDLE_EVENT
+    navigable: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_set_bounds(upgraded.timeline, navigable_bounds)
+    return TimelineTest::CAPABILITY_FAILURE if not navigable.accepted or not navigable.timeline.eligibility.can_reverse or not navigable.timeline.eligibility.can_seek or navigable.timeline.eligibility.reason != DebuggerTimeline::HistoryEligibilityReason.Ready
+    earliest: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_seek(navigable.timeline, TimelineTest::Navigation::FIRST_EVENT)
+    return TimelineTest::CAPABILITY_FAILURE if not earliest.accepted or earliest.timeline.eligibility.can_reverse or not earliest.timeline.eligibility.can_seek or earliest.timeline.eligibility.reason != DebuggerTimeline::HistoryEligibilityReason.Ready
+    unavailable_reverse: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_reverse(earliest.timeline)
+    return TimelineTest::CAPABILITY_FAILURE if unavailable_reverse.accepted
+    blocked: mutable DebuggerTimeline::Timeline = navigable.timeline
+    blocked.eligibility <- DebuggerTimeline::HistoryEligibility{can_reverse: false, can_seek: false, reason: DebuggerTimeline::HistoryEligibilityReason.SideStateUnaligned}
+    unavailable_seek: DebuggerTimeline::TimelineResult = DebuggerTimeline::timeline_seek(blocked, TimelineTest::Navigation::LAST_EVENT)
+    return TimelineTest::CAPABILITY_FAILURE if unavailable_seek.accepted
     invalid: mutable DebuggerCapabilities::CapabilitySet = DebuggerCapabilities::managed_capabilities()
     invalid.reverse_execution <- true
     invalid.history <- DebuggerCapabilities::HistoryKind.Observational

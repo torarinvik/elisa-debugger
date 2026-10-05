@@ -243,6 +243,12 @@ module DebuggerDAPPayload:
             MAX_EVENT_INDEX: u64 = NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64
             MAX_STOP_GENERATION: u64 = NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64
 
+        const module TraceFileRequest:
+            FIRST_PROPERTY: usize = 0
+            DUPLICATE_PROPERTY: usize = 1
+            MAX_EVENT_INDEX: u64 = NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64
+            MAX_STOP_GENERATION: u64 = NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_MAX_U64
+
         const module SourcePaths:
             NO_SOURCE_REFERENCE: u64 = 0
             DAP_SOURCE_BREAKPOINT_NO_COLUMN: u64 = 0
@@ -1302,6 +1308,16 @@ module DebuggerDAPPayload:
             event_index: mutable u64
             expected_stop_generation: mutable u64
 
+        struct TraceSaveRequest:
+            valid: mutable bool
+            path: mutable ProgramPath
+
+        struct TraceOpenRequest:
+            valid: mutable bool
+            path: mutable ProgramPath
+            event_index: mutable u64
+            expected_stop_generation: mutable u64
+
     private:
         def virtual_file_path_id(path: ProgramPath) -> u64:
             hash: mutable u64 = VirtualFileSnapshots::HASH_OFFSET_BASIS
@@ -1415,6 +1431,51 @@ module DebuggerDAPPayload:
             return request if not generation.valid
             request.valid <- true
             request.event_index <- event_index.value
+            request.expected_stop_generation <- generation.value
+            return request
+
+        def trace_path_argument_parse(payload: u8&, length: usize, arguments: usize) -> ProgramPath:
+            path_start: usize = object_field_value_start(payload, length, arguments, DapFields::DAP_PAYLOAD_DAPFIELDS_SOURCE_PATH, TraceFileRequest::FIRST_PROPERTY)
+            return invalid_program_path() if path_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::DAP_PAYLOAD_DAPFIELDS_SOURCE_PATH, TraceFileRequest::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            path: ProgramPath = parse_program_path_string(payload, length, path_start)
+            return invalid_program_path() if not path.valid or path.length > SourcePaths::PATH_COMPONENT_CAPACITY
+            return path
+
+        def trace_save_request_parse(payload: u8&, length: usize) -> TraceSaveRequest:
+            request: mutable TraceSaveRequest = zeroed
+            root_start: mutable usize = RequestParsing::FIRST_JSON_BYTE_INDEX
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + RequestParsing::JSON_WHITESPACE_INCREMENT
+            arguments: usize = object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, TraceFileRequest::FIRST_PROPERTY)
+            return request if arguments == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, TraceFileRequest::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            return request if arguments >= length or payload[arguments] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
+            path: ProgramPath = trace_path_argument_parse(payload, length, arguments)
+            return request if not path.valid
+            request.valid <- true
+            request.path <- path
+            return request
+
+        def trace_open_request_parse(payload: u8&, length: usize) -> TraceOpenRequest:
+            request: mutable TraceOpenRequest = zeroed
+            root_start: mutable usize = RequestParsing::FIRST_JSON_BYTE_INDEX
+            while root_start < length and is_whitespace(payload[root_start]):
+                root_start <- root_start + RequestParsing::JSON_WHITESPACE_INCREMENT
+            arguments: usize = object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, TraceFileRequest::FIRST_PROPERTY)
+            return request if arguments == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, root_start, DapFields::ARGUMENTS, TraceFileRequest::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            return request if arguments >= length or payload[arguments] != Character::DAP_PAYLOAD_CHARACTER_ASCII_BRACE_OPEN
+            path: ProgramPath = trace_path_argument_parse(payload, length, arguments)
+            return request if not path.valid
+            event_start: usize = object_field_value_start(payload, length, arguments, DapFields::EVENT_INDEX, TraceFileRequest::FIRST_PROPERTY)
+            return request if event_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::EVENT_INDEX, TraceFileRequest::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            event: ParsedValue = parse_unsigned_bounded(payload, length, event_start, TraceFileRequest::MAX_EVENT_INDEX)
+            return request if not event.valid
+            generation_start: usize = object_field_value_start(payload, length, arguments, DapFields::EXPECTED_STOP_GENERATION, TraceFileRequest::FIRST_PROPERTY)
+            return request if generation_start == NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX or object_field_value_start(payload, length, arguments, DapFields::EXPECTED_STOP_GENERATION, TraceFileRequest::DUPLICATE_PROPERTY) != NumberFormat::DAP_PAYLOAD_NUMBERFORMAT_NO_INDEX
+            generation: ParsedValue = parse_unsigned_bounded(payload, length, generation_start, TraceFileRequest::MAX_STOP_GENERATION)
+            return request if not generation.valid
+            request.valid <- true
+            request.path <- path
+            request.event_index <- event.value
             request.expected_stop_generation <- generation.value
             return request
 

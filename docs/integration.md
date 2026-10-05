@@ -86,6 +86,15 @@ JetBrains, and other DAP clients. Its companion
 [JSON Schema](../schemas/dap-timeline-navigation-v1.schema.json) can validate
 the custom request and response payloads in plugin tests.
 
+The adapter also advertises `supportsElisaTraceFiles` version 1. Stopped
+sessions can save exact managed traces with `elisa/saveTrace` and reopen a
+compatible trace at a specific event with `elisa/openTrace`. Opening requires
+the current timeline generation and the same build and EDIR image; after a
+successful open, refresh timeline bounds and every stop-scoped inspection
+handle. See the [trace file contract](../spec/dap-trace-files-v1.md) and its
+[JSON Schema](../schemas/dap-trace-files-v1.schema.json) for request,
+compatibility, and failure behavior.
+
 For managed EDIR programs that read virtual files, check
 `supportsElisaVirtualFiles` and `elisaVirtualFilesVersion` in `initialize`,
 then provide immutable byte snapshots in the launch request. Each snapshot
@@ -194,9 +203,9 @@ the compact process.
 
 | Host | Map host actions to | Current adapter guidance |
 | --- | --- | --- |
-| VS Code | DAP initialize/launch, breakpoints, inspection, execution requests, lifecycle, and optional `elisa/getTimeline` / `elisa/seek` | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. Timeline panels use `DebugSession.customRequest` on the existing session. |
-| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter, including the optional timeline custom requests if its bridge supports them | No JetBrains plugin or platform-version qualification is included. A host-specific bridge translates UI/session requests and renders responses; attach and trace artifact transfer are not available through these process transports. |
-| Other editors and tools | DAP for standard debugger UI and optional timeline custom requests; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve exact protocol IDs, and report unavailable operations from endpoint behavior rather than parsing messages. |
+| VS Code | DAP initialize/launch, breakpoints, inspection, execution requests, lifecycle, and optional timeline and trace-file custom requests | Register a debugger type in the consuming plugin, point it at the DAP executable, and use `program` plus optional `sourcePathRoot` in launch configuration. Timeline and trace-file actions use `DebugSession.customRequest` on the existing session. |
+| JetBrains | The same DAP operations where the selected IDE/plugin route can launch a DAP adapter, including timeline and trace-file custom requests when its bridge supports them | No JetBrains plugin or platform-version qualification is included. A host-specific bridge translates UI/session requests and renders responses; the host manages local trace paths and selects a build-compatible launch before reopening. |
+| Other editors and tools | DAP for standard debugger UI and optional timeline/trace-file custom requests; compact JSON for custom managed lifecycle/inspection clients | Launch the child process directly, keep protocol output separate from logs, preserve exact protocol IDs, and report unavailable operations from endpoint behavior rather than parsing messages. |
 
 For a DAP host, the mapping is direct: source-line breakpoints use
 `setBreakpoints`; call-stack and local panes use `threads`, `stackTrace`,
@@ -204,7 +213,12 @@ For a DAP host, the mapping is direct: source-line breakpoints use
 host displays capability fields and protocol errors. A timeline panel checks
 `supportsElisaTimelineNavigation`, queries `elisa/getTimeline`, and seeks with
 `elisa/seek` on the same DAP connection; it refreshes inspection after the
-stopped event. For a compact JSON host,
+stopped event. When `supportsElisaTraceFiles` is present, the host can call
+`elisa/saveTrace` while stopped and reopen a compatible artifact with
+`elisa/openTrace`, supplying the timeline snapshot's stop generation. The
+loaded EDIR image must match the artifact, and the host refreshes timeline and
+inspection after the resulting stopped event. DAP carries a local path rather
+than trace bytes, so the plugin owns artifact selection and retention. For a compact JSON host,
 map lifecycle controls and source breakpoints to the documented request
 names, refresh inspection handles on every stop-generation change, and keep
 the headless process private to that client. There is no supported way to

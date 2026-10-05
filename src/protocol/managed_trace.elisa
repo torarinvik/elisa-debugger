@@ -136,7 +136,11 @@ module DebuggerManagedTraceService:
             restored.controller.engine.next_branch_id <- previous.controller.engine.next_branch_id
             trace_restore_preserve_bookmarks(restored, previous, target_event)
 
-        def trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, replay_event: u64, restore_position_event: u64) -> DebuggerManagedService::Result:
+        def trace_restore_temporary_error(temporary: mutable DebuggerManagedService::Service&, failure: DebuggerManagedService::Result) -> DebuggerManagedService::Result can[Memory.Release, Unsafe.PointerCast]:
+            DebuggerManagedEngine::managed_controller_release_owned_history(temporary.controller) can Memory.Release, Unsafe.PointerCast
+            return failure
+
+        def trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, replay_event: u64, restore_position_event: u64) -> DebuggerManagedService::Result can[Memory.Release, Unsafe.PointerCast]:
             return trace_restore_error(DebuggerErrors::ErrorCode.Corrupt, false, RestoreDetail::INVALID_READER) if not DebuggerTraceReader::reader_is_exact(reader) or reader.manifest.first_event != RestoreRequest::INITIAL_EVENT
             return trace_restore_error(DebuggerErrors::ErrorCode.Unavailable, true, RestoreDetail::INVALID_READER) if replay_event > reader.event_count.u64() or restore_position_event > replay_event
             return trace_restore_error(DebuggerErrors::ErrorCode.InvalidArgument, false, RestoreDetail::BUILD_MISMATCH) if not trace_restore_build_matches(service.controller.session.build, reader.manifest)
@@ -156,34 +160,50 @@ module DebuggerManagedTraceService:
             temporary: mutable DebuggerManagedService::Service
             DebuggerManagedService::service_initialize(temporary, fresh_session, service.controller.engine.image, service.controller.engine.recording)
             launched: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Launch)
-            return launched if not launched.accepted
+            return trace_restore_temporary_error(temporary, launched) if not launched.accepted
             paused: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Pause)
-            return paused if not paused.accepted
+            return trace_restore_temporary_error(temporary, paused) if not paused.accepted
             while temporary.controller.engine.event_count.u64() < checkpoint.event:
                 stepped: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Step)
-                return stepped if not stepped.accepted
+                if not stepped.accepted:
+                    return trace_restore_temporary_error(temporary, stepped)
 
             for index in Boundary::FIRST_INDEX..<checkpoint.event.usize():
-                return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::EVENT_MISMATCH) if not trace_restore_events_match(reader.events[index], temporary.controller.engine.events[index])
-            return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH) if checkpoint.event != temporary.controller.engine.event_count.u64() or checkpoint.state_hash != DebuggerReplayEngine::replay_engine_state_hash(temporary.controller.engine) or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, temporary.controller.engine.machine)
+                if not trace_restore_events_match(reader.events[index], temporary.controller.engine.events[index]):
+                    failure: DebuggerManagedService::Result = trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::EVENT_MISMATCH)
+                    return trace_restore_temporary_error(temporary, failure)
+            if checkpoint.event != temporary.controller.engine.event_count.u64() or checkpoint.state_hash != DebuggerReplayEngine::replay_engine_state_hash(temporary.controller.engine) or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, temporary.controller.engine.machine):
+                failure: DebuggerManagedService::Result = trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH)
+                return trace_restore_temporary_error(temporary, failure)
             failure: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_restore_full_checkpoint(temporary.controller, checkpoint)
-            return DebuggerManagedService::Result{accepted: false, failure: failure} if not DebuggerErrors::error_is_ok(failure)
+            if not DebuggerErrors::error_is_ok(failure):
+                failed: DebuggerManagedService::Result = DebuggerManagedService::Result{accepted: false, failure: failure}
+                return trace_restore_temporary_error(temporary, failed)
             while temporary.controller.engine.event_count.u64() < replay_event:
                 stepped: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Step)
-                return stepped if not stepped.accepted
-            return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH) if temporary.controller.engine.event_count.u64() != replay_event
+                if not stepped.accepted:
+                    return trace_restore_temporary_error(temporary, stepped)
+            if temporary.controller.engine.event_count.u64() != replay_event:
+                failure: DebuggerManagedService::Result = trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH)
+                return trace_restore_temporary_error(temporary, failure)
             for index in Boundary::FIRST_INDEX..<replay_event.usize():
-                return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::EVENT_MISMATCH) if not trace_restore_events_match(reader.events[index], temporary.controller.engine.events[index])
+                if not trace_restore_events_match(reader.events[index], temporary.controller.engine.events[index]):
+                    failure: DebuggerManagedService::Result = trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::EVENT_MISMATCH)
+                    return trace_restore_temporary_error(temporary, failure)
             trace_restore_preserve_configuration(temporary, service, replay_event)
             if restore_position_event < replay_event:
                 sought: DebuggerManagedService::Result = trace_restore_dispatch_seek(temporary, restore_position_event)
-                return sought if not sought.accepted
-            return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH) if temporary.controller.engine.event_count.u64() != restore_position_event
+                if not sought.accepted:
+                    return trace_restore_temporary_error(temporary, sought)
+            if temporary.controller.engine.event_count.u64() != restore_position_event:
+                failure: DebuggerManagedService::Result = trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, RestoreDetail::CHECKPOINT_MISMATCH)
+                return trace_restore_temporary_error(temporary, failure)
             DebuggerManagedService::service_sync_timeline(temporary)
+            DebuggerManagedEngine::managed_controller_release_owned_history(service.controller) can Memory.Release, Unsafe.PointerCast
             service <- temporary
             return DebuggerManagedService::Result{accepted: true, failure: DebuggerErrors::no_error()}
 
-        def trace_restore_fresh_checkpoint(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerManagedService::Result:
+        def trace_restore_fresh_checkpoint(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerManagedService::Result can[Memory.Release, Unsafe.PointerCast]:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
             return DebuggerManagedService::result_error(failure) if not DebuggerErrors::error_is_ok(failure)
             capabilities: DebuggerCapabilities::CapabilitySet = service.controller.session.capabilities
@@ -200,18 +220,24 @@ module DebuggerManagedTraceService:
             temporary: mutable DebuggerManagedService::Service
             DebuggerManagedService::service_initialize(temporary, fresh_session, service.controller.engine.image, service.controller.engine.recording)
             launched: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Launch)
-            return launched if not launched.accepted
+            return trace_restore_temporary_error(temporary, launched) if not launched.accepted
             paused: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Pause)
-            return paused if not paused.accepted
+            return trace_restore_temporary_error(temporary, paused) if not paused.accepted
             while temporary.controller.engine.event_count.u64() < checkpoint.event:
                 stepped: DebuggerManagedService::Result = trace_restore_dispatch(temporary, DebuggerProtocolRequest::RequestMethod.Step)
-                return stepped if not stepped.accepted
+                if not stepped.accepted:
+                    return trace_restore_temporary_error(temporary, stepped)
 
-            return trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, FreshRestoreDetail::REPLAY) if temporary.controller.engine.event_count.u64() != checkpoint.event or DebuggerReplayEngine::replay_engine_state_hash(temporary.controller.engine) != checkpoint.state_hash or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, temporary.controller.engine.machine)
+            if temporary.controller.engine.event_count.u64() != checkpoint.event or DebuggerReplayEngine::replay_engine_state_hash(temporary.controller.engine) != checkpoint.state_hash or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, temporary.controller.engine.machine):
+                failed: DebuggerManagedService::Result = trace_restore_error(DebuggerErrors::ErrorCode.Diverged, false, FreshRestoreDetail::REPLAY)
+                return trace_restore_temporary_error(temporary, failed)
             failure <- DebuggerManagedEngine::managed_restore_full_checkpoint(temporary.controller, checkpoint)
-            return DebuggerManagedService::result_error(failure) if not DebuggerErrors::error_is_ok(failure)
+            if not DebuggerErrors::error_is_ok(failure):
+                failed: DebuggerManagedService::Result = DebuggerManagedService::result_error(failure)
+                return trace_restore_temporary_error(temporary, failed)
             trace_restore_preserve_configuration(temporary, service, checkpoint.event)
             DebuggerManagedService::service_sync_timeline(temporary)
+            DebuggerManagedEngine::managed_controller_release_owned_history(service.controller) can Memory.Release, Unsafe.PointerCast
             service <- temporary
             return DebuggerManagedService::result_ok()
 
@@ -241,8 +267,8 @@ module DebuggerManagedTraceService:
 
         # Restore from a reader-owned checkpoint only after replaying and
         # matching the complete prefix in a temporary service.
-        def service_trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, target_event: u64) -> DebuggerManagedService::Result:
-            return trace_restore_checkpoint(service, reader, target_event, target_event)
+        def service_trace_restore_checkpoint(service: mutable DebuggerManagedService::Service&, reader: DebuggerTraceReader::TraceReader&, target_event: u64) -> DebuggerManagedService::Result can[Memory.Release, Unsafe.PointerCast]:
+            return trace_restore_checkpoint(service, reader, target_event, target_event) can Memory.Release, Unsafe.PointerCast
 
         # Restore a decoded checkpoint into a fresh service after verifying its
         # build and complete canonical EDIR image fingerprint, then replaying
@@ -251,8 +277,8 @@ module DebuggerManagedTraceService:
         # sources. The destination must be Created, have no recorded events or
         # branch records, and negotiate checkpoint support; debug configuration
         # may be seeded beforehand and is preserved.
-        def service_restore_fresh_checkpoint(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerManagedService::Result:
-            return trace_restore_fresh_checkpoint(service, checkpoint)
+        def service_restore_fresh_checkpoint(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerManagedService::Result can[Memory.Release, Unsafe.PointerCast]:
+            return trace_restore_fresh_checkpoint(service, checkpoint) can Memory.Release, Unsafe.PointerCast
 
         # Restore an exact committed artifact into a new service state. File
         # decoding and replay happen against temporary owned state; the caller's

@@ -173,11 +173,15 @@ for example, `saveTrace build/session.trace`. In a new CLI process, use
 managed image, replay its bounded history, and position at the requested event
 before inspecting or seeking through its timeline; for example,
 `openTrace 1 build/session.trace`. The path is the remaining text after the
-event, so spaces are preserved. The compact JSON
-process still cannot carry a destination path or return trace artifact bytes,
-so trace-file export is currently available through the interactive CLI and
-typed Elisa service API. Trace-file restore is available through the
-interactive CLI and typed Elisa service API.
+event, so spaces are preserved. The DAP adapter advertises version 1 of
+`supportsElisaTraceFiles`, with `elisa/saveTrace` and generation-aware
+`elisa/openTrace` requests on the existing adapter connection. Reopening
+requires the trace to match the currently loaded EDIR build and image; refresh
+timeline and inspection after its stopped event. See the
+[versioned DAP trace-file contract](spec/dap-trace-files-v1.md). The compact
+JSON process still cannot carry a destination path or return trace artifact
+bytes, so trace-file transfer is available through the interactive CLI, DAP,
+and typed Elisa service API.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

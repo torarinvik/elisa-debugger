@@ -16,6 +16,8 @@ include "../inspect/memory.elisa"
 include "./request.elisa"
 include "./dispatcher.elisa"
 include "./managed_service.elisa"
+include "./managed_trace.elisa"
+include "./managed_trace_file.elisa"
 include "./dap_payload.elisa"
 include "./dap.elisa"
 include "../vm/edir_file.elisa"
@@ -180,6 +182,34 @@ module DebuggerDAPServer:
             STALE_GENERATION_SUFFIX: cstr = "\",\"success\":false,\"message\":\"timeline snapshot is stale; query the timeline again\"}"
             STALE_GENERATION_SUFFIX_LENGTH: usize = 83
 
+        const module TraceFiles:
+            VERSION: u64 = 1
+            SAVE_COMMAND: cstr = "elisa/saveTrace"
+            SAVE_COMMAND_LENGTH: usize = 15
+            SAVE_COMMAND_HASH: u64 = 714307668951307497
+            OPEN_COMMAND: cstr = "elisa/openTrace"
+            OPEN_COMMAND_LENGTH: usize = 15
+            OPEN_COMMAND_HASH: u64 = 714304655246469180
+            INVALID_ARGUMENT_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace request arguments are invalid\"}"
+            INVALID_ARGUMENT_SUFFIX_LENGTH: usize = 66
+            STOPPED_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace file operations require a stopped session\"}"
+            STOPPED_SUFFIX_LENGTH: usize = 78
+            INCOMPATIBLE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace does not match the active build and image\"}"
+            INCOMPATIBLE_SUFFIX_LENGTH: usize = 78
+            SAVE_REJECTED_SUFFIX: cstr = "\",\"success\":false,\"message\":\"this session cannot be saved as an exact trace\"}"
+            SAVE_REJECTED_SUFFIX_LENGTH: usize = 77
+            CORRUPT_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace artifact is corrupt or incomplete\"}"
+            CORRUPT_SUFFIX_LENGTH: usize = 70
+            RESOURCE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace exceeds supported restore limits\"}"
+            RESOURCE_SUFFIX_LENGTH: usize = 69
+            UNAVAILABLE_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace operation is unavailable\"}"
+            UNAVAILABLE_SUFFIX_LENGTH: usize = 61
+            STALE_GENERATION_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace control is stale; query the timeline again\"}"
+            STALE_GENERATION_SUFFIX_LENGTH: usize = 79
+
+        const module TraceFileDetail:
+            REQUEST_ARGUMENT: u32 = 18
+
         const module CommandDispatch:
             DAP_UNKNOWN_COMMAND_HASH: u64 = 0
             COMMAND_HASH_INITIALIZE: u64 = 2872973214862224
@@ -207,6 +237,8 @@ module DebuggerDAPServer:
             COMMAND_HASH_HOST_EFFECT_CANCEL: u64 = HostEffectCancellation::COMMAND_HASH
             COMMAND_HASH_GET_TIMELINE: u64 = TimelineNavigation::GET_TIMELINE_COMMAND_HASH
             COMMAND_HASH_TIMELINE_SEEK: u64 = TimelineNavigation::SEEK_COMMAND_HASH
+            COMMAND_HASH_TRACE_SAVE: u64 = TraceFiles::SAVE_COMMAND_HASH
+            COMMAND_HASH_TRACE_OPEN: u64 = TraceFiles::OPEN_COMMAND_HASH
             DAP_HASH_MULTIPLIER: u64 = 31
             MAX_KNOWN_DAP_COMMAND_LENGTH: usize = HostEffectExtension::REPLY_COMMAND_LENGTH
 
@@ -232,6 +264,7 @@ module DebuggerDAPServer:
             DAP_HOST_EFFECT_DETAIL_STATE: u32 = 15
             DAP_LAUNCH_VIRTUAL_FILES_ARGUMENT: u32 = 16
             DAP_LAUNCH_VIRTUAL_FILES_HANDLE: u32 = 17
+            DAP_TRACE_FILE_ARGUMENT: u32 = TraceFileDetail::REQUEST_ARGUMENT
             DAP_HOST_EFFECT_CANCEL_DETAIL_ARGUMENT: u32 = 18
             DAP_HOST_EFFECT_CANCEL_DETAIL_STATE: u32 = 19
             DAP_TIMELINE_SEEK_DETAIL_ARGUMENT: u32 = 20
@@ -368,8 +401,8 @@ module DebuggerDAPServer:
         const module Initialize:
             DAP_INIT_COMMAND: cstr = "initialize"
             DAP_INIT_COMMAND_LENGTH: usize = 10
-            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaHostEffectCancellation\":true,\"elisaHostEffectCancellationVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1,\"supportsElisaTimelineNavigation\":true,\"elisaTimelineNavigationVersion\":1}}"
-            DAP_INIT_SUFFIX_LENGTH: usize = 771
+            DAP_INIT_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"supportsConfigurationDoneRequest\":true,\"supportsFunctionBreakpoints\":true,\"supportsLogPoints\":true,\"supportsConditionalBreakpoints\":true,\"supportsHitConditionalBreakpoints\":true,\"supportsDataBreakpoints\":false,\"supportsEvaluateForHovers\":true,\"supportsTerminateRequest\":true,\"supportsRestartRequest\":false,\"supportsStepBack\":true,\"supportsSetVariable\":false,\"supportsReadMemoryRequest\":true,\"supportsDisassembleRequest\":false,\"supportsDelayedStackTraceLoading\":true,\"supportsElisaHostEffects\":true,\"elisaHostEffectsVersion\":1,\"supportsElisaHostEffectCancellation\":true,\"elisaHostEffectCancellationVersion\":1,\"supportsElisaVirtualFiles\":true,\"elisaVirtualFilesVersion\":1,\"supportsElisaTimelineNavigation\":true,\"elisaTimelineNavigationVersion\":1,\"supportsElisaTraceFiles\":true,\"elisaTraceFilesVersion\":1}}"
+            DAP_INIT_SUFFIX_LENGTH: usize = 829
 
         const module JsonWire:
             JSON_FIRST_BYTE_INDEX: usize = 0
@@ -885,6 +918,8 @@ module DebuggerDAPServer:
             return CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL if candidate_hash == CommandDispatch::COMMAND_HASH_HOST_EFFECT_CANCEL and dap_json_string_matches_ascii(payload, start, end, HostEffectCancellation::COMMAND, HostEffectCancellation::COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_GET_TIMELINE if candidate_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE and dap_json_string_matches_ascii(payload, start, end, TimelineNavigation::GET_TIMELINE_COMMAND, TimelineNavigation::GET_TIMELINE_COMMAND_LENGTH)
             return CommandDispatch::COMMAND_HASH_TIMELINE_SEEK if candidate_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK and dap_json_string_matches_ascii(payload, start, end, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH)
+            return CommandDispatch::COMMAND_HASH_TRACE_SAVE if candidate_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE and dap_json_string_matches_ascii(payload, start, end, TraceFiles::SAVE_COMMAND, TraceFiles::SAVE_COMMAND_LENGTH)
+            return CommandDispatch::COMMAND_HASH_TRACE_OPEN if candidate_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN and dap_json_string_matches_ascii(payload, start, end, TraceFiles::OPEN_COMMAND, TraceFiles::OPEN_COMMAND_LENGTH)
             return CommandDispatch::DAP_UNKNOWN_COMMAND_HASH
 
         def json_primitive_literal_length(kind: u8) -> u8:
@@ -2099,6 +2134,33 @@ module DebuggerDAPServer:
             result: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
             return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: method, accepted: result.accepted, stop_generation: service.controller.session.stop_generation, failure: result.failure}
 
+        def dispatch_trace_save(service: mutable DebuggerManagedService::Service&, payload: u8&, payload_length: usize, pending: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            method: DebuggerProtocolRequest::RequestMethod = DebuggerProtocolRequest::RequestMethod.TraceExport
+            if pending.active or service.controller.session.state != DebuggerSession::SessionState.Stopped:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_HOST_EFFECT_DETAIL_STATE)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            request: DebuggerDAPPayload::TraceSaveRequest = DebuggerDAPPayload::trace_save_request_parse(payload, payload_length)
+            if not request.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_TRACE_FILE_ARGUMENT)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            exported: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(service, request.path.bytes[0], request.path.length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: method, accepted: exported.accepted, stop_generation: service.controller.session.stop_generation, failure: exported.failure}
+
+        def dispatch_trace_open(service: mutable DebuggerManagedService::Service&, payload: u8&, payload_length: usize, pending: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            method: DebuggerProtocolRequest::RequestMethod = DebuggerProtocolRequest::RequestMethod.OpenTrace
+            if pending.active:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, ErrorDetail::DAP_HOST_EFFECT_DETAIL_STATE)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            request: DebuggerDAPPayload::TraceOpenRequest = DebuggerDAPPayload::trace_open_request_parse(payload, payload_length)
+            if not request.valid:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, ErrorDetail::DAP_TRACE_FILE_ARGUMENT)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            if service.controller.session.stop_generation != request.expected_stop_generation:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.StaleGeneration, true, ErrorDetail::DAP_TRACE_FILE_ARGUMENT)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, method, failure)
+            restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_replace_from_file(service, request.path.bytes[0], request.path.length, request.event_index) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: method, accepted: restored.accepted, stop_generation: service.controller.session.stop_generation, failure: restored.failure}
+
         def dispatch_memory(service: mutable DebuggerManagedService::Service&, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&) -> DebuggerProtocolDispatcher::DispatchResult:
             request: DebuggerDAPPayload::MemoryRequest = DebuggerDAPPayload::memory_request_parse(payload, payload_length)
             if not request.valid:
@@ -2260,7 +2322,7 @@ module DebuggerDAPServer:
                     return DebuggerProtocolDispatcher::DispatchResult{session: service.controller.session, method: DebuggerProtocolRequest::RequestMethod.Launch, accepted: false, stop_generation: service.controller.session.stop_generation, failure: failure}
             return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Launch, request_id)
 
-        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_options: mutable DebuggerDAPPayload::ClientOptions&, context: mutable DAPRequestContext&, pending_host_effect: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+        def dispatch_command(service: mutable DebuggerManagedService::Service&, command_hash: u64, request_id: u64, payload: u8&, payload_length: usize, memory: mutable DebuggerMemory::MemoryRead&, variables: mutable DebuggerManagedInspection::LocalPage&, source_breakpoints: mutable DebuggerManagedService::SourceBreakpointResult&, client_options: mutable DebuggerDAPPayload::ClientOptions&, context: mutable DAPRequestContext&, pending_host_effect: mutable PendingHostEffect&) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             if command_hash == CommandDispatch::COMMAND_HASH_INITIALIZE:
                 coordinates: DebuggerDAPPayload::ClientOptions = DebuggerDAPPayload::client_options_parse(payload, payload_length)
                 if not coordinates.valid:
@@ -2280,6 +2342,10 @@ module DebuggerDAPServer:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Timeline, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK:
                 return dispatch_timeline_seek(service, request_id, payload, payload_length, pending_host_effect)
+            if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE:
+                return dispatch_trace_save(service, payload, payload_length, pending_host_effect) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            if command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN:
+                return dispatch_trace_open(service, payload, payload_length, pending_host_effect) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
             if command_hash == CommandDispatch::COMMAND_HASH_PAUSE:
                 return dispatch_managed(service, DebuggerProtocolRequest::RequestMethod.Pause, request_id)
             if command_hash == CommandDispatch::COMMAND_HASH_NEXT:
@@ -2466,6 +2532,32 @@ module DebuggerDAPServer:
 
         def write_response(service: DebuggerManagedService::Service&, result: DebuggerProtocolDispatcher::DispatchResult&, command_hash: u64, request_sequence: u64, response_sequence: u64, state_committed: bool, memory: DebuggerMemory::MemoryRead&, variables: DebuggerManagedInspection::LocalPage&, source_breakpoints: DebuggerManagedService::SourceBreakpointResult&, client_options: DebuggerDAPPayload::ClientOptions&, context: DAPRequestContext&, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
+                if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE or command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN:
+                    command: cstr = TraceFiles::SAVE_COMMAND if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE else TraceFiles::OPEN_COMMAND
+                    command_length: usize = TraceFiles::SAVE_COMMAND_LENGTH if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE else TraceFiles::OPEN_COMMAND_LENGTH
+                    suffix: mutable cstr = TraceFiles::UNAVAILABLE_SUFFIX
+                    suffix_length: mutable usize = TraceFiles::UNAVAILABLE_SUFFIX_LENGTH
+                    if result.failure.code == DebuggerErrors::ErrorCode.InvalidArgument:
+                        suffix <- TraceFiles::INVALID_ARGUMENT_SUFFIX if result.failure.detail == ErrorDetail::DAP_TRACE_FILE_ARGUMENT
+                        suffix_length <- TraceFiles::INVALID_ARGUMENT_SUFFIX_LENGTH if result.failure.detail == ErrorDetail::DAP_TRACE_FILE_ARGUMENT
+                        suffix <- TraceFiles::INCOMPATIBLE_SUFFIX if command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN and result.failure.detail != ErrorDetail::DAP_TRACE_FILE_ARGUMENT
+                        suffix_length <- TraceFiles::INCOMPATIBLE_SUFFIX_LENGTH if command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN and result.failure.detail != ErrorDetail::DAP_TRACE_FILE_ARGUMENT
+                        suffix <- TraceFiles::SAVE_REJECTED_SUFFIX if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE and result.failure.detail != ErrorDetail::DAP_TRACE_FILE_ARGUMENT
+                        suffix_length <- TraceFiles::SAVE_REJECTED_SUFFIX_LENGTH if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE and result.failure.detail != ErrorDetail::DAP_TRACE_FILE_ARGUMENT
+                    if result.failure.code == DebuggerErrors::ErrorCode.StaleGeneration:
+                        suffix <- TraceFiles::STALE_GENERATION_SUFFIX
+                        suffix_length <- TraceFiles::STALE_GENERATION_SUFFIX_LENGTH
+                    if result.failure.code == DebuggerErrors::ErrorCode.InvalidState:
+                        suffix <- TraceFiles::STOPPED_SUFFIX
+                        suffix_length <- TraceFiles::STOPPED_SUFFIX_LENGTH
+                    if result.failure.code == DebuggerErrors::ErrorCode.Corrupt:
+                        suffix <- TraceFiles::CORRUPT_SUFFIX
+                        suffix_length <- TraceFiles::CORRUPT_SUFFIX_LENGTH
+                    if result.failure.code == DebuggerErrors::ErrorCode.ResourceLimit:
+                        suffix <- TraceFiles::RESOURCE_SUFFIX
+                        suffix_length <- TraceFiles::RESOURCE_SUFFIX_LENGTH
+                    write_dynamic_response(response_sequence, request_sequence, command, command_length, suffix, suffix_length) can Console, Unsafe.PointerCast
+                    return
                 if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK and result.failure.code == DebuggerErrors::ErrorCode.StaleGeneration:
                     write_dynamic_response(response_sequence, request_sequence, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH, TimelineNavigation::STALE_GENERATION_SUFFIX, TimelineNavigation::STALE_GENERATION_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                     return
@@ -2561,6 +2653,12 @@ module DebuggerDAPServer:
             if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK:
                 write_dynamic_response(response_sequence, request_sequence, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
+            if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE:
+                write_dynamic_response(response_sequence, request_sequence, TraceFiles::SAVE_COMMAND, TraceFiles::SAVE_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            if command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN:
+                write_dynamic_response(response_sequence, request_sequence, TraceFiles::OPEN_COMMAND, TraceFiles::OPEN_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
             if command_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE:
                 write_timeline_response(DebuggerManagedService::service_timeline(service), service.controller.session.stop_generation, request_sequence, response_sequence) can Console, Unsafe.PointerCast
                 return
@@ -2622,7 +2720,7 @@ module DebuggerDAPServer:
             return DebuggerDAP::RequestKind.Step if command_hash == CommandDispatch::COMMAND_HASH_NEXT or command_hash == CommandDispatch::COMMAND_HASH_STEP_IN or command_hash == CommandDispatch::COMMAND_HASH_STEP_OUT or command_hash == CommandDispatch::COMMAND_HASH_STEP_BACK
             return DebuggerDAP::RequestKind.ReverseContinue if command_hash == CommandDispatch::COMMAND_HASH_REVERSE_CONTINUE
             return DebuggerDAP::RequestKind.Terminate if command_hash == CommandDispatch::COMMAND_HASH_TERMINATE
-            return DebuggerDAP::RequestKind.Step if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK
+            return DebuggerDAP::RequestKind.Step if command_hash == CommandDispatch::COMMAND_HASH_TIMELINE_SEEK or command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN
             return DebuggerDAP::RequestKind.Other
 
     public:
@@ -2630,7 +2728,7 @@ module DebuggerDAPServer:
             build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(1), runtime: DebuggerIdentity::debug_id(2), source: DebuggerIdentity::debug_id(3), target: DebuggerIdentity::debug_id(4), metadata_version: 1}
             return DebuggerSession::new_session(DebuggerIdentity::debug_id(1), build, DebuggerCapabilities::managed_capabilities())
 
-        def run() -> i64 can[Console, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def run() -> i64 can[Console, Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             decoder: mutable Decoder = decoder_new()
             chunk: mutable u8[TransportLimits::DAP_READ_CHUNK_SIZE] = zeroed
             outbound_sequence: mutable u64 = 1
@@ -2692,5 +2790,5 @@ module DebuggerDAPServer:
             return TransportLimits::DAP_SERVER_INVALID_FRAME_EXIT_CODE if decoder.state != FrameParsing::DECODER_HEADER_STATE or decoder.header_prefix_position != 0
             return TransportLimits::DAP_SERVER_SUCCESS_EXIT_CODE
 
-def main() -> i64 can[Console, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+def main() -> i64 can[Console, Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     return DebuggerDAPServer::run()

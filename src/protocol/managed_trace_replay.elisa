@@ -10,6 +10,7 @@ module DebuggerManagedTraceReplay:
             FIRST_EVENT: usize = 0
             EVENT_INCREMENT: usize = 1
             ROOT_BRANCH: u64 = 0
+            RESOURCE_OPERATION_FIELDS: usize = 10
 
         const module Detail:
             UNSUPPORTED_STATE: u32 = 1
@@ -34,6 +35,26 @@ module DebuggerManagedTraceReplay:
             return DebuggerEffects::EffectKind.Random if request.kind == DebuggerManagedEngine::HostEffectKind.RandomU64
             return DebuggerEffects::EffectKind.ConsoleInput if request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput
             return DebuggerEffects::EffectKind.ConsoleOutput
+
+        # Compare journal entries as they are reconstructed, so a bad write
+        # or seek is reported at its first guest event, before terminal hashing.
+        def resource_operation_mismatch(expected: DebuggerVirtualResources::ResourceOperation, observed: DebuggerVirtualResources::ResourceOperation, last_verified: DebuggerIdentity::Position, event: u64) -> DebuggerReplayDiagnostic::Divergence:
+            left: u64[Boundary::RESOURCE_OPERATION_FIELDS] = [expected.sequence, expected.kind.u64(), expected.handle.value, expected.path.value, expected.generation, 1 if expected.writable else 0, expected.offset.u64(), expected.requested.u64(), expected.transferred.u64(), 1 if expected.eof else 0]
+            right: u64[Boundary::RESOURCE_OPERATION_FIELDS] = [observed.sequence, observed.kind.u64(), observed.handle.value, observed.path.value, observed.generation, 1 if observed.writable else 0, observed.offset.u64(), observed.requested.u64(), observed.transferred.u64(), 1 if observed.eof else 0]
+            for field in 0..<Boundary::RESOURCE_OPERATION_FIELDS:
+                return DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.ResourceOperation, last_verified, event, left[field], right[field]) if left[field] != right[field]
+            for byte in 0..<DebuggerVirtualResources::Limits::MAX_RESOURCE_BYTES:
+                return DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.ResourceOperation, last_verified, event, expected.bytes[byte].u64(), observed.bytes[byte].u64()) if expected.bytes[byte] != observed.bytes[byte]
+            return zeroed
+
+        def verify_resource_operations(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, first: usize, last_verified: DebuggerIdentity::Position, event: u64) -> DebuggerErrors::DebuggerError:
+            for operation in first..<service.controller.state.resources.operation_count:
+                if operation >= checkpoint.resources.operation_count:
+                    service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.MissingResult, last_verified, event, checkpoint.resources.operation_count.u64(), service.controller.state.resources.operation_count.u64())
+                    return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::RESOURCE_IDENTITY)
+                service.replay_diagnostic <- resource_operation_mismatch(checkpoint.resources.operations[operation], service.controller.state.resources.operations[operation], last_verified, event)
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::RESOURCE_IDENTITY) if service.replay_diagnostic.available
+            return DebuggerErrors::no_error()
 
         def record_captured_effect(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, request: DebuggerManagedEngine::HostEffectRequest, event: DebuggerEvents::EventEnvelope) -> DebuggerErrors::DebuggerError:
             index: usize = service.controller.state.effects.count
@@ -95,12 +116,15 @@ module DebuggerManagedTraceReplay:
                 if mounted.handle.value != file.handle.value:
                     service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.ResourceIdentity, service.controller.session.position, Boundary::FIRST_EVENT.u64(), file.handle.value, mounted.handle.value)
                     return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::RESOURCE_IDENTITY)
+            failure <- verify_resource_operations(service, checkpoint, Boundary::FIRST_EVENT, service.controller.session.position, Boundary::FIRST_EVENT.u64())
+            return failure if not DebuggerErrors::error_is_ok(failure)
             failure <- DebuggerManagedEngine::managed_launch(service.controller)
             return failure if not DebuggerErrors::error_is_ok(failure)
             failure <- DebuggerManagedEngine::managed_pause(service.controller)
             return failure if not DebuggerErrors::error_is_ok(failure)
             for index in Boundary::FIRST_EVENT..<event_count:
                 last_verified: DebuggerIdentity::Position = service.controller.session.position
+                first_resource_operation: usize = service.controller.state.resources.operation_count
                 request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(service.controller)
                 if DebuggerManagedEngine::managed_host_effect_requires_provider(request.kind):
                     failure <- record_captured_effect(service, checkpoint, request, events[index])
@@ -112,6 +136,8 @@ module DebuggerManagedTraceReplay:
                 if service.controller.engine.event_count != index + Boundary::EVENT_INCREMENT:
                     service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.EventCount, last_verified, index.u64(), (index + Boundary::EVENT_INCREMENT).u64(), service.controller.engine.event_count.u64())
                     return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EVENT_MISMATCH)
+                failure <- verify_resource_operations(service, checkpoint, first_resource_operation, last_verified, index.u64())
+                return failure if not DebuggerErrors::error_is_ok(failure)
                 service.replay_diagnostic <- DebuggerReplayDiagnostic::event_mismatch(events[index], service.controller.engine.events[index], last_verified)
                 return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EVENT_MISMATCH) if service.replay_diagnostic.available
             reconstructed: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)

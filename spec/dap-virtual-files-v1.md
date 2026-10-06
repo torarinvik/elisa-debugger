@@ -42,14 +42,17 @@ Add `elisaVirtualFiles` to the normal DAP `launch` request's `arguments`:
 Each entry requires a positive `handle`, a non-empty UTF-8 `path`, and a
 `contentsHex` string containing an even number of hexadecimal digits. Hex may
 use either case and represents bytes directly, including zero bytes. The
-optional `writable` property may be omitted or set to `false`; `true` is
-rejected because the current guest instruction set only reads virtual files.
+optional `writable` property defaults to `false`. A host may set it to `true`
+when initialize additionally advertises `supportsElisaVirtualFileWrites: true`
+and `elisaVirtualFileWritesVersion: 1`. This permits guest writes to the virtual
+copy without modifying any host file.
 
 Version 1 permits at most 16 snapshots, at most 256 decoded bytes per
 snapshot, and at most 1024 UTF-8 bytes per path. Handles must be unique and
 contiguous from 1 through N in array order. This matches the resource store's
 validated handle invariant; a nonsequential mapping is rejected. Guest
-`virtual_file_read_byte` operations address the explicit handle. The first
+`virtual_file_read_byte`, `virtual_file_write_byte`, and `virtual_file_seek`
+operations address the explicit handle. The first
 entry above is therefore read using handle 1.
 
 `path` is a logical identity used to reject duplicate resources and derive a
@@ -61,12 +64,15 @@ duplicate mapping.
 The adapter validates every snapshot before loading or launching the guest.
 It mounts snapshots into the managed service before launch, capturing the
 initial bytes at event zero. A mount failure resets the partially configured
-service before returning an error. Reads are recorded in the managed resource
-journal and restored with reverse navigation and replay.
+service before returning an error. Reads, byte writes, and absolute seeks are
+recorded in the managed resource journal and restored with reverse navigation
+and replay. Seek accepts an offset through the current file length; writes can
+overwrite or append through the 256-byte bound. Read-only writes, invalid
+handles/offsets, and exhausted journal capacity fail before advancing execution.
 
 Malformed fields, duplicate properties or paths, invalid UTF-8, odd or
-non-hex contents, invalid handle sequences, and `writable: true` fail launch
-with an invalid-argument response. The extension is available for the managed
+non-hex contents, invalid handle sequences, and non-boolean `writable` values
+fail launch with an invalid-argument response. The extension is available for the managed
 EDIR engine; native engine sessions do not mount these snapshots.
 
 ## Editor integration
@@ -74,8 +80,8 @@ EDIR engine; native engine sessions do not mount these snapshots.
 An adapter plugin should read the capability before adding the custom launch
 field. It should map each guest handle to a stable editor-owned logical path
 and provide an immutable byte snapshot. To update contents, start a new launch
-with a new snapshot. Version 1 does not support guest writes, file watching,
-host path access, or editing a snapshot during a recording.
+with a new snapshot. Version 1 does not support guest open/close, file watching,
+host path access, sparse files, or editing a snapshot during a recording.
 
 The headless service API and DAP extension are separate integration surfaces.
 The DAP schema is not a cross-language ABI for directly calling Elisa modules.

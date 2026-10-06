@@ -62,9 +62,10 @@ separate, and the in-memory envelope requires zero padding beyond its body.
 
 Exact managed export supports executed clock samples, unsigned random values,
 single-byte console input (including EOF), single-byte console output, and
-single-byte reads from launch-mounted virtual resources. Before export, the
+single-byte reads/writes and absolute seeks in launch-mounted virtual resources. Before export, the
 service reconstructs every event from the captured effect results and initial
-resource images, compares complete event envelopes, and checks the terminal
+resource images, compares each resource journal entry and complete event
+envelopes at its first reconstructed boundary, and checks the terminal
 VM and side-state fingerprints. A final checkpoint with unrelated adapter or
 resource activity is insufficient and remains non-exportable.
 

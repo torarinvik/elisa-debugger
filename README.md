@@ -187,14 +187,22 @@ bytes, so trace-file transfer is available through the interactive CLI, DAP,
 and typed Elisa service API.
 
 Exact managed traces can also preserve executed clock/random results,
-single-byte console input and output, EOF, and reads from mounted virtual
-files. Export validates their complete event-aligned journals. Reopening uses
+single-byte console input and output, EOF, and reads, byte writes, and absolute
+seeks in mounted virtual files. Writable snapshots modify only the virtual
+copy. Export validates their complete event-aligned journals. Reopening uses
 captured inputs without consulting host providers or redisplaying target
 output; source stepping and continue through the retained prefix use the same
 recorded state as seek. A compatible EDIR image is still required. Run
 `make ELISA_ALLOW_STALE_STAGE1=0 managed-trace-effects-check` to exercise a
 compiler-produced recursive program across separate recording and replay
 processes, including changed/deleted host input and corruption rejection.
+`managed-virtual-file-mutations-check` adds overwrite, append, seek, EOF,
+capacity/permission failures, and every-boundary state comparison.
+`dap-virtual-file-mutations-check` qualifies writable launch snapshots and trace
+reopening across fresh adapters; use `writable: true` only after negotiating
+`supportsElisaVirtualFileWrites` version 1.
+`cli-virtual-file-mutations-check` opens the same artifact in a fresh CLI,
+advances and reverses through it, and exports identical bytes.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

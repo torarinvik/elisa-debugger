@@ -3,9 +3,74 @@
 This records the compiler dependency and qualified compiler-to-debugger seam.
 The supported EDIR subset and qualification dates below define its scope.
 
-## Compiler revision
+## Virtual-file write/seek qualification
 
-Current qualification uses stage1 provenance revision
+The compiler integration branch `codex/debugger-resource-effects` is committed
+at `bb789d4cdb0679579b6b6379bbe28994c68e44ae`, based on
+`bb1f4095e350aa8dcb232a0e56b53c684b44ce2f`. It emits codec schema 4, program
+version 6, including `virtual_file_write_byte(handle, byte)` and
+`virtual_file_seek(handle, offset)`. Both arguments must be unnamed integer
+literals; handles are positive, bytes are 0–255, and offsets are nonnegative.
+Older program versions remain readable; version 5 cannot contain these opcodes.
+
+Qualification ran entirely on the requested Vast instance on 2026-10-07,
+using isolated compiler and debugger snapshots, Clang/LLVM 21, and the Linux
+flags below. The rebuilt Go stage0 source is pinned at
+`4a68f508b90634b548f5e0728da4147853560248`; its executable SHA-256 is
+`aa271df4a554eaefc4c063e62212e2bef58787f724d72e0aca9157801df2999a`.
+The compiler bootstrap used O2 and a 16 GiB RSS guard after hitting the default
+6 GiB guard. The matching runtime was built with one stage1 partition;
+debugger applications used four. Stale-product overrides remained disabled.
+
+| Input or product | SHA-256 |
+| --- | --- |
+| Compiler source tree | `7354d76a85d5fc33f04b3bde0df8fbb68fe1b13fbb93fc9dc11e754ba2555071` |
+| Build recipes | `7b4267cbd9e406c71e7bb89bfb93980d8d3e9c6cc33746340cba67adc27d6e10` |
+| Linux stage1 product | `684227605452b65b68af5a4f79fbe81df2dc4a6e984e5b7e11dd037dbfe79bec` |
+| Linux runtime object | `ded3d7caec38a329678e7e9b22db85eb5004216a5366ae1abe70d0c81510cf44` |
+
+Compiler scalar/native parity and host-effect emission passed, including O0/O2
+operand/source checks and invalid-call rejection. The broad parity script now
+selects Linux or Darwin linker flags explicitly. `make -j12 check module-check
+smoke` passed again after integrating the CLI/resource-divergence gates into
+the combined parallel test graph. Separate O2 managed, DAP, and CLI products passed the new trace
+regressions, alongside the existing clock/console/read trace tests.
+
+The mutation fixture executes 35 events and nine virtual operations: overwrite,
+seek, read, seek to end, append, seek to start, two reads, and EOF. Fresh
+processes compare all 36 VM/resource-state boundaries after changing and
+removing the original host input. Recording, replay, and reverse navigation
+never modify that file. Permission, handle, seek, byte-capacity, and
+journal-capacity failures preserve the VM, journal, generation, and history.
+A self-consistent changed first write is rejected at event zero; resource
+journals are compared at every reconstructed operation before terminal hashing.
+Both CLI and DAP report the first changed byte as expected 91/observed 90,
+preserve the live stop, and accept the original trace on retry at O0 and O2.
+Divergence and successful retry responses pass Draft 2020-12 validation.
+
+The typed service and DAP can record writable snapshots. CLI and DAP can reopen,
+advance, reverse, and export identical artifacts after rewinding. DAP advertises
+`supportsElisaVirtualFileWrites` version 1; its launch schema accepts a boolean
+`writable`. Guest open/close, guest error return values, sparse files, buffered
+I/O, and arbitrary host resources remain outside this bounded instruction
+contract. The neighboring compiler checkout was not modified.
+
+Select the integration checkout through one build override; the Makefile derives
+its wrapper, EDIR producer, runtime, and compiler dependencies from that root:
+
+```sh
+make ELISA_COMPILER_SOURCE_ROOT=/path/to/Elisa-compiler-debugger-resource-effects \
+  ELISA_ALLOW_STALE_STAGE1=0 check module-check smoke
+```
+
+Seed that checkout and its matching runtime on the target host before running
+these gates. The default adjacent compiler must contain the integration commit
+to lower the mutation fixture. This Linux qualification does not establish a
+current Darwin qualification for the new instructions.
+
+## Previous clock/console/read qualification
+
+Earlier qualification uses stage1 provenance revision
 `23a0e16a854cddec3016746a0cb9480db0c4db22` and its matching runtime on Linux
 x86_64 (2026-10-07), with stale-stage1 refusal enabled. Earlier focused gates
 passed on Darwin arm64 (2026-10-06), before the subsequent Linux portability,

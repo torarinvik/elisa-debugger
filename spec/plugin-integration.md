@@ -148,7 +148,7 @@ the current event-index limit.
 
 Managed programs that read virtual files can use the optional
 `supportsElisaVirtualFiles` launch extension. Plugins should provide immutable
-read-only byte snapshots with explicit guest handles in `arguments` and honor
+byte snapshots with explicit guest handles in `arguments` and honor
 the advertised version. See the
 [virtual-file contract](dap-virtual-files-v1.md) for limits and mapping rules.
 

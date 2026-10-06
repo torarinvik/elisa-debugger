@@ -60,8 +60,10 @@ their complete 64-bit value is preserved by the checkpoint codec. Callers
 provide stable request/result hashes, which must identify the relevant call
 shape and stream position. The managed effect bridge pairs byte-oriented
 console input/output and EOF with typed adapter journals; mounted virtual-file
-reads retain initial bytes and ordered resource operations. Artifact export
-reconstructs these executed effects, checks every canonical event envelope,
+byte reads/writes and absolute seeks retain initial bytes and ordered resource
+operations. Artifact export
+reconstructs these executed effects, checks each resource operation at its
+reconstructed boundary and every canonical event envelope,
 and compares complete terminal side state. Unrelated adapter/resource records
 remain rejected even when their snapshots and checksums are structurally valid.
 Network, process, foreign calls, and compiler-unintegrated file operations

@@ -95,11 +95,13 @@ handle. See the [trace file contract](../spec/dap-trace-files-v1.md) and its
 [JSON Schema](../schemas/dap-trace-files-v1.schema.json) for request,
 compatibility, and failure behavior.
 
-For managed EDIR programs that read virtual files, check
+For managed EDIR programs that use virtual files, check
 `supportsElisaVirtualFiles` and `elisaVirtualFilesVersion` in `initialize`,
 then provide immutable byte snapshots in the launch request. Each snapshot
 maps an explicit guest handle to a logical path and hex-encoded bytes; version
-1 supports read-only contents. The
+1 defaults to read-only contents. Set `writable: true` only when initialize
+also advertises `supportsElisaVirtualFileWrites` version 1. Byte writes and
+absolute seeks update the virtual copy and never modify a host path. The
 [virtual-file contract](../spec/dap-virtual-files-v1.md) defines bounds,
 handle ordering, and replay behavior.
 

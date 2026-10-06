@@ -3,10 +3,13 @@ set -eu
 
 cli=${1:?expected CLI path}
 fixture=${2:?expected compiler-produced image}
-trace=build/dap-trace-effects.eltr
-image='build/cli effect image.edir'
-corrupt='build/cli invalid image.edir'
-exported='build/cli effect replay.eltr'
+trace=${3:-build/dap-trace-effects.eltr}
+last_event=${4:-59}
+previous_event=$((last_event - 1))
+prefix=${5:-effect}
+image="build/cli $prefix image.edir"
+corrupt="build/cli $prefix invalid image.edir"
+exported="build/cli $prefix replay.eltr"
 
 cp "$fixture" "$image"
 printf 'invalid EDIR' > "$corrupt"
@@ -17,14 +20,14 @@ output=$({
     printf 'run %s\npause\nopenTrace 0 %s\n' "$image" "$trace"
     # A later launch must preserve the loaded replay and its stop position.
     printf 'launch %s\ntimeline\nstep\ncontinue\nstack\ntimeline\n' "$corrupt"
-    printf 'seek 0\nstep\nseek 59\nreverseStep\ntimeline\nseek 0\nsaveTrace %s\n' "$exported"
+    printf 'seek 0\nstep\nseek %s\nreverseStep\ntimeline\nseek 0\nsaveTrace %s\n' "$last_event" "$exported"
 } | "$cli")
 test "$(printf '%s\n' "$output" | grep -c '^error code=')" -eq 4
 for expected in \
     'opened trace event=0 generation=' \
-    'event=0 branch=0 retained=available[0,59] exact=available[0,59]' \
-    'event=59 branch=0 retained=available[0,59] exact=available[0,59]' \
-    'event=58 branch=0 retained=available[0,59] exact=available[0,59]' \
+    "event=0 branch=0 retained=available[0,$last_event] exact=available[0,$last_event]" \
+    "event=$last_event branch=0 retained=available[0,$last_event] exact=available[0,$last_event]" \
+    "event=$previous_event branch=0 retained=available[0,$last_event] exact=available[0,$last_event]" \
     'result=-1 returnDepth=0' \
     'saved trace bytes='; do
     printf '%s\n' "$output" | grep -F "$expected" > /dev/null || {

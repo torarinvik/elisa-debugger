@@ -2,13 +2,14 @@
 # as current targets.
 .DELETE_ON_ERROR:
 
-ELISA_COMPILER ?= ../Elisa-compiler/scripts/elisac_stage1.sh
+ELISA_COMPILER_SOURCE_ROOT ?= ../Elisa-compiler
+ELISA_COMPILER ?= $(ELISA_COMPILER_SOURCE_ROOT)/scripts/elisac_stage1.sh
 ELISA_COMPILER_COMMAND := $(ELISA_COMPILER)
 # The compiler is commonly located under a workspace path containing spaces.
 # Keep it as one shell argument in every recipe, including command-line
 # overrides such as `make ELISA_COMPILER=/path/with\ spaces/elisac-stage1`.
 override ELISA_COMPILER := "$(ELISA_COMPILER_COMMAND)"
-ELISA_RUNTIME ?= $(abspath ../Elisa-compiler/build/runtime/elisacore_runtime.o)
+ELISA_RUNTIME ?= $(abspath $(ELISA_COMPILER_SOURCE_ROOT)/build/runtime/elisacore_runtime.o)
 # Large aggregate fixtures exercise the modules in one executable entry point. Keep their
 # generated stack frames above macOS's default 8 MiB thread stack while leaving other hosts'
 # linker defaults untouched.
@@ -22,7 +23,7 @@ endif
 # pre-wrapper product binaries. Supplying both makes this Makefile independent of that rollout.
 ELISA_RUNTIME_ENV = ELISA_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_RUNTIME_OBJ="$(ELISA_RUNTIME)" ELISA_STAGE1_LINK="$(ELISA_LINK_FLAGS)"
 BUILD ?= build
-ELISA_EDIR_COMPILER ?= ../Elisa-compiler/scripts/elisac_stage1.sh
+ELISA_EDIR_COMPILER ?= $(ELISA_COMPILER_SOURCE_ROOT)/scripts/elisac_stage1.sh
 ELISA_EDIR_ALLOW_STALE_STAGE1 ?= 0
 COMPILER_EDIR_FIXTURE := tests/compiler_edir_arithmetic_fixture.elisa
 COMPILER_EDIR_ARTIFACT := $(BUILD)/compiler_edir_arithmetic.edir
@@ -130,7 +131,6 @@ DAP_ZERO_BASED_MAPPED_COLUMN := 3
 # Require the sibling checkout's current stage1 executable by default. The wrapper
 # checks source, recipe, and product content provenance before invoking it.
 ELISA_ALLOW_STALE_STAGE1 ?= 0
-ELISA_COMPILER_SOURCE_ROOT ?= ../Elisa-compiler
 ELISA_COMPILER_WRAPPER_BUILD_DEPENDENCY ?= $(ELISA_COMPILER_SOURCE_ROOT)/scripts/elisac_stage1.sh
 ELISA_COMPILER_BUILD_DEPENDENCY ?= $(if $(ELISA_STAGE1_BIN),$(ELISA_STAGE1_BIN),$(ELISA_COMPILER_SOURCE_ROOT)/bin/elisac-stage1)
 ELISA_RUNTIME_BUILD_DEPENDENCY ?= $(ELISA_RUNTIME)
@@ -444,6 +444,31 @@ managed-trace-effects-check: $(BUILD)/elisa-debugger-managed-trace-effects-check
 	sh tests/managed_trace_effects_check.sh "$(BUILD)/elisa-debugger-managed-trace-effects-check"
 	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O2 -o "$(BUILD)/trace-effects.edir" tests/compiler_edir_trace_effects_fixture.elisa
 	sh tests/managed_trace_effects_check.sh "$(BUILD)/elisa-debugger-managed-trace-effects-check"
+
+$(BUILD)/elisa-debugger-managed-virtual-file-mutations-check: tests/managed_virtual_file_mutations_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+.PHONY: managed-virtual-file-mutations-check dap-virtual-file-mutations-check
+managed-virtual-file-mutations-check: $(BUILD)/elisa-debugger-managed-virtual-file-mutations-check
+	mkdir -p $(BUILD)
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(BUILD)/file-mutations.edir" tests/compiler_edir_virtual_file_mutations_fixture.elisa
+	sh tests/managed_virtual_file_mutations_check.sh "$(BUILD)/elisa-debugger-managed-virtual-file-mutations-check"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O2 -o "$(BUILD)/file-mutations.edir" tests/compiler_edir_virtual_file_mutations_fixture.elisa
+	sh tests/managed_virtual_file_mutations_check.sh "$(BUILD)/elisa-debugger-managed-virtual-file-mutations-check"
+
+dap-virtual-file-mutations-check: $(BUILD)/elisa-debugger-dap-server managed-virtual-file-mutations-check
+	sh tests/dap_virtual_file_mutations_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-mutations.edir"
+
+.PHONY: cli-virtual-file-mutations-check
+cli-virtual-file-mutations-check: $(BUILD)/elisa-debugger-cli dap-virtual-file-mutations-check
+	set -e; last_event=$$(( $$(wc -c < "$(BUILD)/file-mutations.reference") / 16 - 1 )); sh tests/cli_trace_effects_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/file-mutations.edir" "$(BUILD)/dap-file-mutations.eltr" "$$last_event" mutations
+
+.PHONY: resource-divergence-clients-check
+resource-divergence-clients-check: cli-virtual-file-mutations-check $(BUILD)/elisa-debugger-trace-divergence-fixture
+	sh tests/replay_divergence_clients_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-mutations.edir" "$(BUILD)/elisa-debugger-trace-divergence-fixture" resources
+
+module-check: managed-virtual-file-mutations-check dap-virtual-file-mutations-check cli-virtual-file-mutations-check resource-divergence-clients-check
 
 managed-source-path-check: $(BUILD)/elisa-debugger-managed-source-path-check
 	"$(BUILD)/elisa-debugger-managed-source-path-check"

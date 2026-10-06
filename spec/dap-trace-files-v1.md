@@ -70,6 +70,10 @@ when their call site, invocation, and request shape still match.
 Stepping or continuing through that prefix consumes captured results without
 another host-effect provider request or target output write.
 
+Resource journal entries are compared at each reconstructed boundary. A changed
+write payload or seek request reports the `resource-operation` component at the
+first affected guest event; terminal state hashing remains an additional check.
+
 When replay disagrees with a captured event or effect request, a failed
 `elisa/openTrace` response includes `body.elisaReplayDivergence`, version 1.
 It identifies the first failing event, the last verified boundary in the

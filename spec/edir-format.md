@@ -106,7 +106,7 @@ file descriptors, or raw Elisa struct layout.
 
 ## Managed effect instructions
 
-Program versions 1 through 5 are supported. Version 1 contains the original
+Program versions 1 through 6 are supported. Version 1 contains the original
 scalar, memory, control-flow, and call instructions. Later versions add these
 instructions without changing the instruction record layout:
 
@@ -117,14 +117,20 @@ instructions without changing the instruction record layout:
 | 22 | ConsoleWriteByte | 3 | `0 <= a <= 255`, `b = 0` | One transferred byte |
 | 23 | ConsoleReadByte | 4 | `a = b = 0` | Byte `0..255`, or EOF `-1` |
 | 24 | VirtualFileReadByte | 5 | Positive logical resource handle `a`, `b = 0` | Byte `0..255`, or EOF `-1` |
+| 25 | VirtualFileWriteByte | 6 | Positive handle `a`, `0 <= b <= 255` | One transferred byte |
+| 26 | VirtualFileSeek | 6 | Positive handle `a`, nonnegative absolute offset `b` | New cursor offset |
 
 The verifier rejects an effect instruction in an older program version and
 rejects invalid or unused operands. The plain machine step refuses host-effect
 instructions; the managed bridge commits a validated result together with its
 journal and event. A virtual resource handle identifies a captured file in the
 session, never a host file descriptor. Replay uses captured results and virtual
-bytes. File open/write/seek/close and arbitrary foreign calls are not instructions
-in this version.
+bytes. Writes overwrite or append within the bounded virtual copy. Seek permits
+offsets from zero through the current file length; sparse files are unsupported.
+Invalid handles, read-only writes, invalid seeks, and exhausted byte/journal
+capacity return a debugger failure before committing the instruction. Guest
+error return values, file open/close, and arbitrary foreign calls remain outside
+this instruction contract.
 
 ## Current file launch contract
 
@@ -139,9 +145,9 @@ bytes and decodes JSON escapes, including Unicode surrogate pairs.
 
 This loader runs on the POSIX host boundary; file access is provided by
 `open`, `read`, and `close`, while bounds checks, decoding, and EDIR
-verification remain in Elisa. The current adjacent compiler checkout at the
+verification remain in Elisa. The selected compiler integration checkout at the
 revision recorded in [`docs/compiler-integration.md`](../docs/compiler-integration.md)
-emits schema-4 artifacts with program version 5 for its explicitly supported
+emits schema-4 artifacts with program version 6 for its explicitly supported
 single-file scalar, counted-loop, recursive-call, and effect fixtures, with
 source-table identities, original source spans, and function descriptors.
 Legacy schema-2/3 artifacts remain loadable for compatibility. The producer rejects

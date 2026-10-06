@@ -8,10 +8,21 @@ creator=${4:?expected divergence fixture creator}
 bad=build/replay-divergence.eltr
 good=build/dap-trace-effects.eltr
 output=build/replay-divergence-dap.output
-"$creator"
+component=machine-state
+event=58
+if test "${5:-events}" = resources; then
+    bad=build/resource-divergence.eltr
+    good=build/dap-file-mutations.eltr
+    output=build/resource-divergence-dap.output
+    component=resource-operation
+    event=0
+    "$creator" resources
+else
+    "$creator"
+fi
 
 cli_output=$(printf 'launch %s\npause\nopenTrace 0 %s\nstack\ntimeline\nopenTrace 0 %s\ncontinue\nstack\n' "$fixture" "$bad" "$good" | "$cli")
-printf '%s\n' "$cli_output" | grep -F 'divergence version=1 component=machine-state event=58 lastVerified=58 recording=1 branch=0' > /dev/null
+printf '%s\n' "$cli_output" | grep -F "divergence version=1 component=$component event=$event lastVerified=$event recording=1 branch=0" > /dev/null
 printf '%s\n' "$cli_output" | grep -F 'frame id=1 event=0 instruction=0' > /dev/null
 printf '%s\n' "$cli_output" | grep -F 'result=-1 returnDepth=0' > /dev/null
 test "$(printf '%s\n' "$cli_output" | grep -c '^error code=')" -eq 1
@@ -34,7 +45,7 @@ frame() {
 
 # Transport verification only: all lengths and JSON messages must remain
 # valid even for diagnostics containing full-width identities and hashes.
-python3 - "$output" <<'PY'
+python3 - "$output" "$component" "$event" <<'PY'
 import json
 import pathlib
 import sys
@@ -52,10 +63,13 @@ responses = {m['request_seq']: m for m in messages if m['type'] == 'response'}
 assert responses[5]['success'] is False
 diagnostic = responses[5]['body']['elisaReplayDivergence']
 assert diagnostic['version'] == 1
-assert diagnostic['component'] == 'machine-state'
-assert diagnostic['eventIndex'] == diagnostic['lastVerifiedEvent'] == '58'
+assert diagnostic['component'] == sys.argv[2]
+assert diagnostic['eventIndex'] == diagnostic['lastVerifiedEvent'] == sys.argv[3]
 assert diagnostic['recordingId'] == '1' and diagnostic['branchId'] == '0'
-assert diagnostic['expectedEventAvailable'] and diagnostic['observedEventAvailable']
+if sys.argv[2] == 'machine-state':
+    assert diagnostic['expectedEventAvailable'] and diagnostic['observedEventAvailable']
+else:
+    assert diagnostic['expectedValue'] == '91' and diagnostic['observedValue'] == '90'
 assert diagnostic['expectedValueAvailable'] and diagnostic['observedValueAvailable']
 assert diagnostic['expectedValue'] != diagnostic['observedValue']
 assert diagnostic['verifiedCheckpointAvailable'] is False

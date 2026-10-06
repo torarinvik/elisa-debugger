@@ -1,13 +1,14 @@
 # Bounded local trace-file I/O. The file remains canonical bytes; existing
 # storage codecs validate chunks and footers before a write is accepted.
 
-extern open(path: cstr, flags: int) -> int can[Blocking.IO]
-extern mkstemp(path_template: cstr) -> int can[Blocking.IO]
-extern close(fd: int) -> int can[Blocking.IO]
-extern fsync(fd: int) -> int can[Blocking.IO]
-extern read(fd: int, buf: void&, count: usize) -> isize can[Blocking.IO]
-extern rename(source: cstr, destination: cstr) -> int can[Blocking.IO]
-extern unlink(path: cstr) -> int can[Blocking.IO]
+# Preserve signed C int error results on every supported ABI.
+extern open(path: cstr, flags: i32) -> i32 can[Blocking.IO]
+extern mkstemp(path_template: cstr) -> i32 can[Blocking.IO]
+extern close(fd: i32) -> i32 can[Blocking.IO]
+extern fsync(fd: i32) -> i32 can[Blocking.IO]
+extern read(fd: i32, buf: void&, count: usize) -> isize can[Blocking.IO]
+extern rename(source: cstr, destination: cstr) -> i32 can[Blocking.IO]
+extern unlink(path: cstr) -> i32 can[Blocking.IO]
 
 include "./storage.elisa"
 include "../core/errors.elisa"
@@ -45,8 +46,8 @@ module DebuggerTraceFile:
             BeforeCommit
 
         const module FileSystem:
-            READ_ONLY: int = 0
-            SYSCALL_FAILURE_RESULT: int = -1
+            READ_ONLY: i32 = 0
+            SYSCALL_FAILURE_RESULT: i32 = -1
 
         const module Buffer:
             EMPTY_CAPACITY: usize = 0
@@ -112,7 +113,7 @@ module DebuggerTraceFile:
 
             temporary_path: mutable u8[TemporaryPath::PATH_CAPACITY_BYTES] = zeroed
             temporary_path_prepare(path, path_length, temporary_path[Path::PATH_FIRST_BYTE_INDEX])
-            descriptor: int = mkstemp((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
+            descriptor: i32 = mkstemp((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
             return invalid_write(FileStatus.OpenFailure, Detail::OPEN, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO, scan) if descriptor == FileSystem::SYSCALL_FAILURE_RESULT
 
             if failure_point == FailureInjection.AfterPartialWrite:
@@ -129,8 +130,8 @@ module DebuggerTraceFile:
                 temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.WriteFailure, Detail::WRITE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
 
-            sync_status: int = fsync(descriptor) can Blocking.IO
-            close_status: int = close(descriptor) can Blocking.IO
+            sync_status: i32 = fsync(descriptor) can Blocking.IO
+            close_status: i32 = close(descriptor) can Blocking.IO
             if sync_status == FileSystem::SYSCALL_FAILURE_RESULT:
                 temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.SyncFailure, Detail::SYNC, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
@@ -145,7 +146,7 @@ module DebuggerTraceFile:
 
             terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
             path_terminate(path, path_length, terminated_path[Path::PATH_FIRST_BYTE_INDEX])
-            commit_status: int = rename((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr], (&terminated_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
+            commit_status: i32 = rename((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr], (&terminated_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
             if commit_status == FileSystem::SYSCALL_FAILURE_RESULT:
                 temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.CommitFailure, Detail::COMMIT, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
@@ -238,7 +239,7 @@ module DebuggerTraceFile:
 
             terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
             path_terminate(path, path_length, terminated_path[Loop::LOOP_FIRST_BYTE_INDEX])
-            descriptor: int = open((&terminated_path[Loop::LOOP_FIRST_BYTE_INDEX]).cast[cstr], FileSystem::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
+            descriptor: i32 = open((&terminated_path[Loop::LOOP_FIRST_BYTE_INDEX]).cast[cstr], FileSystem::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
             return invalid_read(FileStatus.OpenFailure, Detail::OPEN, DebuggerErrors::ErrorCode.Unavailable, ErrorPolicy::RETRYABLE_IO) if descriptor == FileSystem::SYSCALL_FAILURE_RESULT
 
             bytes_read: mutable usize = Buffer::EMPTY_CAPACITY
@@ -263,7 +264,7 @@ module DebuggerTraceFile:
                 read_failed <- true if probe_count < Loop::EOF
                 too_large <- true if probe_count > Loop::EOF
 
-            close_result: int = close(descriptor) can Blocking.IO
+            close_result: i32 = close(descriptor) can Blocking.IO
             return invalid_read_with_count(FileStatus.ReadFailure, Detail::READ, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, bytes_read) if read_failed
             return invalid_read_with_count(FileStatus.CloseFailure, Detail::CLOSE, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, bytes_read) if close_result == FileSystem::SYSCALL_FAILURE_RESULT
             return invalid_read_with_count(FileStatus.TooLarge, Detail::TOO_LARGE, DebuggerErrors::ErrorCode.ResourceLimit, ErrorPolicy::NON_RETRYABLE, bytes_read) if too_large

@@ -85,6 +85,12 @@ module DebuggerReplayEngine:
             ExecutionFault
             StepLimit
 
+        struct SeekCandidate:
+            machine: mutable DebuggerEDIR::Machine
+            event: mutable usize
+            valid: mutable bool
+            failure: mutable EngineError
+
         struct ReplayEngine:
             image: mutable DebuggerEDIR::ProgramImage
             machine: mutable DebuggerEDIR::Machine
@@ -139,14 +145,17 @@ module DebuggerReplayEngine:
                 engine.machine.halted <- true
                 engine.engine_error <- EngineError.ExecutionFault
 
-        def replay_engine_position(engine: mutable ReplayEngine&) -> DebuggerIdentity::Position:
+        def replay_engine_machine_position(engine: ReplayEngine&, machine: DebuggerEDIR::Machine&, event: usize) -> DebuggerIdentity::Position:
             position: mutable DebuggerIdentity::Position = DebuggerIdentity::initial_position(engine.recording)
-            position.branch <- replay_engine_branch_at(engine, engine.event_count.u64())
-            position.event <- engine.event_count.u64()
-            position.statement <- DebuggerIdentity::debug_id(engine.machine.program_counter)
-            invocation: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_invocation_identity(engine.image, engine.machine)
+            position.branch <- replay_engine_branch_at(engine, event.u64())
+            position.event <- event.u64()
+            position.statement <- DebuggerIdentity::debug_id(machine.program_counter)
+            invocation: DebuggerEDIRIdentity::StableIdentity = DebuggerEDIRIdentity::effect_invocation_identity(engine.image, machine)
             position.invocation <- invocation.value if invocation.valid
             return position
+
+        def replay_engine_position(engine: mutable ReplayEngine&) -> DebuggerIdentity::Position:
+            return replay_engine_machine_position(engine, engine.machine, engine.event_count)
 
         def replay_engine_history_capacity() -> usize:
             return Capacity::HISTORY_CAPACITY
@@ -384,18 +393,37 @@ module DebuggerReplayEngine:
         # event envelopes. Managed replay uses this when the corresponding
         # side-state boundary is absent, so a rejected seek stays fully atomic.
         def replay_engine_seek_preview(engine: ReplayEngine&, target: usize) -> EngineError:
-            return EngineError.HistoryUnavailable if target > Capacity::HISTORY_CAPACITY or engine.event_count > Capacity::HISTORY_CAPACITY or target < engine.event_count
-            speculative_machine: mutable DebuggerEDIR::Machine = engine.machine
-            speculative_event: mutable usize = engine.event_count
-            while speculative_event < target and not speculative_machine.halted and not speculative_machine.faulted:
-                previous_event: usize = speculative_event
-                failure: EngineError = replay_engine_speculative_step(engine, speculative_machine, speculative_event)
-                return failure if failure != EngineError.None
-                return EngineError.HistoryUnavailable if speculative_event == previous_event
-            return EngineError.HistoryUnavailable if speculative_event != target
-            return EngineError.HistoryUnavailable if not replay_engine_apply_interventions_to_machine(engine, speculative_machine, target.u64())
-            return EngineError.ExecutionFault if speculative_machine.faulted
-            return EngineError.None
+            candidate: SeekCandidate = replay_engine_seek_candidate(engine, target, false)
+            return candidate.failure
+
+        # Reconstruct owned candidate VM state without changing any retained
+        # snapshot, event, result, cursor, or engine error. Recorded replay
+        # verifies every committed envelope before the caller publishes it.
+        def replay_engine_seek_candidate(engine: ReplayEngine&, target: usize, verify_recorded_events: bool) -> SeekCandidate:
+            candidate: mutable SeekCandidate = SeekCandidate{machine: engine.machine, event: engine.event_count, valid: false, failure: EngineError.HistoryUnavailable}
+            return candidate if target > Capacity::HISTORY_CAPACITY or engine.event_count > Capacity::HISTORY_CAPACITY or target < engine.event_count
+            while candidate.event < target and not candidate.machine.halted and not candidate.machine.faulted:
+                previous_event: usize = candidate.event
+                candidate.failure <- replay_engine_speculative_step(engine, candidate.machine, candidate.event)
+                return candidate if candidate.failure != EngineError.None
+                if candidate.event == previous_event:
+                    candidate.failure <- EngineError.HistoryUnavailable
+                    return candidate
+                if verify_recorded_events:
+                    position: DebuggerIdentity::Position = replay_engine_machine_position(engine, candidate.machine, previous_event)
+                    observed: DebuggerEvents::EventEnvelope = DebuggerEvents::event_envelope(Event::REPLAY_ENGINE_SCHEMA_VERSION, previous_event.u64(), position, DebuggerEvents::EventKind.ExecutionBoundary, DebuggerEvents::EventQuality.Exact, replay_engine_machine_state_hash(candidate.machine, previous_event.u64()))
+                    if not DebuggerEvents::event_envelopes_equal(engine.events[previous_event], observed):
+                        candidate.failure <- EngineError.ExecutionFault
+                        return candidate
+            if candidate.event != target or not replay_engine_apply_interventions_to_machine(engine, candidate.machine, target.u64()):
+                candidate.failure <- EngineError.HistoryUnavailable
+                return candidate
+            if candidate.machine.faulted:
+                candidate.failure <- EngineError.ExecutionFault
+                return candidate
+            candidate.valid <- true
+            candidate.failure <- EngineError.None
+            return candidate
 
         def replay_engine_seek(engine: mutable ReplayEngine&, target: usize) -> void:
             original_machine: DebuggerEDIR::Machine = engine.machine

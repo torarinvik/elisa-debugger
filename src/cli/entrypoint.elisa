@@ -6,6 +6,7 @@ include "../core/capabilities.elisa"
 include "../core/errors.elisa"
 include "../core/identity.elisa"
 include "../engine/default_image.elisa"
+include "../vm/edir_file.elisa"
 include "../inspect/managed.elisa"
 include "./commands.elisa"
 include "../protocol/request.elisa"
@@ -15,10 +16,10 @@ include "../protocol/managed_trace_file.elisa"
 include "../protocol/managed_trace.elisa"
 include "../query/timeline.elisa"
 
-extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
-extern printf(format: cstr, ...) -> int can[Console]
-extern puts(text: cstr) -> int can[Console]
-extern fflush(stream: mutable void&?) -> int can[Console]
+extern read(fd: i32, buf: void&, count: usize) -> isize can[Console]
+extern printf(format: cstr, ...) -> i32 can[Console]
+extern puts(text: cstr) -> i32 can[Console]
+extern fflush(stream: mutable void&?) -> i32 can[Console]
 
 module DebuggerCLIEntrypoint:
     private:
@@ -29,6 +30,7 @@ module DebuggerCLIEntrypoint:
             CLI_ENTRYPOINT_FIRST_LOCAL_INDEX: usize = 0
             DEFAULT_LOCAL_REQUEST: usize = 0
             UNSUPPORTED_RESULT_DETAIL: u32 = 4
+            LAUNCH_STATE_DETAIL: u32 = 5
 
         const module Encoding:
             CLI_ENTRYPOINT_ENCODING_ASCII_NEWLINE: u8 = 10
@@ -50,7 +52,7 @@ module DebuggerCLIEntrypoint:
             CLI_ENTRYPOINT_LINE_CAPACITY: usize = DebuggerCLI::Limits::MAX_LINE_BYTES
 
         const module Stdin:
-            FD: int = 0
+            FD: i32 = 0
 
         const module TimelineText:
             AVAILABLE: cstr = "available"
@@ -137,8 +139,20 @@ module DebuggerCLIEntrypoint:
                 return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
             return DebuggerProtocolDispatcher::dispatch_request(service.controller.session, request, RequestSentinel::NO_EXPECTED_GENERATION)
 
+        def launch_image(service: mutable DebuggerManagedService::Service&, parsed: mutable DebuggerCLI::ParsedCommand&, request: DebuggerProtocolRequest::Request) -> DebuggerProtocolDispatcher::DispatchResult can[Blocking.IO, Unsafe.PointerCast]:
+            if service.controller.session.state != DebuggerSession::SessionState.Created:
+                failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Cli::LAUNCH_STATE_DETAIL)
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, failure)
+            loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(parsed.text_argument[DebuggerCLI::Limits::FIRST_TEXT_ARGUMENT_BYTE_INDEX], parsed.text_argument_length) can Blocking.IO, Unsafe.PointerCast
+            if not loaded.valid:
+                return DebuggerProtocolDispatcher::dispatch_error(service.controller.session, request.method, loaded.failure)
+            session: DebuggerSession::Session = service.controller.session
+            recording: DebuggerIdentity::DebugId = service.controller.engine.recording
+            DebuggerManagedService::service_initialize(service, session, loaded.image, recording)
+            return dispatch_request(service, request)
+
         def process_line(service: mutable DebuggerManagedService::Service&, session: mutable DebuggerSession::Session&, line: u8&, length: usize, request_id: u64) -> void can[Console, Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
-            parsed: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(line, length, RequestSentinel::NO_EXPECTED_GENERATION)
+            parsed: mutable DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(line, length, RequestSentinel::NO_EXPECTED_GENERATION)
             method: DebuggerProtocolRequest::RequestMethod = method_from_command(parsed.command)
             request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: method, id: request_id, has_id: true, expected_generation: parsed.expected_generation, target_event: RequestSentinel::NO_TARGET_EVENT, valid: parsed.valid and method != DebuggerProtocolRequest::RequestMethod.Unknown}
             request.target_event <- parsed.argument if parsed.command == DebuggerCLI::Command.Seek and parsed.argument_present
@@ -151,15 +165,27 @@ module DebuggerCLIEntrypoint:
                 else:
                     _ = printf("error code=%d detail=%u\n", exported.failure.code, exported.failure.detail) can Console
             elif parsed.command == DebuggerCLI::Command.OpenTrace:
-                restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(service, parsed.text_argument[DebuggerCLI::Limits::FIRST_TEXT_ARGUMENT_BYTE_INDEX], parsed.text_argument_length, parsed.argument) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+                restored: mutable DebuggerManagedService::Result = zeroed
+                if service.controller.session.state == DebuggerSession::SessionState.Stopped:
+                    restored <- DebuggerManagedTraceService::service_trace_replace_from_file(service, parsed.text_argument[DebuggerCLI::Limits::FIRST_TEXT_ARGUMENT_BYTE_INDEX], parsed.text_argument_length, parsed.argument) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+                else:
+                    restored <- DebuggerManagedTraceService::service_trace_restore_file(service, parsed.text_argument[DebuggerCLI::Limits::FIRST_TEXT_ARGUMENT_BYTE_INDEX], parsed.text_argument_length, parsed.argument) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
                 if restored.accepted:
                     session <- service.controller.session
                     _ = printf("opened trace event=%llu generation=%llu\n", parsed.argument, session.stop_generation) can Console
                     write_timeline(service) can Console
                 else:
                     _ = printf("error code=%d detail=%u\n", restored.failure.code, restored.failure.detail) can Console
+                    diagnostic: DebuggerReplayDiagnostic::Divergence = DebuggerManagedService::service_replay_diagnostic(service)
+                    if restored.failure.code == DebuggerErrors::ErrorCode.Diverged and diagnostic.available:
+                        _ = printf("divergence version=%u component=%s event=%llu lastVerified=%llu recording=%llu branch=%llu expectedKind=%u observedKind=%u expectedInvocation=%llu observedInvocation=%llu expectedCallSite=%llu observedCallSite=%llu expectedRequest=%llu observedRequest=%llu\n", diagnostic.schema, DebuggerReplayDiagnostic::component_name(diagnostic.component), diagnostic.event, diagnostic.last_verified.event, diagnostic.last_verified.recording.value, diagnostic.last_verified.branch.value, diagnostic.expected_kind.u32(), diagnostic.observed_kind.u32(), diagnostic.expected_position.invocation.value, diagnostic.observed_position.invocation.value, diagnostic.expected_call_site.value, diagnostic.observed_call_site.value, diagnostic.expected_request_hash, diagnostic.observed_request_hash) can Console
+                        _ = printf("divergence values expectedEvent=%s observedEvent=%s expectedTask=%llu observedTask=%llu expectedValue=%s:%llu observedValue=%s:%llu verifiedCheckpoint=%s:%llu\n", timeline_availability_text(diagnostic.has_expected_event), timeline_availability_text(diagnostic.has_observed_event), diagnostic.expected_position.task.value, diagnostic.observed_position.task.value, timeline_availability_text(diagnostic.has_expected_value), diagnostic.expected_value, timeline_availability_text(diagnostic.has_observed_value), diagnostic.observed_value, timeline_availability_text(diagnostic.has_verified_checkpoint), diagnostic.verified_checkpoint_event) can Console
             else:
-                result: DebuggerProtocolDispatcher::DispatchResult = dispatch_request(service, request)
+                result: mutable DebuggerProtocolDispatcher::DispatchResult = zeroed
+                if parsed.text_argument_present and (parsed.command == DebuggerCLI::Command.Launch or parsed.command == DebuggerCLI::Command.Run):
+                    result <- launch_image(service, parsed, request) can Blocking.IO, Unsafe.PointerCast
+                else:
+                    result <- dispatch_request(service, request)
                 session <- result.session
                 service.controller.session <- result.session
                 if result.accepted:
@@ -174,7 +200,7 @@ module DebuggerCLIEntrypoint:
     public:
         def run_cli() -> i64 can[Console, Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
             session: mutable DebuggerSession::Session = initial_session()
-            service: mutable DebuggerManagedService::Service
+            service: mutable DebuggerManagedService::Service = zeroed
             DebuggerManagedService::service_initialize(service, session, DebuggerDefaultImage::image_new(), DebuggerIdentity::debug_id(1))
             line: mutable u8[Line::CLI_ENTRYPOINT_LINE_CAPACITY] = zeroed
             length: mutable usize = 0
@@ -190,8 +216,11 @@ module DebuggerCLIEntrypoint:
                     length <- 0
                     request_id <- request_id if request_id == Bounds::MAX_REQUEST_ID else request_id + First::CLI_ENTRYPOINT_FIRST_REQUEST_ID
                 else:
-                    return Exit::INPUT_ERROR if length + 1 >= Line::CLI_ENTRYPOINT_LINE_CAPACITY
+                    if length + 1 >= Line::CLI_ENTRYPOINT_LINE_CAPACITY:
+                        DebuggerManagedEngine::managed_controller_release_owned_history(service.controller) can Memory.Release, Unsafe.PointerCast
+                        return Exit::INPUT_ERROR
                     length <- length + 1
+            DebuggerManagedEngine::managed_controller_release_owned_history(service.controller) can Memory.Release, Unsafe.PointerCast
             return Exit::OK
 
 def main() -> i64 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:

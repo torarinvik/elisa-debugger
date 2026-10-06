@@ -1,10 +1,72 @@
 # Compiler integration boundary
 
-This records the compiler dependency and the narrow compiler-to-debugger seam
-verified on 2026-09-15. It is a compatibility record, not a claim that arbitrary
-Elisa programs can be compiled to EDIR.
+This records the compiler dependency and qualified compiler-to-debugger seam.
+The supported EDIR subset and qualification dates below define its scope.
 
 ## Compiler revision
+
+Current qualification uses stage1 provenance revision
+`23a0e16a854cddec3016746a0cb9480db0c4db22` and its matching runtime on Linux
+x86_64 (2026-10-07), with stale-stage1 refusal enabled. Earlier focused gates
+passed on Darwin arm64 (2026-10-06), before the subsequent Linux portability,
+immutable retained replay, and trace-publication generation repairs. The
+compiler emits EDIR codec schema 4 and program version 5 for the supported clock/random, console byte/EOF, and
+virtual-file byte-read instructions. `managed-trace-effects-check` compiles a
+recursive program at O0/O2, records it in one process, and restores every
+boundary in fresh processes after changing and deleting its original host
+file. A separately compiled O2 test executable passes the same regression.
+`dap-trace-effects-check` saves and reopens this program across adapter
+processes and advances through captured effects without provider requests.
+These focused gates do not qualify broader language or native replay support.
+The older pinned integration procedure below remains historical evidence.
+
+`cli-trace-effects-check` opens that same DAP trace with an explicit EDIR image
+in a fresh CLI process, advances and reverses through captured effects, and
+exports an identical artifact after rewinding. Missing/corrupt image loads,
+an incompatible trace, and a repeated launch leave the session usable.
+`replay-divergence-clients-check` changes an event state hash and reseals all
+transport checksums. Both clients report the first mismatch at event 58 with
+58 verified preceding boundaries, preserve the live stop, and accept the
+original artifact on retry. The DAP diagnostic passes Content-Length and JSON
+validation.
+
+The Linux run completed `make -j12 check module-check smoke`. Separate O2
+executables passed managed effect replay, CLI/DAP effectful trace reopening,
+first-divergence diagnostics, editor timeline navigation, EDIR loading,
+transactional trace-file I/O, spawn-action storage, child capture, and agent
+transport. Draft 2020-12 validation covered both the rejected divergence
+response and successful trace-open retry. Negative regressions reproduced
+retained-history mutation and delayed provider-reply acceptance before their
+repairs. The source snapshot used for the final full run was
+`cfac83eabd71a5def7daf22f863935f168e9c6144beff1153be418728fadaa2b`;
+the seven O2 integration builds used the same implementation sources. Extra
+O2 file-loader and trace-file executables also passed. Later documentation
+edits do not imply additional runtime qualification. The remote compiler
+source is an isolated pinned snapshot; changes to neighboring checkouts are
+not incorporated into these results.
+
+The current provenance guard hashes compiler sources, runtime sources, build
+recipes, and the stage1 product. It checks content rather than timestamps.
+The source-tree SHA-256 is
+`58e3e1ffa12306bef27875b95697768819c376f1646565b8f62a8abd25a7fe48`;
+the build-recipe SHA-256 is
+`7b4267cbd9e406c71e7bb89bfb93980d8d3e9c6cc33746340cba67adc27d6e10`.
+
+| Provenance host | Stage1 product SHA-256 | Runtime object SHA-256 |
+| --- | --- | --- |
+| Darwin arm64, earlier focused gates | `d397d5e37ac1d37ee070d56e5f7076466d7dd47251518bcf1b2f2c24be007fe2` | `4bfbc5841c65981a9574c7c81ff60e48cd8f4f059d4c92123b43149e1b06c080` |
+| Linux x86_64 | `b24730757cad1f181f1a6647b2dfe52d6c46e262c91e4a179f9db0ed25451b14` | `9d7bbd0119182a7047825ec61ce72ff9c5d32ef3cf61c42a68eb3a315ca1b4ab` |
+
+Linux qualification uses Clang/LLVM 21, explicit
+`ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1`, and
+`ELISA_NO_LINUX_SHIM=1`. A runtime built without the Linux host flag referenced
+Darwin `sysctlbyname`; rebuilding with the correct flags resolved that link
+failure. The runtime is compiled with `ELISA_STAGE1_JOBS=1` to retain private
+helper linkage. Compiling both runtime and application with multiple stage1
+partitions exposes a duplicate `elisa.part.__elisa_darray_grow` definition on
+this compiler revision. Application builds use four partitions after the
+single-object runtime build. No unresolved-symbol or duplicate-definition
+linker override is used.
 
 On 2026-09-15, `origin/main` resolved to
 `fd2cb3cff470319500db362e5fce2833cbe300de` (`fd2cb3cf`). The isolated debugger
@@ -17,7 +79,7 @@ EDIR and native LLVM, and maps native DWARF locations back to original source
 lines. The checks below use a clean worktree at the integration revision, a
 stage1 product rebuilt from that worktree, and its matching runtime object.
 
-The wrapper `scripts/elisac_stage1.sh` rejects a product binary older than any
+At the historical integration revision, the wrapper `scripts/elisac_stage1.sh` rejects a product binary older than any
 compiler `.elisa` or `.elisai` source. The guard is timestamp based, not a Git
 revision check. Keep `ELISA_ALLOW_STALE_STAGE1=0` for integration checks; setting
 it to `1` only bypasses freshness validation and does not establish that the
@@ -41,7 +103,7 @@ ELISA_ALLOW_STALE_STAGE1=0 \
 The seed flow also builds the runtime object from the same compiler source. Keep
 that object paired with this stage1 product when building the debugger.
 
-## Strict-freshness build and test path
+## Historical integration build and test path
 
 From this debugger repository, keep `COMPILER_ROOT` set to the clean compiler
 worktree above. This direct command checks the stage1 product's timestamp
@@ -129,20 +191,21 @@ and native `-O0`. This exercises the latest LLVM optimization pipeline on that
 fixture; it does not exercise `darray[i64]` memory lowering or establish a
 general optimized-program replay claim.
 
-## Supported boundary and current limits
+## Historical boundary and current limits
 
-The compiler's `-emit edir` mode accepts the scalar and counted-loop fixtures
+At the historical integration revision, `-emit edir` accepts the scalar and counted-loop fixtures
 plus a bounded three-function recursive-call shape with undecorated,
 effect-free `i64` signatures. It rejects other syntax and semantics instead of
 silently producing a partial artifact. Includes, static-generated source maps,
 multiple source files, closures, generics, effects, and arbitrary native
 programs are outside this slice.
 
-The current compiler producer emits codec schema 3 artifacts with EDIR program
+That compiler producer emits codec schema 3 artifacts with EDIR program
 version 1 in [the EDIR format](../spec/edir-format.md). Schema 3 adds function
 descriptors and is required for the bounded recursive-call fixture. The
-debugger also accepts legacy schema 2 artifacts and verifies either schema
-before managed execution. A relative input source path
+debugger now emits schema 4, reads legacy schemas 2/3, and verifies each schema
+before managed execution. The current narrow effects boundary is described in
+the qualification section above. A relative input source path
 becomes the artifact's logical path. For absolute source paths,
 `ELISA_EDIR_SOURCE_ROOT` must identify the root to strip; the editor then uses
 the corresponding `sourcePathRoot` launch mapping when sending absolute paths to

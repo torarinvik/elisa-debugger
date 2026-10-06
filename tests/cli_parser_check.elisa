@@ -24,6 +24,9 @@ const module TestText:
     TRACE_PATH: cstr = "build/cli trace restart.eltr"
     MISSING_PATH_LINE: cstr = "openTrace 17   "
     OVERFLOW_EVENT_LINE: cstr = "openTrace 18446744073709551616 trace.eltr"
+    LAUNCH_LINE: cstr = "launch build/compiler image.edir  \t"
+    RUN_LINE: cstr = "run build/compiler image.edir"
+    IMAGE_PATH: cstr = "build/compiler image.edir"
 
 const module TestResult:
     SUCCESS: i64 = 0
@@ -32,6 +35,7 @@ const module TestResult:
     OPEN_TRACE_MUTATING: i64 = 11
     OPEN_TRACE_MISSING_PATH: i64 = 12
     OPEN_TRACE_OVERFLOW: i64 = 13
+    IMAGE_PATH_PARSE: i64 = 14
 
 def copy_text(source: cstr, destination: mutable u8&, capacity: usize) -> usize:
     length: mutable usize = Test::FIRST_BYTE
@@ -41,6 +45,20 @@ def copy_text(source: cstr, destination: mutable u8&, capacity: usize) -> usize:
         destination[length] <- byte
         length <- length + Test::INCREMENT
     return length
+
+def image_path_is_exact(line: cstr, command: DebuggerCLI::Command) -> bool:
+    bytes: mutable u8[Test::OPEN_LINE_CAPACITY] = zeroed
+    expected: mutable u8[Test::PATH_CAPACITY] = zeroed
+    length: usize = copy_text(line, bytes[Test::FIRST_BYTE], Test::OPEN_LINE_CAPACITY)
+    path_length: usize = copy_text(TestText::IMAGE_PATH, expected[Test::FIRST_BYTE], Test::PATH_CAPACITY)
+    parsed: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(bytes[Test::FIRST_BYTE], length, Test::EXPECTED_GENERATION)
+    return false if not parsed.valid or parsed.command != command or parsed.argument_present or not parsed.text_argument_present or parsed.text_argument_length != path_length or parsed.expected_generation != Test::EXPECTED_GENERATION
+    for index in Test::FIRST_BYTE..<path_length:
+        return false if parsed.text_argument[index] != expected[index]
+    # An embedded NUL must not make the loader open a different path.
+    bytes[length - Test::INCREMENT] <- Test::NUL
+    nul: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(bytes[Test::FIRST_BYTE], length, Test::EXPECTED_GENERATION)
+    return not nul.valid
 
 
 def main() -> i64:
@@ -94,4 +112,5 @@ def main() -> i64:
     overflow_event_length: usize = copy_text(TestText::OVERFLOW_EVENT_LINE, overflow_event_line[Test::FIRST_BYTE], Test::OPEN_LINE_CAPACITY)
     overflow_event: DebuggerCLI::ParsedCommand = DebuggerCLI::command_parse_line(overflow_event_line[Test::FIRST_BYTE], overflow_event_length, Test::EXPECTED_GENERATION)
     return TestResult::OPEN_TRACE_OVERFLOW if overflow_event.valid
+    return TestResult::IMAGE_PATH_PARSE if not image_path_is_exact(TestText::LAUNCH_LINE, DebuggerCLI::Command.Launch) or not image_path_is_exact(TestText::RUN_LINE, DebuggerCLI::Command.Run)
     return TestResult::SUCCESS

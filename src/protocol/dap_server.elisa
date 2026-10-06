@@ -2,10 +2,11 @@
 # bounded command dispatcher for initialize, launch, stepping, pause, threads,
 # and lifecycle requests; session semantics remain in the shared modules.
 
-extern read(fd: int, buf: void&, count: usize) -> isize can[Console]
-extern printf(format: cstr, ...) -> int can[Console]
-extern puts(text: cstr) -> int can[Console]
-extern fflush(stream: mutable void&?) -> int can[Console]
+extern read(fd: i32, buf: void&, count: usize) -> isize can[Console]
+extern printf(format: cstr, ...) -> i32 can[Console]
+extern puts(text: cstr) -> i32 can[Console]
+extern fflush(stream: mutable void&?) -> i32 can[Console]
+extern snprintf(buffer: void&, count: usize, format: cstr, ...) -> i32
 
 include "../core/session.elisa"
 include "../core/capabilities.elisa"
@@ -190,6 +191,8 @@ module DebuggerDAPServer:
             OPEN_COMMAND: cstr = "elisa/openTrace"
             OPEN_COMMAND_LENGTH: usize = 15
             OPEN_COMMAND_HASH: u64 = 714304655246469180
+            SUCCESS_SUFFIX: cstr = "\",\"success\":true,\"body\":{\"accepted\":true}}"
+            SUCCESS_SUFFIX_LENGTH: usize = 42
             INVALID_ARGUMENT_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace request arguments are invalid\"}"
             INVALID_ARGUMENT_SUFFIX_LENGTH: usize = 66
             STOPPED_SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace file operations require a stopped session\"}"
@@ -209,6 +212,13 @@ module DebuggerDAPServer:
 
         const module TraceFileDetail:
             REQUEST_ARGUMENT: u32 = 18
+
+        const module ReplayDiagnosticWire:
+            CAPACITY: usize = 2048
+            FIRST_BYTE: usize = 0
+            SUFFIX: cstr = "\",\"success\":false,\"message\":\"trace replay diverged\",\"body\":{\"elisaReplayDivergence\":{\"version\":%u,\"component\":\"%s\",\"eventIndex\":\"%llu\",\"lastVerifiedEvent\":\"%llu\",\"recordingId\":\"%llu\",\"branchId\":\"%llu\",\"expectedEventAvailable\":%s,\"observedEventAvailable\":%s,\"expectedKind\":%u,\"observedKind\":%u,\"expectedTaskId\":\"%llu\",\"observedTaskId\":\"%llu\",\"expectedInvocationId\":\"%llu\",\"observedInvocationId\":\"%llu\",\"expectedCallSiteId\":\"%llu\",\"observedCallSiteId\":\"%llu\",\"expectedRequestHash\":\"%llu\",\"observedRequestHash\":\"%llu\",\"expectedValueAvailable\":%s,\"observedValueAvailable\":%s,\"expectedValue\":\"%llu\",\"observedValue\":\"%llu\",\"verifiedCheckpointAvailable\":%s,\"verifiedCheckpointEvent\":\"%llu\"}}}"
+            TRUE_VALUE: cstr = "true"
+            FALSE_VALUE: cstr = "false"
 
         const module CommandDispatch:
             DAP_UNKNOWN_COMMAND_HASH: u64 = 0
@@ -630,7 +640,7 @@ module DebuggerDAPServer:
             DAP_THREADS_SUFFIX_LENGTH: usize = 61
 
         const module TransportLimits:
-            PROTOCOL_DAP_SERVER_TRANSPORT_LIMITS_STDIN_FD: int = 0
+            PROTOCOL_DAP_SERVER_TRANSPORT_LIMITS_STDIN_FD: i32 = 0
             MAX_DAP_PAYLOAD: usize = 65536
             MAX_DAP_HEADER_BYTES: usize = 64
             MAX_DAP_HEADER_DIGITS: usize = 10
@@ -1612,6 +1622,17 @@ module DebuggerDAPServer:
             _ = printf(command) can Console
             _ = printf(suffix) can Console
 
+        def diagnostic_boolean(value: bool) -> cstr:
+            return ReplayDiagnosticWire::TRUE_VALUE if value else ReplayDiagnosticWire::FALSE_VALUE
+
+        def write_replay_divergence(diagnostic: DebuggerReplayDiagnostic::Divergence, response_sequence: u64, request_sequence: u64) -> void can[Console, Unsafe.PointerCast]:
+            suffix: mutable u8[ReplayDiagnosticWire::CAPACITY] = zeroed
+            length: i32 = snprintf((&suffix[ReplayDiagnosticWire::FIRST_BYTE]).cast[void&], ReplayDiagnosticWire::CAPACITY, ReplayDiagnosticWire::SUFFIX, diagnostic.schema, DebuggerReplayDiagnostic::component_name(diagnostic.component), diagnostic.event, diagnostic.last_verified.event, diagnostic.last_verified.recording.value, diagnostic.last_verified.branch.value, diagnostic_boolean(diagnostic.has_expected_event), diagnostic_boolean(diagnostic.has_observed_event), diagnostic.expected_kind.u32(), diagnostic.observed_kind.u32(), diagnostic.expected_position.task.value, diagnostic.observed_position.task.value, diagnostic.expected_position.invocation.value, diagnostic.observed_position.invocation.value, diagnostic.expected_call_site.value, diagnostic.observed_call_site.value, diagnostic.expected_request_hash, diagnostic.observed_request_hash, diagnostic_boolean(diagnostic.has_expected_value), diagnostic_boolean(diagnostic.has_observed_value), diagnostic.expected_value, diagnostic.observed_value, diagnostic_boolean(diagnostic.has_verified_checkpoint), diagnostic.verified_checkpoint_event) can Unsafe.PointerCast
+            if length < 0 or length.usize() >= ReplayDiagnosticWire::CAPACITY:
+                write_dynamic_response(response_sequence, request_sequence, TraceFiles::OPEN_COMMAND, TraceFiles::OPEN_COMMAND_LENGTH, TraceFiles::UNAVAILABLE_SUFFIX, TraceFiles::UNAVAILABLE_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                return
+            write_dynamic_response(response_sequence, request_sequence, TraceFiles::OPEN_COMMAND, TraceFiles::OPEN_COMMAND_LENGTH, (&suffix[ReplayDiagnosticWire::FIRST_BYTE]).cast[cstr], length.usize()) can Console, Unsafe.PointerCast
+
         def timeline_boolean_length(value: bool) -> usize:
             return TimelineNavigation::TRUE_VALUE_LENGTH if value else TimelineNavigation::FALSE_VALUE_LENGTH
 
@@ -2533,6 +2554,9 @@ module DebuggerDAPServer:
         def write_response(service: DebuggerManagedService::Service&, result: DebuggerProtocolDispatcher::DispatchResult&, command_hash: u64, request_sequence: u64, response_sequence: u64, state_committed: bool, memory: DebuggerMemory::MemoryRead&, variables: DebuggerManagedInspection::LocalPage&, source_breakpoints: DebuggerManagedService::SourceBreakpointResult&, client_options: DebuggerDAPPayload::ClientOptions&, context: DAPRequestContext&, payload: u8&, command_start: usize, command_end: usize) -> void can[Console, Unsafe.PointerCast]:
             if not result.accepted:
                 if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE or command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN:
+                    if command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN and result.failure.code == DebuggerErrors::ErrorCode.Diverged and service.replay_diagnostic.available:
+                        write_replay_divergence(service.replay_diagnostic, response_sequence, request_sequence) can Console, Unsafe.PointerCast
+                        return
                     command: cstr = TraceFiles::SAVE_COMMAND if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE else TraceFiles::OPEN_COMMAND
                     command_length: usize = TraceFiles::SAVE_COMMAND_LENGTH if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE else TraceFiles::OPEN_COMMAND_LENGTH
                     suffix: mutable cstr = TraceFiles::UNAVAILABLE_SUFFIX
@@ -2654,10 +2678,10 @@ module DebuggerDAPServer:
                 write_dynamic_response(response_sequence, request_sequence, TimelineNavigation::SEEK_COMMAND, TimelineNavigation::SEEK_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_TRACE_SAVE:
-                write_dynamic_response(response_sequence, request_sequence, TraceFiles::SAVE_COMMAND, TraceFiles::SAVE_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                write_dynamic_response(response_sequence, request_sequence, TraceFiles::SAVE_COMMAND, TraceFiles::SAVE_COMMAND_LENGTH, TraceFiles::SUCCESS_SUFFIX, TraceFiles::SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_TRACE_OPEN:
-                write_dynamic_response(response_sequence, request_sequence, TraceFiles::OPEN_COMMAND, TraceFiles::OPEN_COMMAND_LENGTH, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX, ResponseStatus::DAP_SIMPLE_SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
+                write_dynamic_response(response_sequence, request_sequence, TraceFiles::OPEN_COMMAND, TraceFiles::OPEN_COMMAND_LENGTH, TraceFiles::SUCCESS_SUFFIX, TraceFiles::SUCCESS_SUFFIX_LENGTH) can Console, Unsafe.PointerCast
                 return
             if command_hash == CommandDispatch::COMMAND_HASH_GET_TIMELINE:
                 write_timeline_response(DebuggerManagedService::service_timeline(service), service.controller.session.stop_generation, request_sequence, response_sequence) can Console, Unsafe.PointerCast

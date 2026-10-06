@@ -58,12 +58,30 @@ unsigned 64-bit random samples for exact replay. Random samples use the typed
 `effect_oracle_record_random` and `effect_oracle_replay_random_result` APIs;
 their complete 64-bit value is preserved by the checkpoint codec. Callers
 provide stable request/result hashes, which must identify the relevant call
-shape and stream position. Console input/output, file contents, network
-payloads, process state, and foreign-call results still exceed the scalar
-record shape. Recording those kinds marks the oracle incomplete, and replay
-refuses incomplete data even if a serialized exactness flag is forged. The
-typed console adapters and virtual file store still need a shared durable
-effect-event path before those effects can contribute to exact replay.
+shape and stream position. The managed effect bridge pairs byte-oriented
+console input/output and EOF with typed adapter journals; mounted virtual-file
+reads retain initial bytes and ordered resource operations. Artifact export
+reconstructs these executed effects, checks every canonical event envelope,
+and compares complete terminal side state. Unrelated adapter/resource records
+remain rejected even when their snapshots and checksums are structurally valid.
+Network, process, foreign calls, and compiler-unintegrated file operations
+remain outside this exact artifact path.
+
+Reopening reconstructs recording state in a temporary service without a host
+provider or target output sink. It preserves a complete side-state snapshot at
+each retained boundary. Seek, source stepping, and continue within that prefix
+restore the captured state; they do not obtain fresh inputs. Export reads the
+validated retained high-water checkpoint without moving the inspection cursor.
+
+Provider replies are rejected while the cursor is inside already recorded
+future, including matching delayed replies through the typed engine API.
+Successful trace replacement advances the published stop generation once;
+private reconstruction stops do not invalidate editor handles repeatedly.
+
+POSIX file descriptors and status returns use explicit `i32` declarations.
+Elisa `int` is wider on the qualified hosts and cannot describe C's signed
+error return. Spawn-action storage is an aligned opaque 80-byte buffer that
+covers both qualified 64-bit libc layouts; libc alone interprets its fields.
 
 ## Protocols
 

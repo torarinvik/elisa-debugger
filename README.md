@@ -169,11 +169,14 @@ and stop generation. Use `seek <event> [expected-stop-generation]` to move to
 an exact event; the optional generation rejects stale scripted seeks. Use
 `saveTrace <path>` to transactionally write an exact managed trace to a file;
 for example, `saveTrace build/session.trace`. In a new CLI process, use
-`openTrace <event> <path>` to validate a saved trace against the CLI's default
-managed image, replay its bounded history, and position at the requested event
-before inspecting or seeking through its timeline; for example,
-`openTrace 1 build/session.trace`. The path is the remaining text after the
-event, so spaces are preserved. The DAP adapter advertises version 1 of
+`openTrace <event> <path>` to validate a saved trace against the loaded managed
+image, replay its bounded history, and position at the requested event before
+inspecting or seeking through its timeline. The default is the built-in demo;
+use `launch <EDIR-path>` (or `run <EDIR-path>`), then `pause`, to load a
+compiler-produced image before opening its trace. A stopped session is replaced
+only after full compatibility and replay validation succeeds. For example:
+`launch build/program.edir`, `pause`, `openTrace 0 build/session.trace`.
+Paths consume the remaining text, preserving spaces. The DAP adapter advertises version 1 of
 `supportsElisaTraceFiles`, with `elisa/saveTrace` and generation-aware
 `elisa/openTrace` requests on the existing adapter connection. Reopening
 requires the trace to match the currently loaded EDIR build and image; refresh
@@ -182,6 +185,16 @@ timeline and inspection after its stopped event. See the
 JSON process still cannot carry a destination path or return trace artifact
 bytes, so trace-file transfer is available through the interactive CLI, DAP,
 and typed Elisa service API.
+
+Exact managed traces can also preserve executed clock/random results,
+single-byte console input and output, EOF, and reads from mounted virtual
+files. Export validates their complete event-aligned journals. Reopening uses
+captured inputs without consulting host providers or redisplaying target
+output; source stepping and continue through the retained prefix use the same
+recorded state as seek. A compatible EDIR image is still required. Run
+`make ELISA_ALLOW_STALE_STAGE1=0 managed-trace-effects-check` to exercise a
+compiler-produced recursive program across separate recording and replay
+processes, including changed/deleted host input and corruption rejection.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

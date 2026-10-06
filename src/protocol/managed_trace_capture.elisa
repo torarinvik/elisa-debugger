@@ -1,7 +1,7 @@
-# Shared bounded trace snapshot construction. This module deliberately avoids
-# trace readers and restore code so export-only clients keep a smaller surface.
+# Shared bounded trace snapshot construction. Export verifies captured inputs
+# through the same prefix reconstruction used by restore, without file readers.
 
-include "./managed_service.elisa"
+include "./managed_trace_replay.elisa"
 include "../trace/recorder.elisa"
 include "../trace/pipeline.elisa"
 
@@ -26,8 +26,8 @@ module DebuggerManagedTraceCapture:
         def capture_error(failure: DebuggerErrors::DebuggerError) -> DebuggerTracePipeline::BundleBuildResult:
             return DebuggerTracePipeline::BundleBuildResult{accepted: false, bundle: zeroed, failure: failure}
 
-        # These side streams have no event-aligned encoding yet. Reject an
-        # exact capture before export could omit their state from replay.
+        # Side state requires complete event-aligned reconstruction. A sealed
+        # final snapshot alone cannot qualify an exact recording.
         def capture_has_unjournaled_side_state(service: DebuggerManagedService::Service&) -> bool:
             return true if service.controller.state.branches.count != SideState::NO_RECORDS
             return true if service.controller.state.tasks.task_count != SideState::NO_RECORDS or service.controller.state.tasks.wait_count != SideState::NO_RECORDS
@@ -53,7 +53,13 @@ module DebuggerManagedTraceCapture:
             return capture_error(DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::TRACE_STATE)) if not DebuggerSession::session_can_inspect(service.controller.session)
             DebuggerManagedService::service_capture_trace_events(service)
             return capture_error(service.trace_failure) if service.trace_partial
-            if capture_has_unjournaled_side_state(service):
+            retained: DebuggerManagedEngine::RetainedCheckpoint = DebuggerManagedEngine::managed_retained_checkpoint(service.controller, service.recorded_event_count.u64())
+            checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = retained.checkpoint
+            has_side_state: bool = capture_has_unjournaled_side_state(service) or checkpoint.effects.count != SideState::NO_RECORDS or checkpoint.resources.count != SideState::NO_RECORDS or checkpoint.adapters.clock.count != SideState::NO_RECORDS or checkpoint.adapters.random.count != SideState::NO_RECORDS or checkpoint.adapters.console.count != SideState::NO_RECORDS
+            side_state_replayable: mutable bool = not has_side_state
+            if has_side_state and retained.found and service.controller.state.branches.count == SideState::NO_RECORDS and service.controller.engine.intervention_count == SideState::NO_RECORDS:
+                side_state_replayable <- DebuggerManagedTraceReplay::recorded_prefix_is_replayable(service, checkpoint) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+            if not side_state_replayable:
                 failure: DebuggerErrors::DebuggerError = DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, ErrorDetail::UNJOURNALED_SIDE_STATE)
                 service.trace_partial <- true
                 service.trace_failure <- failure
@@ -64,10 +70,9 @@ module DebuggerManagedTraceCapture:
                 failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append(recorder, service.recorded_events[index])
                 return capture_error(failure) if not DebuggerErrors::error_is_ok(failure)
             # Full checkpoints include VM, scheduler, effect, virtual-resource,
-            # and adapter state. Capture one only at the recorded high-water
-            # boundary, after the final event.
-            if service.recorded_event_count > Boundary::NO_RECORDED_EVENTS and service.controller.engine.event_count == service.recorded_event_count:
-                checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+            # and adapter state. The retained high-water checkpoint follows
+            # the final event, regardless of the current inspection cursor.
+            if service.recorded_event_count > Boundary::NO_RECORDED_EVENTS and retained.found:
                 failure: DebuggerErrors::DebuggerError = DebuggerTraceRecorder::recorder_append_checkpoint(recorder, checkpoint)
                 return capture_error(failure) if not DebuggerErrors::error_is_ok(failure)
             return DebuggerTracePipeline::bundle_from_recorder(recorder) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast

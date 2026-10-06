@@ -1,0 +1,133 @@
+# Reconstruct the supported managed recording from immutable captured inputs.
+# No host provider or target output sink is reachable from this module. Every
+# event and the complete terminal side state must agree before publication.
+
+include "./managed_service.elisa"
+
+module DebuggerManagedTraceReplay:
+    private:
+        const module Boundary:
+            FIRST_EVENT: usize = 0
+            EVENT_INCREMENT: usize = 1
+            ROOT_BRANCH: u64 = 0
+
+        const module Detail:
+            UNSUPPORTED_STATE: u32 = 1
+            RESOURCE_IDENTITY: u32 = 2
+            EFFECT_REQUEST: u32 = 3
+            EVENT_MISMATCH: u32 = 4
+            CHECKPOINT_MISMATCH: u32 = 5
+            EVENT_COUNT: u32 = 6
+
+        def replay_error(code: DebuggerErrors::ErrorCode, detail: u32) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(code, false, detail)
+
+        def checkpoint_domain_is_supported(checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> bool:
+            return false if checkpoint.branch.value != Boundary::ROOT_BRANCH
+            return false if checkpoint.tasks.task_count != Boundary::FIRST_EVENT or checkpoint.tasks.wait_count != Boundary::FIRST_EVENT or checkpoint.tasks.scheduler_count != Boundary::FIRST_EVENT or checkpoint.tasks.scheduler_cursor != Boundary::FIRST_EVENT
+            return false if checkpoint.tasks.scheduler_replaying or checkpoint.tasks.scheduler_diverged or checkpoint.tasks.scheduler_overflowed
+            return false if checkpoint.effects.mode != DebuggerEffects::EffectMode.Recording or checkpoint.resources.mode != DebuggerVirtualResources::ResourceMode.Recording
+            return checkpoint.adapters.clock.mode == DebuggerReplayAdapters::AdapterMode.Recording and checkpoint.adapters.random.mode == DebuggerReplayAdapters::AdapterMode.Recording and checkpoint.adapters.console.mode == DebuggerReplayAdapters::AdapterMode.Recording
+
+        def expected_effect_kind(request: DebuggerManagedEngine::HostEffectRequest) -> DebuggerEffects::EffectKind:
+            return DebuggerEffects::EffectKind.Clock if request.kind == DebuggerManagedEngine::HostEffectKind.ClockNow
+            return DebuggerEffects::EffectKind.Random if request.kind == DebuggerManagedEngine::HostEffectKind.RandomU64
+            return DebuggerEffects::EffectKind.ConsoleInput if request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput
+            return DebuggerEffects::EffectKind.ConsoleOutput
+
+        def record_captured_effect(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, request: DebuggerManagedEngine::HostEffectRequest, event: DebuggerEvents::EventEnvelope) -> DebuggerErrors::DebuggerError:
+            index: usize = service.controller.state.effects.count
+            if not request.valid or index >= checkpoint.effects.count:
+                service.replay_diagnostic <- DebuggerReplayDiagnostic::divergence(DebuggerReplayDiagnostic::Component.MissingResult, service.controller.session.position, event.ordinal)
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EFFECT_REQUEST)
+            record: DebuggerEffects::EffectRecord = checkpoint.effects.records[index]
+            kind: DebuggerEffects::EffectKind = expected_effect_kind(request)
+            mismatch: mutable DebuggerReplayDiagnostic::Divergence = zeroed
+            if record.kind != kind:
+                mismatch <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.EffectKind, service.controller.session.position, event.ordinal, record.kind.u64(), kind.u64())
+            elif record.call_site.value != request.call_site.value:
+                mismatch <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.CallSite, service.controller.session.position, event.ordinal, record.call_site.value, request.call_site.value)
+            elif record.invocation.value != request.invocation.value:
+                mismatch <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.Invocation, service.controller.session.position, event.ordinal, record.invocation.value, request.invocation.value)
+            elif record.request_hash != request.request_hash:
+                mismatch <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.Request, service.controller.session.position, event.ordinal, record.request_hash, request.request_hash)
+            if mismatch.available:
+                mismatch.has_expected_event <- true
+                mismatch.expected_position <- event.position
+                mismatch.expected_position.invocation <- record.invocation
+                mismatch.expected_kind <- event.kind
+                mismatch.expected_call_site <- record.call_site
+                mismatch.observed_call_site <- request.call_site
+                mismatch.expected_request_hash <- record.request_hash
+                mismatch.observed_request_hash <- request.request_hash
+                mismatch.observed_position <- service.controller.session.position
+                mismatch.observed_position.invocation <- request.invocation
+                service.replay_diagnostic <- mismatch
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EFFECT_REQUEST)
+            reply: mutable DebuggerManagedService::Result = zeroed
+            if request.kind == DebuggerManagedEngine::HostEffectKind.ClockNow and record.kind == DebuggerEffects::EffectKind.Clock:
+                reply <- DebuggerManagedService::service_record_clock_effect(service, request, record.result_hash, record.result_value)
+            elif request.kind == DebuggerManagedEngine::HostEffectKind.RandomU64 and record.kind == DebuggerEffects::EffectKind.Random:
+                reply <- DebuggerManagedService::service_record_random_effect(service, request, record.result_hash, record.result_value.u64())
+            elif request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput and record.kind == DebuggerEffects::EffectKind.ConsoleInput:
+                reply <- DebuggerManagedService::service_record_console_input(service, request, record.result_hash, record.result_value)
+            elif request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleOutput and record.kind == DebuggerEffects::EffectKind.ConsoleOutput:
+                reply <- DebuggerManagedService::service_record_console_output(service, request)
+            else:
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EFFECT_REQUEST)
+            return reply.failure
+
+    public:
+        # The destination is temporary owned state. Failure never publishes it
+        # to a live session; callers release its history on all rejected paths.
+        def replay_recorded_prefix(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, events: DebuggerEvents::EventEnvelope&, event_count: usize) -> DebuggerErrors::DebuggerError:
+            service.replay_diagnostic <- zeroed
+            failure: mutable DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            return replay_error(DebuggerErrors::ErrorCode.Unsupported, Detail::UNSUPPORTED_STATE) if not checkpoint_domain_is_supported(checkpoint)
+            return replay_error(DebuggerErrors::ErrorCode.ResourceLimit, Detail::EVENT_COUNT) if event_count > DebuggerManagedService::service_recording_capacity() or checkpoint.event != event_count.u64()
+            return replay_error(DebuggerErrors::ErrorCode.InvalidState, Detail::UNSUPPORTED_STATE) if service.controller.session.state != DebuggerSession::SessionState.Created or service.controller.engine.event_count != Boundary::FIRST_EVENT
+            for index in Boundary::FIRST_EVENT..<checkpoint.resources.count:
+                file: DebuggerVirtualResources::VirtualFile = checkpoint.resources.files[index]
+                return replay_error(DebuggerErrors::ErrorCode.Unsupported, Detail::UNSUPPORTED_STATE) if not file.mounted
+                mounted: DebuggerVirtualResources::ResourceOpenResult = DebuggerManagedEngine::managed_resource_mount(service.controller, file.path, file.writable, file.generation, file.initial_bytes[Boundary::FIRST_EVENT], file.initial_length)
+                return mounted.failure if not mounted.accepted
+                if mounted.handle.value != file.handle.value:
+                    service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.ResourceIdentity, service.controller.session.position, Boundary::FIRST_EVENT.u64(), file.handle.value, mounted.handle.value)
+                    return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::RESOURCE_IDENTITY)
+            failure <- DebuggerManagedEngine::managed_launch(service.controller)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            failure <- DebuggerManagedEngine::managed_pause(service.controller)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            for index in Boundary::FIRST_EVENT..<event_count:
+                last_verified: DebuggerIdentity::Position = service.controller.session.position
+                request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(service.controller)
+                if DebuggerManagedEngine::managed_host_effect_requires_provider(request.kind):
+                    failure <- record_captured_effect(service, checkpoint, request, events[index])
+                else:
+                    request_step: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: Boundary::EVENT_INCREMENT.u64(), has_id: true, expected_generation: Boundary::FIRST_EVENT.u64(), target_event: Boundary::FIRST_EVENT.u64(), valid: true}
+                    stepped: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request_step)
+                    failure <- stepped.failure
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                if service.controller.engine.event_count != index + Boundary::EVENT_INCREMENT:
+                    service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.EventCount, last_verified, index.u64(), (index + Boundary::EVENT_INCREMENT).u64(), service.controller.engine.event_count.u64())
+                    return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EVENT_MISMATCH)
+                service.replay_diagnostic <- DebuggerReplayDiagnostic::event_mismatch(events[index], service.controller.engine.events[index], last_verified)
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EVENT_MISMATCH) if service.replay_diagnostic.available
+            reconstructed: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+            if reconstructed.state_hash != checkpoint.state_hash or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, service.controller.engine.machine):
+                service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.MachineState, service.controller.session.position, checkpoint.event, checkpoint.state_hash, reconstructed.state_hash)
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::CHECKPOINT_MISMATCH)
+            if not DebuggerFullCheckpoint::full_checkpoint_is_valid(reconstructed) or reconstructed.side_state_hash != checkpoint.side_state_hash:
+                service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.SideState, service.controller.session.position, checkpoint.event, checkpoint.side_state_hash, reconstructed.side_state_hash)
+                return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::CHECKPOINT_MISMATCH)
+            DebuggerManagedService::service_sync_timeline(service)
+            return DebuggerErrors::no_error()
+
+        def recorded_prefix_is_replayable(source: DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+            session: DebuggerSession::Session = DebuggerSession::new_session(source.controller.session.id, source.controller.session.build, source.controller.session.capabilities)
+            temporary: mutable DebuggerManagedService::Service = zeroed
+            DebuggerManagedService::service_initialize(temporary, session, source.controller.engine.image, source.controller.engine.recording)
+            failure: DebuggerErrors::DebuggerError = replay_recorded_prefix(temporary, checkpoint, source.recorded_events[Boundary::FIRST_EVENT], source.recorded_event_count)
+            DebuggerManagedEngine::managed_controller_release_owned_history(temporary.controller) can Memory.Release, Unsafe.PointerCast
+            return DebuggerErrors::error_is_ok(failure)

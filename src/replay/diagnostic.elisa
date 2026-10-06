@@ -1,0 +1,139 @@
+# Replay failures are observations about a rejected candidate, never a new
+# execution position for the live session. Values are present only when their
+# flags say so; zero is a legitimate identity, result, and hash.
+
+include "../core/events.elisa"
+
+module DebuggerReplayDiagnostic:
+    private:
+        const module Name:
+            EVENT_IDENTITY: cstr = "event-identity"
+            EVENT_KIND: cstr = "event-kind"
+            PAYLOAD: cstr = "payload"
+            MACHINE_STATE: cstr = "machine-state"
+            SIDE_STATE: cstr = "side-state"
+            EFFECT_KIND: cstr = "effect-kind"
+            CALL_SITE: cstr = "call-site"
+            INVOCATION: cstr = "invocation"
+            REQUEST: cstr = "request"
+            RESOURCE_IDENTITY: cstr = "resource-identity"
+            EVENT_COUNT: cstr = "event-count"
+            MISSING_RESULT: cstr = "missing-result"
+            NONE: cstr = "none"
+
+    public:
+        const module Schema:
+            VERSION: u32 = 1
+
+        enum Component:
+            None
+            EventIdentity
+            EventKind
+            Payload
+            MachineState
+            SideState
+            EffectKind
+            CallSite
+            Invocation
+            Request
+            ResourceIdentity
+            EventCount
+            MissingResult
+
+        struct Divergence:
+            available: mutable bool
+            schema: mutable u32
+            component: mutable Component
+            event: mutable u64
+            last_verified: mutable DebuggerIdentity::Position
+            expected_position: mutable DebuggerIdentity::Position
+            observed_position: mutable DebuggerIdentity::Position
+            has_expected_event: mutable bool
+            has_observed_event: mutable bool
+            expected_kind: mutable DebuggerEvents::EventKind
+            observed_kind: mutable DebuggerEvents::EventKind
+            expected_call_site: mutable DebuggerIdentity::DebugId
+            observed_call_site: mutable DebuggerIdentity::DebugId
+            expected_request_hash: mutable u64
+            observed_request_hash: mutable u64
+            has_expected_value: mutable bool
+            has_observed_value: mutable bool
+            expected_value: mutable u64
+            observed_value: mutable u64
+            has_verified_checkpoint: mutable bool
+            verified_checkpoint_event: mutable u64
+
+        def divergence(component: Component, last_verified: DebuggerIdentity::Position, event: u64) -> Divergence:
+            result: mutable Divergence = zeroed
+            result.available <- true
+            result.schema <- Schema::VERSION
+            result.component <- component
+            result.last_verified <- last_verified
+            result.event <- event
+            return result
+
+        def values(component: Component, last_verified: DebuggerIdentity::Position, event: u64, expected: u64, observed: u64) -> Divergence:
+            result: mutable Divergence = divergence(component, last_verified, event)
+            result.has_expected_value <- true
+            result.has_observed_value <- true
+            result.expected_value <- expected
+            result.observed_value <- observed
+            return result
+
+        # Equality remains the canonical event contract. Classification only
+        # describes its failure; it cannot decide that unequal events match.
+        def event_mismatch(expected: DebuggerEvents::EventEnvelope, observed: DebuggerEvents::EventEnvelope, last_verified: DebuggerIdentity::Position) -> Divergence:
+            result: mutable Divergence = zeroed
+            return result if DebuggerEvents::event_envelopes_equal(expected, observed)
+            result <- divergence(Component.EventIdentity, last_verified, expected.ordinal)
+            result.has_expected_event <- true
+            result.has_observed_event <- true
+            result.expected_position <- expected.position
+            result.observed_position <- observed.position
+            result.expected_kind <- expected.kind
+            result.observed_kind <- observed.kind
+            if not DebuggerEvents::event_payload_is_canonical(expected) or not DebuggerEvents::event_payload_is_canonical(observed):
+                result.component <- Component.Payload
+                return result
+            return result if expected.schema != observed.schema or expected.ordinal != observed.ordinal or expected.task.value != observed.task.value or expected.position.recording.value != observed.position.recording.value or expected.position.branch.value != observed.position.branch.value or expected.position.event != observed.position.event or expected.position.task.value != observed.position.task.value or expected.position.statement.value != observed.position.statement.value or expected.position.microstep != observed.position.microstep or expected.quality != observed.quality
+            if expected.position.invocation.value != observed.position.invocation.value:
+                result.component <- Component.Invocation
+                result.has_expected_value <- true
+                result.has_observed_value <- true
+                result.expected_value <- expected.position.invocation.value
+                result.observed_value <- observed.position.invocation.value
+            elif expected.kind != observed.kind:
+                result.component <- Component.EventKind
+            elif expected.state_hash != observed.state_hash:
+                result.component <- Component.MachineState
+                result.has_expected_value <- true
+                result.has_observed_value <- true
+                result.expected_value <- expected.state_hash
+                result.observed_value <- observed.state_hash
+            elif expected.payload_kind != observed.payload_kind or expected.payload_length != observed.payload_length or expected.payload_hash != observed.payload_hash:
+                result.component <- Component.Payload
+                result.has_expected_value <- true
+                result.has_observed_value <- true
+                result.expected_value <- expected.payload_hash
+                result.observed_value <- observed.payload_hash
+            else:
+                for index in 0..<expected.payload_length.usize():
+                    if expected.payload[index] != observed.payload[index]:
+                        result.component <- Component.Payload
+                        break
+            return result
+
+        def component_name(component: Component) -> cstr:
+            return Name::EVENT_IDENTITY if component == Component.EventIdentity
+            return Name::EVENT_KIND if component == Component.EventKind
+            return Name::PAYLOAD if component == Component.Payload
+            return Name::MACHINE_STATE if component == Component.MachineState
+            return Name::SIDE_STATE if component == Component.SideState
+            return Name::EFFECT_KIND if component == Component.EffectKind
+            return Name::CALL_SITE if component == Component.CallSite
+            return Name::INVOCATION if component == Component.Invocation
+            return Name::REQUEST if component == Component.Request
+            return Name::RESOURCE_IDENTITY if component == Component.ResourceIdentity
+            return Name::EVENT_COUNT if component == Component.EventCount
+            return Name::MISSING_RESULT if component == Component.MissingResult
+            return Name::NONE

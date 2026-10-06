@@ -7,9 +7,9 @@ include "../src/trace/pipeline.elisa"
 include "../src/trace/export.elisa"
 include "../src/trace/file_reader.elisa"
 
-extern creat(path: cstr, mode: int) -> int can[Blocking.IO]
-extern close(fd: int) -> int can[Blocking.IO]
-extern write(fd: int, buffer: void&, count: usize) -> isize can[Blocking.IO]
+extern creat(path: cstr, mode: u32) -> i32 can[Blocking.IO]
+extern close(fd: i32) -> i32 can[Blocking.IO]
+extern write(fd: i32, buffer: void&, count: usize) -> isize can[Blocking.IO]
 
 const module Test:
     BUILD_COMPILER_ID: u64 = 401
@@ -27,9 +27,9 @@ const module Test:
     FIRST_BYTE_INDEX: usize = 0
     BYTE_INCREMENT: usize = 1
     PATH_NUL: u8 = 0
-    FILE_MODE_OWNER_READ_WRITE: int = 384
-    FILE_OPEN_FAILURE: int = -1
-    FILE_CLOSE_FAILURE: int = -1
+    FILE_MODE_OWNER_READ_WRITE: u32 = 384
+    FILE_OPEN_FAILURE: i32 = -1
+    FILE_CLOSE_FAILURE: i32 = -1
     WRITE_FAILURE: isize = -1
     WRITE_NO_PROGRESS: isize = 0
     FIRST_WRITE_OFFSET: usize = 0
@@ -40,6 +40,7 @@ const module TestPaths:
     VALID_TRACE: cstr = "build/trace-file-roundtrip.eltr"
     TRUNCATED_TRACE: cstr = "build/trace-file-truncated.eltr"
     MISSING_TRACE: cstr = "/__elisa_debugger_trace_file_missing__/trace.eltr"
+    DIRECTORY_TARGET: cstr = "build"
     PARENT_TRACE: cstr = "build/../trace-file-parent.eltr"
 
 const module TestResult:
@@ -65,6 +66,8 @@ const module TestResult:
     PATH_TRAVERSAL: i64 = 19
     FILE_READER: i64 = 20
     TRUNCATED_FILE_READER: i64 = 21
+    CREATE_FAILURE: i64 = 22
+    RENAME_FAILURE: i64 = 23
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{
@@ -84,7 +87,7 @@ def copy_path(source: cstr, output: mutable u8&) -> usize:
         length <- length + Test::BYTE_INCREMENT
     return length
 
-def write_prefix(fd: int, bytes: u8&, length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
+def write_prefix(fd: i32, bytes: u8&, length: usize) -> bool can[Blocking.IO, Unsafe.PointerCast]:
     offset: mutable usize = Test::FIRST_WRITE_OFFSET
     while offset < length:
         written: isize = write(fd, (&bytes[offset]).cast[void&], length - offset) can Blocking.IO, Unsafe.PointerCast
@@ -98,10 +101,10 @@ def write_truncated_fixture(path: u8&, path_length: usize, bytes: u8&, length: u
     for index in Test::FIRST_BYTE_INDEX..<path_length:
         terminated_path[index] <- path[index]
     terminated_path[path_length] <- Test::PATH_NUL
-    descriptor: int = creat((&terminated_path[Test::FIRST_BYTE_INDEX]).cast[cstr], Test::FILE_MODE_OWNER_READ_WRITE) can Blocking.IO, Unsafe.PointerCast
+    descriptor: i32 = creat((&terminated_path[Test::FIRST_BYTE_INDEX]).cast[cstr], Test::FILE_MODE_OWNER_READ_WRITE) can Blocking.IO, Unsafe.PointerCast
     return false if descriptor == Test::FILE_OPEN_FAILURE
     written: bool = write_prefix(descriptor, bytes, length) can Blocking.IO, Unsafe.PointerCast
-    close_status: int = close(descriptor) can Blocking.IO
+    close_status: i32 = close(descriptor) can Blocking.IO
     return written and close_status != Test::FILE_CLOSE_FAILURE
 
 def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
@@ -127,6 +130,13 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     missing_path_length: usize = copy_path(TestPaths::MISSING_TRACE, missing_path[Test::FIRST_BYTE_INDEX])
     missing: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(missing_path[Test::FIRST_BYTE_INDEX], missing_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::OPEN_FAILURE if missing.status != DebuggerTraceFile::FileStatus.OpenFailure
+    missing_write: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(missing_path[Test::FIRST_BYTE_INDEX], missing_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::CREATE_FAILURE if missing_write.accepted or missing_write.status != DebuggerTraceFile::FileStatus.OpenFailure
+
+    directory_path: mutable u8[Test::PATH_BUFFER_CAPACITY] = zeroed
+    directory_path_length: usize = copy_path(TestPaths::DIRECTORY_TARGET, directory_path[Test::FIRST_BYTE_INDEX])
+    directory_write: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(directory_path[Test::FIRST_BYTE_INDEX], directory_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::RENAME_FAILURE if directory_write.accepted or directory_write.status != DebuggerTraceFile::FileStatus.CommitFailure
 
     written: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
     return TestResult::WRITE if not written.accepted or written.status != DebuggerTraceFile::FileStatus.Ready or not written.scan.footer_verified

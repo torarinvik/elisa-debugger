@@ -5,13 +5,14 @@ EDIR artifacts are little-endian, versioned byte streams decoded by
 passed to the managed VM. A malformed or truncated stream produces an invalid
 decode result and must be rejected by the session coordinator.
 
-The current codec schema is `3`. Schema `1` is rejected. Schema `2` remains
-readable as a legacy stream with no function table; schema `3` adds an explicit
-function-descriptor table after the instruction stream. The header is:
+The current codec schema is `4`. Schema `1` is rejected. Schema `2` remains
+readable as a legacy stream with no function table. Schemas `3` and `4` share
+the explicit function-descriptor table after the instruction stream. The
+program version separately declares the instruction semantics. The header is:
 
 | Field | Width | Meaning |
 | --- | ---: | --- |
-| schema | 4 | Codec schema, currently `3` |
+| schema | 4 | Codec schema, currently `4` |
 | program version | 4 | EDIR program semantics version |
 | instruction count | 8 | Number of encoded instructions |
 | local count | 8 | Declared local slots |
@@ -55,7 +56,7 @@ than the referenced row's line count. A zero file ID remains valid for
 instructions without source locations. The codec accepts at most 128
 instructions.
 
-The current compiler's schema-3 producer serializes parser spans verbatim:
+The current compiler's schema-4 producer serializes parser spans verbatim:
 lines are one-based, columns are one-based UTF-8 byte counts, and byte offsets
 are zero-based with an exclusive end. The wire format has no coordinate-unit
 tag. These producer columns do not satisfy the session protocol's zero-based
@@ -65,7 +66,7 @@ usable, while compiler-artifact column breakpoints are unsupported until the
 producer emits normalized coordinates or the artifact carries enough source
 content for a consumer to convert them safely.
 
-Schema 3 appends a function count and its descriptors after all instructions.
+Schemas 3/4 append a function count and its descriptors after all instructions.
 The bounded compiler call fixture emits three descriptors (`main`, `descend`,
 and `add_ten`) and call targets that point at their entry instructions. Other
 source-level calls remain outside the producer contract. The function table
@@ -91,7 +92,7 @@ adjacent half-open ranges are valid. The debugger does not infer descriptors
 from instruction addresses or call targets. A schema-2 artifact decodes with an
 empty function table, so it cannot provide function-name resolution.
 
-The maximum schema-3 stream size is 37,729 bytes:
+The maximum schema-3/4 stream size is 37,729 bytes:
 `29 + 128*62 + 16*(36+1024) + 4 + 64*(72+128)`. These are byte counts in the
 canonical codec layout and must stay synchronized with `DebuggerEDIRCodec` and
 the file loader bound.
@@ -102,6 +103,28 @@ references, line bounds, local initialization, and required return reachability
 are checked before an image is accepted. The artifact contains logical program
 metadata only. It contains no host pointers, native addresses, allocator state,
 file descriptors, or raw Elisa struct layout.
+
+## Managed effect instructions
+
+Program versions 1 through 5 are supported. Version 1 contains the original
+scalar, memory, control-flow, and call instructions. Later versions add these
+instructions without changing the instruction record layout:
+
+| Opcode | Instruction | Minimum program version | Operands | Result |
+| ---: | --- | ---: | --- | --- |
+| 20 | ClockNow | 2 | `a = b = 0` | Captured signed clock sample |
+| 21 | RandomU64 | 2 | `a = b = 0` | Captured 64-bit bits in the signed accumulator |
+| 22 | ConsoleWriteByte | 3 | `0 <= a <= 255`, `b = 0` | One transferred byte |
+| 23 | ConsoleReadByte | 4 | `a = b = 0` | Byte `0..255`, or EOF `-1` |
+| 24 | VirtualFileReadByte | 5 | Positive logical resource handle `a`, `b = 0` | Byte `0..255`, or EOF `-1` |
+
+The verifier rejects an effect instruction in an older program version and
+rejects invalid or unused operands. The plain machine step refuses host-effect
+instructions; the managed bridge commits a validated result together with its
+journal and event. A virtual resource handle identifies a captured file in the
+session, never a host file descriptor. Replay uses captured results and virtual
+bytes. File open/write/seek/close and arbitrary foreign calls are not instructions
+in this version.
 
 ## Current file launch contract
 
@@ -118,10 +141,10 @@ This loader runs on the POSIX host boundary; file access is provided by
 `open`, `read`, and `close`, while bounds checks, decoding, and EDIR
 verification remain in Elisa. The current adjacent compiler checkout at the
 revision recorded in [`docs/compiler-integration.md`](../docs/compiler-integration.md)
-emits schema-3 artifacts for its explicitly supported single-file scalar,
-counted-loop, and bounded recursive-call fixtures, with source-table identities,
-original source spans, and function descriptors for the call fixture. Legacy
-schema-2 artifacts remain loadable for compatibility. The producer rejects
+emits schema-4 artifacts with program version 5 for its explicitly supported
+single-file scalar, counted-loop, recursive-call, and effect fixtures, with
+source-table identities, original source spans, and function descriptors.
+Legacy schema-2/3 artifacts remain loadable for compatibility. The producer rejects
 includes and unsupported syntax instead of emitting a partial image; the
 Elisa-authored fixtures continue to cover VM instructions beyond that initial
 compiler subset.

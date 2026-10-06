@@ -1,0 +1,255 @@
+# One process records a compiler-produced recursive program; another restores
+# every boundary from disk with no host providers and changed/missing inputs.
+
+include "../src/protocol/managed_trace.elisa"
+include "../src/protocol/managed_trace_file.elisa"
+include "../src/vm/edir_file.elisa"
+
+extern creat(path: cstr, mode: u32) -> i32 can[Blocking.IO]
+
+const module Test:
+    const module Path:
+        IMAGE: cstr = "build/trace-effects.edir"
+        IMAGE_LENGTH: usize = 24
+        TRACE: cstr = "build/trace-effects.eltr"
+        TRACE_LENGTH: usize = 24
+        REFERENCE: cstr = "build/trace-effects.reference"
+        HOST_INPUT: cstr = "build/trace-effects-host.bin"
+
+    const module Identity:
+        COMPILER: u64 = 1001
+        RUNTIME: u64 = 1002
+        SOURCE: u64 = 1003
+        TARGET: u64 = 1004
+        SESSION: u64 = 1005
+        RECORDING: u64 = 1006
+        FRESH_RECORDING: u64 = 1007
+        RESOURCE_PATH: u64 = 1008
+        WRONG_INVOCATION: u64 = 1009
+        VERSION: u32 = 1
+        RESOURCE_GENERATION: u64 = 1
+        RESOURCE_HANDLE: u64 = 1
+
+    const module Provider:
+        CLOCK: i64 = 3
+        RANDOM: u64 = 18446744073709551615
+        INPUT: i64 = 66
+        EOF: i64 = -1
+        EXPECTED_CALLS: usize = 5
+        EXPECTED_RESOURCE_OPERATIONS: usize = 2
+        EXPECTED_FILE_BYTE: u8 = 65
+
+    const module Boundary:
+        FIRST: usize = 0
+        INCREMENT: usize = 1
+        MODE_ARGUMENT: usize = 1
+        ARGUMENT_COUNT: i64 = 2
+        MODE_RECORD_BYTE: u8 = 99
+        MODE_REPLAY_BYTE: u8 = 112
+        MODE_BYTE_INDEX: usize = 2
+        READ_ONLY: i32 = 0
+        FILE_MODE: u32 = 384
+        HASH_PAIR_BYTES: usize = 16
+        INPUT_CAPACITY: usize = 2
+        REFERENCE_CAPACITY: usize = 131072
+        CONTINUE_LIMIT: u64 = 256
+
+    const module Failure:
+        OK: i64 = 0
+        ARGUMENTS: i64 = 1
+        IMAGE: i64 = 2
+        FILE: i64 = 3
+        LAUNCH: i64 = 4
+        STEP: i64 = 5
+        PROVIDER: i64 = 6
+        EXECUTION: i64 = 7
+        EXPORT: i64 = 8
+        RESTORE: i64 = 9
+        STATE: i64 = 10
+        SEEK: i64 = 11
+        CORRUPTION: i64 = 12
+        ATOMICITY: i64 = 13
+
+def initialize(service: mutable DebuggerManagedService::Service&, image: DebuggerEDIR::ProgramImage&, recording: u64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    build: DebuggerIdentity::BuildIdentity = DebuggerIdentity::BuildIdentity{compiler: DebuggerIdentity::debug_id(Test::Identity::COMPILER), runtime: DebuggerIdentity::debug_id(Test::Identity::RUNTIME), source: DebuggerIdentity::debug_id(Test::Identity::SOURCE), target: DebuggerIdentity::debug_id(Test::Identity::TARGET), metadata_version: Test::Identity::VERSION}
+    session: DebuggerSession::Session = DebuggerSession::new_session(DebuggerIdentity::debug_id(Test::Identity::SESSION), build, DebuggerCapabilities::managed_capabilities())
+    DebuggerManagedService::service_initialize(service, session, image, DebuggerIdentity::debug_id(recording))
+
+def append_hashes(reference: mutable DebuggerTraceBinary::ByteWriter&, service: mutable DebuggerManagedService::Service&) -> void:
+    checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    DebuggerTraceBinary::writer_put_u64(reference, checkpoint.state_hash)
+    DebuggerTraceBinary::writer_put_u64(reference, checkpoint.side_state_hash)
+
+def corruption_is_atomic(service: mutable DebuggerManagedService::Service&) -> bool can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    loaded: mutable DebuggerTraceFileReader::LoadResult = DebuggerTraceFileReader::trace_file_reader_load(Test::Path::TRACE.cast[u8&], Test::Path::TRACE_LENGTH) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return false if not loaded.accepted
+    reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceFileReader::trace_file_reader_result_reader(loaded) can Abort.Panic
+    original_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = reader.full_checkpoints[Test::Boundary::FIRST]
+    original_event: DebuggerEvents::EventEnvelope = reader.events[Test::Boundary::FIRST]
+    reader.full_checkpoints[Test::Boundary::FIRST].effects.records[Test::Boundary::FIRST].invocation <- DebuggerIdentity::debug_id(Test::Identity::WRONG_INVOCATION)
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(reader.full_checkpoints[Test::Boundary::FIRST])
+    original_hash: u64 = DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine)
+    original_generation: u64 = service.controller.session.stop_generation
+    original_history: heap void&? = service.controller.side_history
+    rejected: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
+    unchanged: mutable bool = not rejected.accepted and rejected.failure.code == DebuggerErrors::ErrorCode.Diverged and service.controller.session.state == DebuggerSession::SessionState.Created and service.controller.session.stop_generation == original_generation and service.controller.side_history == original_history and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == original_hash and service.recorded_event_count == Test::Boundary::FIRST
+    diagnostic: mutable DebuggerReplayDiagnostic::Divergence = DebuggerManagedService::service_replay_diagnostic(service)
+    unchanged <- unchanged and diagnostic.available and diagnostic.schema == DebuggerReplayDiagnostic::Schema::VERSION and diagnostic.component == DebuggerReplayDiagnostic::Component.Invocation and diagnostic.event == Test::Boundary::FIRST.u64() and diagnostic.last_verified.event == Test::Boundary::FIRST.u64() and diagnostic.last_verified.recording.value == Test::Identity::RECORDING and diagnostic.has_expected_value and diagnostic.has_observed_value and diagnostic.expected_value == Test::Identity::WRONG_INVOCATION and diagnostic.observed_value == original_checkpoint.effects.records[Test::Boundary::FIRST].invocation.value and not diagnostic.has_observed_event and not diagnostic.has_verified_checkpoint
+    reader.full_checkpoints[Test::Boundary::FIRST] <- original_checkpoint
+    reader.events[Test::Boundary::FIRST].position.invocation <- DebuggerIdentity::debug_id(Test::Identity::WRONG_INVOCATION)
+    rejected_event: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
+    unchanged <- unchanged and not rejected_event.accepted and rejected_event.failure.code == DebuggerErrors::ErrorCode.Diverged and service.controller.session.state == DebuggerSession::SessionState.Created and service.controller.session.stop_generation == original_generation and service.controller.side_history == original_history and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == original_hash and service.recorded_event_count == Test::Boundary::FIRST
+    diagnostic <- DebuggerManagedService::service_replay_diagnostic(service)
+    unchanged <- unchanged and diagnostic.available and diagnostic.component == DebuggerReplayDiagnostic::Component.Invocation and diagnostic.event == Test::Boundary::FIRST.u64() and diagnostic.last_verified.event == Test::Boundary::FIRST.u64() and diagnostic.has_expected_event and diagnostic.has_observed_event and diagnostic.expected_position.invocation.value == Test::Identity::WRONG_INVOCATION and diagnostic.observed_position.invocation.value == original_event.position.invocation.value
+    reader.events[Test::Boundary::FIRST] <- original_event
+    # A later mismatch reports the entire verified prefix, not just event zero.
+    last: usize = reader.event_count - Test::Boundary::INCREMENT
+    final_event: DebuggerEvents::EventEnvelope = reader.events[last]
+    reader.events[last].state_hash <- final_event.state_hash ^ Test::Boundary::INCREMENT.u64()
+    late: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
+    diagnostic <- DebuggerManagedService::service_replay_diagnostic(service)
+    unchanged <- unchanged and not late.accepted and late.failure.code == DebuggerErrors::ErrorCode.Diverged and diagnostic.available and diagnostic.component == DebuggerReplayDiagnostic::Component.MachineState and diagnostic.event == last.u64() and diagnostic.last_verified.event == last.u64() and diagnostic.expected_value == reader.events[last].state_hash and diagnostic.observed_value == final_event.state_hash and service.controller.session.stop_generation == original_generation and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == original_hash
+    reader.events[last] <- final_event
+    # Retry success clears the rejected candidate's diagnostic.
+    retry: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
+    unchanged <- unchanged and retry.accepted and not DebuggerManagedService::service_replay_diagnostic(service).available
+    DebuggerTraceFileReader::trace_file_reader_result_destroy(loaded) can Memory.Release, Unsafe.PointerCast
+    return unchanged
+
+def record_trace(service: mutable DebuggerManagedService::Service&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    input: mutable u8[Test::Boundary::INPUT_CAPACITY] = zeroed
+    input_fd: i32 = open(Test::Path::HOST_INPUT, Test::Boundary::READ_ONLY) can Blocking.IO
+    return Test::Failure::FILE if input_fd < Test::Boundary::READ_ONLY
+    input_length: isize = read(input_fd, (&input[Test::Boundary::FIRST]).cast[void&], Test::Boundary::INPUT_CAPACITY) can Blocking.IO, Unsafe.PointerCast
+    closed: mutable i32 = close(input_fd) can Blocking.IO
+    return Test::Failure::FILE if input_length != Test::Boundary::INCREMENT.isize() or closed != Test::Boundary::READ_ONLY or input[Test::Boundary::FIRST] != Test::Provider::EXPECTED_FILE_BYTE
+    mounted: DebuggerVirtualResources::ResourceOpenResult = DebuggerManagedEngine::managed_resource_mount(service.controller, DebuggerIdentity::debug_id(Test::Identity::RESOURCE_PATH), false, Test::Identity::RESOURCE_GENERATION, input[Test::Boundary::FIRST], input_length.usize())
+    return Test::Failure::FILE if not mounted.accepted or mounted.handle.value != Test::Identity::RESOURCE_HANDLE
+    return Test::Failure::LAUNCH if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(service.controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(service.controller))
+    reference: mutable DebuggerTraceBinary::ByteWriter = zeroed
+    append_hashes(reference, service)
+    calls: mutable usize = Test::Boundary::FIRST
+    input_calls: mutable usize = Test::Boundary::FIRST
+    while not service.controller.engine.machine.halted and service.controller.engine.event_count < DebuggerManagedService::service_recording_capacity():
+        request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(service.controller)
+        reply: mutable DebuggerManagedService::Result = zeroed
+        if request.kind == DebuggerManagedEngine::HostEffectKind.ClockNow:
+            reply <- DebuggerManagedService::service_record_clock_effect(service, request, DebuggerManagedService::service_host_effect_result_hash(Test::Provider::CLOCK.u64()), Test::Provider::CLOCK)
+        elif request.kind == DebuggerManagedEngine::HostEffectKind.RandomU64:
+            reply <- DebuggerManagedService::service_record_random_effect(service, request, DebuggerManagedService::service_host_effect_result_hash(Test::Provider::RANDOM), Test::Provider::RANDOM)
+        elif request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleOutput:
+            reply <- DebuggerManagedService::service_record_console_output(service, request)
+        elif request.kind == DebuggerManagedEngine::HostEffectKind.ConsoleInput:
+            value: i64 = Test::Provider::INPUT if input_calls == Test::Boundary::FIRST else Test::Provider::EOF
+            reply <- DebuggerManagedService::service_record_console_input(service, request, DebuggerManagedService::service_host_effect_result_hash(value.u64()), value)
+            input_calls <- input_calls + Test::Boundary::INCREMENT
+        else:
+            step: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Step, id: Test::Boundary::INCREMENT.u64(), has_id: true, expected_generation: Test::Boundary::FIRST.u64(), target_event: Test::Boundary::FIRST.u64(), valid: true}
+            reply <- DebuggerManagedService::service_dispatch(service, step)
+        return Test::Failure::STEP if not reply.accepted
+        calls <- calls + Test::Boundary::INCREMENT if DebuggerManagedEngine::managed_host_effect_requires_provider(request.kind)
+        append_hashes(reference, service)
+    return Test::Failure::EXECUTION if not service.controller.engine.machine.halted or service.controller.engine.machine.result != Test::Provider::EOF or calls != Test::Provider::EXPECTED_CALLS or service.controller.state.resources.operation_count != Test::Provider::EXPECTED_RESOURCE_OPERATIONS
+    exported: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(service, Test::Path::TRACE.cast[u8&], Test::Path::TRACE_LENGTH) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return Test::Failure::EXPORT if not exported.accepted
+    fd: i32 = creat(Test::Path::REFERENCE, Test::Boundary::FILE_MODE) can Blocking.IO
+    return Test::Failure::FILE if fd < Test::Boundary::READ_ONLY
+    written: isize = write(fd, (&reference.bytes[Test::Boundary::FIRST]).cast[void&], reference.length) can Blocking.IO, Unsafe.PointerCast
+    closed <- close(fd) can Blocking.IO
+    return Test::Failure::FILE if written != reference.length.isize() or closed != Test::Boundary::READ_ONLY
+    return Test::Failure::OK
+
+def replay_trace(service: mutable DebuggerManagedService::Service&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    reference: mutable DebuggerTraceBinary::ByteReader = zeroed
+    fd: i32 = open(Test::Path::REFERENCE, Test::Boundary::READ_ONLY) can Blocking.IO
+    return Test::Failure::FILE if fd < Test::Boundary::READ_ONLY
+    length: isize = read(fd, (&reference.bytes[Test::Boundary::FIRST]).cast[void&], Test::Boundary::REFERENCE_CAPACITY) can Blocking.IO, Unsafe.PointerCast
+    closed: i32 = close(fd) can Blocking.IO
+    return Test::Failure::FILE if length <= Test::Boundary::HASH_PAIR_BYTES.isize() or length.usize() % Test::Boundary::HASH_PAIR_BYTES != Test::Boundary::FIRST or closed != Test::Boundary::READ_ONLY
+    reference.length <- length.usize()
+    final_event: usize = reference.length / Test::Boundary::HASH_PAIR_BYTES - Test::Boundary::INCREMENT
+    restored: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_file(service, Test::Path::TRACE.cast[u8&], Test::Path::TRACE_LENGTH, final_event.u64()) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return Test::Failure::RESTORE if not restored.accepted or service.controller.engine.recording.value != Test::Identity::RECORDING
+    for event in Test::Boundary::FIRST..<final_event + Test::Boundary::INCREMENT:
+        request: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Seek, id: Test::Boundary::INCREMENT.u64(), has_id: true, expected_generation: service.controller.session.stop_generation, target_event: event.u64(), valid: true}
+        sought: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, request)
+        return Test::Failure::SEEK if not sought.accepted
+        checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+        expected_state: u64 = DebuggerTraceBinary::reader_take_u64(reference)
+        expected_side: u64 = DebuggerTraceBinary::reader_take_u64(reference)
+        return Test::Failure::STATE if checkpoint.state_hash != expected_state or checkpoint.side_state_hash != expected_side or service.controller.engine.event_count != event
+    return Test::Failure::STATE if not DebuggerTraceBinary::reader_is_valid(reference) or reference.offset != reference.length
+    final_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    rewind: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Seek, id: Test::Boundary::INCREMENT.u64(), has_id: true, expected_generation: service.controller.session.stop_generation, target_event: Test::Boundary::FIRST.u64(), valid: true}
+    rewound: mutable DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, rewind)
+    return Test::Failure::SEEK if not rewound.accepted
+    # A matching but delayed provider reply cannot overwrite recorded future.
+    clock_request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(service.controller)
+    provider_generation: u64 = service.controller.session.stop_generation
+    original_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    original_next: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_retained_checkpoint(service.controller, Test::Boundary::INCREMENT.u64()).checkpoint
+    return Test::Failure::PROVIDER if not clock_request.valid or clock_request.kind != DebuggerManagedEngine::HostEffectKind.ClockNow or DebuggerManagedEngine::managed_host_effect_is_pending(service.controller)
+    late_reply: DebuggerManagedService::Result = DebuggerManagedService::service_record_clock_effect(service, clock_request, DebuggerManagedService::service_host_effect_result_hash(Test::Provider::CLOCK.u64()), Test::Provider::CLOCK)
+    direct_reply: DebuggerErrors::DebuggerError = DebuggerManagedEngine::managed_record_clock_effect(service.controller, clock_request.request_hash, DebuggerManagedService::service_host_effect_result_hash(Test::Provider::CLOCK.u64()), Test::Provider::CLOCK)
+    return Test::Failure::ATOMICITY if late_reply.accepted or DebuggerErrors::error_is_ok(direct_reply) or service.controller.session.stop_generation != provider_generation or service.controller.engine.event_count != Test::Boundary::FIRST
+    after_reply: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    after_next: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_retained_checkpoint(service.controller, Test::Boundary::INCREMENT.u64()).checkpoint
+    return Test::Failure::ATOMICITY if after_reply.state_hash != original_checkpoint.state_hash or after_reply.side_state_hash != original_checkpoint.side_state_hash or after_next.state_hash != original_next.state_hash or after_next.side_state_hash != original_next.side_state_hash
+    saved_from_history: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(service, Test::Path::TRACE.cast[u8&], Test::Path::TRACE_LENGTH) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    return Test::Failure::EXPORT if not saved_from_history.accepted
+    while service.controller.engine.event_count < final_event:
+        before_event: usize = service.controller.engine.event_count
+        stepped: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_step_into_with_outcome(service)
+        return Test::Failure::PROVIDER if stepped.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed
+        return Test::Failure::STEP if service.controller.engine.event_count <= before_event
+    stepped_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    return Test::Failure::STATE if stepped_checkpoint.state_hash != final_checkpoint.state_hash or stepped_checkpoint.side_state_hash != final_checkpoint.side_state_hash
+    rewind.expected_generation <- service.controller.session.stop_generation
+    rewound <- DebuggerManagedService::service_dispatch(service, rewind)
+    return Test::Failure::SEEK if not rewound.accepted
+    completed: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_continue_with_outcome(service, Test::Boundary::CONTINUE_LIMIT)
+    return Test::Failure::PROVIDER if completed.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed or not service.controller.engine.machine.halted
+    continued_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    return Test::Failure::STATE if continued_checkpoint.state_hash != final_checkpoint.state_hash or continued_checkpoint.side_state_hash != final_checkpoint.side_state_hash
+    for index in Test::Boundary::FIRST..<service.recorded_event_count:
+        return Test::Failure::ATOMICITY if not DebuggerEvents::event_envelopes_equal(service.recorded_events[index], service.controller.engine.events[index])
+    rewind.expected_generation <- service.controller.session.stop_generation
+    rewound <- DebuggerManagedService::service_dispatch(service, rewind)
+    return Test::Failure::SEEK if not rewound.accepted
+    initial_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    original_generation: u64 = service.controller.session.stop_generation
+    original_envelope: DebuggerEvents::EventEnvelope = service.controller.engine.events[Test::Boundary::FIRST]
+    original_snapshot: DebuggerCheckpoint::MachineSnapshot = service.controller.engine.history[Test::Boundary::INCREMENT]
+    original_bits: u64 = service.controller.engine.effect_result_bits[Test::Boundary::FIRST]
+    service.controller.engine.effect_result_bits[Test::Boundary::FIRST] <- Test::Boundary::FIRST.u64()
+    rejected: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_step_with_outcome(service)
+    rejected_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
+    return Test::Failure::ATOMICITY if rejected.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Failed or service.controller.engine.event_count != Test::Boundary::FIRST or service.controller.session.stop_generation != original_generation or rejected_checkpoint.state_hash != initial_checkpoint.state_hash or rejected_checkpoint.side_state_hash != initial_checkpoint.side_state_hash
+    return Test::Failure::ATOMICITY if not DebuggerEvents::event_envelopes_equal(original_envelope, service.controller.engine.events[Test::Boundary::FIRST]) or original_snapshot.state_hash != service.controller.engine.history[Test::Boundary::INCREMENT].state_hash
+    seek_forward: DebuggerProtocolRequest::Request = DebuggerProtocolRequest::Request{method: DebuggerProtocolRequest::RequestMethod.Seek, id: Test::Boundary::INCREMENT.u64(), has_id: true, expected_generation: service.controller.session.stop_generation, target_event: final_event.u64(), valid: true}
+    rejected_seek: DebuggerManagedService::Result = DebuggerManagedService::service_dispatch(service, seek_forward)
+    return Test::Failure::ATOMICITY if rejected_seek.accepted or rejected_seek.failure.code != DebuggerErrors::ErrorCode.Diverged or service.controller.engine.event_count != Test::Boundary::FIRST or service.controller.session.stop_generation != original_generation or not DebuggerEvents::event_envelopes_equal(original_envelope, service.controller.engine.events[Test::Boundary::FIRST]) or original_snapshot.state_hash != service.controller.engine.history[Test::Boundary::INCREMENT].state_hash
+    rejected_continue: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_continue_with_outcome(service, Test::Boundary::CONTINUE_LIMIT)
+    return Test::Failure::ATOMICITY if rejected_continue.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Failed or service.controller.engine.event_count != Test::Boundary::FIRST or not DebuggerEvents::event_envelopes_equal(original_envelope, service.controller.engine.events[Test::Boundary::FIRST]) or original_snapshot.state_hash != service.controller.engine.history[Test::Boundary::INCREMENT].state_hash
+    service.controller.engine.effect_result_bits[Test::Boundary::FIRST] <- original_bits
+    return Test::Failure::OK
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    return Test::Failure::ARGUMENTS if argc != Test::Boundary::ARGUMENT_COUNT
+    arguments: mutable cstr&& = argv.cast[mutable cstr&&] can Unsafe.PointerCast
+    mode_argument: cstr = arguments[Test::Boundary::MODE_ARGUMENT].cast[cstr]
+    mode: u8 = mode_argument[Test::Boundary::MODE_BYTE_INDEX].u8()
+    loaded: DebuggerEDIRFile::LoadResult = DebuggerEDIRFile::artifact_load(Test::Path::IMAGE.cast[u8&], Test::Path::IMAGE_LENGTH) can Blocking.IO, Unsafe.PointerCast
+    return Test::Failure::IMAGE if not loaded.valid
+    service: mutable DebuggerManagedService::Service = zeroed
+    initialize(service, loaded.image, Test::Identity::FRESH_RECORDING if mode == Test::Boundary::MODE_REPLAY_BYTE else Test::Identity::RECORDING) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+    result: mutable i64 = Test::Failure::ARGUMENTS
+    if mode == Test::Boundary::MODE_RECORD_BYTE:
+        result <- record_trace(service) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    elif mode == Test::Boundary::MODE_REPLAY_BYTE:
+        result <- replay_trace(service) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    else:
+        unchanged: bool = corruption_is_atomic(service) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+        result <- Test::Failure::OK if unchanged else Test::Failure::ATOMICITY
+    DebuggerManagedEngine::managed_controller_release_owned_history(service.controller) can Memory.Release, Unsafe.PointerCast
+    return result

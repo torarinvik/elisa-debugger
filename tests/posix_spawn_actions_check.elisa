@@ -1,0 +1,32 @@
+# libc writes into caller-owned action storage. Guards catch the Linux
+# overwrite that a pointer-sized Darwin allocation previously allowed.
+
+include "../src/platform/child_process.elisa"
+
+const module Test:
+    BEFORE: u64 = 12297829382473034410
+    AFTER: u64 = 6148914691236517205
+    SUCCESS: i32 = 0
+    SOURCE_DESCRIPTOR: i32 = 1
+    TARGET_DESCRIPTOR: i32 = 2
+    INVALID_DESCRIPTOR: i32 = -1
+    FAILURE: i64 = 1
+    OK: i64 = 0
+
+struct GuardedActions:
+    before: mutable u64
+    actions: mutable DebuggerSpawnActions::FileActions
+    after: mutable u64
+
+def main() -> i64 can Unsafe.PointerCast:
+    storage: mutable GuardedActions = GuardedActions{before: Test::BEFORE, actions: DebuggerSpawnActions::file_actions_new(), after: Test::AFTER}
+    pointer: mutable void&? = (&storage.actions).cast[mutable void&?] can Unsafe.PointerCast
+    initialized: i32 = debugger_posix_spawn_actions_init(pointer) can Unsafe.PointerCast
+    return Test::FAILURE if initialized != Test::SUCCESS
+    duplicated: i32 = debugger_posix_spawn_actions_adddup2(pointer, Test::SOURCE_DESCRIPTOR, Test::TARGET_DESCRIPTOR) can Unsafe.PointerCast
+    closed: i32 = debugger_posix_spawn_actions_addclose(pointer, Test::SOURCE_DESCRIPTOR) can Unsafe.PointerCast
+    rejected: i32 = debugger_posix_spawn_actions_addclose(pointer, Test::INVALID_DESCRIPTOR) can Unsafe.PointerCast
+    destroyed: i32 = debugger_posix_spawn_actions_destroy(pointer) can Unsafe.PointerCast
+    return Test::FAILURE if duplicated != Test::SUCCESS or closed != Test::SUCCESS or rejected == Test::SUCCESS or destroyed != Test::SUCCESS
+    return Test::FAILURE if storage.before != Test::BEFORE or storage.after != Test::AFTER
+    return Test::OK

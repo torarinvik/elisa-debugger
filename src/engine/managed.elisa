@@ -263,6 +263,30 @@ module DebuggerManagedEngine:
             controller.state <- candidate_state
             return DebuggerErrors::no_error()
 
+        def managed_uses_recorded_future(controller: ManagedController&) -> bool:
+            return controller.engine.event_count.u64() < controller.session.retained_last and controller.engine.branch.value == Identity::NO_BRANCH and controller.state.branches.count == Event::INITIAL_INDEX and controller.engine.intervention_count == Event::INITIAL_INDEX
+
+        # A missing or corrupt retained boundary is a failure, never a reason
+        # to request a fresh input or repeat a target output effect.
+        def managed_restore_recorded_boundary(controller: mutable ManagedController&, target: usize) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if managed_history_has_unaligned_side_state(controller) or not managed_side_checkpoint_is_valid(controller, target)
+            checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = managed_side_checkpoint_at(controller, target)
+            candidate_state: mutable DebuggerManagedState::State = controller.state
+            failure: DebuggerErrors::DebuggerError = DebuggerManagedState::state_restore(candidate_state, checkpoint)
+            return failure if not DebuggerErrors::error_is_ok(failure)
+            candidate: DebuggerReplayEngine::SeekCandidate = DebuggerReplayEngine::replay_engine_seek_candidate(controller.engine, target, true)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY) if candidate.failure == DebuggerReplayEngine::EngineError.HistoryUnavailable
+            if not candidate.valid or candidate.failure != DebuggerReplayEngine::EngineError.None or candidate.event != target or checkpoint.state_hash != DebuggerReplayEngine::replay_engine_machine_state_hash(candidate.machine, target.u64()) or not DebuggerCheckpoint::snapshot_matches_machine(checkpoint.machine, candidate.machine):
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::HISTORY)
+            controller.engine.machine <- candidate.machine
+            controller.engine.event_count <- target
+            controller.engine.engine_error <- DebuggerReplayEngine::EngineError.None
+            controller.state <- candidate_state
+            return DebuggerErrors::no_error()
+
+        def managed_advance_recorded_boundary(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            return managed_restore_recorded_boundary(controller, controller.engine.event_count + DebuggerReplayEngine::Limits::BOUNDARY_INCREMENT)
+
     public:
         enum HostEffectKind:
             None
@@ -328,6 +352,7 @@ module DebuggerManagedEngine:
             return kind == HostEffectKind.ClockNow or kind == HostEffectKind.RandomU64 or kind == HostEffectKind.ConsoleInput or kind == HostEffectKind.ConsoleOutput
 
         def managed_host_effect_is_pending(controller: ManagedController&) -> bool:
+            return false if managed_uses_recorded_future(controller)
             return managed_host_effect_requires_provider(managed_host_effect_request(controller).kind)
 
         def managed_begin_side_effect_replay(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
@@ -778,7 +803,12 @@ module DebuggerManagedEngine:
                     host_effect_pending <- true
                     break
                 pending_request: HostEffectRequest = managed_host_effect_request(controller)
-                if pending_request.kind == HostEffectKind.VirtualFileReadByte:
+                if managed_uses_recorded_future(controller):
+                    replay_failure: DebuggerErrors::DebuggerError = managed_advance_recorded_boundary(controller)
+                    if not DebuggerErrors::error_is_ok(replay_failure):
+                        controller.last_error <- replay_failure
+                        break
+                elif pending_request.kind == HostEffectKind.VirtualFileReadByte:
                     resource_failure: DebuggerErrors::DebuggerError = managed_record_virtual_file_read(controller)
                     if not DebuggerErrors::error_is_ok(resource_failure):
                         controller.last_error <- resource_failure
@@ -796,7 +826,7 @@ module DebuggerManagedEngine:
             managed_sync_position(controller)
             managed_refresh_values(controller)
             pending_request: HostEffectRequest = managed_host_effect_request(controller) if not hit_breakpoint else HostEffectRequest{kind: HostEffectKind.None, call_site: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), invocation: DebuggerIdentity::debug_id(ManagedEffectIdentityDefaults::NO_ID), request_hash: HostEffectRequestHash::NO_REQUEST, payload: ManagedEffectIdentityDefaults::NO_ID, valid: false}
-            host_effect_pending <- managed_host_effect_requires_provider(pending_request.kind)
+            host_effect_pending <- managed_host_effect_is_pending(controller) if not hit_breakpoint else false
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.HistoryFull or (controller.engine.engine_error == DebuggerReplayEngine::EngineError.StepLimit and controller.engine.event_count >= DebuggerReplayEngine::replay_engine_history_capacity()):
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.ResourceLimit, false, Detail::HISTORY)
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if host_effect_pending and not pending_request.valid
@@ -808,6 +838,8 @@ module DebuggerManagedEngine:
 
         def managed_step(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session)
+            if managed_uses_recorded_future(controller):
+                return managed_seek(controller, controller.engine.event_count + DebuggerReplayEngine::Limits::BOUNDARY_INCREMENT)
             original_machine: DebuggerEDIR::Machine = controller.engine.machine
             original_engine_error: DebuggerReplayEngine::EngineError = controller.engine.engine_error
             before_event: usize = controller.engine.event_count
@@ -1033,7 +1065,7 @@ module DebuggerManagedEngine:
             current_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, controller.engine.event_count.u64())
             breakpoint_reported_here: bool = controller.has_last_breakpoint_stop and controller.last_breakpoint_event == controller.engine.event_count.u64() and controller.last_breakpoint_instruction == controller.engine.machine.program_counter and controller.last_breakpoint_branch.value == current_branch.value
             kind: mutable ExecutionOutcomeKind = ExecutionOutcomeKind.Completed
-            kind <- ExecutionOutcomeKind.AwaitingHostEffect if request.valid and managed_host_effect_requires_provider(request.kind) and (failure.detail == Detail::HOST_EFFECT_REQUEST or not breakpoint_reported_here)
+            kind <- ExecutionOutcomeKind.AwaitingHostEffect if request.valid and managed_host_effect_is_pending(controller) and (failure.detail == Detail::HOST_EFFECT_REQUEST or not breakpoint_reported_here)
             kind <- ExecutionOutcomeKind.Failed if not DebuggerErrors::error_is_ok(failure) and kind != ExecutionOutcomeKind.AwaitingHostEffect
             return ExecutionOutcome{kind: kind, position: DebuggerReplayEngine::replay_engine_position(controller.engine), host_effect: request, failure: failure}
 
@@ -1050,6 +1082,7 @@ module DebuggerManagedEngine:
             return DebuggerEffects::EffectReplay{accepted: false, result_hash: HostEffectReplayDefaults::NO_RESULT_HASH, result_value: HostEffectReplayDefaults::NO_CLOCK_VALUE, suppress_external_write: HostEffectReplayDefaults::DO_NOT_SUPPRESS_EXTERNAL_WRITE, failure: failure}
 
         def managed_host_effect_preflight(controller: mutable ManagedController&, kind: HostEffectKind) -> DebuggerErrors::DebuggerError:
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::HOST_EFFECT_REQUEST) if managed_uses_recorded_future(controller)
             running_virtual_read: bool = kind == HostEffectKind.VirtualFileReadByte and controller.session.state == DebuggerSession::SessionState.Running
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::ENGINE_FAULT) if not DebuggerSession::session_can_inspect(controller.session) and not running_virtual_read
             request: HostEffectRequest = managed_host_effect_request(controller)
@@ -1284,6 +1317,13 @@ module DebuggerManagedEngine:
                     preview_error: DebuggerReplayEngine::EngineError = DebuggerReplayEngine::replay_engine_seek_preview(controller.engine, event)
                     return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::ENGINE_FAULT) if preview_error == DebuggerReplayEngine::EngineError.ExecutionFault
                 return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Unavailable, true, Detail::HISTORY)
+            if event > original_event_count and event.u64() <= controller.session.retained_last and managed_uses_recorded_future(controller):
+                recorded_failure: DebuggerErrors::DebuggerError = managed_restore_recorded_boundary(controller, event)
+                return recorded_failure if not DebuggerErrors::error_is_ok(recorded_failure)
+                controller.session <- next_session
+                managed_sync_position(controller)
+                managed_refresh_values(controller)
+                return DebuggerErrors::no_error()
             DebuggerReplayEngine::replay_engine_seek(controller.engine, event)
             if controller.engine.engine_error == DebuggerReplayEngine::EngineError.ExecutionFault:
                 # Restore the caller-visible engine state before surfacing the
@@ -1580,6 +1620,17 @@ module DebuggerManagedEngine:
             # while the child remains the selected resumable branch.
             checkpoint_branch: DebuggerIdentity::DebugId = DebuggerReplayEngine::replay_engine_branch_at(controller.engine, checkpoint_event)
             return DebuggerManagedState::state_capture(controller.state, controller.engine.machine, controller.session.build, image_fingerprint, controller.engine.recording, checkpoint_branch, checkpoint_event, DebuggerReplayEngine::replay_engine_state_hash(controller.engine))
+
+        struct RetainedCheckpoint:
+            found: mutable bool
+            checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint
+
+        # Read an immutable retained boundary without moving the inspection
+        # cursor. This lets trace export retain its high-water checkpoint even
+        # when the user is currently inspecting an earlier event.
+        def managed_retained_checkpoint(controller: mutable ManagedController&, event: u64) -> RetainedCheckpoint:
+            return RetainedCheckpoint{found: false, checkpoint: zeroed} if event > DebuggerReplayEngine::replay_engine_history_capacity().u64() or managed_history_has_unaligned_side_state(controller) or not managed_side_checkpoint_is_valid(controller, event.usize())
+            return RetainedCheckpoint{found: true, checkpoint: managed_side_checkpoint_at(controller, event.usize())}
 
         def managed_restore_full_checkpoint(controller: mutable ManagedController&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&) -> DebuggerErrors::DebuggerError:
             failure: mutable DebuggerErrors::DebuggerError = DebuggerFullCheckpoint::full_checkpoint_validate(checkpoint)

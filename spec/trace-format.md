@@ -15,7 +15,7 @@ Trace files are a sequence of little-endian records. A record begins with a
 | 40 | 8 | payload FNV-1a checksum (64-bit standard offset basis) |
 
 The payload follows immediately and is limited by the storage reader's named
-capacity. Event payloads use the recorder's versioned fixed-width envelope;
+capacity. Event records use a versioned envelope with variable-length bodies;
 manifest payloads use the manifest codec. All fields are encoded explicitly by
 `DebuggerTraceBinary`.
 
@@ -53,9 +53,38 @@ chunks, a verified footer, and all required source/build artifacts. Removing a
 replay-required blob produces a partial/non-replayable export rather than an
 exact claim.
 
+## Event-aligned managed effects
+
+Current writers emit event record schema `3`, including only the declared
+payload bytes; readers retain schema `2` fixed-body compatibility. Scalar
+payloads contain eight little-endian bytes. State and payload hashes are
+separate, and the in-memory envelope requires zero padding beyond its body.
+
+Exact managed export supports executed clock samples, unsigned random values,
+single-byte console input (including EOF), single-byte console output, and
+single-byte reads from launch-mounted virtual resources. Before export, the
+service reconstructs every event from the captured effect results and initial
+resource images, compares complete event envelopes, and checks the terminal
+VM and side-state fingerprints. A final checkpoint with unrelated adapter or
+resource activity is insufficient and remains non-exportable.
+
+The artifact retains the checkpoint at its recorded high-water boundary even
+when inspection has moved backward. Restore reconstructs the supported prefix
+in temporary owned state and publishes it only after build/image, event, and
+checkpoint validation. Its resource bytes come from the checkpoint, and its
+clock, random, and console results come from captured journals. It has no host
+effect provider or target output sink. Subsequent seek, source stepping, and
+continue through the retained prefix consume those validated snapshots.
+
+This path remains bounded by the managed history and journal capacities.
+Guest file open/write/seek/close, task scheduling, branch interventions, and
+unrecorded side activity require their own event-aligned integration before
+they can qualify for exact artifact export.
+
 ## Managed full checkpoint payload
 
-The managed full-checkpoint codec schema is `3`; its envelope fields are
+The managed full-checkpoint codec schema is `9`; the captured managed state
+schema is `5`. Its envelope fields are
 encoded explicitly in little-endian order. The envelope contains the checkpoint
 schema, recording and branch IDs, event ordinal, state hash, complete
 `BuildIdentity` (compiler, runtime, source, target, and metadata version), and
@@ -67,8 +96,8 @@ files, and function descriptors. Restore compares both identities with the
 destination before replaying the checkpoint prefix.
 
 The checksum and image fingerprint detect accidental corruption or identity
-mismatch; they are not cryptographic authentication. Schema-2 checkpoint
-payloads are rejected by the schema-3 decoder and must be regenerated from a
+mismatch; they are not cryptographic authentication. Earlier checkpoint codec
+payloads are rejected by the schema-9 decoder and must be regenerated from a
 source execution with the intended build and image.
 
 Trace format v1 has no branch-lineage manifest. Exact v1 recordings therefore

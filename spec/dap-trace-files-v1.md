@@ -31,6 +31,9 @@ Send `elisa/saveTrace` with the destination path:
 The session must be stopped and have no active host-effect request. The adapter
 exports through the managed trace service, which validates exactness before
 writing a complete trace artifact and atomically replacing the destination.
+Supported event-aligned clock/random, console byte/EOF, and mounted-file read
+activity is preserved. Saving after a rewind keeps the recording's high-water
+checkpoint and full retained prefix. Unjournaled side state remains rejected.
 A successful response has `body: {"accepted":true}`. A failed request leaves
 the existing destination unchanged if writing did not complete atomically.
 
@@ -56,11 +59,35 @@ state, positions at `eventIndex`, then replaces the live session only after
 all checks succeed. A rejected open leaves the running session unchanged.
 
 A successful response has `body: {"accepted":true}` and is followed by a DAP
-`stopped` event with reason `step`. The stop generation advances. Hosts should
+`stopped` event with reason `step`. The stop generation advances once for the
+replacement; private replay and seek stops do not publish generations. Hosts should
 query `elisa/getTimeline` and refresh `stackTrace`, `scopes`, and `variables`
 because inspection handles belong to the previous generation. The reopened
 history remains available for forward and reverse navigation within the
 reported bounds after the artifact reader is released.
+Delayed provider replies cannot overwrite the already recorded future, even
+when their call site, invocation, and request shape still match.
+Stepping or continuing through that prefix consumes captured results without
+another host-effect provider request or target output write.
+
+When replay disagrees with a captured event or effect request, a failed
+`elisa/openTrace` response includes `body.elisaReplayDivergence`, version 1.
+It identifies the first failing event, the last verified boundary in the
+rejected candidate, the affected component, expected/observed event kinds,
+task/invocation/call-site identities, request hashes, and component values.
+The component names and fields are defined in the JSON Schema. Event ordinals,
+identities, hashes, and values are unsigned decimal strings to preserve all
+64 bits. Availability flags distinguish missing evidence from a legitimate
+zero. A checkpoint is reported as verified only after its full validation and
+replay comparison succeeds; the initial reconstructed state is not invented
+checkpoint evidence.
+
+The diagnostic describes a rejected candidate. Its `lastVerifiedEvent` does
+not move the live session: its position, stop generation, frames, and values
+remain unchanged. The host can continue inspecting it or retry a compatible
+artifact. A successful retry clears the previous diagnostic. Decode,
+compatibility, and lifecycle failures may omit a replay diagnostic because no
+event comparison took place.
 
 Trace files are integrity-checked, not authenticated. Hosts should treat a
 trace as untrusted input and present adapter failures clearly. The adapter

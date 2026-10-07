@@ -464,6 +464,33 @@ dap-virtual-file-mutations-check: $(BUILD)/elisa-debugger-dap-server managed-vir
 cli-virtual-file-mutations-check: $(BUILD)/elisa-debugger-cli dap-virtual-file-mutations-check
 	set -e; last_event=$$(( $$(wc -c < "$(BUILD)/file-mutations.reference") / 16 - 1 )); sh tests/cli_trace_effects_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/file-mutations.edir" "$(BUILD)/dap-file-mutations.eltr" "$$last_event" mutations
 
+$(BUILD)/elisa-debugger-managed-virtual-file-results-check: tests/managed_virtual_file_results_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+.PHONY: managed-virtual-file-results-check dap-virtual-file-results-check
+managed-virtual-file-results-check: $(BUILD)/elisa-debugger-managed-virtual-file-results-check
+	mkdir -p $(BUILD)
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(BUILD)/file-results.edir" tests/compiler_edir_virtual_file_results_fixture.elisa
+	sh tests/managed_virtual_file_results_check.sh "$(BUILD)/elisa-debugger-managed-virtual-file-results-check"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O2 -o "$(BUILD)/file-results.edir" tests/compiler_edir_virtual_file_results_fixture.elisa
+	sh tests/managed_virtual_file_results_check.sh "$(BUILD)/elisa-debugger-managed-virtual-file-results-check"
+
+dap-virtual-file-results-check: $(BUILD)/elisa-debugger-dap-server managed-virtual-file-results-check
+	sh tests/dap_virtual_file_results_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-results.edir"
+
+.PHONY: cli-virtual-file-results-check
+cli-virtual-file-results-check: $(BUILD)/elisa-debugger-cli dap-virtual-file-results-check
+	set -e; last_event=$$(( $$(wc -c < "$(BUILD)/file-results.reference") / 16 - 1 )); sh tests/cli_trace_effects_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/file-results.edir" "$(BUILD)/dap-file-results.eltr" "$$last_event" results
+
+module-check: managed-virtual-file-results-check dap-virtual-file-results-check cli-virtual-file-results-check
+
+.PHONY: result-divergence-clients-check
+result-divergence-clients-check: cli-virtual-file-results-check $(BUILD)/elisa-debugger-trace-divergence-fixture
+	sh tests/replay_divergence_clients_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-results.edir" "$(BUILD)/elisa-debugger-trace-divergence-fixture" results
+
+module-check: result-divergence-clients-check
+
 .PHONY: resource-divergence-clients-check
 resource-divergence-clients-check: cli-virtual-file-mutations-check $(BUILD)/elisa-debugger-trace-divergence-fixture
 	sh tests/replay_divergence_clients_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-mutations.edir" "$(BUILD)/elisa-debugger-trace-divergence-fixture" resources

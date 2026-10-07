@@ -38,7 +38,9 @@ If `initialize` advertises `supportsElisaVirtualFiles` version 1, the plugin
 may add `elisaVirtualFiles` snapshots to the launch configuration. The schema
 documents each snapshot's handle, logical path, bytes, bounds, and read-only
 flag; the [wire contract](dap-virtual-files-v1.md) defines handle order and
-replay behavior.
+replay behavior. Negotiate `supportsElisaVirtualFileResults` version 1 before
+using program-7 guest file error returns; resource exhaustion still stops the
+debugger atomically.
 
 Managed DAP source breakpoints support numeric `hitCondition` strings such as
 `"2"`: the breakpoint begins stopping when its second matching hit is

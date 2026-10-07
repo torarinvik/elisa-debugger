@@ -108,3 +108,9 @@ other DAP hosts can send the same custom requests over the existing adapter
 connection. A host should save the artifact URI/path with its own session
 metadata, ask the user to select a compatible launch when reopening, and use
 the timeline response as the authoritative range for navigation.
+
+Version-7 guest file results are checked against their typed scalar journal at
+each reconstructed boundary. A changed result or result hash reports
+`effect-result` with unsigned 64-bit expected/observed values (negative guest
+results retain their two’s-complement bits). Rejected restore keeps the live
+position and generation unchanged, and a valid retry clears the diagnostic.

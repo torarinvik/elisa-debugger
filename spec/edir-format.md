@@ -106,7 +106,7 @@ file descriptors, or raw Elisa struct layout.
 
 ## Managed effect instructions
 
-Program versions 1 through 6 are supported. Version 1 contains the original
+Program versions 1 through 7 are supported. Version 1 contains the original
 scalar, memory, control-flow, and call instructions. Later versions add these
 instructions without changing the instruction record layout:
 
@@ -119,6 +119,9 @@ instructions without changing the instruction record layout:
 | 24 | VirtualFileReadByte | 5 | Positive logical resource handle `a`, `b = 0` | Byte `0..255`, or EOF `-1` |
 | 25 | VirtualFileWriteByte | 6 | Positive handle `a`, `0 <= b <= 255` | One transferred byte |
 | 26 | VirtualFileSeek | 6 | Positive handle `a`, nonnegative absolute offset `b` | New cursor offset |
+| 27 | VirtualFileTryReadByte | 7 | Positive handle `a`, `b = 0` | Byte, EOF, or guest error |
+| 28 | VirtualFileTryWriteByte | 7 | Positive handle `a`, `0 <= b <= 255` | One transferred byte or guest error |
+| 29 | VirtualFileTrySeek | 7 | Positive handle `a`, nonnegative offset `b` | New cursor or guest error |
 
 The verifier rejects an effect instruction in an older program version and
 rejects invalid or unused operands. The plain machine step refuses host-effect
@@ -128,8 +131,16 @@ session, never a host file descriptor. Replay uses captured results and virtual
 bytes. Writes overwrite or append within the bounded virtual copy. Seek permits
 offsets from zero through the current file length; sparse files are unsupported.
 Invalid handles, read-only writes, invalid seeks, and exhausted byte/journal
-capacity return a debugger failure before committing the instruction. Guest
-error return values, file open/close, and arbitrary foreign calls remain outside
+capacity return a debugger failure before committing the legacy instruction.
+The version-7 `virtual_file_try_read_byte`, `virtual_file_try_write_byte`, and
+`virtual_file_try_seek` calls return EOF `-1`, invalid handle `-2`, permission
+denied `-3`, or invalid offset `-4` as applicable. Successful results retain the
+legacy values. Each try call captures its identity, request, scalar result, and
+result hash in a typed effect record; successful I/O also enters the resource
+journal. Explicit Replay mode verifies the scalar outcome computed from the
+captured resource state before committing either journal cursor.
+Byte/journal exhaustion, invalid images, and corrupt debugger state
+remain atomic debugger failures. File open/close and arbitrary foreign calls remain outside
 this instruction contract.
 
 ## Current file launch contract
@@ -147,7 +158,7 @@ This loader runs on the POSIX host boundary; file access is provided by
 `open`, `read`, and `close`, while bounds checks, decoding, and EDIR
 verification remain in Elisa. The selected compiler integration checkout at the
 revision recorded in [`docs/compiler-integration.md`](../docs/compiler-integration.md)
-emits schema-4 artifacts with program version 6 for its explicitly supported
+emits schema-4 artifacts with program version 7 for its explicitly supported
 single-file scalar, counted-loop, recursive-call, and effect fixtures, with
 source-table identities, original source spans, and function descriptors.
 Legacy schema-2/3 artifacts remain loadable for compatibility. The producer rejects

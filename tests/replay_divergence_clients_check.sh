@@ -17,6 +17,13 @@ if test "${5:-events}" = resources; then
     component=resource-operation
     event=0
     "$creator" resources
+elif test "${5:-events}" = results; then
+    bad=build/result-divergence.eltr
+    good=build/dap-file-results.eltr
+    output=build/result-divergence-dap.output
+    component=effect-result
+    event=0
+    "$creator" scalar results
 else
     "$creator"
 fi
@@ -68,6 +75,8 @@ assert diagnostic['eventIndex'] == diagnostic['lastVerifiedEvent'] == sys.argv[3
 assert diagnostic['recordingId'] == '1' and diagnostic['branchId'] == '0'
 if sys.argv[2] == 'machine-state':
     assert diagnostic['expectedEventAvailable'] and diagnostic['observedEventAvailable']
+elif sys.argv[2] == 'effect-result':
+    assert diagnostic['expectedValue'] == '18446744073709551614' and diagnostic['observedValue'] == '18446744073709551613'
 else:
     assert diagnostic['expectedValue'] == '91' and diagnostic['observedValue'] == '90'
 assert diagnostic['expectedValueAvailable'] and diagnostic['observedValueAvailable']

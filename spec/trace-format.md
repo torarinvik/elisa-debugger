@@ -84,7 +84,7 @@ they can qualify for exact artifact export.
 
 ## Managed full checkpoint payload
 
-The managed full-checkpoint codec schema is `9`; the captured managed state
+The managed full-checkpoint codec supports schemas `9` and `10`; the captured managed state
 schema is `5`. Its envelope fields are
 encoded explicitly in little-endian order. The envelope contains the checkpoint
 schema, recording and branch IDs, event ordinal, state hash, complete
@@ -97,8 +97,12 @@ files, and function descriptors. Restore compares both identities with the
 destination before replaying the checkpoint prefix.
 
 The checksum and image fingerprint detect accidental corruption or identity
-mismatch; they are not cryptographic authentication. Earlier checkpoint codec
-payloads are rejected by the schema-9 decoder and must be regenerated from a
+mismatch; they are not cryptographic authentication. Checkpoint schema 10 adds typed virtual-file try-read, try-write, and try-seek
+scalar effect kinds 10–12 without changing the field layout or managed hash
+domain. Writers use schema 9 for recordings containing only earlier effect
+kinds, preserving their canonical rewind exports, and schema 10 when a new kind
+is present. Readers reject new kinds inside a schema-9 envelope.
+Earlier checkpoint codec payloads are rejected and must be regenerated from a
 source execution with the intended build and image.
 
 Trace format v1 has no branch-lineage manifest. Exact v1 recordings therefore

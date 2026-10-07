@@ -101,7 +101,10 @@ then provide immutable byte snapshots in the launch request. Each snapshot
 maps an explicit guest handle to a logical path and hex-encoded bytes; version
 1 defaults to read-only contents. Set `writable: true` only when initialize
 also advertises `supportsElisaVirtualFileWrites` version 1. Byte writes and
-absolute seeks update the virtual copy and never modify a host path. The
+absolute seeks update the virtual copy and never modify a host path.
+`supportsElisaVirtualFileResults` version 1 additionally supports version-7
+guest try calls that return captured invalid-handle, permission, and offset
+errors while execution continues. The
 [virtual-file contract](../spec/dap-virtual-files-v1.md) defines bounds,
 handle ordering, and replay behavior.
 

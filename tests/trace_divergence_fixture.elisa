@@ -3,6 +3,7 @@
 # replay divergence, rather than treating a transport checksum as execution proof.
 
 include "../src/trace/file_reader.elisa"
+include "../src/engine/state.elisa"
 include "../src/trace/recorder.elisa"
 include "../src/trace/pipeline.elisa"
 include "../src/trace/export.elisa"
@@ -17,6 +18,10 @@ const module Test:
     RESOURCE_SOURCE_LENGTH: usize = 29
     RESOURCE_DESTINATION: cstr = "build/resource-divergence.eltr"
     RESOURCE_DESTINATION_LENGTH: usize = 30
+    RESULT_SOURCE: cstr = "build/dap-file-results.eltr"
+    RESULT_SOURCE_LENGTH: usize = 27
+    RESULT_DESTINATION: cstr = "build/result-divergence.eltr"
+    RESULT_DESTINATION_LENGTH: usize = 28
     FIRST: usize = 0
     INCREMENT: usize = 1
     CHECKPOINT_COUNT: usize = 1
@@ -26,13 +31,19 @@ const module Test:
     EXPORT: i64 = 3
     WRITE: i64 = 4
 
-def create_fixture(reader: mutable DebuggerTraceReader::TraceReader&, resource: bool) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+def create_fixture(reader: mutable DebuggerTraceReader::TraceReader&, resource: bool, scalar_result: bool) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     return Test::LOAD if reader.event_count == Test::FIRST or reader.full_checkpoint_count != Test::CHECKPOINT_COUNT
     checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = reader.full_checkpoints[Test::FIRST]
     recorder: mutable DebuggerTraceRecorder::TraceRecorder = zeroed
     DebuggerTraceRecorder::recorder_initialize(recorder, checkpoint.build, checkpoint.recording)
     last: usize = reader.event_count - Test::INCREMENT
-    if resource:
+    if scalar_result:
+        return Test::LOAD if checkpoint.effects.count != 10
+        checkpoint.effects.records[0].result_value <- -2
+        checkpoint.effects.records[0].result_hash <- DebuggerManagedState::state_effect_result_hash((-2).u64())
+        DebuggerFullCheckpoint::full_checkpoint_seal_side_state(checkpoint)
+        return Test::LOAD if not DebuggerFullCheckpoint::full_checkpoint_is_valid(checkpoint)
+    elif resource:
         return Test::LOAD if checkpoint.resources.operation_count != 9 or checkpoint.resources.count != 1
         checkpoint.resources.operations[0].bytes[0] <- 91
         checkpoint.resources.operations[2].bytes[0] <- 91
@@ -53,18 +64,19 @@ def create_fixture(reader: mutable DebuggerTraceReader::TraceReader&, resource: 
     exported: DebuggerTraceExport::ExportResult = DebuggerTraceExport::export_bundle(bundle) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     DebuggerTraceBundle::bundle_destroy(bundle) can Memory.Release, Unsafe.PointerCast
     return Test::EXPORT if not DebuggerErrors::error_is_ok(exported.failure)
-    destination: cstr = Test::RESOURCE_DESTINATION if resource else Test::DESTINATION
-    destination_length: usize = Test::RESOURCE_DESTINATION_LENGTH if resource else Test::DESTINATION_LENGTH
+    destination: cstr = Test::RESULT_DESTINATION if scalar_result else (Test::RESOURCE_DESTINATION if resource else Test::DESTINATION)
+    destination_length: usize = Test::RESULT_DESTINATION_LENGTH if scalar_result else (Test::RESOURCE_DESTINATION_LENGTH if resource else Test::DESTINATION_LENGTH)
     written: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(destination.cast[u8&], destination_length, exported.bytes.bytes[Test::FIRST], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
     return Test::OK if written.accepted else Test::WRITE
 
 def main(argc: i64, argv: mutable void&) -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
+    scalar_result: bool = argc == 3
     resource: bool = argc == 2
-    source: cstr = Test::RESOURCE_SOURCE if resource else Test::SOURCE
-    source_length: usize = Test::RESOURCE_SOURCE_LENGTH if resource else Test::SOURCE_LENGTH
+    source: cstr = Test::RESULT_SOURCE if scalar_result else (Test::RESOURCE_SOURCE if resource else Test::SOURCE)
+    source_length: usize = Test::RESULT_SOURCE_LENGTH if scalar_result else (Test::RESOURCE_SOURCE_LENGTH if resource else Test::SOURCE_LENGTH)
     loaded: mutable DebuggerTraceFileReader::LoadResult = DebuggerTraceFileReader::trace_file_reader_load(source.cast[u8&], source_length) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     return Test::LOAD if not loaded.accepted
     reader: mutable heap DebuggerTraceReader::TraceReader& = DebuggerTraceFileReader::trace_file_reader_result_reader(loaded) can Abort.Panic
-    result: i64 = create_fixture(reader, resource) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
+    result: i64 = create_fixture(reader, resource, scalar_result) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     DebuggerTraceFileReader::trace_file_reader_result_destroy(loaded) can Memory.Release, Unsafe.PointerCast
     return result

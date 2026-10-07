@@ -203,6 +203,11 @@ reopening across fresh adapters; use `writable: true` only after negotiating
 `supportsElisaVirtualFileWrites` version 1.
 `cli-virtual-file-mutations-check` opens the same artifact in a fresh CLI,
 advances and reverses through it, and exports identical bytes.
+`managed-virtual-file-results-check` records guest errors for invalid handles,
+read-only writes, and invalid offsets, with equivalence at every boundary.
+The matching DAP/CLI checks qualify fresh-process restore and retry; DAP
+advertises `supportsElisaVirtualFileResults` version 1. Legacy file calls retain
+atomic debugger-failure behavior.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

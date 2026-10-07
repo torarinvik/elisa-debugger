@@ -144,6 +144,7 @@ module DebuggerManagedEngine:
 
         const module ManagedEffectStep:
             NO_RESULT_BITS: u64 = 0
+            RESULT_COUNT_INCREMENT: usize = 1
 
 
         def managed_build_identity_matches(left: DebuggerIdentity::BuildIdentity, right: DebuggerIdentity::BuildIdentity) -> bool:
@@ -304,6 +305,12 @@ module DebuggerManagedEngine:
             return managed_restore_recorded_boundary(controller, controller.engine.event_count + DebuggerReplayEngine::Limits::BOUNDARY_INCREMENT)
 
     public:
+        const module VirtualFileResult:
+            EOF: i64 = -1
+            INVALID_HANDLE: i64 = -2
+            PERMISSION_DENIED: i64 = -3
+            INVALID_OFFSET: i64 = -4
+
         enum HostEffectKind:
             None
             ClockNow
@@ -313,6 +320,9 @@ module DebuggerManagedEngine:
             VirtualFileReadByte
             VirtualFileWriteByte
             VirtualFileSeek
+            VirtualFileTryReadByte
+            VirtualFileTryWriteByte
+            VirtualFileTrySeek
 
         struct HostEffectRequest:
             kind: mutable HostEffectKind
@@ -365,6 +375,18 @@ module DebuggerManagedEngine:
                 request.kind <- HostEffectKind.VirtualFileSeek
                 request.payload <- instruction.a.u64()
                 request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
+            elif instruction.opcode == DebuggerEDIR::Opcode.VirtualFileTryReadByte:
+                request.kind <- HostEffectKind.VirtualFileTryReadByte
+                request.payload <- instruction.a.u64()
+                request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
+            elif instruction.opcode == DebuggerEDIR::Opcode.VirtualFileTryWriteByte:
+                request.kind <- HostEffectKind.VirtualFileTryWriteByte
+                request.payload <- instruction.a.u64()
+                request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
+            elif instruction.opcode == DebuggerEDIR::Opcode.VirtualFileTrySeek:
+                request.kind <- HostEffectKind.VirtualFileTrySeek
+                request.payload <- instruction.a.u64()
+                request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
             else:
                 return request
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
@@ -378,7 +400,10 @@ module DebuggerManagedEngine:
             return kind == HostEffectKind.ClockNow or kind == HostEffectKind.RandomU64 or kind == HostEffectKind.ConsoleInput or kind == HostEffectKind.ConsoleOutput
 
         def managed_host_effect_is_virtual_resource(kind: HostEffectKind) -> bool:
-            return kind == HostEffectKind.VirtualFileReadByte or kind == HostEffectKind.VirtualFileWriteByte or kind == HostEffectKind.VirtualFileSeek
+            return kind == HostEffectKind.VirtualFileReadByte or kind == HostEffectKind.VirtualFileWriteByte or kind == HostEffectKind.VirtualFileSeek or managed_host_effect_captures_virtual_file_result(kind)
+
+        def managed_host_effect_captures_virtual_file_result(kind: HostEffectKind) -> bool:
+            return kind == HostEffectKind.VirtualFileTryReadByte or kind == HostEffectKind.VirtualFileTryWriteByte or kind == HostEffectKind.VirtualFileTrySeek
 
         def managed_host_effect_is_pending(controller: ManagedController&) -> bool:
             return false if managed_uses_recorded_future(controller)
@@ -547,6 +572,7 @@ module DebuggerManagedEngine:
         # leave the VM, journal, and retained checkpoints at the same boundary.
         def managed_record_virtual_file_operation(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
             request: HostEffectRequest = managed_host_effect_request(controller)
+            return managed_record_virtual_file_result(controller) if managed_host_effect_captures_virtual_file_result(request.kind)
             return managed_record_virtual_file_read(controller) if request.kind == HostEffectKind.VirtualFileReadByte
             return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid or not managed_host_effect_is_virtual_resource(request.kind)
             preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, request.kind)
@@ -565,6 +591,57 @@ module DebuggerManagedEngine:
                 failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(candidate_state.resources, DebuggerIdentity::debug_id(request.payload), instruction.b.usize())
                 return failure if not DebuggerErrors::error_is_ok(failure)
             return managed_commit_host_effect(controller, candidate_state, result_bits, request.kind)
+
+        # Try operations commit the scalar guest outcome alongside the virtual
+        # mutation. Resource exhaustion and corrupt state remain debugger errors.
+        def managed_record_virtual_file_result(controller: mutable ManagedController&) -> DebuggerErrors::DebuggerError:
+            request: HostEffectRequest = managed_host_effect_request(controller)
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidArgument, false, Detail::HOST_EFFECT_REQUEST) if not request.valid or not managed_host_effect_captures_virtual_file_result(request.kind)
+            preflight: DebuggerErrors::DebuggerError = managed_host_effect_preflight(controller, request.kind)
+            return preflight if not DebuggerErrors::error_is_ok(preflight)
+            candidate: mutable DebuggerManagedState::State = controller.state
+            replaying: bool = candidate.effects.mode == DebuggerEffects::EffectMode.Replaying
+            return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.InvalidState, false, Detail::HOST_EFFECT_REQUEST) if (not replaying and candidate.effects.mode != DebuggerEffects::EffectMode.Recording) or not DebuggerManagedState::state_replay_is_exact(candidate)
+            instruction: DebuggerEDIR::Instruction = controller.engine.image.instructions[controller.engine.machine.program_counter.usize()]
+            value: mutable i64 = instruction.b
+            kind: mutable DebuggerEffects::EffectKind = DebuggerEffects::EffectKind.VirtualFileTrySeek
+            kind <- DebuggerEffects::EffectKind.VirtualFileTryReadByte if request.kind == HostEffectKind.VirtualFileTryReadByte
+            kind <- DebuggerEffects::EffectKind.VirtualFileTryWriteByte if request.kind == HostEffectKind.VirtualFileTryWriteByte
+            byte: mutable u8[VirtualFileInput::REQUESTED_BYTES] = zeroed
+            handle: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(request.payload)
+            file_index: usize = DebuggerVirtualResources::resources_find(candidate.resources, handle)
+            # Guest errors are determined before consuming a resource operation.
+            # A failed call has a scalar record, but no successful I/O entry.
+            if file_index >= DebuggerVirtualResources::Limits::MAX_OPEN_RESOURCES:
+                value <- VirtualFileResult::INVALID_HANDLE
+            elif request.kind == HostEffectKind.VirtualFileTryWriteByte and not candidate.resources.files[file_index].writable:
+                value <- VirtualFileResult::PERMISSION_DENIED
+            elif request.kind == HostEffectKind.VirtualFileTrySeek and instruction.b.usize() > candidate.resources.files[file_index].length:
+                value <- VirtualFileResult::INVALID_OFFSET
+            elif request.kind == HostEffectKind.VirtualFileTryReadByte:
+                read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(candidate.resources, handle, byte[VirtualFileInput::FIRST_BYTE_INDEX], VirtualFileInput::REQUESTED_BYTES)
+                return read.failure if not DebuggerErrors::error_is_ok(read.failure)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENGINE_FAULT) if (read.eof and read.transferred != 0) or (not read.eof and read.transferred != VirtualFileInput::REQUESTED_BYTES)
+                value <- VirtualFileResult::EOF if read.eof else byte[VirtualFileInput::FIRST_BYTE_INDEX].i64()
+            elif request.kind == HostEffectKind.VirtualFileTryWriteByte:
+                byte[VirtualFileInput::FIRST_BYTE_INDEX] <- instruction.b.u8()
+                write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(candidate.resources, handle, byte[VirtualFileInput::FIRST_BYTE_INDEX], VirtualFileInput::REQUESTED_BYTES)
+                return write.failure if not DebuggerErrors::error_is_ok(write.failure)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENGINE_FAULT) if write.transferred != VirtualFileInput::REQUESTED_BYTES or write.eof
+                value <- write.transferred.i64()
+            else:
+                failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(candidate.resources, handle, instruction.b.usize())
+                return failure if not DebuggerErrors::error_is_ok(failure)
+            if replaying:
+                result: DebuggerEffects::EffectReplay = DebuggerEffects::effect_oracle_replay_result_in_invocation(candidate.effects, kind, request.call_site, request.invocation, request.request_hash)
+                return result.failure if not result.accepted
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Diverged, false, Detail::HOST_EFFECT_REQUEST) if result.result_value != value or result.result_hash != DebuggerManagedState::state_effect_result_hash(value.u64())
+            else:
+                previous_count: usize = candidate.effects.count
+                DebuggerEffects::effect_oracle_record_in_invocation(candidate.effects, kind, request.call_site, request.invocation, request.request_hash, DebuggerManagedState::state_effect_result_hash(value.u64()), value)
+                return candidate.effects.last_error if not DebuggerErrors::error_is_ok(candidate.effects.last_error)
+                return DebuggerErrors::make_error(DebuggerErrors::ErrorCode.Corrupt, false, Detail::ENGINE_FAULT) if candidate.effects.count != previous_count + ManagedEffectStep::RESULT_COUNT_INCREMENT or not DebuggerEffects::effect_oracle_is_exact(candidate.effects)
+            return managed_commit_host_effect(controller, candidate, value.u64(), request.kind)
 
         def managed_initialize(controller: mutable ManagedController&, session: DebuggerSession::Session, image: DebuggerEDIR::ProgramImage&, recording: DebuggerIdentity::DebugId) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             if not controller.side_history_initialized:

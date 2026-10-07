@@ -75,6 +75,16 @@ non-hex contents, invalid handle sequences, and non-boolean `writable` values
 fail launch with an invalid-argument response. The extension is available for the managed
 EDIR engine; native engine sessions do not mount these snapshots.
 
+The adapter additionally advertises `supportsElisaVirtualFileResults: true`
+and `elisaVirtualFileResultsVersion: 1`. With a matching version-7 EDIR producer,
+`virtual_file_try_read_byte`, `virtual_file_try_write_byte`, and
+`virtual_file_try_seek` return captured guest error values: invalid handle `-2`,
+permission denied `-3`, or invalid offset `-4`. EOF remains `-1`. A failed guest
+call advances execution without mutating file bytes or cursor; its effect record
+is replayed from the captured resources and checked at that exact boundary.
+Resource exhaustion and invalid debugger state still return debugger failures.
+Legacy calls retain their debugger-failure behavior.
+
 ## Editor integration
 
 An adapter plugin should read the capability before adding the custom launch

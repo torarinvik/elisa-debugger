@@ -56,6 +56,47 @@ module DebuggerManagedTraceReplay:
                 return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::RESOURCE_IDENTITY) if service.replay_diagnostic.available
             return DebuggerErrors::no_error()
 
+        # Try-file results are recomputed from captured resources. Compare the
+        # scalar journal immediately, including calls that fail without an I/O entry.
+        def verify_effect_operations(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, first: usize, last_verified: DebuggerIdentity::Position, event: u64) -> DebuggerErrors::DebuggerError:
+            for index in first..<service.controller.state.effects.count:
+                if index >= checkpoint.effects.count:
+                    service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.MissingResult, last_verified, event, checkpoint.effects.count.u64(), service.controller.state.effects.count.u64())
+                    return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EFFECT_REQUEST)
+                expected: DebuggerEffects::EffectRecord = checkpoint.effects.records[index]
+                observed: DebuggerEffects::EffectRecord = service.controller.state.effects.records[index]
+                component: mutable DebuggerReplayDiagnostic::Component = DebuggerReplayDiagnostic::Component.None
+                left: mutable u64 = expected.result_value.u64()
+                right: mutable u64 = observed.result_value.u64()
+                if expected.kind != observed.kind:
+                    component <- DebuggerReplayDiagnostic::Component.EffectKind
+                    left <- expected.kind.u64()
+                    right <- observed.kind.u64()
+                elif expected.call_site.value != observed.call_site.value:
+                    component <- DebuggerReplayDiagnostic::Component.CallSite
+                    left <- expected.call_site.value
+                    right <- observed.call_site.value
+                elif expected.invocation.value != observed.invocation.value:
+                    component <- DebuggerReplayDiagnostic::Component.Invocation
+                    left <- expected.invocation.value
+                    right <- observed.invocation.value
+                elif expected.request_hash != observed.request_hash:
+                    component <- DebuggerReplayDiagnostic::Component.Request
+                    left <- expected.request_hash
+                    right <- observed.request_hash
+                elif expected.result_value != observed.result_value:
+                    component <- DebuggerReplayDiagnostic::Component.EffectResult
+                elif expected.result_hash != observed.result_hash:
+                    component <- DebuggerReplayDiagnostic::Component.EffectResult
+                    left <- expected.result_hash
+                    right <- observed.result_hash
+                elif expected.sequence != observed.sequence or expected.suppress_external_write != observed.suppress_external_write:
+                    component <- DebuggerReplayDiagnostic::Component.SideState
+                if component != DebuggerReplayDiagnostic::Component.None:
+                    service.replay_diagnostic <- DebuggerReplayDiagnostic::values(component, last_verified, event, left, right)
+                    return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EFFECT_REQUEST)
+            return DebuggerErrors::no_error()
+
         def record_captured_effect(service: mutable DebuggerManagedService::Service&, checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint&, request: DebuggerManagedEngine::HostEffectRequest, event: DebuggerEvents::EventEnvelope) -> DebuggerErrors::DebuggerError:
             index: usize = service.controller.state.effects.count
             if not request.valid or index >= checkpoint.effects.count:
@@ -124,6 +165,7 @@ module DebuggerManagedTraceReplay:
             return failure if not DebuggerErrors::error_is_ok(failure)
             for index in Boundary::FIRST_EVENT..<event_count:
                 last_verified: DebuggerIdentity::Position = service.controller.session.position
+                first_effect_operation: usize = service.controller.state.effects.count
                 first_resource_operation: usize = service.controller.state.resources.operation_count
                 request: DebuggerManagedEngine::HostEffectRequest = DebuggerManagedEngine::managed_host_effect_request(service.controller)
                 if DebuggerManagedEngine::managed_host_effect_requires_provider(request.kind):
@@ -136,6 +178,8 @@ module DebuggerManagedTraceReplay:
                 if service.controller.engine.event_count != index + Boundary::EVENT_INCREMENT:
                     service.replay_diagnostic <- DebuggerReplayDiagnostic::values(DebuggerReplayDiagnostic::Component.EventCount, last_verified, index.u64(), (index + Boundary::EVENT_INCREMENT).u64(), service.controller.engine.event_count.u64())
                     return replay_error(DebuggerErrors::ErrorCode.Diverged, Detail::EVENT_MISMATCH)
+                failure <- verify_effect_operations(service, checkpoint, first_effect_operation, last_verified, index.u64())
+                return failure if not DebuggerErrors::error_is_ok(failure)
                 failure <- verify_resource_operations(service, checkpoint, first_resource_operation, last_verified, index.u64())
                 return failure if not DebuggerErrors::error_is_ok(failure)
                 service.replay_diagnostic <- DebuggerReplayDiagnostic::event_mismatch(events[index], service.controller.engine.events[index], last_verified)

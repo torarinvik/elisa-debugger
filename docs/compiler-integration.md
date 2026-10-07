@@ -3,6 +3,48 @@
 This records the compiler dependency and qualified compiler-to-debugger seam.
 The supported EDIR subset and qualification dates below define its scope.
 
+## Guest file result qualification
+
+The same integration branch now includes compiler commit
+`415d5c1c35f1503cf2ec96afe071a8fa747cfcb0`, directly after the write/seek
+commit below. It emits EDIR program version 7 with literal-argument
+`virtual_file_try_read_byte`, `virtual_file_try_write_byte`, and
+`virtual_file_try_seek` calls. The compiler's O0/O2 golden artifacts, source
+spans, malformed-call refusal, and scalar/native parity pass on the requested
+Vast Linux instance with strict stale-product refusal.
+
+| Input or product | SHA-256 |
+| --- | --- |
+| Compiler source | `228f7a1b542294fdee07e4f13663474590af2cd7942ad6e729712028e7e570ee` |
+| Build recipes | `7b4267cbd9e406c71e7bb89bfb93980d8d3e9c6cc33746340cba67adc27d6e10` |
+| Linux stage1 | `9dcfb73322e6900848a69191f66325c76a53750c7d08070db1a8da8a4a499412` |
+| Linux runtime | `06f75666d3c625595126f538e5b8205ea6d8037123c7fa6d8f4e592d6ea8f70f` |
+
+The compiler was freshly bootstrapped at O2 with the same stage0 and Linux
+settings below. The new fixture makes ten guest calls, branches on invalid
+handle, permission, and offset results, and records five successful resource
+operations. Fresh processes compare VM and side-state hashes at all 57
+boundaries (56 events), with changed/deleted host input and no host writes.
+Capacity failure rejects both the candidate resource mutation and effect record.
+The explicit Replay-mode API consumes scalar and resource journals together;
+guest errors consume one scalar and no I/O entry. Request/result mismatches
+leave both cursors, guest state, retained history, and stop generation unchanged.
+A self-consistent altered first error reports `effect-result` at event zero;
+rejected restore preserves the live stop and permits a valid retry.
+
+The focused gates, full `make -j12 check module-check smoke` graph, CLI/DAP
+restore and retry, and byte-identical rewind export of the prior program-6,
+checkpoint-codec-9 trace pass at O0. The managed guest-error driver, full
+checkpoint codec, CLI, DAP, and divergence fixture also pass their focused gates
+at O2, including the earlier mixed clock/random/console trace. Guest-result,
+resource, and event divergence/retry responses pass Draft 2020-12 validation. Full-checkpoint writers preserve codec 9 for earlier effect kinds
+and select codec 10 for the new typed scalar kinds; managed hash schema 5 stays
+stable. DAP advertises `supportsElisaVirtualFileResults` version 1.
+
+This closes the captured scalar guest error slice for mounted byte I/O and
+absolute seeks. Guest open/close, larger buffered files, general host effects,
+and the other milestone gates remain open.
+
 ## Virtual-file write/seek qualification
 
 The compiler integration branch `codex/debugger-resource-effects` is committed

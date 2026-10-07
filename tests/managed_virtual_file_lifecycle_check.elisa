@@ -1,4 +1,4 @@
-# One process records a compiler-produced virtual-file guest-error program; another restores
+# One process records a compiler-produced virtual-file lifecycle program; another restores
 # every boundary from disk with changed/missing inputs and no host writes.
 
 include "../src/protocol/managed_trace.elisa"
@@ -9,12 +9,12 @@ extern creat(path: cstr, mode: u32) -> i32 can[Blocking.IO]
 
 const module Test:
     const module Path:
-        IMAGE: cstr = "build/file-results.edir"
-        IMAGE_LENGTH: usize = 23
-        TRACE: cstr = "build/file-results.eltr"
-        TRACE_LENGTH: usize = 23
-        REFERENCE: cstr = "build/file-results.reference"
-        HOST_INPUT: cstr = "build/file-results-host.bin"
+        IMAGE: cstr = "build/file-lifecycle.edir"
+        IMAGE_LENGTH: usize = 25
+        TRACE: cstr = "build/file-lifecycle.eltr"
+        TRACE_LENGTH: usize = 25
+        REFERENCE: cstr = "build/file-lifecycle.reference"
+        HOST_INPUT: cstr = "build/file-lifecycle-host.bin"
 
     const module Identity:
         COMPILER: u64 = 1001
@@ -35,8 +35,8 @@ const module Test:
         RANDOM: u64 = 18446744073709551615
         INPUT: i64 = 66
         EOF: i64 = -1
-        EXPECTED_CALLS: usize = 10
-        EXPECTED_RESOURCE_OPERATIONS: usize = 5
+        EXPECTED_CALLS: usize = 14
+        EXPECTED_RESOURCE_OPERATIONS: usize = 7
         EXPECTED_FILE_BYTE: u8 = 65
 
     const module Boundary:
@@ -98,7 +98,17 @@ def corruption_is_atomic(service: mutable DebuggerManagedService::Service&) -> b
     return false if not DebuggerFullCheckpoint::full_checkpoint_is_valid(reader.full_checkpoints[Test::Boundary::FIRST])
     rejected_resource: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
     diagnostic <- DebuggerManagedService::service_replay_diagnostic(service)
-    unchanged <- not rejected_resource.accepted and rejected_resource.failure.code == DebuggerErrors::ErrorCode.Diverged and diagnostic.available and diagnostic.component == DebuggerReplayDiagnostic::Component.EffectResult and diagnostic.event == 0 and diagnostic.last_verified.event == 0 and diagnostic.expected_value == (-2).u64() and diagnostic.observed_value == (-3).u64() and service.controller.session.stop_generation == original_generation and service.controller.side_history == original_history and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == original_hash
+    unchanged <- not rejected_resource.accepted and rejected_resource.failure.code == DebuggerErrors::ErrorCode.Diverged and diagnostic.available and diagnostic.component == DebuggerReplayDiagnostic::Component.EffectResult and diagnostic.event == 0 and diagnostic.last_verified.event == 0 and diagnostic.expected_value == (-2).u64() and diagnostic.observed_value == 0 and service.controller.session.stop_generation == original_generation and service.controller.side_history == original_history and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == original_hash
+    reader.full_checkpoints[Test::Boundary::FIRST] <- original_checkpoint
+    # Replace close/reopen with two valid seeks: a coherent false resource
+    # history must still disagree with deterministic execution at event zero.
+    reader.full_checkpoints[Test::Boundary::FIRST].resources.operations[0].kind <- DebuggerVirtualResources::ResourceOperationKind.Seek
+    reader.full_checkpoints[Test::Boundary::FIRST].resources.operations[1].kind <- DebuggerVirtualResources::ResourceOperationKind.Seek
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(reader.full_checkpoints[Test::Boundary::FIRST])
+    return false if not DebuggerFullCheckpoint::full_checkpoint_is_valid(reader.full_checkpoints[Test::Boundary::FIRST])
+    rejected_lifetime: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
+    diagnostic <- DebuggerManagedService::service_replay_diagnostic(service)
+    unchanged <- unchanged and not rejected_lifetime.accepted and rejected_lifetime.failure.code == DebuggerErrors::ErrorCode.Diverged and diagnostic.available and diagnostic.component == DebuggerReplayDiagnostic::Component.ResourceOperation and diagnostic.event == 0 and diagnostic.last_verified.event == 0 and service.controller.session.stop_generation == original_generation and service.controller.side_history == original_history and DebuggerReplayEngine::replay_engine_state_hash(service.controller.engine) == original_hash
     reader.full_checkpoints[Test::Boundary::FIRST] <- original_checkpoint
     reader.events[Test::Boundary::FIRST].position.invocation <- DebuggerIdentity::debug_id(Test::Identity::WRONG_INVOCATION)
     rejected_event: DebuggerManagedService::Result = DebuggerManagedTraceService::service_trace_restore_checkpoint(service, reader, reader.event_count.u64()) can Memory.Release, Unsafe.PointerCast
@@ -131,29 +141,24 @@ def failed_step_is_atomic(service: mutable DebuggerManagedService::Service&, exp
 
 def result_guards(image: DebuggerEDIR::ProgramImage&) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast]:
     candidate: mutable DebuggerEDIR::ProgramImage = image
-    candidate.program.version <- 6
-    return false if DebuggerEDIR::verify_image(candidate).valid
     candidate.program.version <- 7
-    candidate.instructions[0].b <- 256
     return false if DebuggerEDIR::verify_image(candidate).valid
-    candidate.instructions[0].b <- 90
+    candidate.program.version <- 8
+    candidate.instructions[0].b <- 1
+    return false if DebuggerEDIR::verify_image(candidate).valid
+    candidate.instructions[0].b <- 0
     candidate.instructions[0].a <- 0
-    return false if DebuggerEDIR::verify_image(candidate).valid
-    candidate.instructions[0].a <- 1
-    candidate.instructions[0].opcode <- DebuggerEDIR::Opcode.VirtualFileTrySeek
-    candidate.instructions[0].b <- -1
     return false if DebuggerEDIR::verify_image(candidate).valid
     candidate <- image
     machine: mutable DebuggerEDIR::Machine = DebuggerEDIR::machine_new()
     machine <- DebuggerEDIR::machine_step(machine, image.instructions[0])
     return false if not machine.faulted or machine.steps != 0
-    candidate <- image
     encoded: mutable DebuggerTraceBinary::ByteWriter = DebuggerEDIRCodec::artifact_encode(candidate)
     return false if not DebuggerTraceBinary::writer_is_valid(encoded)
     decoder: mutable DebuggerTraceBinary::ByteReader = zeroed
     DebuggerTraceBinary::reader_initialize(decoder, encoded.bytes[0], encoded.length)
     decoded: DebuggerEDIRCodec::DecodeResult = DebuggerEDIRCodec::artifact_decode(decoder)
-    return false if not decoded.valid or decoded.image.program.version != image.program.version or decoded.image.instructions[0].opcode != DebuggerEDIR::Opcode.VirtualFileTryWriteByte
+    return false if not decoded.valid or decoded.image.program.version != 8 or decoded.image.instructions[0].opcode != DebuggerEDIR::Opcode.VirtualFileTryClose
     for scenario in 0..<3:
         candidate <- image
         candidate.function_count <- 1
@@ -162,6 +167,11 @@ def result_guards(image: DebuggerEDIR::ProgramImage&) -> bool can[Memory.Allocat
         candidate.program.local_count <- 0
         for instruction in 0..<candidate.program.instruction_count.usize():
             candidate.instructions[instruction] <- image.instructions[0]
+            if scenario == 0:
+                candidate.instructions[instruction].opcode <- DebuggerEDIR::Opcode.VirtualFileTryWriteByte
+                candidate.instructions[instruction].b <- 90
+            if scenario == 1 and instruction % 2 == 1:
+                candidate.instructions[instruction].opcode <- DebuggerEDIR::Opcode.VirtualFileTryReopen
         last: usize = candidate.program.instruction_count.usize() - 1
         candidate.instructions[last].opcode <- DebuggerEDIR::Opcode.Return
         candidate.instructions[last].a <- 0
@@ -174,7 +184,7 @@ def result_guards(image: DebuggerEDIR::ProgramImage&) -> bool can[Memory.Allocat
         initial: mutable u8[256] = zeroed
         if scenario == 2:
             for record in 0..<256:
-                DebuggerEffects::effect_oracle_record_in_invocation(service.controller.state.effects, DebuggerEffects::EffectKind.VirtualFileTryWriteByte, DebuggerIdentity::debug_id(1), DebuggerIdentity::debug_id(1), 1, DebuggerManagedState::state_effect_result_hash((-3).u64()), -3)
+                DebuggerEffects::effect_oracle_record_in_invocation(service.controller.state.effects, DebuggerEffects::EffectKind.VirtualFileTryClose, DebuggerIdentity::debug_id(1), DebuggerIdentity::debug_id(1), 1, DebuggerManagedState::state_effect_result_hash(0), 0)
         mounted: DebuggerVirtualResources::ResourceOpenResult = DebuggerManagedEngine::managed_resource_mount(service.controller, DebuggerIdentity::debug_id(Test::Identity::RESOURCE_PATH), true, Test::Identity::RESOURCE_GENERATION, initial[0], 256 if scenario == 0 else 1)
         return false if not mounted.accepted
         return false if not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_launch(service.controller)) or not DebuggerErrors::error_is_ok(DebuggerManagedEngine::managed_pause(service.controller))
@@ -216,9 +226,9 @@ def consuming_replay_is_exact(source: mutable DebuggerManagedService::Service&) 
             for event in 0..<source.recorded_event_count:
                 step: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_step_with_outcome(replay)
                 return false if step.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Completed or not DebuggerEvents::event_envelopes_equal(source.recorded_events[event], replay.controller.engine.events[event])
-                # The first five calls are guest errors and must not consume I/O.
-                if replay.controller.state.effects.cursor <= 5:
-                    return false if replay.controller.state.resources.operation_cursor != 0
+                # After the first close, four closed-handle errors consume only scalars.
+                if replay.controller.state.effects.cursor >= 1 and replay.controller.state.effects.cursor <= 5:
+                    return false if replay.controller.state.resources.operation_cursor != 1 or DebuggerVirtualResources::resources_handle_is_open(replay.controller.state.resources, DebuggerIdentity::debug_id(1))
             exact: bool = replay.controller.engine.machine.halted and replay.controller.engine.machine.result == -1 and replay.controller.state.effects.cursor == source.controller.state.effects.count and replay.controller.state.resources.operation_cursor == source.controller.state.resources.operation_count and DebuggerManagedEngine::managed_is_exact(replay.controller)
             DebuggerManagedEngine::managed_controller_release_owned_history(replay.controller) can Memory.Release, Unsafe.PointerCast
             return false if not exact
@@ -241,7 +251,11 @@ def record_trace(service: mutable DebuggerManagedService::Service&) -> i64 can[B
         return Test::Failure::STEP if step.kind == DebuggerManagedEngine::ExecutionOutcomeKind.Failed or step.kind == DebuggerManagedEngine::ExecutionOutcomeKind.AwaitingHostEffect
         append_hashes(reference, service)
     return Test::Failure::EXECUTION if not service.controller.engine.machine.halted or service.controller.engine.machine.result != Test::Provider::EOF or service.controller.state.resources.operation_count != Test::Provider::EXPECTED_RESOURCE_OPERATIONS or service.controller.state.effects.count != Test::Provider::EXPECTED_CALLS
-    return Test::Failure::STATE if service.controller.state.resources.files[0].length != 1 or service.controller.state.resources.files[0].cursor != 1 or service.controller.state.resources.files[0].bytes[0] != 65
+    expected_values: i64[14] = [0, -5, -5, -5, -5, 1, 65, -6, -2, -2, 0, 1, 65, -1]
+    expected_kinds: u16[14] = [13, 10, 11, 12, 13, 14, 10, 14, 13, 14, 13, 14, 10, 10]
+    for index in 0..<14:
+        return Test::Failure::STATE if service.controller.state.effects.records[index].result_value != expected_values[index] or service.controller.state.effects.records[index].kind.u16() != expected_kinds[index]
+    return Test::Failure::STATE if service.controller.state.resources.files[0].length != 1 or service.controller.state.resources.files[0].cursor != 1 or service.controller.state.resources.files[0].bytes[0] != 65 or not DebuggerVirtualResources::resources_handle_is_open(service.controller.state.resources, DebuggerIdentity::debug_id(1))
     return Test::Failure::ATOMICITY if not consuming_replay_is_exact(service) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     exported: DebuggerManagedTraceFile::ExportResult = DebuggerManagedTraceFile::export_service_trace(service, Test::Path::TRACE.cast[u8&], Test::Path::TRACE_LENGTH) can Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast
     return Test::Failure::EXPORT if not exported.accepted
@@ -302,7 +316,7 @@ def replay_trace(service: mutable DebuggerManagedService::Service&) -> i64 can[B
     original_envelope: DebuggerEvents::EventEnvelope = service.controller.engine.events[Test::Boundary::FIRST]
     original_snapshot: DebuggerCheckpoint::MachineSnapshot = service.controller.engine.history[Test::Boundary::INCREMENT]
     original_bits: u64 = service.controller.engine.effect_result_bits[Test::Boundary::FIRST]
-    service.controller.engine.effect_result_bits[Test::Boundary::FIRST] <- Test::Boundary::FIRST.u64()
+    service.controller.engine.effect_result_bits[Test::Boundary::FIRST] <- Test::Boundary::INCREMENT.u64()
     rejected: DebuggerManagedEngine::ExecutionOutcome = DebuggerManagedService::service_step_with_outcome(service)
     rejected_checkpoint: DebuggerFullCheckpoint::ManagedCheckpoint = DebuggerManagedEngine::managed_full_checkpoint(service.controller)
     return Test::Failure::ATOMICITY if rejected.kind != DebuggerManagedEngine::ExecutionOutcomeKind.Failed or service.controller.engine.event_count != Test::Boundary::FIRST or service.controller.session.stop_generation != original_generation or rejected_checkpoint.state_hash != initial_checkpoint.state_hash or rejected_checkpoint.side_state_hash != initial_checkpoint.side_state_hash

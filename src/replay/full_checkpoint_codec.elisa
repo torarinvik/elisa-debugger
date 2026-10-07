@@ -51,7 +51,8 @@ module DebuggerFullCheckpointCodec:
     private:
         const module Codec:
             REPLAY_FULL_CHECKPOINT_CODEC_MAGIC: u32 = 1263022918
-            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 10
+            REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA: u32 = 11
+            SCALAR_FILE_CODEC_SCHEMA: u32 = 10
             LEGACY_CODEC_SCHEMA: u32 = 9
             REPLAY_FULL_CHECKPOINT_CODEC_BYTE_BITS: u64 = 8
             REPLAY_FULL_CHECKPOINT_CODEC_BYTE_MASK: u64 = 255
@@ -72,11 +73,14 @@ module DebuggerFullCheckpointCodec:
             SYNC_KIND_MAX: u16 = 4
             RUNTIME_STATUS_MAX: u16 = 4
             SCHEDULE_KIND_MAX: u16 = 6
-            EFFECT_KIND_MAX: u16 = 12
+            EFFECT_KIND_MAX: u16 = 14
+            SCALAR_FILE_EFFECT_KIND_MAX: u16 = 12
             LEGACY_EFFECT_KIND_MAX: u16 = 9
             EFFECT_MODE_MAX: u16 = 4
             EFFECT_EXACTNESS_MAX: u16 = 3
             RESOURCE_MODE_MAX: u16 = 2
+            RESOURCE_KIND_MAX: u16 = 5
+            LEGACY_RESOURCE_KIND_MAX: u16 = 3
             REPLAY_FULL_CHECKPOINT_CODEC_ERROR_CODE_MAX: u16 = 12
             REPLAY_FULL_CHECKPOINT_CODEC_ERROR_SEVERITY_MAX: u16 = 2
             ENUM_ZERO: u16 = 0
@@ -92,6 +96,8 @@ module DebuggerFullCheckpointCodec:
             ENUM_TEN: u16 = 10
             ENUM_ELEVEN: u16 = 11
             ENUM_TWELVE: u16 = 12
+            ENUM_THIRTEEN: u16 = 13
+            ENUM_FOURTEEN: u16 = 14
             REPLAY_FULL_CHECKPOINT_CODEC_U16_BYTES: usize = DebuggerFullCheckpointCodecCapacity::U16_BYTES
             REPLAY_FULL_CHECKPOINT_CODEC_U32_BYTES: usize = DebuggerFullCheckpointCodecCapacity::U32_BYTES
             REPLAY_FULL_CHECKPOINT_CODEC_U64_BYTES: usize = DebuggerFullCheckpointCodecCapacity::U64_BYTES
@@ -451,6 +457,8 @@ module DebuggerFullCheckpointCodec:
             return DebuggerEffects::EffectKind.VirtualFileTryReadByte if code == Codec::ENUM_TEN
             return DebuggerEffects::EffectKind.VirtualFileTryWriteByte if code == Codec::ENUM_ELEVEN
             return DebuggerEffects::EffectKind.VirtualFileTrySeek if code == Codec::ENUM_TWELVE
+            return DebuggerEffects::EffectKind.VirtualFileTryClose if code == Codec::ENUM_THIRTEEN
+            return DebuggerEffects::EffectKind.VirtualFileTryReopen if code == Codec::ENUM_FOURTEEN
             reader.failed <- true
             return DebuggerEffects::EffectKind.Clock
 
@@ -514,11 +522,13 @@ module DebuggerFullCheckpointCodec:
 
         def reader_take_resource_operation_kind(reader: mutable CheckpointReader&) -> DebuggerVirtualResources::ResourceOperationKind:
             code: u16 = reader_take_u16(reader)
-            reader.failed <- true if code > Codec::ENUM_THREE
+            reader.failed <- true if code > Codec::RESOURCE_KIND_MAX
             return DebuggerVirtualResources::ResourceOperationKind.Open if code == Codec::ENUM_ZERO
             return DebuggerVirtualResources::ResourceOperationKind.Read if code == Codec::ENUM_ONE
             return DebuggerVirtualResources::ResourceOperationKind.Write if code == Codec::ENUM_TWO
             return DebuggerVirtualResources::ResourceOperationKind.Seek if code == Codec::ENUM_THREE
+            return DebuggerVirtualResources::ResourceOperationKind.Close if code == Codec::ENUM_FOUR
+            return DebuggerVirtualResources::ResourceOperationKind.Reopen if code == Codec::ENUM_FIVE
             reader.failed <- true
             return DebuggerVirtualResources::ResourceOperationKind.Open
 
@@ -765,7 +775,12 @@ module DebuggerFullCheckpointCodec:
             # legacy kinds, including immutable rewind export of existing traces.
             codec_schema: mutable u32 = Codec::LEGACY_CODEC_SCHEMA
             for effect_index in Codec::FIRST_INDEX..<checkpoint.effects.count:
-                codec_schema <- Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA if checkpoint.effects.records[effect_index].kind.u16() > Codec::LEGACY_EFFECT_KIND_MAX
+                if checkpoint.effects.records[effect_index].kind.u16() > Codec::SCALAR_FILE_EFFECT_KIND_MAX:
+                    codec_schema <- Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA
+                elif checkpoint.effects.records[effect_index].kind.u16() > Codec::LEGACY_EFFECT_KIND_MAX and codec_schema < Codec::SCALAR_FILE_CODEC_SCHEMA:
+                    codec_schema <- Codec::SCALAR_FILE_CODEC_SCHEMA
+            for operation_index in Codec::FIRST_INDEX..<checkpoint.resources.operation_count:
+                codec_schema <- Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA if checkpoint.resources.operations[operation_index].kind.u16() > Codec::LEGACY_RESOURCE_KIND_MAX
             writer_put_u32(encoded, codec_schema)
             writer_put_u32(encoded, checkpoint.schema)
             writer_put_u64(encoded, checkpoint.recording.value)
@@ -822,7 +837,7 @@ module DebuggerFullCheckpointCodec:
             checkpoint.build <- reader_take_build_identity(reader)
             checkpoint.image_fingerprint <- reader_take_u64(reader)
             checkpoint.image_fingerprint_valid <- reader_take_bool(reader)
-            if reader.failed or magic != Codec::REPLAY_FULL_CHECKPOINT_CODEC_MAGIC or (codec_schema != Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA and codec_schema != Codec::LEGACY_CODEC_SCHEMA):
+            if reader.failed or magic != Codec::REPLAY_FULL_CHECKPOINT_CODEC_MAGIC or (codec_schema != Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA and codec_schema != Codec::SCALAR_FILE_CODEC_SCHEMA and codec_schema != Codec::LEGACY_CODEC_SCHEMA):
                 return decode_failure(DecodeStatus.Invalid)
             machine_bytes: mutable u8[DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES] = zeroed
             for index in Codec::FIRST_INDEX..<DebuggerCheckpointWireLayout::CHECKPOINT_PAYLOAD_BYTES:
@@ -841,7 +856,14 @@ module DebuggerFullCheckpointCodec:
             if codec_schema == Codec::LEGACY_CODEC_SCHEMA:
                 for effect_index in 0..<checkpoint.effects.count:
                     return decode_failure(DecodeStatus.Invalid) if checkpoint.effects.records[effect_index].kind.u16() > Codec::LEGACY_EFFECT_KIND_MAX
+            if codec_schema == Codec::SCALAR_FILE_CODEC_SCHEMA:
+                for effect_index in Codec::FIRST_INDEX..<checkpoint.effects.count:
+                    return decode_failure(DecodeStatus.Invalid) if checkpoint.effects.records[effect_index].kind.u16() > Codec::SCALAR_FILE_EFFECT_KIND_MAX
             checkpoint.resources <- reader_take_resource_store(reader)
+            return decode_failure(DecodeStatus.Invalid if not reader.truncated else DecodeStatus.Truncated) if reader.failed
+            if codec_schema != Codec::REPLAY_FULL_CHECKPOINT_CODEC_SCHEMA:
+                for operation_index in Codec::FIRST_INDEX..<checkpoint.resources.operation_count:
+                    return decode_failure(DecodeStatus.Invalid) if checkpoint.resources.operations[operation_index].kind.u16() > Codec::LEGACY_RESOURCE_KIND_MAX
             checkpoint.adapters <- reader_take_adapter_snapshot(reader)
             if reader.failed:
                 return decode_failure(DecodeStatus.Invalid if not reader.truncated else DecodeStatus.Truncated)

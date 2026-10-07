@@ -310,6 +310,9 @@ module DebuggerManagedEngine:
             INVALID_HANDLE: i64 = -2
             PERMISSION_DENIED: i64 = -3
             INVALID_OFFSET: i64 = -4
+            CLOSED_HANDLE: i64 = -5
+            ALREADY_OPEN: i64 = -6
+            CLOSED_OK: i64 = 0
 
         enum HostEffectKind:
             None
@@ -323,6 +326,8 @@ module DebuggerManagedEngine:
             VirtualFileTryReadByte
             VirtualFileTryWriteByte
             VirtualFileTrySeek
+            VirtualFileTryClose
+            VirtualFileTryReopen
 
         struct HostEffectRequest:
             kind: mutable HostEffectKind
@@ -387,6 +392,14 @@ module DebuggerManagedEngine:
                 request.kind <- HostEffectKind.VirtualFileTrySeek
                 request.payload <- instruction.a.u64()
                 request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
+            elif instruction.opcode == DebuggerEDIR::Opcode.VirtualFileTryClose:
+                request.kind <- HostEffectKind.VirtualFileTryClose
+                request.payload <- instruction.a.u64()
+                request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
+            elif instruction.opcode == DebuggerEDIR::Opcode.VirtualFileTryReopen:
+                request.kind <- HostEffectKind.VirtualFileTryReopen
+                request.payload <- instruction.a.u64()
+                request.request_hash <- virtual_file_request_hash(instruction.opcode, request.payload, instruction.b)
             else:
                 return request
             identity: ManagedEffectIdentity = managed_active_effect_identity(controller)
@@ -403,7 +416,7 @@ module DebuggerManagedEngine:
             return kind == HostEffectKind.VirtualFileReadByte or kind == HostEffectKind.VirtualFileWriteByte or kind == HostEffectKind.VirtualFileSeek or managed_host_effect_captures_virtual_file_result(kind)
 
         def managed_host_effect_captures_virtual_file_result(kind: HostEffectKind) -> bool:
-            return kind == HostEffectKind.VirtualFileTryReadByte or kind == HostEffectKind.VirtualFileTryWriteByte or kind == HostEffectKind.VirtualFileTrySeek
+            return kind == HostEffectKind.VirtualFileTryReadByte or kind == HostEffectKind.VirtualFileTryWriteByte or kind == HostEffectKind.VirtualFileTrySeek or kind == HostEffectKind.VirtualFileTryClose or kind == HostEffectKind.VirtualFileTryReopen
 
         def managed_host_effect_is_pending(controller: ManagedController&) -> bool:
             return false if managed_uses_recorded_future(controller)
@@ -607,6 +620,8 @@ module DebuggerManagedEngine:
             kind: mutable DebuggerEffects::EffectKind = DebuggerEffects::EffectKind.VirtualFileTrySeek
             kind <- DebuggerEffects::EffectKind.VirtualFileTryReadByte if request.kind == HostEffectKind.VirtualFileTryReadByte
             kind <- DebuggerEffects::EffectKind.VirtualFileTryWriteByte if request.kind == HostEffectKind.VirtualFileTryWriteByte
+            kind <- DebuggerEffects::EffectKind.VirtualFileTryClose if request.kind == HostEffectKind.VirtualFileTryClose
+            kind <- DebuggerEffects::EffectKind.VirtualFileTryReopen if request.kind == HostEffectKind.VirtualFileTryReopen
             byte: mutable u8[VirtualFileInput::REQUESTED_BYTES] = zeroed
             handle: DebuggerIdentity::DebugId = DebuggerIdentity::debug_id(request.payload)
             file_index: usize = DebuggerVirtualResources::resources_find(candidate.resources, handle)
@@ -614,6 +629,19 @@ module DebuggerManagedEngine:
             # A failed call has a scalar record, but no successful I/O entry.
             if file_index >= DebuggerVirtualResources::Limits::MAX_OPEN_RESOURCES:
                 value <- VirtualFileResult::INVALID_HANDLE
+            elif request.kind == HostEffectKind.VirtualFileTryReopen:
+                if DebuggerVirtualResources::resources_handle_is_open(candidate.resources, handle):
+                    value <- VirtualFileResult::ALREADY_OPEN
+                else:
+                    reopened: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_reopen(candidate.resources, handle)
+                    return reopened.failure if not reopened.accepted
+                    value <- reopened.handle.value.i64()
+            elif not DebuggerVirtualResources::resources_handle_is_open(candidate.resources, handle):
+                value <- VirtualFileResult::CLOSED_HANDLE
+            elif request.kind == HostEffectKind.VirtualFileTryClose:
+                failure: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_close(candidate.resources, handle)
+                return failure if not DebuggerErrors::error_is_ok(failure)
+                value <- VirtualFileResult::CLOSED_OK
             elif request.kind == HostEffectKind.VirtualFileTryWriteByte and not candidate.resources.files[file_index].writable:
                 value <- VirtualFileResult::PERMISSION_DENIED
             elif request.kind == HostEffectKind.VirtualFileTrySeek and instruction.b.usize() > candidate.resources.files[file_index].length:

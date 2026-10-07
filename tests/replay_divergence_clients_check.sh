@@ -24,6 +24,13 @@ elif test "${5:-events}" = results; then
     component=effect-result
     event=0
     "$creator" scalar results
+elif test "${5:-events}" = lifecycle; then
+    bad=build/lifecycle-divergence.eltr
+    good=build/dap-file-lifecycle.eltr
+    output=build/lifecycle-divergence-dap.output
+    component=effect-result
+    event=0
+    "$creator" scalar results lifecycle
 else
     "$creator"
 fi
@@ -52,7 +59,7 @@ frame() {
 
 # Transport verification only: all lengths and JSON messages must remain
 # valid even for diagnostics containing full-width identities and hashes.
-python3 - "$output" "$component" "$event" <<'PY'
+python3 - "$output" "$component" "$event" "${5:-events}" <<'PY'
 import json
 import pathlib
 import sys
@@ -76,7 +83,7 @@ assert diagnostic['recordingId'] == '1' and diagnostic['branchId'] == '0'
 if sys.argv[2] == 'machine-state':
     assert diagnostic['expectedEventAvailable'] and diagnostic['observedEventAvailable']
 elif sys.argv[2] == 'effect-result':
-    assert diagnostic['expectedValue'] == '18446744073709551614' and diagnostic['observedValue'] == '18446744073709551613'
+    assert diagnostic['expectedValue'] == '18446744073709551614' and diagnostic['observedValue'] == ('0' if sys.argv[4] == 'lifecycle' else '18446744073709551613')
 else:
     assert diagnostic['expectedValue'] == '91' and diagnostic['observedValue'] == '90'
 assert diagnostic['expectedValueAvailable'] and diagnostic['observedValueAvailable']

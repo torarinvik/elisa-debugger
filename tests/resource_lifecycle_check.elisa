@@ -1,0 +1,89 @@
+# Close/reopen operates on a captured logical identity, with no host descriptors.
+include "../src/replay/resources.elisa"
+
+def mount(store: mutable DebuggerVirtualResources::ResourceStore&) -> DebuggerIdentity::DebugId:
+    DebuggerVirtualResources::resources_initialize(store, DebuggerVirtualResources::ResourceMode.Recording)
+    bytes: mutable u8[2] = [65, 66]
+    result: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_mount(store, DebuggerIdentity::debug_id(40), true, 1, bytes[0], 2)
+    return result.handle
+
+def closed_calls_are_atomic(store: mutable DebuggerVirtualResources::ResourceStore&, handle: DebuggerIdentity::DebugId) -> bool:
+    count: usize = store.operation_count
+    cursor: usize = store.operation_cursor
+    file_cursor: usize = store.files[0].cursor
+    bytes: mutable u8[1] = [90]
+    read: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, handle, bytes[0], 1)
+    write: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(store, handle, bytes[0], 1)
+    seek: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_seek(store, handle, 0)
+    close: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_close(store, handle)
+    unknown_close: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_close(store, DebuggerIdentity::debug_id(7))
+    unknown_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_reopen(store, DebuggerIdentity::debug_id(7))
+    return read.failure.code == DebuggerErrors::ErrorCode.InvalidState and write.failure.code == DebuggerErrors::ErrorCode.InvalidState and seek.code == DebuggerErrors::ErrorCode.InvalidState and close.code == DebuggerErrors::ErrorCode.InvalidState and unknown_close.code == DebuggerErrors::ErrorCode.InvalidArgument and unknown_open.failure.code == DebuggerErrors::ErrorCode.InvalidArgument and not unknown_open.accepted and store.operation_count == count and store.operation_cursor == cursor and store.files[0].cursor == file_cursor and store.files[0].bytes[0] == 65 and bytes[0] == 90 and DebuggerVirtualResources::resources_is_exact(store)
+
+def main() -> i64:
+    store: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    handle: DebuggerIdentity::DebugId = mount(store)
+    return 1 if handle.value != 1 or not DebuggerVirtualResources::resources_handle_is_open(store, handle)
+    read_bytes: mutable u8[1] = zeroed
+    read: mutable DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_read(store, handle, read_bytes[0], 1)
+    return 2 if not DebuggerErrors::error_is_ok(read.failure) or read_bytes[0] != 65
+    return 3 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(store, handle)) or DebuggerVirtualResources::resources_handle_is_open(store, handle) or store.files[0].cursor != 1
+    return 4 if not closed_calls_are_atomic(store, handle)
+    branch: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_branch(store)
+    reopen: mutable DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_reopen(branch, handle)
+    return 5 if not reopen.accepted or reopen.handle.value != handle.value or branch.files[0].cursor != 0 or not DebuggerVirtualResources::resources_handle_is_open(branch, handle) or DebuggerVirtualResources::resources_handle_is_open(store, handle) or store.files[0].cursor != 1
+    replacement: mutable u8[1] = [90]
+    written: DebuggerVirtualResources::IoResult = DebuggerVirtualResources::resources_write(branch, handle, replacement[0], 1)
+    return 6 if not DebuggerErrors::error_is_ok(written.failure) or branch.files[0].bytes[0] != 90 or store.files[0].bytes[0] != 65 or not DebuggerVirtualResources::resources_is_exact(branch)
+    return 24 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(branch, handle))
+    reopen <- DebuggerVirtualResources::resources_reopen(branch, handle)
+    read <- DebuggerVirtualResources::resources_read(branch, handle, read_bytes[0], 1)
+    return 25 if not reopen.accepted or not DebuggerErrors::error_is_ok(read.failure) or read_bytes[0] != 90 or store.files[0].bytes[0] != 65 or not DebuggerVirtualResources::resources_is_exact(branch)
+    snapshot: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_snapshot(store)
+    reopen <- DebuggerVirtualResources::resources_reopen(snapshot, handle)
+    return 7 if not reopen.accepted or snapshot.files[0].cursor != 0 or store.files[0].cursor != 1
+    read <- DebuggerVirtualResources::resources_read(snapshot, handle, read_bytes[0], 1)
+    return 8 if not DebuggerErrors::error_is_ok(read.failure) or read_bytes[0] != 65 or snapshot.operation_count != 4
+    count: usize = snapshot.operation_count
+    already_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_reopen(snapshot, handle)
+    return 9 if already_open.accepted or already_open.failure.code != DebuggerErrors::ErrorCode.InvalidState or snapshot.operation_count != count or snapshot.files[0].cursor != 1
+    malformed: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_snapshot(snapshot)
+    malformed.operations[1].bytes[255] <- 1
+    return 10 if DebuggerVirtualResources::resources_is_valid(malformed)
+    malformed <- DebuggerVirtualResources::resources_clone_snapshot(snapshot)
+    malformed.operations[2].kind <- DebuggerVirtualResources::ResourceOperationKind.Close
+    return 11 if DebuggerVirtualResources::resources_is_valid(malformed)
+    malformed <- DebuggerVirtualResources::resources_clone_snapshot(snapshot)
+    malformed.operations[1].kind <- DebuggerVirtualResources::ResourceOperationKind.Reopen
+    return 12 if DebuggerVirtualResources::resources_is_valid(malformed)
+    return 13 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_replay_restart(snapshot)) or not DebuggerVirtualResources::resources_handle_is_open(snapshot, handle) or snapshot.files[0].cursor != 0
+    mismatch: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_close(snapshot, handle)
+    return 14 if mismatch.code != DebuggerErrors::ErrorCode.Diverged or snapshot.operation_cursor != 0 or not DebuggerVirtualResources::resources_handle_is_open(snapshot, handle)
+    read <- DebuggerVirtualResources::resources_read(snapshot, handle, read_bytes[0], 1)
+    return 15 if not DebuggerErrors::error_is_ok(read.failure) or read_bytes[0] != 65
+    return 16 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(snapshot, handle)) or DebuggerVirtualResources::resources_handle_is_open(snapshot, handle) or snapshot.operation_cursor != 2 or not closed_calls_are_atomic(snapshot, handle)
+    replay_branch: mutable DebuggerVirtualResources::ResourceStore = DebuggerVirtualResources::resources_clone_branch(snapshot)
+    reopen <- DebuggerVirtualResources::resources_reopen(replay_branch, handle)
+    return 17 if not reopen.accepted or replay_branch.operation_count != 3 or snapshot.operation_cursor != 2 or not DebuggerVirtualResources::resources_is_exact(replay_branch)
+    reopen <- DebuggerVirtualResources::resources_reopen(snapshot, handle)
+    return 18 if not reopen.accepted or reopen.handle.value != handle.value or snapshot.operation_cursor != 3 or snapshot.files[0].cursor != 0
+    read <- DebuggerVirtualResources::resources_read(snapshot, handle, read_bytes[0], 1)
+    return 19 if not DebuggerErrors::error_is_ok(read.failure) or not DebuggerVirtualResources::resources_replay_complete(snapshot) or read_bytes[0] != 65
+    overflow: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    overflow_handle: DebuggerIdentity::DebugId = mount(overflow)
+    while overflow.operation_count < DebuggerVirtualResources::Limits::MAX_OPERATIONS:
+        return 20 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(overflow, overflow_handle))
+        reopened: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_reopen(overflow, overflow_handle)
+        return 21 if not reopened.accepted
+    failed_close: DebuggerErrors::DebuggerError = DebuggerVirtualResources::resources_close(overflow, overflow_handle)
+    return 22 if failed_close.code != DebuggerErrors::ErrorCode.ResourceLimit or not overflow.operation_overflowed or overflow.operation_count != 32 or not DebuggerVirtualResources::resources_handle_is_open(overflow, overflow_handle) or not DebuggerVirtualResources::resources_is_valid(overflow) or DebuggerVirtualResources::resources_is_exact(overflow)
+    # Reinitialization must not retain bytes or the mounted flag in a new slot.
+    DebuggerVirtualResources::resources_initialize(store, DebuggerVirtualResources::ResourceMode.Recording)
+    fresh: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(99), false, 2)
+    return 23 if not fresh.accepted or store.files[0].mounted or store.files[0].length != 0 or store.files[0].initial_length != 0 or store.files[0].cursor != 0 or store.files[0].bytes[0] != 0 or store.files[0].initial_bytes[0] != 0 or not DebuggerVirtualResources::resources_is_exact(store)
+    return 26 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(store, fresh.handle))
+    return 27 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_replay_restart(store)) or DebuggerVirtualResources::resources_handle_is_open(store, fresh.handle)
+    replay_open: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_open_checked(store, DebuggerIdentity::debug_id(99), false, 2)
+    return 28 if not replay_open.accepted or not DebuggerVirtualResources::resources_handle_is_open(store, fresh.handle)
+    return 29 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(store, fresh.handle)) or DebuggerVirtualResources::resources_handle_is_open(store, fresh.handle) or not DebuggerVirtualResources::resources_replay_complete(store)
+    return 0

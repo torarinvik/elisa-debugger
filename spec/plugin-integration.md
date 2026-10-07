@@ -40,7 +40,10 @@ documents each snapshot's handle, logical path, bytes, bounds, and read-only
 flag; the [wire contract](dap-virtual-files-v1.md) defines handle order and
 replay behavior. Negotiate `supportsElisaVirtualFileResults` version 1 before
 using program-7 guest file error returns; resource exhaustion still stops the
-debugger atomically.
+debugger atomically. Negotiate `supportsElisaVirtualFileLifecycle` version 1
+before using program-8 logical close/reopen and closed-handle results. This
+operates on the immutable launch snapshot identity; reopen resets only its
+virtual cursor and uses captured bytes.
 
 Managed DAP source breakpoints support numeric `hitCondition` strings such as
 `"2"`: the breakpoint begins stopping when its second matching hit is

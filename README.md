@@ -94,6 +94,11 @@ The Makefile requires a fresh sibling compiler product by default. Keep
 `ELISA_ALLOW_STALE_STAGE1=0` for the strict compiler-freshness gate; setting it
 to `1` is an explicit escape hatch for investigating older build artifacts.
 The build output is ignored under `build/`.
+The Linux resource-lifecycle qualification uses compiler integration commit
+`2b8c7d2b` and strict provenance checks. Set `ELISA_STAGE1_JOBS=1` when building
+optimized DAP with that compiler: its parallel object build reported heap
+corruption. The full O0 regression graph and the serial DAP O2 replay gates
+passed; compiler partition cleanup still needs qualification.
 
 `build/elisa-debugger` runs the deterministic core self-test. The self-test
 returns a nonzero code for identity, capability, session, event, EDIR, replay,
@@ -208,6 +213,12 @@ read-only writes, and invalid offsets, with equivalence at every boundary.
 The matching DAP/CLI checks qualify fresh-process restore and retry; DAP
 advertises `supportsElisaVirtualFileResults` version 1. Legacy file calls retain
 atomic debugger-failure behavior.
+`managed-virtual-file-lifecycle-check` adds captured logical close and reopen,
+closed-handle errors, and replay of the same identity and bytes. The matching
+DAP/CLI checks negotiate `supportsElisaVirtualFileLifecycle` version 1 and
+verify canonical trace exports. Reopen resets the cursor to zero; close keeps
+the captured bytes and identity. Host path opens and descriptor reuse remain
+outside this bounded contract.
 
 The headless process currently owns one managed session per process. Its
 inspection results are tied to the returned stop generation; local pages use

@@ -324,6 +324,47 @@ def check_scalar_file_codec_versions() -> i64:
         return 75 if rejected.status != DebuggerFullCheckpointCodec::DecodeStatus.Invalid
     return 0
 
+# Schema 11 carries logical close/reopen in both journals. Older schema
+# headers cannot admit them, even with a corrected wire checksum.
+def check_lifecycle_codec_versions() -> i64:
+    checkpoint: mutable DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
+    resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
+    DebuggerVirtualResources::resources_initialize(resources, DebuggerVirtualResources::ResourceMode.Recording)
+    bytes: mutable u8[1] = [65]
+    mounted: DebuggerVirtualResources::ResourceOpenResult = DebuggerVirtualResources::resources_mount(resources, DebuggerIdentity::debug_id(81), true, 1, bytes[0], 1)
+    return 76 if not mounted.accepted or not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(resources, mounted.handle))
+    return 76 if not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_replay_restart(resources)) or not DebuggerErrors::error_is_ok(DebuggerVirtualResources::resources_close(resources, mounted.handle))
+    checkpoint.resources <- resources
+    for scenario in 0..<3:
+        if scenario != 0:
+            checkpoint.effects.records[0].kind <- DebuggerEffects::EffectKind.VirtualFileTryClose if scenario == 1 else DebuggerEffects::EffectKind.VirtualFileTryReopen
+            checkpoint.effects.records[0].suppress_external_write <- false
+            checkpoint.effects.records[0].result_value <- 0 if scenario == 1 else 1
+            checkpoint.effects.records[0].result_hash <- DebuggerManagedState::state_effect_result_hash(checkpoint.effects.records[0].result_value.u64())
+        DebuggerFullCheckpoint::full_checkpoint_seal_side_state(checkpoint)
+        encoded: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
+        return 77 if encoded.failed or encoded.bytes[Test::CODEC_SCHEMA_OFFSET] != 11
+        decoded: mutable DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length)
+        return 78 if decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Ready or not checkpoints_are_equal(checkpoint, decoded.checkpoint) or DebuggerVirtualResources::resources_handle_is_open(decoded.checkpoint.resources, mounted.handle)
+        for schema in 9..<11:
+            encoded.bytes[Test::CODEC_SCHEMA_OFFSET] <- schema.u8()
+            checksum: u64 = DebuggerTraceBinary::bytes_checksum(encoded.bytes[0], encoded.length - Test::CODEC_CHECKSUM_BYTES)
+            test_put_u64(encoded.bytes[0], encoded.length - Test::CODEC_CHECKSUM_BYTES, checksum)
+            decoded <- DebuggerFullCheckpointCodec::full_checkpoint_decode(encoded.bytes[0], encoded.length)
+            return 79 if decoded.status != DebuggerFullCheckpointCodec::DecodeStatus.Invalid
+    # Scalar lifecycle kinds also require schema 11 when no resource closes exist.
+    original: DebuggerFullCheckpoint::ManagedCheckpoint = make_checkpoint()
+    checkpoint.resources <- original.resources
+    DebuggerFullCheckpoint::full_checkpoint_seal_side_state(checkpoint)
+    scalar: mutable DebuggerFullCheckpointCodec::EncodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_encode(checkpoint)
+    return 80 if scalar.failed or scalar.bytes[Test::CODEC_SCHEMA_OFFSET] != 11
+    scalar.bytes[Test::CODEC_SCHEMA_OFFSET] <- 10
+    checksum: u64 = DebuggerTraceBinary::bytes_checksum(scalar.bytes[0], scalar.length - Test::CODEC_CHECKSUM_BYTES)
+    test_put_u64(scalar.bytes[0], scalar.length - Test::CODEC_CHECKSUM_BYTES, checksum)
+    rejected: DebuggerFullCheckpointCodec::DecodedCheckpoint = DebuggerFullCheckpointCodec::full_checkpoint_decode(scalar.bytes[0], scalar.length)
+    return 81 if rejected.status != DebuggerFullCheckpointCodec::DecodeStatus.Invalid
+    return 0
+
 def check_resource_snapshot_isolation() -> i64:
     resources: mutable DebuggerVirtualResources::ResourceStore = zeroed
     DebuggerVirtualResources::resources_initialize(resources, DebuggerVirtualResources::ResourceMode.Recording)
@@ -742,6 +783,8 @@ def check_rejects_malformed_inputs() -> i64:
     return 0
 
 def main() -> i64:
+    lifecycle_codec_status: i64 = check_lifecycle_codec_versions()
+    return lifecycle_codec_status if lifecycle_codec_status != 0
     scalar_codec_status: i64 = check_scalar_file_codec_versions()
     return scalar_codec_status if scalar_codec_status != 0
     resource_snapshot_status: i64 = check_resource_snapshot_isolation()

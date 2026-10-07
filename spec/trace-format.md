@@ -78,13 +78,13 @@ effect provider or target output sink. Subsequent seek, source stepping, and
 continue through the retained prefix consume those validated snapshots.
 
 This path remains bounded by the managed history and journal capacities.
-Guest file open/write/seek/close, task scheduling, branch interventions, and
-unrecorded side activity require their own event-aligned integration before
+General guest path opens, task scheduling, branch interventions, and
+unrecorded side activity require further event-aligned integration before
 they can qualify for exact artifact export.
 
 ## Managed full checkpoint payload
 
-The managed full-checkpoint codec supports schemas `9` and `10`; the captured managed state
+The managed full-checkpoint codec supports schemas `9`, `10`, and `11`; the captured managed state
 schema is `5`. Its envelope fields are
 encoded explicitly in little-endian order. The envelope contains the checkpoint
 schema, recording and branch IDs, event ordinal, state hash, complete
@@ -99,9 +99,13 @@ destination before replaying the checkpoint prefix.
 The checksum and image fingerprint detect accidental corruption or identity
 mismatch; they are not cryptographic authentication. Checkpoint schema 10 adds typed virtual-file try-read, try-write, and try-seek
 scalar effect kinds 10–12 without changing the field layout or managed hash
-domain. Writers use schema 9 for recordings containing only earlier effect
-kinds, preserving their canonical rewind exports, and schema 10 when a new kind
-is present. Readers reject new kinds inside a schema-9 envelope.
+domain. Schema 11 adds scalar kinds 13–14 (try-close/reopen) and resource operation
+kinds 4–5 (Close/Reopen), with the same field layout and managed hash domain.
+Openness derives from the consumed operation prefix; captured identities and
+bytes survive close. Writers select schema 9 for earlier recordings, schema 10
+for kinds 10–12, and schema 11 when lifecycle kinds are present, preserving
+canonical rewind exports of older traces. Readers accept schemas 9–11 and
+reject kinds introduced after the declared schema.
 Earlier checkpoint codec payloads are rejected and must be regenerated from a
 source execution with the intended build and image.
 

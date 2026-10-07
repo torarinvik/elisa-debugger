@@ -485,6 +485,39 @@ cli-virtual-file-results-check: $(BUILD)/elisa-debugger-cli dap-virtual-file-res
 
 module-check: managed-virtual-file-results-check dap-virtual-file-results-check cli-virtual-file-results-check
 
+$(BUILD)/elisa-debugger-resource-lifecycle-check: tests/resource_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+$(BUILD)/elisa-debugger-managed-virtual-file-lifecycle-check: tests/managed_virtual_file_lifecycle_check.elisa $(ELISA_BUILD_INPUTS)
+	mkdir -p $(BUILD)
+	ELISA_ALLOW_STALE_STAGE1="$(ELISA_ALLOW_STALE_STAGE1)" $(ELISA_RUNTIME_ENV) $(ELISA_COMPILER) -emit exe -O0 -o "$@" "$<"
+
+.PHONY: resource-lifecycle-check managed-virtual-file-lifecycle-check dap-virtual-file-lifecycle-check cli-virtual-file-lifecycle-check
+resource-lifecycle-check: $(BUILD)/elisa-debugger-resource-lifecycle-check
+	"$(BUILD)/elisa-debugger-resource-lifecycle-check"
+
+managed-virtual-file-lifecycle-check: $(BUILD)/elisa-debugger-managed-virtual-file-lifecycle-check
+	mkdir -p $(BUILD)
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O0 -o "$(BUILD)/file-lifecycle.edir" tests/compiler_edir_virtual_file_lifecycle_fixture.elisa
+	sh tests/managed_virtual_file_lifecycle_check.sh "$(BUILD)/elisa-debugger-managed-virtual-file-lifecycle-check"
+	$(ELISA_RUNTIME_ENV) ELISA_ALLOW_STALE_STAGE1="$(ELISA_EDIR_ALLOW_STALE_STAGE1)" "$(ELISA_EDIR_COMPILER)" -emit edir -O2 -o "$(BUILD)/file-lifecycle.edir" tests/compiler_edir_virtual_file_lifecycle_fixture.elisa
+	sh tests/managed_virtual_file_lifecycle_check.sh "$(BUILD)/elisa-debugger-managed-virtual-file-lifecycle-check"
+
+dap-virtual-file-lifecycle-check: $(BUILD)/elisa-debugger-dap-server managed-virtual-file-lifecycle-check
+	sh tests/dap_virtual_file_lifecycle_check.sh "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-lifecycle.edir"
+
+cli-virtual-file-lifecycle-check: $(BUILD)/elisa-debugger-cli dap-virtual-file-lifecycle-check
+	set -e; last_event=$$(( $$(wc -c < "$(BUILD)/file-lifecycle.reference") / 16 - 1 )); sh tests/cli_trace_effects_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/file-lifecycle.edir" "$(BUILD)/dap-file-lifecycle.eltr" "$$last_event" lifecycle
+
+module-check: resource-lifecycle-check managed-virtual-file-lifecycle-check dap-virtual-file-lifecycle-check cli-virtual-file-lifecycle-check
+
+.PHONY: lifecycle-divergence-clients-check
+lifecycle-divergence-clients-check: cli-virtual-file-lifecycle-check $(BUILD)/elisa-debugger-trace-divergence-fixture
+	sh tests/replay_divergence_clients_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-lifecycle.edir" "$(BUILD)/elisa-debugger-trace-divergence-fixture" lifecycle
+
+module-check: lifecycle-divergence-clients-check
+
 .PHONY: result-divergence-clients-check
 result-divergence-clients-check: cli-virtual-file-results-check $(BUILD)/elisa-debugger-trace-divergence-fixture
 	sh tests/replay_divergence_clients_check.sh "$(BUILD)/elisa-debugger-cli" "$(BUILD)/elisa-debugger-dap-server" "$(BUILD)/file-results.edir" "$(BUILD)/elisa-debugger-trace-divergence-fixture" results

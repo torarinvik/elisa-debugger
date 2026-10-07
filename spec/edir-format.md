@@ -106,7 +106,7 @@ file descriptors, or raw Elisa struct layout.
 
 ## Managed effect instructions
 
-Program versions 1 through 7 are supported. Version 1 contains the original
+Program versions 1 through 8 are supported. Version 1 contains the original
 scalar, memory, control-flow, and call instructions. Later versions add these
 instructions without changing the instruction record layout:
 
@@ -122,6 +122,19 @@ instructions without changing the instruction record layout:
 | 27 | VirtualFileTryReadByte | 7 | Positive handle `a`, `b = 0` | Byte, EOF, or guest error |
 | 28 | VirtualFileTryWriteByte | 7 | Positive handle `a`, `0 <= b <= 255` | One transferred byte or guest error |
 | 29 | VirtualFileTrySeek | 7 | Positive handle `a`, nonnegative offset `b` | New cursor or guest error |
+| 30 | VirtualFileTryClose | 8 | Positive handle `a`, `b = 0` | Zero or guest error |
+| 31 | VirtualFileTryReopen | 8 | Positive handle `a`, `b = 0` | Captured handle or guest error |
+
+Program version 8 adds `virtual_file_try_close(handle)` and
+`virtual_file_try_reopen(handle)`, with immediate positive integer handles.
+Close returns `0`, preserves captured bytes and cursor, and prevents subsequent
+I/O. Reopen requires a closed logical file, returns the same captured handle,
+and resets its cursor to zero without consulting a host path or allocating a
+host descriptor. Closed handles return `-5` from try-read/write/seek/close;
+reopening an already open handle returns `-6`. Unknown handles return `-2`.
+Successful calls consume one resource operation and one scalar effect; guest
+errors consume only a scalar effect. Resource exhaustion remains an atomic
+debugger failure. Captured handles are never reused.
 
 The verifier rejects an effect instruction in an older program version and
 rejects invalid or unused operands. The plain machine step refuses host-effect
@@ -140,8 +153,8 @@ result hash in a typed effect record; successful I/O also enters the resource
 journal. Explicit Replay mode verifies the scalar outcome computed from the
 captured resource state before committing either journal cursor.
 Byte/journal exhaustion, invalid images, and corrupt debugger state
-remain atomic debugger failures. File open/close and arbitrary foreign calls remain outside
-this instruction contract.
+remain atomic debugger failures. General host path opens, descriptor reuse,
+and arbitrary foreign calls remain outside this instruction contract.
 
 ## Current file launch contract
 
@@ -158,7 +171,7 @@ This loader runs on the POSIX host boundary; file access is provided by
 `open`, `read`, and `close`, while bounds checks, decoding, and EDIR
 verification remain in Elisa. The selected compiler integration checkout at the
 revision recorded in [`docs/compiler-integration.md`](../docs/compiler-integration.md)
-emits schema-4 artifacts with program version 7 for its explicitly supported
+emits schema-4 artifacts with program version 8 for its explicitly supported
 single-file scalar, counted-loop, recursive-call, and effect fixtures, with
 source-table identities, original source spans, and function descriptors.
 Legacy schema-2/3 artifacts remain loadable for compatibility. The producer rejects

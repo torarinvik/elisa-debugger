@@ -85,13 +85,26 @@ is replayed from the captured resources and checked at that exact boundary.
 Resource exhaustion and invalid debugger state still return debugger failures.
 Legacy calls retain their debugger-failure behavior.
 
+The `supportsElisaVirtualFileLifecycle: true` capability with
+`elisaVirtualFileLifecycleVersion: 1` adds program-8 logical close/reopen.
+`virtual_file_try_close` returns `0` on success. `virtual_file_try_reopen`
+returns the same captured handle and resets its cursor to zero. Close preserves
+bytes, path identity, and cursor; all try-I/O on a closed handle returns `-5`.
+Closing an already closed handle returns `-5`; reopening an open handle returns
+`-6`; unknown handles return `-2`. These results and successful lifecycle
+operations are journaled and validated at every replay boundary. Reverse
+navigation derives openness from the consumed journal prefix. No host file is
+opened, closed, written, or allocated by these guest instructions.
+
 ## Editor integration
 
 An adapter plugin should read the capability before adding the custom launch
 field. It should map each guest handle to a stable editor-owned logical path
 and provide an immutable byte snapshot. To update contents, start a new launch
-with a new snapshot. Version 1 does not support guest open/close, file watching,
-host path access, sparse files, or editing a snapshot during a recording.
+with a new snapshot. The launch snapshot contract does not provide general guest path opens, host
+descriptor reuse, file watching, host path access, sparse files, or editing a
+snapshot during a recording. Logical close/reopen requires the separately
+negotiated lifecycle capability.
 
 The headless service API and DAP extension are separate integration surfaces.
 The DAP schema is not a cross-language ABI for directly calling Elisa modules.

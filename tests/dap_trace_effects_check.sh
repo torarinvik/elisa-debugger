@@ -42,7 +42,7 @@ replay_requests() {
 }
 
 record_output=$(record_requests | "$server")
-printf '%s\n' "$record_output" | grep -F '"request_seq":15,"command":"elisa/saveTrace","success":true,"body":{"accepted":true}' > /dev/null
+printf '%s\n' "$record_output" | grep -F '"request_seq":15,"command":"elisa/saveTrace","success":true,"body":{"accepted":true,"published":true,"durable":true}' > /dev/null
 printf '%s\n' "$record_output" | grep -F '"event":"exited","body":{"exitCode":-1}' > /dev/null
 original_trace=$(cksum "$trace")
 replay_output=$(replay_requests | "$server")
@@ -50,7 +50,7 @@ for response in \
     '"request_seq":5,"command":"elisa/openTrace","success":true,"body":{"accepted":true}' \
     '"request_seq":6,"command":"next","success":true' \
     '"request_seq":7,"command":"continue","success":true' \
-    '"request_seq":8,"command":"elisa/saveTrace","success":true,"body":{"accepted":true}' \
+    '"request_seq":8,"command":"elisa/saveTrace","success":true,"body":{"accepted":true,"published":true,"durable":true}' \
     '"event":"exited","body":{"exitCode":-1}'; do
     printf '%s\n' "$replay_output" | grep -F "$response" > /dev/null
 done

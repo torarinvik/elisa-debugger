@@ -106,7 +106,7 @@ printf '%s\n' "$output" | grep -F '"supportsElisaTraceFiles":true,"elisaTraceFil
 printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"stopGeneration":'"$OLD_STOP_GENERATION"',"currentEvent":1,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1,"canSeek":true,"canReverse":true}' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$OLD_STACK_SEQUENCE"',"command":"stackTrace","success":true,"body":{"stackFrames":[{"id":'"$EXPECTED_STALE_FRAME_ID" >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$STALE_OPEN_SEQUENCE"',"command":"elisa/openTrace","success":false,"message":"trace control is stale; query the timeline again"' >/dev/null
-printf '%s\n' "$output" | grep -F '"request_seq":'"$SAVE_TRACE_SEQUENCE"',"command":"elisa/saveTrace","success":true,"body":{"accepted":true}' >/dev/null
+printf '%s\n' "$output" | grep -F '"request_seq":'"$SAVE_TRACE_SEQUENCE"',"command":"elisa/saveTrace","success":true,"body":{"accepted":true,"published":true,"durable":true}' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$OPEN_TRACE_SEQUENCE"',"command":"elisa/openTrace","success":true,"body":{"accepted":true}' >/dev/null
 printf '%s\n' "$output" | grep -F '"command":"elisa/getTimeline","success":true,"body":{"version":1,"stopGeneration":'"$OPEN_STOP_GENERATION"',"currentEvent":0,"hasRetainedRange":true,"retainedFirst":0,"retainedLast":1,"hasExactRange":true,"exactFirst":0,"exactLast":1' >/dev/null
 printf '%s\n' "$output" | grep -F '"request_seq":'"$FORWARD_SEEK_SEQUENCE"',"command":"elisa/seek","success":true' >/dev/null

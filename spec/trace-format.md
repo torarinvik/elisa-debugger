@@ -114,3 +114,19 @@ accept only root-branch events and root-branch full checkpoints. Structurally
 valid non-root or mixed-branch records can still be decoded, but verification
 reports them as partial and non-replayable until a later format version stores
 and validates the branch's parent, fork event, and required dependency range.
+
+## Local artifact publication
+
+The bounded local writer accepts only complete validated traces. It writes a
+unique staging file in the destination directory, syncs and closes that file,
+then atomically renames it over the destination and syncs the parent directory.
+A successful write reports `accepted`, `published`, and `durable` as true.
+
+Before rename, a failure discards the staging file and preserves the existing
+destination. After rename, the new artifact remains visible even if directory
+sync or close fails. `published:true, durable:false` means directory sync was
+not confirmed; `published:true, durable:true` with a failed status means sync
+succeeded and directory close failed. Callers must keep the parent path stable
+during the operation. Durability depends on the filesystem's successful sync
+contract. This complete-artifact transaction does not yet provide incremental
+capture, arbitrary-position checkpoints, or crash-safe streaming recovery.

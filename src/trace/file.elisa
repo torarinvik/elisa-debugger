@@ -44,6 +44,9 @@ module DebuggerTraceFile:
             None
             AfterPartialWrite
             BeforeCommit
+            BeforeDirectoryOpen
+            AfterCommit
+            AfterDirectorySync
 
         const module FileSystem:
             READ_ONLY: i32 = 0
@@ -70,6 +73,9 @@ module DebuggerTraceFile:
             TRUNCATED_TRACE: u32 = 9
             SYNC: u32 = 10
             COMMIT: u32 = 11
+            DIRECTORY_OPEN: u32 = 12
+            DIRECTORY_SYNC: u32 = 13
+            DIRECTORY_CLOSE: u32 = 14
 
         const module ErrorPolicy:
             RETRYABLE_IO: bool = true
@@ -85,7 +91,20 @@ module DebuggerTraceFile:
             return ReadResult{accepted: false, bytes_read: bytes_read, status: status, scan: zeroed, failure: file_error(code, retryable, detail)}
 
         def invalid_write(status: FileStatus, detail: u32, code: DebuggerErrors::ErrorCode, retryable: bool, scan: DebuggerTraceStorage::StorageScan) -> WriteResult:
-            return WriteResult{accepted: false, status: status, scan: scan, failure: file_error(code, retryable, detail)}
+            return WriteResult{accepted: false, published: false, durable: false, status: status, scan: scan, failure: file_error(code, retryable, detail)}
+
+        def published_write_failure(status: FileStatus, detail: u32, durable: bool, scan: DebuggerTraceStorage::StorageScan) -> WriteResult:
+            return WriteResult{accepted: false, published: true, durable: durable, status: status, scan: scan, failure: file_error(DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, detail)}
+
+        def parent_path_prepare(path: u8&, path_length: usize, output: mutable u8&) -> void:
+            directory_length: mutable usize = Path::EMPTY_LENGTH
+            for index in Path::PATH_FIRST_BYTE_INDEX..<path_length:
+                directory_length <- index + Path::SEPARATOR_BYTES if path[index] == Path::SLASH
+            if directory_length == Path::EMPTY_LENGTH:
+                output[Path::PATH_FIRST_BYTE_INDEX] <- Path::DOT
+                output[Path::SEPARATOR_BYTES] <- Path::NUL
+            else:
+                path_terminate(path, directory_length, output)
 
         def temporary_path_prepare(path: u8&, path_length: usize, output: mutable u8&) -> void:
             directory_length: mutable usize = Path::EMPTY_LENGTH
@@ -144,13 +163,35 @@ module DebuggerTraceFile:
                 temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.CommitFailure, Detail::COMMIT, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
 
+            # Acquire the parent before publication so an open failure preserves
+            # the previous destination. Keep this descriptor through the rename.
+            parent_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
+            parent_path_prepare(path, path_length, parent_path[Path::PATH_FIRST_BYTE_INDEX])
+            if failure_point == FailureInjection.BeforeDirectoryOpen:
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                return invalid_write(FileStatus.DirectoryOpenFailure, Detail::DIRECTORY_OPEN, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
+            parent_descriptor: i32 = open((&parent_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr], FileSystem::READ_ONLY) can Blocking.IO, Unsafe.PointerCast
+            if parent_descriptor == FileSystem::SYSCALL_FAILURE_RESULT:
+                temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
+                return invalid_write(FileStatus.DirectoryOpenFailure, Detail::DIRECTORY_OPEN, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
+
             terminated_path: mutable u8[DebuggerTraceFileLimits::PATH_CAPACITY_BYTES + Path::TERMINATOR_BYTES] = zeroed
             path_terminate(path, path_length, terminated_path[Path::PATH_FIRST_BYTE_INDEX])
             commit_status: i32 = rename((&temporary_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr], (&terminated_path[Path::PATH_FIRST_BYTE_INDEX]).cast[cstr]) can Blocking.IO, Unsafe.PointerCast
             if commit_status == FileSystem::SYSCALL_FAILURE_RESULT:
+                _ = close(parent_descriptor) can Blocking.IO
                 temporary_file_discard(temporary_path[Path::PATH_FIRST_BYTE_INDEX]) can Blocking.IO, Unsafe.PointerCast
                 return invalid_write(FileStatus.CommitFailure, Detail::COMMIT, DebuggerErrors::ErrorCode.Transport, ErrorPolicy::RETRYABLE_IO, scan)
-            return WriteResult{accepted: true, status: FileStatus.Ready, scan: scan, failure: DebuggerErrors::no_error()}
+            # Rename has published the new complete file. A later error cannot
+            # roll it back and must report that publication explicitly.
+            if failure_point == FailureInjection.AfterCommit:
+                _ = close(parent_descriptor) can Blocking.IO
+                return published_write_failure(FileStatus.DirectorySyncFailure, Detail::DIRECTORY_SYNC, false, scan)
+            directory_sync_status: i32 = fsync(parent_descriptor) can Blocking.IO
+            directory_close_status: i32 = close(parent_descriptor) can Blocking.IO
+            return published_write_failure(FileStatus.DirectorySyncFailure, Detail::DIRECTORY_SYNC, false, scan) if directory_sync_status == FileSystem::SYSCALL_FAILURE_RESULT
+            return published_write_failure(FileStatus.DirectoryCloseFailure, Detail::DIRECTORY_CLOSE, true, scan) if directory_close_status == FileSystem::SYSCALL_FAILURE_RESULT or failure_point == FailureInjection.AfterDirectorySync
+            return WriteResult{accepted: true, published: true, durable: true, status: FileStatus.Ready, scan: scan, failure: DebuggerErrors::no_error()}
 
         def path_is_valid(path: u8&, path_length: usize) -> bool:
             return false if path_length == Path::EMPTY_LENGTH or path_length > DebuggerTraceFileLimits::PATH_CAPACITY_BYTES
@@ -202,6 +243,9 @@ module DebuggerTraceFile:
             TooLarge
             InvalidTrace
             TruncatedTrace
+            DirectoryOpenFailure
+            DirectorySyncFailure
+            DirectoryCloseFailure
 
         struct ReadResult:
             accepted: mutable bool
@@ -212,6 +256,8 @@ module DebuggerTraceFile:
 
         struct WriteResult:
             accepted: mutable bool
+            published: mutable bool
+            durable: mutable bool
             status: mutable FileStatus
             scan: mutable DebuggerTraceStorage::StorageScan
             failure: mutable DebuggerErrors::DebuggerError
@@ -223,11 +269,17 @@ module DebuggerTraceFile:
                     None
                     AfterPartialWrite
                     BeforeCommit
+                    BeforeDirectoryOpen
+                    AfterCommit
+                    AfterDirectorySync
 
                 def trace_file_write_with_failure_injection(path: u8&, path_length: usize, bytes: u8&, length: usize, failure_point: FailurePoint) -> WriteResult can[Blocking.IO, Unsafe.PointerCast]:
                     internal_failure: mutable DebuggerTraceFile::FailureInjection = DebuggerTraceFile::FailureInjection.None
                     internal_failure <- DebuggerTraceFile::FailureInjection.AfterPartialWrite if failure_point == FailurePoint.AfterPartialWrite
                     internal_failure <- DebuggerTraceFile::FailureInjection.BeforeCommit if failure_point == FailurePoint.BeforeCommit
+                    internal_failure <- DebuggerTraceFile::FailureInjection.BeforeDirectoryOpen if failure_point == FailurePoint.BeforeDirectoryOpen
+                    internal_failure <- DebuggerTraceFile::FailureInjection.AfterCommit if failure_point == FailurePoint.AfterCommit
+                    internal_failure <- DebuggerTraceFile::FailureInjection.AfterDirectorySync if failure_point == FailurePoint.AfterDirectorySync
                     return DebuggerTraceFile::trace_file_write_transaction(path, path_length, bytes, length, internal_failure) can Blocking.IO, Unsafe.PointerCast
 
         # Read into caller-owned bounded storage. A structurally valid but
@@ -276,8 +328,10 @@ module DebuggerTraceFile:
 
         # Only a complete trace with a verified footer is written. The writer
         # stages beside the destination, fsyncs the complete file, then uses
-        # same-filesystem rename as its atomic visibility commit. It does not
-        # fsync the parent directory, so rename durability across sudden power
-        # loss is not guaranteed.
+        # same-filesystem rename as its atomic visibility commit, then fsyncs
+        # the parent directory. accepted requires both syncs and descriptor
+        # closes. published and durable distinguish errors after publication.
+        # Callers must keep the destination's directory path stable during I/O;
+        # durability follows the host filesystem's successful fsync contract.
         def trace_file_write(path: u8&, path_length: usize, bytes: u8&, length: usize) -> WriteResult can[Blocking.IO, Unsafe.PointerCast]:
             return trace_file_write_transaction(path, path_length, bytes, length, FailureInjection.None) can Blocking.IO, Unsafe.PointerCast

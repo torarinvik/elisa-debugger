@@ -49,7 +49,7 @@ while data:
 
 record_output=$(record_requests | "$server")
 printf '%s\n' "$record_output" | grep -F '"supportsElisaVirtualFileLifecycle":true,"elisaVirtualFileLifecycleVersion":1' >/dev/null
-printf '%s\n' "$record_output" | grep -F '"request_seq":5,"command":"elisa/saveTrace","success":true,"body":{"accepted":true}' >/dev/null
+printf '%s\n' "$record_output" | grep -F '"request_seq":5,"command":"elisa/saveTrace","success":true,"body":{"accepted":true,"published":true,"durable":true}' >/dev/null
 printf '%s\n' "$record_output" | grep -F '"event":"exited","body":{"exitCode":-1}' >/dev/null
 assert_frames "$record_output"
 test "$(cat "$host_input")" = A

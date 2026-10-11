@@ -11,7 +11,9 @@ and response envelopes. The initialize response advertises:
 ```json
 {
   "supportsElisaTraceFiles": true,
-  "elisaTraceFilesVersion": 1
+  "elisaTraceFilesVersion": 1,
+  "supportsElisaDurableTracePublication": true,
+  "elisaDurableTracePublicationVersion": 1
 }
 ```
 
@@ -34,8 +36,21 @@ writing a complete trace artifact and atomically replacing the destination.
 Supported event-aligned clock/random, console byte/EOF, and mounted-file read
 activity is preserved. Saving after a rewind keeps the recording's high-water
 checkpoint and full retained prefix. Unjournaled side state remains rejected.
-A successful response has `body: {"accepted":true}`. A failed request leaves
-the existing destination unchanged if writing did not complete atomically.
+With durable publication version 1, a successful save has
+`body: {"accepted":true,"published":true,"durable":true}`. The writer syncs the
+complete staging file, closes it, opens the destination's parent directory,
+renames the staging file over the destination, then syncs and closes the parent.
+Durability follows the host filesystem's successful `fsync` contract. The caller
+must keep the parent directory path stable during the operation.
+
+Failures before rename preserve the old destination. An error after rename
+returns `success:false` with `body: {"accepted":false,"published":true,"durable":false}`
+when directory sync fails, or `durable:true` when only the directory close fails.
+The new complete artifact is already visible in either case; it is not rolled
+back. Hosts must inspect these fields before describing a failed save as
+unpublished. A retry writes the complete artifact through the same transaction.
+Opening a trace retains `body: {"accepted":true}`. Older adapters without the
+durable publication capability retain their original save response.
 
 ## Open a trace
 

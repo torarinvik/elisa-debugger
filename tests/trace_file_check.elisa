@@ -68,6 +68,11 @@ const module TestResult:
     TRUNCATED_FILE_READER: i64 = 21
     CREATE_FAILURE: i64 = 22
     RENAME_FAILURE: i64 = 23
+    DIRECTORY_OPEN: i64 = 24
+    DIRECTORY_SYNC: i64 = 25
+    DIRECTORY_CLOSE: i64 = 26
+    PUBLISHED_BYTES: i64 = 27
+    DURABLE_RETRY: i64 = 28
 
 def build_identity() -> DebuggerIdentity::BuildIdentity:
     return DebuggerIdentity::BuildIdentity{
@@ -131,15 +136,15 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     missing: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(missing_path[Test::FIRST_BYTE_INDEX], missing_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::OPEN_FAILURE if missing.status != DebuggerTraceFile::FileStatus.OpenFailure
     missing_write: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(missing_path[Test::FIRST_BYTE_INDEX], missing_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::CREATE_FAILURE if missing_write.accepted or missing_write.status != DebuggerTraceFile::FileStatus.OpenFailure
+    return TestResult::CREATE_FAILURE if missing_write.accepted or missing_write.published or missing_write.durable or missing_write.status != DebuggerTraceFile::FileStatus.OpenFailure
 
     directory_path: mutable u8[Test::PATH_BUFFER_CAPACITY] = zeroed
     directory_path_length: usize = copy_path(TestPaths::DIRECTORY_TARGET, directory_path[Test::FIRST_BYTE_INDEX])
     directory_write: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(directory_path[Test::FIRST_BYTE_INDEX], directory_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::RENAME_FAILURE if directory_write.accepted or directory_write.status != DebuggerTraceFile::FileStatus.CommitFailure
+    return TestResult::RENAME_FAILURE if directory_write.accepted or directory_write.published or directory_write.durable or directory_write.status != DebuggerTraceFile::FileStatus.CommitFailure
 
     written: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::WRITE if not written.accepted or written.status != DebuggerTraceFile::FileStatus.Ready or not written.scan.footer_verified
+    return TestResult::WRITE if not written.accepted or not written.published or not written.durable or written.status != DebuggerTraceFile::FileStatus.Ready or not written.scan.footer_verified
 
     loaded: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::READ if not loaded.accepted or loaded.status != DebuggerTraceFile::FileStatus.Ready or loaded.bytes_read != exported.bytes.length or not loaded.scan.footer_verified
@@ -165,7 +170,7 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     return TestResult::TRUNCATED_FILE_READER if truncated_import.accepted or truncated_import.reader != null
 
     preflight: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], truncated_length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::PREFLIGHT if preflight.accepted or preflight.status != DebuggerTraceFile::FileStatus.TruncatedTrace
+    return TestResult::PREFLIGHT if preflight.accepted or preflight.published or preflight.durable or preflight.status != DebuggerTraceFile::FileStatus.TruncatedTrace
     preserved: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PRESERVED_FILE if not preserved.accepted or preserved.bytes_read != exported.bytes.length or not preserved.scan.footer_verified
     for index in Test::FIRST_BYTE_INDEX..<preserved.bytes_read:
@@ -188,23 +193,51 @@ def main() -> i64 can[Blocking.IO, Memory.Allocate, Memory.Release, Abort.Panic,
     return TestResult::ALTERNATE_TRACE if not alternate_differs
 
     partial_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.AfterPartialWrite) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::PARTIAL_WRITE_INJECTION if partial_failure.accepted or partial_failure.status != DebuggerTraceFile::FileStatus.WriteFailure
+    return TestResult::PARTIAL_WRITE_INJECTION if partial_failure.accepted or partial_failure.published or partial_failure.durable or partial_failure.status != DebuggerTraceFile::FileStatus.WriteFailure
     after_partial_failure: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PARTIAL_WRITE_PRESERVATION if not after_partial_failure.accepted or after_partial_failure.bytes_read != exported.bytes.length
     for index in Test::FIRST_BYTE_INDEX..<after_partial_failure.bytes_read:
         return TestResult::PARTIAL_WRITE_PRESERVATION if read_buffer[index] != exported.bytes.bytes[index]
 
     commit_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.BeforeCommit) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::COMMIT_INJECTION if commit_failure.accepted or commit_failure.status != DebuggerTraceFile::FileStatus.CommitFailure
+    return TestResult::COMMIT_INJECTION if commit_failure.accepted or commit_failure.published or commit_failure.durable or commit_failure.status != DebuggerTraceFile::FileStatus.CommitFailure
     after_commit_failure: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::COMMIT_PRESERVATION if not after_commit_failure.accepted or after_commit_failure.bytes_read != exported.bytes.length
     for index in Test::FIRST_BYTE_INDEX..<after_commit_failure.bytes_read:
         return TestResult::COMMIT_PRESERVATION if read_buffer[index] != exported.bytes.bytes[index]
 
+    directory_open_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.BeforeDirectoryOpen) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::DIRECTORY_OPEN if directory_open_failure.accepted or directory_open_failure.published or directory_open_failure.durable or directory_open_failure.status != DebuggerTraceFile::FileStatus.DirectoryOpenFailure
+    after_directory_open_failure: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::DIRECTORY_OPEN if not after_directory_open_failure.accepted or after_directory_open_failure.bytes_read != exported.bytes.length
+    for index in Test::FIRST_BYTE_INDEX..<after_directory_open_failure.bytes_read:
+        return TestResult::DIRECTORY_OPEN if read_buffer[index] != exported.bytes.bytes[index]
+
+    directory_sync_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.AfterCommit) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::DIRECTORY_SYNC if directory_sync_failure.accepted or not directory_sync_failure.published or directory_sync_failure.durable or directory_sync_failure.status != DebuggerTraceFile::FileStatus.DirectorySyncFailure
+    published_alternate: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PUBLISHED_BYTES if not published_alternate.accepted or published_alternate.bytes_read != alternate_export.bytes.length
+    for index in Test::FIRST_BYTE_INDEX..<published_alternate.bytes_read:
+        return TestResult::PUBLISHED_BYTES if read_buffer[index] != alternate_export.bytes.bytes[index]
+
+    directory_close_failure: DebuggerTraceFile::WriteResult = DebuggerTraceFile::TestSupport::trace_file_write_with_failure_injection(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length, DebuggerTraceFile::TestSupport::FailurePoint.AfterDirectorySync) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::DIRECTORY_CLOSE if directory_close_failure.accepted or not directory_close_failure.published or not directory_close_failure.durable or directory_close_failure.status != DebuggerTraceFile::FileStatus.DirectoryCloseFailure
+    published_original: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::PUBLISHED_BYTES if not published_original.accepted or published_original.bytes_read != exported.bytes.length
+    for index in Test::FIRST_BYTE_INDEX..<published_original.bytes_read:
+        return TestResult::PUBLISHED_BYTES if read_buffer[index] != exported.bytes.bytes[index]
+
+    retried: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, alternate_export.bytes.bytes[Test::FIRST_BYTE_INDEX], alternate_export.bytes.length) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::DURABLE_RETRY if not retried.accepted or not retried.published or not retried.durable or retried.status != DebuggerTraceFile::FileStatus.Ready
+    after_retry: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(valid_path[Test::FIRST_BYTE_INDEX], valid_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
+    return TestResult::DURABLE_RETRY if not after_retry.accepted or after_retry.bytes_read != alternate_export.bytes.length
+    for index in Test::FIRST_BYTE_INDEX..<after_retry.bytes_read:
+        return TestResult::DURABLE_RETRY if read_buffer[index] != alternate_export.bytes.bytes[index]
+
     parent_path: mutable u8[Test::PATH_BUFFER_CAPACITY] = zeroed
     parent_path_length: usize = copy_path(TestPaths::PARENT_TRACE, parent_path[Test::FIRST_BYTE_INDEX])
     parent_write: DebuggerTraceFile::WriteResult = DebuggerTraceFile::trace_file_write(parent_path[Test::FIRST_BYTE_INDEX], parent_path_length, exported.bytes.bytes[Test::FIRST_BYTE_INDEX], exported.bytes.length) can Blocking.IO, Unsafe.PointerCast
-    return TestResult::PATH_TRAVERSAL if parent_write.accepted or parent_write.status != DebuggerTraceFile::FileStatus.InvalidPath
+    return TestResult::PATH_TRAVERSAL if parent_write.accepted or parent_write.published or parent_write.durable or parent_write.status != DebuggerTraceFile::FileStatus.InvalidPath
     parent_read: DebuggerTraceFile::ReadResult = DebuggerTraceFile::trace_file_read(parent_path[Test::FIRST_BYTE_INDEX], parent_path_length, read_buffer[Test::FIRST_BYTE_INDEX], DebuggerTraceFileLimits::MAX_FILE_BYTES) can Blocking.IO, Unsafe.PointerCast
     return TestResult::PATH_TRAVERSAL if parent_read.accepted or parent_read.status != DebuggerTraceFile::FileStatus.InvalidPath
     return TestResult::OK
